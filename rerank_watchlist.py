@@ -83,9 +83,16 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10):
     old_wl = {e["ticker"] for e in wt.get("watchlist", [])}
 
     # Rank all non-held, non-VCI candidates by live normalised score (desc).
+    # Deterministic tie-break (runs AFTER the live metrics pull + scoring): equal
+    # live scores are ordered by in-window first (more actionable), then ticker
+    # A->Z, so consecutive runs produce an identical top-10 at the #10 boundary.
+    def _rank_key(e):
+        return (-float(e.get("_rank_score", -1)),
+                0 if e.get("in_window") else 1,
+                str(e.get("ticker", "")))
     ranked = sorted(
         (e for t, e in registry.items() if t not in held and t not in vci),
-        key=lambda e: -float(e.get("_rank_score", -1)),
+        key=_rank_key,
     )
 
     new_wl, new_pool = [], []
