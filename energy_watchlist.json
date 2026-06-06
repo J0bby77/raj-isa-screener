@@ -1,0 +1,226 @@
+[
+  {
+    "ticker": "VST",
+    "company": "Vistra Corp",
+    "sector": "Utilities",
+    "sub_type": "nuclear_power",
+    "region": "US",
+    "notes": "Largest competitive power generator; nuclear + gas; AI data centre PPA pipeline"
+  },
+  {
+    "ticker": "CEG",
+    "company": "Constellation Energy",
+    "sector": "Utilities",
+    "sub_type": "nuclear_power",
+    "region": "US",
+    "notes": "Largest US nuclear operator; Microsoft 20yr PPA; clean energy growth"
+  },
+  {
+    "ticker": "TLN",
+    "company": "Talen Energy",
+    "sector": "Utilities",
+    "sub_type": "nuclear_power",
+    "region": "US",
+    "notes": "Susquehanna nuclear plant; Amazon AWS data centre co-location deal"
+  },
+  {
+    "ticker": "NRG",
+    "company": "NRG Energy",
+    "sector": "Utilities",
+    "sub_type": "power_generation",
+    "region": "US",
+    "notes": "Integrated retail + generation; Vivint home energy acquisition"
+  },
+  {
+    "ticker": "GEV",
+    "company": "GE Vernova",
+    "sector": "Industrials",
+    "sub_type": "energy_equipment",
+    "region": "US",
+    "notes": "Gas turbines + wind + grid equipment; spun off from GE 2024; massive backlog"
+  },
+  {
+    "ticker": "BE",
+    "company": "Bloom Energy",
+    "sector": "Industrials",
+    "sub_type": "fuel_cell",
+    "region": "US",
+    "notes": "Solid oxide fuel cells; AI data centre behind-the-meter power; Oracle + Nebius deals"
+  },
+  {
+    "ticker": "FSLR",
+    "company": "First Solar",
+    "sector": "Technology",
+    "sub_type": "solar_manufacturing",
+    "region": "US",
+    "notes": "Thin-film solar panels; US-manufactured; utility-scale PPA backlog; IRA beneficiary"
+  },
+  {
+    "ticker": "ENPH",
+    "company": "Enphase Energy",
+    "sector": "Technology",
+    "sub_type": "solar_equipment",
+    "region": "US",
+    "notes": "Residential solar microinverters + storage; high gross margins; cyclical post-boom"
+  },
+  {
+    "ticker": "NEE",
+    "company": "NextEra Energy",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "US",
+    "notes": "Largest US utility; wind + solar + storage; FPL regulated base; long-term PPA backlog"
+  },
+  {
+    "ticker": "ETN",
+    "company": "Eaton Corp",
+    "sector": "Industrials",
+    "sub_type": "grid_infrastructure",
+    "region": "US",
+    "notes": "Electrical components + power management; data centre electrification play"
+  },
+  {
+    "ticker": "PWR",
+    "company": "Quanta Services",
+    "sector": "Industrials",
+    "sub_type": "grid_infrastructure",
+    "region": "US",
+    "notes": "Power grid construction + renewables installation; execution of energy buildout"
+  },
+  {
+    "ticker": "OKLO",
+    "company": "Oklo Inc",
+    "sector": "Utilities",
+    "sub_type": "nuclear_smr",
+    "region": "US",
+    "notes": "Advanced fission micro-reactors; pre-revenue; speculative nuclear growth; Sam Altman chair"
+  },
+  {
+    "ticker": "SMR",
+    "company": "NuScale Power",
+    "sector": "Utilities",
+    "sub_type": "nuclear_smr",
+    "region": "US",
+    "notes": "Small modular reactors; pre-revenue; high risk; regulatory progress 2025-26"
+  },
+  {
+    "ticker": "PLUG",
+    "company": "Plug Power",
+    "sector": "Industrials",
+    "sub_type": "hydrogen",
+    "region": "US",
+    "notes": "Green hydrogen + electrolysers; significant cash burn; speculative thesis"
+  },
+  {
+    "ticker": "ENR.DE",
+    "company": "Siemens Energy",
+    "sector": "Industrials",
+    "sub_type": "energy_equipment",
+    "region": "EU",
+    "notes": "Gas turbines + offshore wind (Siemens Gamesa majority); GE Vernova European equivalent"
+  },
+  {
+    "ticker": "VWS.CO",
+    "company": "Vestas Wind Systems",
+    "sector": "Industrials",
+    "sub_type": "wind_equipment",
+    "region": "EU",
+    "notes": "Global wind turbine manufacturer; services revenue growing; offshore wind expansion"
+  },
+  {
+    "ticker": "ORSTED.CO",
+    "company": "Orsted",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "EU",
+    "notes": "Global offshore wind developer; US project write-downs in 2023; recovery underway"
+  },
+  {
+    "ticker": "ENEL.MI",
+    "company": "Enel",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "EU",
+    "notes": "European integrated utility; large renewables business; high leverage"
+  },
+  {
+    "ticker": "RWE.DE",
+    "company": "RWE AG",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "EU",
+    "notes": "German utility transitioning to renewables; offshore wind developer; revenue volatile"
+  },
+  {
+    "ticker": "DTE.DE",
+    "company": "E.ON SE",
+    "sector": "Utilities",
+    "sub_type": "grid_infrastructure",
+    "region": "EU",
+    "notes": "European grid operator + retail energy; regulated revenue base; grid investment cycle"
+  },
+  {
+    "ticker": "ITM.L",
+    "company": "ITM Power",
+    "sector": "Industrials",
+    "sub_type": "hydrogen",
+    "region": "UK",
+    "notes": "Electrolyser manufacturer; green hydrogen; pre-profit; UK-listed speculative play"
+  },
+  {
+    "ticker": "DRX.L",
+    "company": "Drax Group",
+    "sector": "Utilities",
+    "sub_type": "bioenergy",
+    "region": "UK",
+    "notes": "Biomass power generation; BECCS carbon capture ambition; UK Contracts for Difference"
+  },
+  {
+    "ticker": "SSE.L",
+    "company": "SSE plc",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "UK",
+    "notes": "UK regulated networks + renewables; offshore wind pipeline; regulated return growth"
+  },
+  {
+    "ticker": "BEP-UN.TO",
+    "company": "Brookfield Renewable Partners",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "CA",
+    "notes": "Global renewables platform; hydro + wind + solar + storage; fully contracted cash flows"
+  },
+  {
+    "ticker": "NPI.TO",
+    "company": "Northland Power",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "CA",
+    "notes": "Canadian offshore wind developer; contracted revenue; international expansion"
+  },
+  {
+    "ticker": "AQN.TO",
+    "company": "Algonquin Power & Utilities",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "CA",
+    "notes": "Renewables + regulated utilities; restructuring post-rate shock; recovery play"
+  },
+  {
+    "ticker": "IBDRY",
+    "company": "Iberdrola (ADR)",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "EU",
+    "notes": "Global renewables leader; offshore wind + grids; US business growing; ADR for accessibility"
+  },
+  {
+    "ticker": "EDPFY",
+    "company": "EDP Renewables (ADR)",
+    "sector": "Utilities",
+    "sub_type": "renewables",
+    "region": "EU",
+    "notes": "Pure-play renewables; wind + solar globally; Portuguese parent; fully contracted"
+  }
+]

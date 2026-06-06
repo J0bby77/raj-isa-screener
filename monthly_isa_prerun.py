@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""
+monthly_isa_prerun.py  --  Monthly ISA Review Pre-Run Orchestrator
+Version: 3.0  |  2026-06-04
+
+Master script. Runs the day before the Monthly ISA Portfolio Review.
+Schedule: Saturday before the first Sunday of each month, at 14:30.
+The main review task runs the following morning (Sunday).
+
+Pipeline (in order):
+  Step 1: extract_portfolio.py       -> portfolio_data_mmm_yyyy.json
+  Step 2: extract_xray.py            -> xray_data_mmm_yyyy.json
+  Step 3: portfolio_analytics.py     -> analytics_data_mmm_yyyy.json
+  Step 4: update_watchlist.py        -> updated watchlist_tickers.json + promotion log
+  Step 5: sync_vci_watchlist.py      -> watchlist_tickers.json (vci_watchlist section refreshed)
+  Step 6: fetch_watchlist_metrics.py -> watchlist_metrics_mmm_yyyy.json
+  Step 7: score_partab.py            -> watchlist_scored_mmm_yyyy.json
+  Step 8: step9_pre_builder.py       -> step9_pre_mmm_yyyy.json
+  Step 9: email_prefill.py           -> email_data_mmm_yyyy.json (pre-filled skeleton)
+  Step 10: write run_context_mmm_yyyy.json (staging file with all paths + summary)
+
+Each step saves its output immediately. If a step fails, the script stops and
+reports the error clearly -- the review task will read the error from the staging
+file and report it rather than running blind.
+
+On success, the review task reads run_context_mmm_yyyy.json as its first pre-run
+read instead of Step 2 (xlsx parse) and Step 3 (xray parse) separately.
+
+Usage:
+    python3 monthly_isa_prerun.py [--isa-folder /path/to/ISA] [--dry-run]
+
+Outputs (all to Investment Analysis folder):
+    portfolio_data_mmm_yyyy.json
+    xray_data_mmm_yyyy.json
+    analytics_data_mmm_yyyy.json
+    watchlist_metrics_mmm_yyyy.json
+    watchlist_scored_mmm_yyyy.json
+    step9_pre_mmm_yyyy.json
+    email_data_mmm_yyyy.json
+    run_context_mmm_yyyy.json   <- review task reads this first
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import traceback
+from datetime import date, datetime
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Scripts (same folder as this orchestrator)
+SCRIPTS = {
+    "extract_portfolio":      os.path.join(SCRIPT_DIR, "extract_portfolio.py"),
+    "extract_xray":           os.path.join(SCRIPT_DIR, "extract_xray.py"),
+    "analytics":              os.path.join(SCRIPT_DIR, "portfolio_analytics.py"),
+    "update_watchlist_py":    os.path.join(SCRIPT_DIR, "update_watchlist.py"),
+    "sync_vci_watchlist":     os.path.join(SCRIPT_DIR, "sync_vci_watchlist.py"),    # NEW Step 5
+    "fetch_watchlist":        os.path.join(SCRIPT_DIR, "fetch_watchlist_metrics.py"),
+    "score_partab":           os.path.join(SCRIPT_DIR, "score_partab.py"),
+    "step9_pre_builder":      os.path.join(SCRIPT_DIR, "step9_pre_builder.py"),     # NEW Step 8
+    "email_prefill":          os.path.join(SCRIPT_DIR, "email_prefill.py"),
+}
+
+# Memory files (read by analytics for prior portfolio and trades log)
+# These paths use the Windows path as passed through the bash mount.
+MEMORY_BASE = os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "..",
+                            "AppData", "Roaming", "Claude",
+                            "local-agent-mode-sessions",
+                            "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
+                            "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
+                            "spaces",
+                            "aa27f2f8-c3d3-4862-ba9a-a67b7f6d74b9",
+                            "memory")
+
+
+def find_memory_file(pattern: str) -> str | None:
+    """Find latest memory file matching a glob-style prefix."""
+    import glob as _glob
+    candidates = _glob.glob(os.path.join(MEMORY_BASE, pattern))
+    return max(candidates, default=None, key=os.path.getmtime) if candidates else None
+
+
+# ---------------------------------------------------------------------------
+# Run a script as a subprocess
+# ---------------------------------------------------------------------------
+def run_script(name: str, args: list[str], dry_run: bool = False) -> tuple[bool, str, str]:
+    """
+    Run a Python script. Returns (success, stdout, stderr).
+    """
+    script_path = SCRIPTS[name]
+    if not os.path.exists(script_path):
+        return False, "", f"Script not found: {script_path}"
+
+    cmd = [sys.executable, script_path] + args
+    if dry_run:
+        print(f"  [DRY RUN] Would run: {' '.join(cmd)}")
+        return True, "[dry run]", ""
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120
+        )
+        success = result.returncode == 0
+        return success, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return False, "", f"Script timed out after 120s: {name}"
+    except Exception as e:
+        return False, "", str(e)
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+def validate_json_output(path: str, required_keys: list[str]) -> tuple[bool, str]:
+    """Check output JSON exists and has required top-level keys."""
+    if not os.path.exists(path):
+        return False, f"Output file not found: {path}"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        missing = [k for k in required_keys if k not in data]
+        if missing:
+            return False, f"Missing keys in output: {missing}"
+        return True, "OK"
+    except json.JSONDecodeError as e:
+        return False, f"JSON parse error: {e}"
+    except Exception as e:
+        return False, str(e)
+
+
+def validate_portfolio_value(portfolio_path: str) -> tuple[bool, str]:
+    """Sanity check: portfolio value must be > 50,000 and < 10,000,000."""
+    try:
+        with open(portfolio_path, encoding="utf-8") as f:
+            data = json.load(f)
+        total = data.get("summary", {}).get("total_value_gbp", 0)
+        if total < 50_000:
+            return False, f"Portfolio value suspiciously low: GBP {total:,.2f} -- check xlsx file"
+        if total > 10_000_000:
+            return False, f"Portfolio value suspiciously high: GBP {total:,.2f} -- check xlsx file"
+        return True, f"Portfolio value: GBP {total:,.2f}"
+    except Exception as e:
+        return False, str(e)
+
+
+def check_large_month_on_month_change(analytics_path: str, portfolio_path: str) -> list[str]:
+    """
+    Warn if total portfolio value has changed by more than 15% vs prior month.
+    (Prior value comes from analytics prior_portfolio if available.)
+    """
+    warnings = []
+    try:
+        with open(portfolio_path, encoding="utf-8") as f:
+            port = json.load(f)
+        with open(analytics_path, encoding="utf-8") as f:
+            ana = json.load(f)
+        current = port.get("summary", {}).get("total_value_gbp", 0)
+        phase   = ana.get("phase_status", {})
+        prior_pct = phase.get("prior_pct")
+        if prior_pct is not None:
+            # Can't get prior absolute value from pct alone, skip
+            pass
+    except Exception:
+        pass
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Staging file writer
+# ---------------------------------------------------------------------------
+def write_run_context(
+    month_label:            str,
+    run_month:              str,
+    portfolio_path:         str,
+    xray_path:              str,
+    analytics_path:         str,
+    watchlist_metrics_path: str,
+    watchlist_scored_path:  str,
+    step9_pre_path:         str,
+    email_path:             str,
+    summary:                dict,
+    flags:                  list,
+    warnings:               list,
+    status:                 str,
+    error_message:          str = "",
+) -> str:
+    """Write the run_context_mmm_yyyy.json staging file."""
+    ctx = {
+        "_meta": {
+            "description": (
+                "Pre-run staging file produced by monthly_isa_prerun.py. "
+                "Read by the Monthly ISA Portfolio Review task as its first pre-run read. "
+                "Contains paths to all extracted data files and a summary for immediate use."
+            ),
+            "produced_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "month_label": month_label,
+            "run_month":   run_month,
+            "status":      status,   # "OK" or "ERROR" or "PARTIAL"
+        },
+        "files": {
+            "portfolio_data":       portfolio_path,
+            "xray_data":            xray_path,
+            "analytics_data":       analytics_path,
+            "watchlist_metrics":    watchlist_metrics_path,
+            "watchlist_scored":     watchlist_scored_path,
+            "step9_pre":            step9_pre_path,
+            "email_data":           email_path,
+            "target_weights":       os.path.join(SCRIPT_DIR, "target_weights.json"),
+            "watchlist_tickers":    os.path.join(SCRIPT_DIR, "watchlist_tickers.json"),
+        },
+        "summary": summary,
+        "flags":   flags,
+        "warnings": warnings,
+        "error":   error_message,
+        "instructions_for_review_task": (
+            "1. Read this file first (replaces Step 2 xlsx/xray parse at runtime). "
+            "2. Read files.portfolio_data for full holdings, cash, sleeve breakdown. "
+            "3. Read files.analytics_data for drift table, signals, phase status, rebalancing candidates. "
+            "4. Read files.watchlist_scored for pre-formatted Part A/B tables, conviction ranking, "
+            "in-window names, s5 watchlist rows, s7 sleeve rows, and s3 investment case skeletons. "
+            "5. Read files.step9_pre — contains: "
+            "(a) main_watchlist.T1/T2/T3: tier assignments for top-10 watchlist names. "
+            "    T1 entries have strategic_conviction_score (7/10 pre-computed dimensions), "
+            "    entry_window_score (0-10 quantified), decision_bucket label, and risk_flags block. "
+            "(b) candidate_pool.T1/T2/T3: same tier/score structure for additional names "
+            "    passing the normalised_score >= 70 gate but outside top-10. "
+            "(c) deployment_priority_rank: combined flat list of ALL eligible names "
+            "    (watchlist + candidate_pool) sorted by tier then strategic_conviction_score. "
+            "    Use this as the PRIMARY input for Step 9 deployment decisions — it surfaces "
+            "    candidate_pool T1 names (at entry level) above watchlist T3 names (far above entry). "
+            "(d) vci_watchlist.T1_A/T2_A/T3_A: VCI candidates, unchanged structure. "
+            "At Step 9, complete the 3 session-dependent dimensions: macro_resilience, "
+            "portfolio_fit (use portfolio_overlap flags from each entry as inputs), execution. "
+            "6. Read files.email_data -- pre-filled skeleton. Fill ALL [Claude fills] placeholders during the run. "
+            "7. Run build_monthly_isa_email.py after completing all sections. "
+            "8. If status == ERROR: read the error field, report to Raj, do not proceed with incomplete data. "
+            "POST-RUN: update watchlist_tickers.json with any ranking changes, entry level updates, "
+            "additions/removals, and new stock sleeve purchases. "
+            "NOTE: update_watchlist.py handles promotion/ranking automatically at pre-run; "
+            "Claude only updates stock_sleeve purchases/sales and entry_level revisions post-run."
+        ),
+    }
+
+    out_path = os.path.join(SCRIPT_DIR, f"run_context_{month_label}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(ctx, f, indent=2, ensure_ascii=False)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="Monthly ISA Pre-Run Orchestrator -- runs day before the main review."
+    )
+    parser.add_argument("--isa-folder",      default=None,
+                        help="ISA root folder (parent of Investment Analysis). Auto-detected if omitted.")
+    parser.add_argument("--prior-portfolio", default=None,
+                        help="Path to prior month portfolio JSON for phase transition check.")
+    parser.add_argument("--dry-run",         action="store_true",
+                        help="Print commands without executing them.")
+    args = parser.parse_args()
+
+    isa_folder = args.isa_folder or os.path.dirname(SCRIPT_DIR)
+    run_date   = date.today()
+    month_label = run_date.strftime("%b_%Y").lower()
+    run_month   = run_date.strftime("%b %Y")
+
+    print("=" * 65)
+    print(f"Monthly ISA Pre-Run  |  {run_month}  |  {datetime.now().strftime('%H:%M')}")
+    print("=" * 65)
+
+    # Ensure yfinance is available (not pre-installed in fresh Cowork sessions)
+    try:
+        import yfinance  # noqa: F401
+    except ImportError:
+        print("  Installing yfinance...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "yfinance", "--break-system-packages", "-q"],
+            capture_output=True
+        )
+
+    # Output paths
+    portfolio_path          = os.path.join(SCRIPT_DIR, f"portfolio_data_{month_label}.json")
+    xray_path               = os.path.join(SCRIPT_DIR, f"xray_data_{month_label}.json")
+    analytics_path          = os.path.join(SCRIPT_DIR, f"analytics_data_{month_label}.json")
+    watchlist_metrics_path  = os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
+    watchlist_scored_path   = os.path.join(SCRIPT_DIR, f"watchlist_scored_{month_label}.json")
+    step9_pre_path          = os.path.join(SCRIPT_DIR, f"step9_pre_{month_label}.json")
+    email_path              = os.path.join(SCRIPT_DIR, f"email_data_{month_label}.json")
+    watchlist_config_path   = os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
+
+    # Find memory files (optional -- best effort)
+    trades_log_path  = find_memory_file("project_isa_trades_log.md")
+    prior_port_path  = args.prior_portfolio
+
+    if not prior_port_path:
+        # Try to find last month's portfolio JSON
+        import glob as _glob
+        candidates = sorted(_glob.glob(
+            os.path.join(SCRIPT_DIR, "portfolio_data_*.json")
+        ))
+        # Exclude current month
+        candidates = [c for c in candidates if month_label not in c]
+        prior_port_path = candidates[-1] if candidates else None
+
+    errors   = []
+    warnings = []
+    summary  = {}
+    flags    = []
+    watchlist_promotion_log = {}
+
+    # ---------------------------------------------------------------------------
+    # Step 1: Extract portfolio
+    # ---------------------------------------------------------------------------
+    print(f"\n[1/9] Extracting portfolio from xlsx...")
+    ok, stdout, stderr = run_script(
+        "extract_portfolio",
+        ["--isa-folder", isa_folder, "--out", portfolio_path],
+        dry_run=args.dry_run,
+    )
+    if not ok:
+        msg = stderr or stdout or "Unknown error in extract_portfolio"
+        errors.append(f"Step 1 (extract_portfolio): {msg}")
+        print(f"  FAILED: {msg}")
+    else:
+        print(stdout.strip())
+        valid, vmsg = validate_json_output(
+            portfolio_path, ["_meta", "summary", "funds", "stocks", "cash"]
+        )
+        if not valid:
+            errors.append(f"Step 1 validation: {vmsg}")
+            print(f"  Validation FAILED: {vmsg}")
+        else:
+            val_ok, val_msg = validate_portfolio_value(portfolio_path)
+            if not val_ok:
+                errors.append(f"Step 1 sanity: {val_msg}")
+                print(f"  Sanity check FAILED: {val_msg}")
+            else:
+                print(f"  Validation: {val_msg}")
+                # Populate summary from portfolio
+                with open(portfolio_path, encoding="utf-8") as f:
+                    port_data = json.load(f)
+                s = port_data["summary"]
+                summary = {
+                    "total_value_gbp":       s["total_value_gbp"],
+                    "cash_effective_gbp":    s["cash_effective_gbp"],
+                    "cash_deployable_gbp":   s["cash_deployable_gbp"],
+                    "stock_sleeve_pct":      s["stock_sleeve_pct"],
+                    "fund_sleeve_pct":       s["fund_sleeve_pct"],
+                    "num_stocks":            s["num_stock_positions"],
+                    "num_funds":             s["num_fund_positions"],
+                    "data_date":             port_data["_meta"]["data_date"],
+                    "source_file":           port_data["_meta"]["source_file"],
+                }
+                if port_data["flags"].get("concentration_over_12_5pct"):
+                    flags.append({
+                        "type": "CONCENTRATION",
+                        "message": f"Position(s) over 12.5%: {port_data['flags']['concentration_over_12_5pct']}",
+                    })
+
+    # ---------------------------------------------------------------------------
+    # Step 2: Extract X-Ray
+    # ---------------------------------------------------------------------------
+    print(f"\n[2/9] Extracting X-Ray from PDF...")
+    ok, stdout, stderr = run_script(
+        "extract_xray",
+        ["--isa-folder", isa_folder, "--out", xray_path],
+        dry_run=args.dry_run,
+    )
+    if not ok:
+        msg = stderr or stdout or "Unknown error in extract_xray"
+        # X-Ray is important but not fatal -- warn and continue
+        warnings.append(f"Step 2 (extract_xray): {msg}")
+        print(f"  WARNING: {msg}")
+        # Create minimal xray JSON so downstream steps don't crash
+        if not os.path.exists(xray_path):
+            with open(xray_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "_meta": {"month_label": month_label, "report_date": "unknown"},
+                    "_warning": "X-Ray extraction failed -- Claude must retrieve manually at Step 6",
+                    "asset_allocation": {}, "country_exposure": [], "world_regions": {},
+                    "sector_weights": {}, "trailing_returns": {}, "fund_holdings": [],
+                }, f, indent=2)
+    else:
+        print(stdout.strip())
+        valid, vmsg = validate_json_output(xray_path, ["_meta", "sector_weights"])
+        if not valid:
+            warnings.append(f"Step 2 validation: {vmsg}")
+            print(f"  Validation WARNING: {vmsg}")
+        else:
+            print(f"  Validation: {vmsg}")
+            if not errors:  # only if portfolio step succeeded
+                with open(xray_path, encoding="utf-8") as f:
+                    xray_data = json.load(f)
+                tr = xray_data.get("trailing_returns", {})
+                if "1yr" in tr:
+                    r = tr["1yr"]
+                    summary["xray_1yr_return_pct"] = r.get("portfolio_pct")
+                    summary["xray_1yr_benchmark_pct"] = r.get("benchmark_pct")
+
+    # ---------------------------------------------------------------------------
+    # Step 3: Analytics
+    # ---------------------------------------------------------------------------
+    print(f"\n[3/9] Running portfolio analytics...")
+    if errors:
+        print("  SKIPPED -- portfolio extraction failed (required input).")
+        warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
+    else:
+        analytics_args = [
+            "--portfolio", portfolio_path,
+            "--out",       analytics_path,
+        ]
+        if prior_port_path:
+            analytics_args += ["--prior-portfolio", prior_port_path]
+        if trades_log_path:
+            analytics_args += ["--trades-log", trades_log_path]
+
+        ok, stdout, stderr = run_script(
+            "analytics", analytics_args, dry_run=args.dry_run
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in portfolio_analytics"
+            errors.append(f"Step 3 (analytics): {msg}")
+            print(f"  FAILED: {msg}")
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(
+                analytics_path,
+                ["_meta", "fund_drift_table", "phase_status", "capital_summary"]
+            )
+            if not valid:
+                errors.append(f"Step 3 validation: {vmsg}")
+                print(f"  Validation FAILED: {vmsg}")
+            else:
+                print(f"  Validation: {vmsg}")
+                with open(analytics_path, encoding="utf-8") as f:
+                    ana_data = json.load(f)
+                phase = ana_data.get("phase_status", {})
+                summary["phase_status"] = phase.get("status")
+                summary["rebalancing_candidates"] = len(ana_data.get("rebalancing_candidates", []))
+                flags.extend(ana_data.get("flags", []))
+
+    # ---------------------------------------------------------------------------
+    # Step 4: Update watchlist (promotion/removal/score-delta)
+    # ---------------------------------------------------------------------------
+    print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
+    if errors:
+        print("  SKIPPED -- prior step(s) failed.")
+        warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
+    elif not os.path.exists(watchlist_config_path):
+        warnings.append("Step 4 (update_watchlist): watchlist_tickers.json not found -- skipping.")
+        print("  WARNING: watchlist_tickers.json not found -- skipped.")
+    else:
+        ok, stdout, stderr = run_script(
+            "update_watchlist_py",
+            [
+                "--portfolio-data", portfolio_path,
+                "--watchlist-json", watchlist_config_path,
+                "--inv-dir",        SCRIPT_DIR,
+                "--out-json",       watchlist_config_path,
+            ],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in update_watchlist"
+            warnings.append(f"Step 4 (update_watchlist): {msg}")
+            print(f"  WARNING: {msg}")
+        else:
+            print(stdout.strip())
+            try:
+                import json as _json
+                for line in stdout.splitlines():
+                    if line.strip().startswith("{") and "additions" in line:
+                        watchlist_promotion_log = _json.loads(line)
+                        break
+            except Exception:
+                pass
+            if watchlist_promotion_log:
+                n_add = len(watchlist_promotion_log.get("additions", []))
+                n_rem = len(watchlist_promotion_log.get("removals", []))
+                n_upd = len(watchlist_promotion_log.get("score_updates", []))
+                print(f"  Watchlist updated: +{n_add} added | -{n_rem} removed | {n_upd} score updates")
+
+    # ---------------------------------------------------------------------------
+    # Step 5: Sync VCI watchlist from memory file + refresh Part A scores
+    # ---------------------------------------------------------------------------
+    print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
+    vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
+    if not vci_md_path:
+        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found -- VCI watchlist carries forward unchanged.")
+        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped.")
+    elif not os.path.exists(watchlist_config_path):
+        warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
+        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
+    else:
+        ok, stdout, stderr = run_script(
+            "sync_vci_watchlist",
+            [
+                "--watchlist-md",   vci_md_path,
+                "--watchlist-json", watchlist_config_path,
+                "--inv-dir",        SCRIPT_DIR,
+            ],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in sync_vci_watchlist"
+            warnings.append(f"Step 5 (sync_vci_watchlist): {msg}")
+            print(f"  WARNING: {msg}")
+        else:
+            print(stdout.strip())
+
+    # ---------------------------------------------------------------------------
+    # Step 6: Fetch watchlist + stock sleeve metrics (yfinance pull)
+    # ---------------------------------------------------------------------------
+    print(f"\n[6/9] Fetching watchlist & sleeve metrics (yfinance)...")
+    if not os.path.exists(watchlist_config_path):
+        warnings.append("Step 6: watchlist_tickers.json not found -- skipping metrics pull. "
+                        "Create it in Investment Analysis folder.")
+        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
+        # Create empty placeholder so downstream steps don't crash
+        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                       "_warning": "watchlist_tickers.json missing -- metrics not pulled"}, f)
+    elif errors:
+        print("  SKIPPED -- prior step(s) failed.")
+        warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
+        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"_meta": {"month_label": month_label}, "tickers": {}}, f)
+    else:
+        ok, stdout, stderr = run_script(
+            "fetch_watchlist",
+            [
+                "--watchlist",    watchlist_config_path,
+                "--out",          watchlist_metrics_path,
+                "--month-label",  month_label,
+            ],
+            dry_run=args.dry_run,
+        )
+        # Watchlist pull is non-fatal (yfinance may fail for some tickers)
+        if not ok:
+            msg = stderr or stdout or "Unknown error in fetch_watchlist_metrics"
+            warnings.append(f"Step 6 (fetch_watchlist): {msg}")
+            print(f"  WARNING: {msg}")
+            if not os.path.exists(watchlist_metrics_path):
+                with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+                    json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                               "_warning": "fetch failed: " + msg}, f)
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(watchlist_metrics_path, ["_meta", "tickers"])
+            if not valid:
+                warnings.append("Step 6 validation: " + vmsg)
+                print("  Validation WARNING: " + vmsg)
+            else:
+                with open(watchlist_metrics_path, encoding="utf-8") as f:
+                    wm_data = json.load(f)
+                n_scored = len(wm_data.get("tickers", {}))
+                in_window = wm_data.get("_meta", {}).get("in_window_tickers", [])
+                summary["watchlist_tickers_scored"] = n_scored
+                summary["in_window_names"] = in_window
+                print("  Scored " + str(n_scored) + " tickers | In-window: " + str(in_window))
+
+    # ---------------------------------------------------------------------------
+    # Step 7: Score Part A/B
+    # ---------------------------------------------------------------------------
+    print(f"\n[7/9] Scoring Part A/B and building email structures...")
+    if not os.path.exists(watchlist_metrics_path):
+        warnings.append("Step 7: watchlist_metrics JSON missing -- skipping scorer.")
+        print("  WARNING: metrics file missing -- skipped.")
+        with open(watchlist_scored_path, "w", encoding="utf-8") as f:
+            json.dump({"_meta": {}, "conviction_ranking": [], "s5_watchlist_rows": [],
+                       "s7_sleeve_rows": [], "s3_case_skeletons": []}, f)
+    else:
+        ok, stdout, stderr = run_script(
+            "score_partab",
+            ["--metrics", watchlist_metrics_path, "--out", watchlist_scored_path],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in score_partab"
+            warnings.append("Step 7 (score_partab): " + msg)
+            print("  WARNING: " + msg)
+            if not os.path.exists(watchlist_scored_path):
+                with open(watchlist_scored_path, "w", encoding="utf-8") as f:
+                    json.dump({"_meta": {}, "conviction_ranking": [], "s5_watchlist_rows": [],
+                               "s7_sleeve_rows": [], "s3_case_skeletons": []}, f)
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(
+                watchlist_scored_path,
+                ["conviction_ranking", "s5_watchlist_rows", "s7_sleeve_rows"]
+            )
+            if not valid:
+                warnings.append("Step 7 validation: " + vmsg)
+                print("  Validation WARNING: " + vmsg)
+            else:
+                print("  Validation: " + vmsg)
+
+    # ---------------------------------------------------------------------------
+    # Step 8: Build Step 9 pre-scored output
+    # ---------------------------------------------------------------------------
+    print(f"\n[8/9] Building Step 9 pre-scored output...")
+    if not os.path.exists(watchlist_scored_path):
+        warnings.append("Step 8 (step9_pre_builder): watchlist_scored JSON missing -- skipping.")
+        print(f"  WARNING: watchlist_scored JSON missing -- skipped.")
+    else:
+        ok, stdout, stderr = run_script(
+            "step9_pre_builder",
+            [
+                "--scored",      watchlist_scored_path,
+                "--watchlist",   watchlist_config_path,
+                "--month-label", month_label,
+                "--out",         step9_pre_path,
+            ],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in step9_pre_builder"
+            warnings.append(f"Step 8 (step9_pre_builder): {msg}")
+            print(f"  WARNING: {msg}")
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(
+                step9_pre_path,
+                ["_meta", "main_watchlist", "vci_watchlist", "candidate_pool", "deployment_priority_rank"]
+            )
+            if not valid:
+                warnings.append(f"Step 8 validation: {vmsg}")
+                print(f"  Validation WARNING: {vmsg}")
+            else:
+                print(f"  Validation: {vmsg}")
+
+    # ---------------------------------------------------------------------------
+    # Step 9: Email prefill
+    # ---------------------------------------------------------------------------
+    print(f"\n[9/9] Pre-populating email JSON...")
+    if errors:
+        print("  SKIPPED -- prior step(s) failed.")
+        warnings.append("Step 9 (email_prefill) skipped -- prior step failures.")
+    else:
+        ok, stdout, stderr = run_script(
+            "email_prefill",
+            ["--portfolio", portfolio_path, "--analytics", analytics_path,
+             "--xray", xray_path, "--scored", watchlist_scored_path, "--out", email_path],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in email_prefill"
+            warnings.append("Step 9 (email_prefill): " + msg)
+            print("  WARNING: " + msg)
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(
+                email_path,
+                ["meta", "s6_portfolio_snapshot", "s7_stock_sleeve", "s8_fund_review"]
+            )
+            if not valid:
+                warnings.append("Step 9 validation: " + vmsg)
+                print("  Validation WARNING: " + vmsg)
+            else:
+                print("  Validation: " + vmsg)
+
+    # Write run_context
+    status = "OK" if not errors else "ERROR" if len(errors) >= 2 else "PARTIAL"
+    error_msg = "; ".join(errors) if errors else ""
+    print("Writing run_context_" + month_label + ".json...")
+    if watchlist_promotion_log:
+        summary["watchlist_promotion_log"] = watchlist_promotion_log
+
+    ctx_path = write_run_context(
+        month_label, run_month, portfolio_path, xray_path, analytics_path,
+        watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
+        summary, flags, warnings, status, error_msg,
+    )
+    print("  Written: " + ctx_path)
+
+    print("=" * 65)
+    print("Pre-Run Complete  |  Status: " + status + "  |  " + datetime.now().strftime("%H:%M"))
+    print("=" * 65)
+
+    if summary.get("total_value_gbp"):
+        print("  Portfolio:     " + str(round(summary["total_value_gbp"], 2)))
+        print("  Stock sleeve:  " + str(summary.get("stock_sleeve_pct", "?")))
+        print("  Phase status:  " + str(summary.get("phase_status", "?")))
+
+    if warnings:
+        print("  Warnings: " + str(len(warnings)))
+        for w in warnings:
+            print("    - " + w)
+
+    if errors:
+        print("  ERRORS -- review task will be blocked:")
+        for e in errors:
+            print("    x " + e)
+        sys.exit(1)
+
+    print("  All outputs staged. Review task ready to run tomorrow (Sunday morning).")
+    print("  Review task reads: " + ctx_path)
+
+
+if __name__ == "__main__":
+    main()

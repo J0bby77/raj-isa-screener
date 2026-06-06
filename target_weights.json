@@ -1,0 +1,240 @@
+{
+  "_meta": {
+    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes — they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
+    "version": "1.0",
+    "last_updated": "2026-05-31",
+    "source_memory": "project_isa_target_weights.md",
+    "current_phase": 1
+  },
+
+  "return_objective": {
+    "isa_target_low":    1000000,
+    "isa_target_high":   1500000,
+    "horizon_years":     12,
+    "annual_contribution": 20000,
+    "starting_value_may2026": 138000,
+    "required_return_low":  0.12,
+    "required_return_high": 0.16,
+    "working_target":       0.14,
+    "fund_sleeve_weighted_avg_threshold": 0.12,
+    "stock_sleeve_return_assumption":     0.18,
+    "total_isa_working_target":           0.14
+  },
+
+  "thresholds": {
+    "fund_sleeve_weighted_avg_min": 0.12,
+    "stock_sleeve_on_track":        0.18,
+    "stock_sleeve_watch_low":       0.15,
+    "total_isa_on_track":           0.14,
+    "total_isa_watch_low":          0.13,
+    "phase_transition_pct":         0.15,
+    "max_single_fund_pct":          0.125,
+    "max_stock_position_pct":       0.05,
+    "typical_stock_position_low":   0.015,
+    "typical_stock_position_high":  0.035,
+    "cash_buffer_min":              150,
+    "cash_buffer_max":              200
+  },
+
+  "buckets": {
+    "B1": {
+      "name": "Core Global Equity",
+      "role": "Stable backbone. Diversified, quality, lower vol. Reliable compounding.",
+      "min_expected_return": 0.09,
+      "max_weight_pct": 0.35
+    },
+    "B2": {
+      "name": "Active Growth Equity",
+      "role": "Primary return engine. Active management premium. GARP, quality growth.",
+      "min_expected_return": 0.12,
+      "max_weight_pct": 0.45
+    },
+    "B3": {
+      "name": "High-Growth / Structural Theme",
+      "role": "Highest expected return, highest vol. Structural tailwinds.",
+      "min_expected_return": 0.13,
+      "max_weight_pct": 0.25
+    }
+  },
+
+  "funds": {
+    "BF93W97": {
+      "name": "Royal London Global Equity Select M Acc",
+      "ticker": "BF93W97",
+      "bucket": "B1",
+      "target_pct": 0.08,
+      "band_low": 0.06,
+      "band_high": 0.10,
+      "min_expected_return": 0.09,
+      "phase2_target_pct": 0.07,
+      "notes": ""
+    },
+    "BR2Q8G6": {
+      "name": "Ranmore Global Equity Institutional GBP",
+      "ticker": "BR2Q8G6",
+      "bucket": "B1",
+      "target_pct": 0.08,
+      "band_low": 0.06,
+      "band_high": 0.10,
+      "min_expected_return": 0.09,
+      "phase2_target_pct": 0.07,
+      "notes": ""
+    },
+    "VUAG": {
+      "name": "Vanguard S&P 500 ETF USD Acc GBP",
+      "ticker": "VUAG",
+      "bucket": "B1",
+      "target_pct": 0.10,
+      "band_low": 0.08,
+      "band_high": 0.125,
+      "min_expected_return": 0.09,
+      "phase2_target_pct": 0.09,
+      "notes": "UCITS ETF — no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
+    },
+    "B50MZ94": {
+      "name": "Vanguard Japan Stock Index GBP Acc",
+      "ticker": "B50MZ94",
+      "bucket": "B1",
+      "target_pct": 0.04,
+      "band_low": 0.02,
+      "band_high": 0.06,
+      "min_expected_return": 0.08,
+      "phase2_target_pct": 0.03,
+      "notes": "Passive Japan index — 8% minimum (not 9%) as demanding for this mandate."
+    },
+    "B2PLJM6": {
+      "name": "Artemis SmartGARP UK Eq I Acc GBP",
+      "ticker": "B2PLJM6",
+      "bucket": "B2",
+      "target_pct": 0.09,
+      "band_low": 0.07,
+      "band_high": 0.11,
+      "min_expected_return": 0.12,
+      "phase2_target_pct": 0.08,
+      "notes": ""
+    },
+    "B2PLJD7": {
+      "name": "Artemis SmartGARP European Eq I Acc GBP",
+      "ticker": "B2PLJD7",
+      "bucket": "B2",
+      "target_pct": 0.07,
+      "band_low": 0.05,
+      "band_high": 0.09,
+      "min_expected_return": 0.12,
+      "phase2_target_pct": 0.06,
+      "notes": ""
+    },
+    "B55QSH0": {
+      "name": "JPM UK Equity Core E Net Acc",
+      "ticker": "B55QSH0",
+      "bucket": "B2",
+      "target_pct": 0.06,
+      "band_low": 0.04,
+      "band_high": 0.08,
+      "min_expected_return": 0.12,
+      "phase2_target_pct": 0.05,
+      "notes": ""
+    },
+    "B5TP8W8": {
+      "name": "MI Thornbridge Global Opps C Acc",
+      "ticker": "B5TP8W8",
+      "bucket": "B2",
+      "target_pct": 0.07,
+      "band_low": 0.05,
+      "band_high": 0.09,
+      "min_expected_return": 0.12,
+      "phase2_target_pct": 0.06,
+      "notes": ""
+    },
+    "B42W4J8": {
+      "name": "Polar Capital Global Tech I Inc GBP",
+      "ticker": "B42W4J8",
+      "bucket": "B2",
+      "target_pct": 0.08,
+      "band_low": 0.06,
+      "band_high": 0.10,
+      "min_expected_return": 0.13,
+      "phase2_target_pct": 0.07,
+      "notes": "Higher minimum return (13%) due to tech-focused mandate — B2 but with B3 return expectations."
+    },
+    "B6SQYF4": {
+      "name": "M&G Asian GBP I Acc",
+      "ticker": "B6SQYF4",
+      "bucket": "B3",
+      "target_pct": 0.08,
+      "band_low": 0.06,
+      "band_high": 0.10,
+      "min_expected_return": 0.13,
+      "phase2_target_pct": 0.07,
+      "notes": ""
+    },
+    "B8N44Q8": {
+      "name": "Invesco Asian UK Z Acc",
+      "ticker": "B8N44Q8",
+      "bucket": "B3",
+      "target_pct": 0.08,
+      "band_low": 0.06,
+      "band_high": 0.10,
+      "min_expected_return": 0.13,
+      "phase2_target_pct": 0.07,
+      "notes": ""
+    },
+    "B5B71Q7": {
+      "name": "Vanguard U.S. Equity Index GBP Acc",
+      "ticker": "B5B71Q7",
+      "bucket": "B1",
+      "target_pct": 0.00,
+      "band_low": 0.00,
+      "band_high": 0.00,
+      "min_expected_return": 0.09,
+      "phase2_target_pct": 0.00,
+      "notes": "CONSOLIDATION PENDING — target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
+      "consolidation_target": "VUAG",
+      "pending_sale": true
+    },
+    "SMT": {
+      "name": "Scottish Mortgage Ord",
+      "ticker": "SMT",
+      "bucket": "B3",
+      "target_pct": 0.05,
+      "band_low": 0.03,
+      "band_high": 0.07,
+      "min_expected_return": 0.13,
+      "phase2_target_pct": 0.04,
+      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes — not counted in stock sleeve %. SpaceX ~19% of NAV — below 25% threshold so BROAD-BASED. No preclearance required."
+    }
+  },
+
+  "bucket_totals": {
+    "B1": {"phase1_target_pct": 0.30, "phase1_band_low": 0.28, "phase1_band_high": 0.35},
+    "B2": {"phase1_target_pct": 0.37, "phase1_band_low": 0.33, "phase1_band_high": 0.42},
+    "B3": {"phase1_target_pct": 0.16, "phase1_band_low": 0.13, "phase1_band_high": 0.19}
+  },
+
+  "macro_tilt_rules": {
+    "Expansion":   {"B1": "allow_drift_lower", "B2": "allow_drift_upper", "B3": "allow_drift_upper"},
+    "Slowdown":    {"B1": "move_toward_upper", "B2": "hold_mid_band",     "B3": "move_toward_lower"},
+    "Contraction": {"B1": "hold_at_upper",     "B2": "hold_at_lower",     "B3": "hold_at_lower_no_new_capital"},
+    "Recovery":    {"B1": "allow_drift_lower", "B2": "move_toward_upper", "B3": "move_toward_upper"}
+  },
+
+  "stock_sleeve": {
+    "phase1_target_low": 0.10,
+    "phase1_target_high": 0.15,
+    "phase2_target_low": 0.15,
+    "phase2_target_high": 0.30,
+    "return_assumption": 0.18,
+    "transition_trigger_pct": 0.15,
+    "transition_requires_consecutive_months": 2
+  },
+
+  "signal_logic": {
+    "hold":                  "Within band AND estimated return >= bucket minimum",
+    "watch_return":          "Within band BUT estimated return below bucket minimum (first time)",
+    "research_trigger":      "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
+    "watch_drift":           "Outside band by <= 2%",
+    "rebalancing_candidate": "Outside band by > 2% — escalate to Step 10 Category 7",
+    "drift_watch_threshold": 0.02,
+    "drift_rebalance_threshold": 0.02
+  }
+}

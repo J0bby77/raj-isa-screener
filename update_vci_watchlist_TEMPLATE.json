@@ -1,0 +1,127 @@
+{
+  "_instructions": "Copy to update_vci_watchlist_[mmm_yyyy].json. Fill watchlist entries and change_log_entry. Run: python update_vci_watchlist.py --watchlist <PATH_TO_MEMORY_FILE>/project_isa_vci_watchlist.md --update update_vci_watchlist_jun2026.json",
+
+  "run_month": "June 2026",
+  "run_note": "v2.0 scorecard",
+
+  "watchlist": [
+    {
+      "rank": 1,
+      "ticker": "ONT.L",
+      "company": "Oxford Nanopore Technologies",
+      "exchange": "LSE",
+      "acs": 76,
+      "3yr_pos_pct": "22.9%",
+      "nvidia_signals": "5/6 NVIDIA-CLASS; S5-MULT",
+      "classification": "HIGH CONVICTION",
+      "entry_level": "£1.20-1.35 ACTIVE BUY",
+      "last_scored": "2026-05-25",
+      "entry_trigger": "ACTIVE BUY NOW — NHS products shipping; catalyst premium active",
+      "status": "ACTIVE BUY",
+      "note": "ACS upgraded 73→76 (June v2.0). NVIDIA-CLASS pattern (5 signals). S5-MULTIPLIER active (proteomics latent TAM >10x analyst consensus). ACS8 catalyst premium: NHS products shipping May-Jul 2026 + B2=2. Size 1.0% initial at £1.20-1.35; scale to 1.5% on NHS acceleration or pullback to £1.10-1.20."
+    },
+    {
+      "rank": 2,
+      "ticker": "ABCL",
+      "company": "AbCellera Biologics",
+      "exchange": "NASDAQ",
+      "acs": 74,
+      "3yr_pos_pct": "53.7%",
+      "nvidia_signals": "5/6 NVIDIA-CLASS",
+      "classification": "HIGH CONVICTION",
+      "entry_level": "$4.50-5.25 pullback OR Q3 2026 Phase 2 positive",
+      "last_scored": "2026-05-10",
+      "entry_trigger": "Phase 2 ABCL635 efficacy readout Q3 2026 (binary)",
+      "status": "CATALYST ALERT",
+      "note": "ACS 74 maintained (not re-scored; entry trigger $3.50-4.00 not met at $5.20). MAJOR UPDATE: Phase 1 POSITIVE data May 11, 2026 — ABCL635 dose-dependent testosterone suppression, no liver toxicity, Phase 2 initiated. Phase 2 efficacy readout Q3 2026 = binary catalyst. Cash $655M (15+ quarters runway). Estimated ACS 76-78 if re-scored v2.0. URGENT re-score July 2026."
+    },
+    {
+      "rank": 3,
+      "ticker": "ALAB",
+      "company": "Astera Labs",
+      "exchange": "NASDAQ",
+      "acs": 65,
+      "3yr_pos_pct": "~96%",
+      "nvidia_signals": "4/6 STRONG ASYMMETRIC",
+      "classification": "MODERATE CONVICTION",
+      "entry_level": "$160-170 (currently $306 — far above)",
+      "last_scored": "2026-05-10",
+      "entry_trigger": "Pullback to $160-170 OR Q2 2026 analyst target refresh",
+      "status": "WATCHLIST",
+      "note": "Entry level far above current price. Monitor for pullback. Q2 2026 earnings may refresh analyst targets."
+    },
+    {
+      "rank": 4,
+      "ticker": "CRDO",
+      "company": "Credo Technology",
+      "exchange": "NASDAQ",
+      "acs": 63,
+      "3yr_pos_pct": "~99%",
+      "nvidia_signals": "3/6 ASYMMETRIC",
+      "classification": "MODERATE CONVICTION",
+      "entry_level": "$140-150 (currently $218 — far above)",
+      "last_scored": "2026-05-10",
+      "entry_trigger": "Pullback toward $140-150",
+      "status": "WATCHLIST",
+      "note": "Near 52wk high. No entry at current price. Monitor hyperscaler architecture announcements Q3 2026."
+    },
+    {
+      "rank": 5,
+      "ticker": "RXRX",
+      "company": "Recursion Pharmaceuticals",
+      "exchange": "NASDAQ",
+      "acs": 60,
+      "3yr_pos_pct": "1.7%",
+      "nvidia_signals": "4/6 STRONG ASYMMETRIC; S5-MULT; B1+B2=3 FLOOR",
+      "classification": "MODERATE CONVICTION (floor-capped)",
+      "entry_level": "$3.00-3.50 — AT TRIGGER but no entry until re-score",
+      "last_scored": "2026-05-25",
+      "entry_trigger": "No entry despite price at trigger. 3mo re-score Sep 2026 required",
+      "status": "FLOOR-CAPPED — 3mo re-score",
+      "note": "Downgraded ACS 64→60. Part B Floor applied (B1+B2=3/6; raw ACS=63, capped at 60). Key deterioration: NVIDIA fully exited equity (Feb 2026), Novo Holdings exited, Amazon Bio Discovery launched (Apr 2026), Gibson departed board (Jun 2026). NO ENTRY until September 2026 re-score."
+    }
+  ],
+
+  "nvidia_class_note": "None yet. ONT.L (76, 5 signals, S5-MULT) and ABCL (74, 5 signals) carry NVIDIA-CLASS PATTERN designation — closest to >=85 threshold. ONT.L protein sequencing commercial announcement or ABCL Phase 2 positive could drive re-scoring toward >=85.",
+
+  "rescore_calendar": [
+    {"ticker": "ABCL",  "next_rescore": "July 2026 (URGENT — before Phase 2 data)", "catalyst": "Phase 2 ABCL635 efficacy readout Q3 2026"},
+    {"ticker": "RXRX",  "next_rescore": "September 2026 (3-month floor re-score)",    "catalyst": "REC-1245 2H26 dose escalation data; Amazon Bio traction"},
+    {"ticker": "ALAB",  "next_rescore": "July 2026 (post-Q2 2026 earnings)",          "catalyst": "Revenue beat; analyst target refresh"},
+    {"ticker": "CRDO",  "next_rescore": "September 2026",                             "catalyst": "Hyperscaler architecture announcements"},
+    {"ticker": "ONT.L", "next_rescore": "December 2026",                              "catalyst": "Protein sequencing commercial update; NHS expansion; Van Parys track record"}
+  ],
+
+  "excluded": [
+    {"ticker": "BZ, PDD, NTES, ATAT",  "reason": "China VIE structure — structural exclusion maintained"},
+    {"ticker": "TW, FUTU",             "reason": "Financial intermediation — FS two-tier test fail"},
+    {"ticker": "MOD, BE, NVT, AEIS",   "reason": "Theme 3 Energy for AI: large-cap dominated or near 52wk high"},
+    {"ticker": "LSCC",                 "reason": "Theme 1: AT 52wk high (99.1% of range) — discard"},
+    {"ticker": "SDGR",                 "reason": "Theme 4: tool not OS, weak bottleneck — discard"},
+    {"ticker": "PACB",                 "reason": "ACS 42 — INSUFFICIENT CONVICTION. SPRQ-Nx traction needed. Re-evaluate Oct 2026."},
+    {"ticker": "SEER",                 "reason": "ACS 39 — INSUFFICIENT CONVICTION. TAM too small. Re-evaluate mid-2027."},
+    {"ticker": "KRMN",                 "reason": "ACS 40 — INSUFFICIENT CONVICTION. Defense composites manufacturer — B1=0. No platform ecosystem. Consider main portfolio growth sleeve only. Scored Jun 2026."},
+    {"ticker": "RKLB",                 "reason": "PERMANENTLY RETIRED — market cap $78.6B (>$50-100B exception window). Remove from all candidate pools."},
+    {"ticker": "BKSY",                 "reason": "Near 52wk high (97.9%); analyst target BELOW current price. Note for future run when price corrects. Strong fundamentals: $345M backlog, Gen-3 constellation."}
+  ],
+
+  "amba_monitor": [
+    {
+      "ticker": "AMBA",
+      "company": "Ambarella",
+      "acs_at_removal": 60,
+      "nvidia_signals": "5/6 NVIDIA-CLASS",
+      "current_price": "$87.55 (81.1% 3yr range)",
+      "re_entry_trigger": "$50-55",
+      "notes": "Removed May 2026 per max-5 rule. Pattern intact. Theme 1 sub-segment scan deferred to July 2026 run. Re-add immediately if trigger met."
+    }
+  ],
+
+  "change_log_entry": {
+    "month": "Jun-26",
+    "additions": "None added",
+    "removals": "KRMN discarded (ACS 40, B1=0); RKLB permanently retired",
+    "acs_changes": "ONT.L: 73→76 (UPGRADE v2.0); RXRX: 64→60 (DOWNGRADE, floor B1+B2=3); ABCL: 74 maintained (CATALYST ALERT Phase 1 positive)",
+    "notes": "NVIDIA exit RXRX equity; Amazon Bio Discovery; Gibson off board; ABCL Phase 1 positive"
+  }
+}

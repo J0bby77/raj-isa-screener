@@ -1,0 +1,117 @@
+{
+  "_instructions": "Copy this file to vci_email_data_[mmm_yyyy].json. Fill all fields. Run: python build_vci_email.py --json vci_email_data_jun2026.json --output vci_email_body.html",
+
+  "run_month": "June 2026",
+  "run_date": "25 May 2026",
+  "n_scored": 3,
+  "sleeve_value_gbp": 0,
+  "sleeve_pct": 0.0,
+
+  "nvidia_alerts": [
+    {
+      "_note": "Include one entry per candidate with >=3 signals. Delete this section if none.",
+      "ticker": "ONT.L",
+      "company": "Oxford Nanopore Technologies",
+      "n_signals": 5,
+      "acs": 76,
+      "classification": "NVIDIA-CLASS",
+      "thesis_sentence": "Long-read sequencing platform with NHS deployment underway and proteomics latent TAM exceeding 10x analyst consensus.",
+      "signals_active": ["S1 Platform lock-in", "S2 Structural bottleneck", "S3 Customer co-invest", "S4 R&D ahead of revenue", "S5 Latent demand (S5-MULT)"]
+    }
+  ],
+
+  "candidates": [
+    {
+      "_note": "One entry per candidate. ACS >=45 only shown in E2 table. Rank by ACS descending.",
+      "rank": 1,
+      "ticker": "ONT.L",
+      "acs": 76,
+      "part_a": "18/26",
+      "part_b": "20/24",
+      "nvidia_signals": "5/6 NVIDIA-CLASS; S5-MULT",
+      "entry_level": "£1.20-1.35 ACTIVE BUY",
+      "action": "ACTIVE BUY"
+    },
+    {
+      "rank": 2,
+      "ticker": "ABCL",
+      "acs": 74,
+      "part_a": "16/26",
+      "part_b": "19/24",
+      "nvidia_signals": "5/6 NVIDIA-CLASS",
+      "entry_level": "$4.50-5.25 pullback or Phase 2 positive",
+      "action": "WATCHLIST"
+    },
+    {
+      "rank": 3,
+      "ticker": "RXRX",
+      "acs": 60,
+      "part_a": "12/26",
+      "part_b": "17/24",
+      "nvidia_signals": "4/6 STRONG ASYMMETRIC; B1+B2=3 floor",
+      "entry_level": "$3.00-3.50 — no entry until Sep 2026 re-score",
+      "action": "MONITOR"
+    }
+  ],
+
+  "themes": [
+    {
+      "name": "Biological Computation",
+      "status": "INFLECTING",
+      "catalyst_timeline": "Q3 2026 — ABCL Phase 2 readout; ONT.L NHS expansion",
+      "bottleneck_candidate": "ONT.L / ABCL"
+    },
+    {
+      "name": "AI Infrastructure Compute Substrate",
+      "status": "INFLECTING",
+      "catalyst_timeline": "Q2 2026 — hyperscaler capex cycle; ALAB/CRDO results",
+      "bottleneck_candidate": "ALAB (above entry); CRDO (above entry)"
+    },
+    {
+      "name": "Energy Infrastructure for AI",
+      "status": "PRE-INFLECTION",
+      "catalyst_timeline": "2027+ — SMR licensing; data centre power density",
+      "bottleneck_candidate": "LARGE-CAP DOMINATED — no sub-$50B bottleneck found"
+    }
+  ],
+
+  "portfolio": [
+    {
+      "_note": "One entry per open position. Delete this placeholder if no open positions.",
+      "ticker": "—",
+      "entry_price": "—",
+      "current_price": "—",
+      "gain_pct": "0.0",
+      "thesis": "No positions open",
+      "milestone": "—",
+      "next_action": "—"
+    }
+  ],
+
+  "headroom_gbp": 6900,
+  "headroom_pct_used": 0.0,
+  "headroom_limit_pct": 5,
+  "fast_tracks": ["ONT.L (ACS 76 — ACTIVE BUY)"],
+  "watchlist_added": ["ONT.L (ACS 76)", "ABCL (ACS 74)"],
+  "watchlist_removed": ["KRMN (ACS 40 — discarded, B1=0)", "RKLB (retired — mktcap $78.6B)"],
+  "catalysts_forward": [
+    "ONT.L: NHS clinical products shipping Q2 2026; protein sequencing roadmap update H2 2026",
+    "ABCL: Phase 2 ABCL635 efficacy readout Q3 2026 (binary catalyst)",
+    "RXRX: REC-1245 2H26 dose escalation data; 3-month re-score Sep 2026"
+  ],
+
+  "retrospective": [
+    {
+      "observation": "Batch 2 Part B searches ran in 3 sequential rounds rather than one parallel batch",
+      "enhancement": "Run vci_batch2_gen.py on confirmed shortlist; issue all B1-B12 queries as single parallel block",
+      "category": "efficiency",
+      "impact": "L"
+    },
+    {
+      "observation": "Part A scoring rules applied manually — raw values read from vci_batch1_pull.py output and scored by inspection",
+      "enhancement": "Run vci_acs_scorer.py for all candidates; review scored table; only override A10/A11 manually",
+      "category": "efficiency",
+      "impact": "XL"
+    }
+  ]
+}
