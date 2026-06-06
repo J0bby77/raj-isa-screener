@@ -321,6 +321,19 @@ def parse_portfolio(xlsx_path: str) -> dict:
     if total_value == 0:
         raise ValueError("Total portfolio value is zero — check xlsx format.")
 
+    # Resolve data_dt from data_date or file_date_str (needed for S/O and month label)
+    data_dt = None
+    if data_date:
+        try:
+            data_dt = datetime.strptime(data_date, "%d-%b-%Y")
+        except ValueError:
+            pass
+    if data_dt is None and file_date_str:
+        try:
+            data_dt = datetime.strptime(file_date_str, "%d-%b-%y")
+        except ValueError:
+            pass
+
     # Standing order adjustment — conditional on file date
     # The S/O is paid on the 1st of each month and typically clears within
     # SO_CLEAR_WORKING_DAYS (3) working days. If the AJ Bell file was saved
@@ -353,18 +366,6 @@ def parse_portfolio(xlsx_path: str) -> dict:
     vuag_combined_flag = vuag_combined_pct > 12.5
 
     # Month label
-    data_dt = None
-    if data_date:
-        try:
-            data_dt = datetime.strptime(data_date, "%d-%b-%Y")
-        except ValueError:
-            pass
-    if data_dt is None and file_date_str:
-        try:
-            data_dt = datetime.strptime(file_date_str, "%d-%b-%y")
-        except ValueError:
-            pass
-
     month_label = data_dt.strftime("%b_%Y").lower() if data_dt else "unknown"
     run_month   = data_dt.strftime("%b %Y") if data_dt else "Unknown"
 
@@ -503,99 +504,6 @@ def main():
     else:
         so_days = data["_meta"].get("standing_order_working_days")
         print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared — {so_days} working day(s) after 1st)")
-    print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
-    print(f"\n  Stock positions:   {s['num_stock_positions']}")
-    print(f"  Fund positions:    {s['num_fund_positions']}")
-
-    if data["flags"]["concentration_over_12_5pct"]:
-        print(f"\n  FLAG: Position(s) over 12.5%: {data['flags']['concentration_over_12_5pct']}")
-    if data["flags"]["vuag_plus_vanguard_us_exceeds_12_5pct"]:
-        print(f"\n  FLAG: VUAG + Vanguard US combined {data['flags']['vuag_plus_vanguard_us_combined_pct']:.1f}% > 12.5%")
-
-    print(f"\nOutput written: {out_path}")
-    return out_path
-
-
-if __name__ == "__main__":
-    main()
-        },
-        "notes": (
-            f"Cash per file: £{cash_value:,.2f}. {so_note} "
-            f"Deployable after £{CASH_BUFFER_MIN:.0f} buffer: £{deployable_cash:,.2f}."
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(
-        description="Extract AJ Bell ISA Portfolio xlsx to structured JSON."
-    )
-    parser.add_argument(
-        "--xlsx", default=None,
-        help="Path to xlsx file. If omitted, auto-detects latest in ISA folder."
-    )
-    parser.add_argument(
-        "--out", default=None,
-        help="Output JSON path. If omitted, writes portfolio_data_mmm_yyyy.json to Investment Analysis folder."
-    )
-    parser.add_argument(
-        "--isa-folder", default=ISA_FOLDER,
-        help="ISA root folder (default: parent of this script's directory)."
-    )
-    args = parser.parse_args()
-
-    # Resolve xlsx
-    if args.xlsx:
-        xlsx_path = args.xlsx
-        if not os.path.exists(xlsx_path):
-            print(f"ERROR: xlsx not found: {xlsx_path}")
-            sys.exit(1)
-    else:
-        try:
-            xlsx_path = find_latest_xlsx(args.isa_folder)
-        except FileNotFoundError as e:
-            print(f"ERROR: {e}")
-            sys.exit(1)
-        print(f"Auto-detected: {os.path.basename(xlsx_path)}")
-
-    # Parse
-    print(f"Parsing: {xlsx_path}")
-    try:
-        data = parse_portfolio(xlsx_path)
-    except Exception as e:
-        print(f"ERROR parsing portfolio: {e}")
-        sys.exit(1)
-
-    # Resolve output path
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if args.out:
-        out_path = args.out
-    else:
-        month_label = data["_meta"]["month_label"]
-        out_path = os.path.join(script_dir, f"portfolio_data_{month_label}.json")
-
-    # Write
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-
-    # Summary
-    s = data["summary"]
-    print(f"\nPortfolio extracted: {data['_meta']['run_month']}")
-    print(f"  Total value:       £{s['total_value_gbp']:>12,.2f}")
-    print(f"  Fund sleeve:       £{s['fund_sleeve_value_gbp']:>12,.2f}  ({s['fund_sleeve_pct']:.1f}%)")
-    print(f"  Stock sleeve:      £{s['stock_sleeve_value_gbp']:>12,.2f}  ({s['stock_sleeve_pct']:.1f}%)")
-    print(f"  Cash (stated):     £{s['cash_stated_gbp']:>12,.2f}  ({s['cash_pct']:.1f}%)")
-    if s.get("standing_order_applied"):
-        so_days = data["_meta"].get("standing_order_working_days")
-        days_str = f"{so_days} working day(s) after 1st" if so_days is not None else "date unknown"
-        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (+£{s['standing_order_adj']:,.0f} S/O not yet cleared -- {days_str})")
-    else:
-        so_days = data["_meta"].get("standing_order_working_days")
-        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared -- {so_days} working day(s) after 1st)")
     print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
     print(f"\n  Stock positions:   {s['num_stock_positions']}")
     print(f"  Fund positions:    {s['num_fund_positions']}")
