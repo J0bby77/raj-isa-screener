@@ -843,3 +843,7 @@ def main():
     out_path       = args.out or os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
 
     run(watchlist_path, out_path, month_label)
+
+
+if __name__ == "__main__":
+    main()

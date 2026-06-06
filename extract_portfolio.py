@@ -60,6 +60,24 @@ STOCK_EXCHANGES = {"NASDAQ", "NYSE", "LSE", "XTRA", "EPA", "TSX"}
 # Exchanges where a listing could be either a stock or a fund — check FUND_OVERRIDE
 AMBIGUOUS_EXCHANGES = {"LSE"}
 
+# Non-exchange identifier schemes the broker sometimes uses for DIRECT equity
+# holdings, e.g. "(SEDOL:BKM4N88)". Funds always carry a "FUND:" prefix, so a
+# SEDOL/ISIN/CUSIP-tagged line is treated as a stock unless the mapped ticker is
+# in FUND_OVERRIDE_TICKERS.
+IDENTIFIER_SCHEMES = {"SEDOL", "ISIN", "CUSIP"}
+
+# Map a broker identifier (SEDOL/ISIN/symbol) -> canonical exchange ticker, so
+# the stock sleeve and watchlist reconcile on the same symbol. Extend as needed.
+IDENTIFIER_TICKER_MAP = {
+    "BKM4N88": "PCTY",   # Paylocity Holding Corp (held under SEDOL, not NASDAQ:PCTY)
+}
+
+
+def _canonical_ticker(ticker) -> str:
+    """Map a broker identifier to its canonical exchange ticker (upper-cased)."""
+    t = str(ticker or "").strip().upper()
+    return IDENTIFIER_TICKER_MAP.get(t, t)
+
 
 # ---------------------------------------------------------------------------
 # Standing order helpers
@@ -185,6 +203,15 @@ def classify_holding(investment_name: str, ticker) -> str:
         if exchange in STOCK_EXCHANGES:
             return "stock"
 
+        # Identifier-scheme listing (SEDOL/ISIN/CUSIP) of a direct equity.
+        # Funds carry a "FUND:" prefix (handled above), so map to canonical
+        # ticker and treat as a stock unless that ticker is a fund override.
+        if exchange in IDENTIFIER_SCHEMES:
+            mapped = IDENTIFIER_TICKER_MAP.get(symbol, symbol)
+            if mapped in FUND_OVERRIDE_TICKERS:
+                return "fund"
+            return "stock"
+
     # Fallback: if ticker looks like a fund ISIN (7–9 alphanumerics, starts letter)
     t = str(ticker or "").strip()
     if re.match(r"^[A-Z][A-Z0-9]{6,8}$", t) and not re.match(r"^[A-Z]{1,5}$", t):
@@ -296,7 +323,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
         record = {
             "name":         clean_name,
             "full_name":    investment,
-            "ticker":       str(ticker).strip() if ticker else "",
+            "ticker":       _canonical_ticker(ticker),
             "quantity":     safe_float(qty),
             "price":        safe_float(price),
             "value_gbp":    v,
@@ -504,6 +531,89 @@ def main():
     else:
         so_days = data["_meta"].get("standing_order_working_days")
         print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared — {so_days} working day(s) after 1st)")
+    print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
+    print(f"\n  Stock positions:   {s['num_stock_positions']}")
+    print(f"  Fund positions:    {s['num_fund_positions']}")
+
+    if data["flags"]["concentration_over_12_5pct"]:
+        print(f"\n  FLAG: Position(s) over 12.5%: {data['flags']['concentration_over_12_5pct']}")
+    if data["flags"]["vuag_plus_vanguard_us_exceeds_12_5pct"]:
+        print(f"\n  FLAG: VUAG + Vanguard US combined {data['flags']['vuag_plus_vanguard_us_combined_pct']:.1f}% > 12.5%")
+
+    print(f"\nOutput written: {out_path}")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract AJ Bell ISA Portfolio xlsx to structured JSON."
+    )
+    parser.add_argument(
+        "--xlsx", default=None,
+        help="Path to xlsx file. If omitted, auto-detects latest in ISA folder."
+    )
+    parser.add_argument(
+        "--out", default=None,
+        help="Output JSON path. If omitted, writes portfolio_data_mmm_yyyy.json to Investment Analysis folder."
+    )
+    parser.add_argument(
+        "--isa-folder", default=ISA_FOLDER,
+        help="ISA root folder (default: parent of this script's directory)."
+    )
+    args = parser.parse_args()
+
+    # Resolve xlsx
+    if args.xlsx:
+        xlsx_path = args.xlsx
+        if not os.path.exists(xlsx_path):
+            print(f"ERROR: xlsx not found: {xlsx_path}")
+            sys.exit(1)
+    else:
+        try:
+            xlsx_path = find_latest_xlsx(args.isa_folder)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        print(f"Auto-detected: {os.path.basename(xlsx_path)}")
+
+    # Parse
+    print(f"Parsing: {xlsx_path}")
+    try:
+        data = parse_portfolio(xlsx_path)
+    except Exception as e:
+        print(f"ERROR parsing portfolio: {e}")
+        sys.exit(1)
+
+    # Resolve output path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if args.out:
+        out_path = args.out
+    else:
+        month_label = data["_meta"]["month_label"]
+        out_path = os.path.join(script_dir, f"portfolio_data_{month_label}.json")
+
+    # Write
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+    # Summary
+    s = data["summary"]
+    print(f"\nPortfolio extracted: {data['_meta']['run_month']}")
+    print(f"  Total value:       £{s['total_value_gbp']:>12,.2f}")
+    print(f"  Fund sleeve:       £{s['fund_sleeve_value_gbp']:>12,.2f}  ({s['fund_sleeve_pct']:.1f}%)")
+    print(f"  Stock sleeve:      £{s['stock_sleeve_value_gbp']:>12,.2f}  ({s['stock_sleeve_pct']:.1f}%)")
+    print(f"  Cash (stated):     £{s['cash_stated_gbp']:>12,.2f}  ({s['cash_pct']:.1f}%)")
+    if s.get("standing_order_applied"):
+        so_days = data["_meta"].get("standing_order_working_days")
+        days_str = f"{so_days} working day(s) after 1st" if so_days is not None else "date unknown"
+        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (+£{s['standing_order_adj']:,.0f} S/O not yet cleared -- {days_str})")
+    else:
+        so_days = data["_meta"].get("standing_order_working_days")
+        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared -- {so_days} working day(s) after 1st)")
     print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
     print(f"\n  Stock positions:   {s['num_stock_positions']}")
     print(f"  Fund positions:    {s['num_fund_positions']}")

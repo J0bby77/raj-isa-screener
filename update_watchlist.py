@@ -35,6 +35,7 @@ Phase logic:
 import argparse
 import glob
 import json
+import re
 import math
 import os
 import shutil
@@ -109,22 +110,44 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
         wb.close()
         return rows
 
-    # Read header row (row 1)
+    # Locate the header row dynamically. Analysis SUMMARY tabs carry a title banner
+    # in row 1 and group labels in row 3; the real column headers (Ticker, Part A
+    # (/28), Total (/54), ...) sit several rows down. Scan for the first row with a
+    # Ticker/Symbol/Stock header. Header names are normalised to strip newline and
+    # parenthetical suffixes, e.g. "Part A\n(/28)" -> "part a".
+    def _norm(val):
+        if val is None:
+            return ""
+        txt = str(val).split("\n")[0]
+        txt = re.sub(r"\(.*?\)", "", txt)
+        return txt.strip().lower()
+
+    all_rows = [list(r) for r in sheet.iter_rows(values_only=True)]
+    header_idx = None
     headers = []
-    for cell in next(sheet.iter_rows(min_row=1, max_row=1)):
-        val = cell.value
-        headers.append(str(val).strip() if val is not None else "")
+    for i, r in enumerate(all_rows):
+        norm = [_norm(c) for c in r]
+        if any(h in ("ticker", "symbol", "stock") for h in norm):
+            header_idx = i
+            headers = norm
+            break
+
+    if header_idx is None:
+        print(f"  [update_watchlist] No Ticker header found in SUMMARY of {os.path.basename(xlsx_path)} — skipped")
+        wb.close()
+        return rows
 
     def col(row_vals: list, *names: str):
-        """Return first matching column value, case-insensitive."""
+        """Return first matching column value (headers already normalised)."""
         for name in names:
+            target = name.strip().lower()
             for i, h in enumerate(headers):
-                if h.lower() == name.lower() and i < len(row_vals):
+                if h == target and i < len(row_vals):
                     return row_vals[i]
         return None
 
-    # Read data rows
-    for row in sheet.iter_rows(min_row=2, values_only=True):
+    # Read data rows (everything after the located header row)
+    for row in all_rows[header_idx + 1:]:
         row_vals = list(row)
         if not any(v for v in row_vals):
             continue  # skip blank rows
@@ -269,6 +292,12 @@ def classify_part_b_driver(prior_total: int, new_total: int,
 # Normalised score
 # ---------------------------------------------------------------------------
 
+def _base_ticker(t: str) -> str:
+    """Symbol without exchange suffix, upper-cased (ONT.L -> ONT, CSU.TO -> CSU)."""
+    t = str(t or "").strip().upper()
+    return t.split(".")[0] if "." in t else t
+
+
 def normalised_score(total: int | None, path: str) -> float | None:
     if total is None:
         return None
@@ -292,13 +321,20 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     with open(watchlist_path, encoding="utf-8") as f:
         wl_data = json.load(f)
 
+    # Snapshot the prior pool so carry-forward incumbents survive the ephemeral wipe.
+    prior_pool = list(wl_data.get("candidate_pool", []))
+
     # Load portfolio_data for duplicate check
     portfolio_tickers = set()
+    port_stocks = []
+    port_data_date = run_date
     if portfolio_path and os.path.exists(portfolio_path):
         try:
             with open(portfolio_path, encoding="utf-8") as f:
                 port = json.load(f)
-            for s in port.get("stocks", []):
+            port_stocks = port.get("stocks", [])
+            port_data_date = port.get("_meta", {}).get("data_date", run_date)
+            for s in port_stocks:
                 t = s.get("ticker", "")
                 if t:
                     portfolio_tickers.add(t.upper())
@@ -328,13 +364,73 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         "xlsx_files_archived":  [],   # replaces xlsx_files_deleted
         "xlsx_files_read":      [],
         "path_c_misrouted_log": [],
+        "rows_parsed":          0,
+        "held_removed_from_watchlist": [],
+        "held_removed_from_vci":       [],
+        "sleeve_phantom_removed":      [],
+        "sleeve_added":                [],
     }
+
+    # -----------------------------------------------------------------------
+    # Reconcile against broker truth (portfolio_data.stocks)
+    # -----------------------------------------------------------------------
+    held_base = {_base_ticker(s.get("ticker", "")) for s in port_stocks if s.get("ticker")}
+    portfolio_tickers |= held_base
+
+    # (C) Stock-sleeve sync: drop phantom holds, add un-recorded buys.
+    held_by_base = {_base_ticker(s.get("ticker", "")): s for s in port_stocks if s.get("ticker")}
+    kept_sleeve, sleeve_bases = [], set()
+    for s in wl_data.get("stock_sleeve", []):
+        b = _base_ticker(s.get("ticker", ""))
+        if b in held_by_base:
+            kept_sleeve.append(s); sleeve_bases.add(b)
+        else:
+            promotion_log["sleeve_phantom_removed"].append({
+                "ticker": s.get("ticker"), "name": s.get("name"),
+                "reason": "in stock_sleeve but absent from broker portfolio file",
+            })
+    for b, hs in held_by_base.items():
+        if b not in sleeve_bases:
+            qty = hs.get("quantity") or 0
+            cost = hs.get("cost_gbp")
+            cps = round(cost / qty, 4) if (cost and qty) else None
+            exch = "LSE" if (hs.get("currency") == "GBP") else "NASDAQ"
+            kept_sleeve.append({
+                "ticker": b, "name": hs.get("name", ""), "exchange": exch,
+                "purchase_date": None, "cost_per_share_usd": None,
+                "cost_total_gbp": cost, "shares": qty,
+                "include_in_metrics_pull": True,
+                "note": (f"Auto-added from broker file {port_data_date} — "
+                         "verify purchase_date / cost basis / thesis-break conditions"),
+                "_auto_added": True,
+            })
+            promotion_log["sleeve_added"].append({"ticker": b, "shares": qty})
+    if port_stocks:
+        wl_data["stock_sleeve"] = kept_sleeve
+
+    # (B) Remove held names from the VCI watchlist (suffix-insensitive).
+    if held_base:
+        new_vci = []
+        for e in wl_data.get("vci_watchlist", []):
+            if _base_ticker(e.get("ticker", "")) in held_base:
+                promotion_log["held_removed_from_vci"].append({
+                    "ticker": e.get("ticker"), "reason": "now held in portfolio"})
+            else:
+                new_vci.append(e)
+        wl_data["vci_watchlist"] = new_vci
 
     # -----------------------------------------------------------------------
     # Find all Growth Stock Analysis xlsx files
     # -----------------------------------------------------------------------
-    xlsx_pattern = os.path.join(inv_dir, "Growth Stock Analysis*.xlsx")
-    xlsx_files = sorted(glob.glob(xlsx_pattern))
+    # Ingest analysis xlsx from BOTH the working dir and THIS MONTH's archive, so
+    # the (ephemeral) candidate pool rebuilds completely and idempotently on every
+    # run — even after a prior run already archived the source files.
+    archive_month_dir   = os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, run_date[:7])
+    working_xlsx_files  = sorted(glob.glob(os.path.join(inv_dir, "Growth Stock Analysis*.xlsx")))
+    archived_xlsx_files = sorted(glob.glob(os.path.join(archive_month_dir, "Growth Stock Analysis*.xlsx")))
+    _seen = {os.path.basename(p) for p in working_xlsx_files}
+    xlsx_files = sorted(working_xlsx_files + [p for p in archived_xlsx_files
+                                             if os.path.basename(p) not in _seen])
 
     if not xlsx_files:
         print("  [update_watchlist] No Growth Stock Analysis xlsx files found — nothing to promote.")
@@ -349,6 +445,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         print(f"  [update_watchlist] Reading: {fname}")
         promotion_log["xlsx_files_read"].append(fname)
         rows = read_xlsx_summary_tab(xlsx_path)
+        promotion_log["rows_parsed"] += len(rows)
 
         for row in rows:
             ticker = row["ticker"]
@@ -575,6 +672,14 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         if ticker not in combined:
             combined[ticker] = entry
 
+    # Remove currently-held names from the growth watchlist (positions, not candidates).
+    if held_base:
+        for _t in list(combined.keys()):
+            if _base_ticker(_t) in held_base:
+                promotion_log["held_removed_from_watchlist"].append({
+                    "ticker": _t, "reason": "now held in portfolio — moved to stock sleeve"})
+                combined.pop(_t, None)
+
     def rank_key(item):
         return -(item.get("normalised_score") or 0)
 
@@ -689,6 +794,35 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     if not dry_run:
         wl_data["watchlist"] = new_wl
 
+        # --- Lossless carry-forward: never silently drop a name ---
+        # (i) Incumbents displaced from the top-10 that are neither held nor already
+        #     in the rebuilt pool are retained at their existing (curated) data,
+        #     flagged for a live re-score. (ii) Prior carry-forward names not
+        #     re-screened this cycle are preserved across the ephemeral pool wipe.
+        _pool_tickers = {p.get("ticker") for p in pool_entries}
+        _vci_tickers  = {e.get("ticker") for e in wl_data.get("vci_watchlist", [])}
+        for _e in current_watchlist.values():
+            _t = _e.get("ticker")
+            if not _t or _t in new_wl_set or _t in _pool_tickers:
+                continue
+            if _base_ticker(_t) in held_base:
+                continue
+            cf = dict(_e)
+            cf.update({"_carry_forward": True, "_needs_rescore": True,
+                       "candidate_pool_month": month_label,
+                       "status": "Carried forward — awaiting live re-score"})
+            pool_entries.append(cf); _pool_tickers.add(_t)
+            promotion_log.setdefault("carried_forward", []).append(_t)
+        for _p in prior_pool:
+            _t = _p.get("ticker")
+            if not _t or _t in _pool_tickers or _t in new_wl_set:
+                continue
+            if _base_ticker(_t) in held_base or _t in _vci_tickers:
+                continue
+            if _p.get("_carry_forward"):
+                pool_entries.append(_p); _pool_tickers.add(_t)
+                promotion_log.setdefault("carried_forward", []).append(_t)
+
         # Write candidate_pool (ephemeral — overwrites any prior month's pool)
         wl_data["candidate_pool"] = pool_entries
         wl_data["_candidate_pool_meta"] = {
@@ -707,14 +841,19 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
 
         print(f"  [update_watchlist] watchlist_tickers.json written: {len(new_wl)} watchlist + {len(pool_entries)} candidate_pool entries")
 
-        # Archive xlsx files instead of deleting
+        # Archive working-dir xlsx files (move to archive/<month>/). Files already in
+        # the archive are left in place; re-runs re-read them via the archive glob.
         archive_dir = os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, run_date[:7])  # e.g. archive/2026-06/
-        if xlsx_files:
+        if working_xlsx_files:
             os.makedirs(archive_dir, exist_ok=True)
 
-        for xlsx_path in xlsx_files:
+        for xlsx_path in working_xlsx_files:
             try:
                 dest = os.path.join(archive_dir, os.path.basename(xlsx_path))
+                if os.path.abspath(xlsx_path) == os.path.abspath(dest):
+                    continue
+                if os.path.exists(dest):
+                    os.remove(dest)
                 shutil.move(xlsx_path, dest)
                 fname = os.path.basename(xlsx_path)
                 promotion_log["xlsx_files_archived"].append({

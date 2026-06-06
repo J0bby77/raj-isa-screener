@@ -62,20 +62,33 @@ SCRIPTS = {
     "sync_vci_watchlist":     os.path.join(SCRIPT_DIR, "sync_vci_watchlist.py"),    # NEW Step 5
     "fetch_watchlist":        os.path.join(SCRIPT_DIR, "fetch_watchlist_metrics.py"),
     "score_partab":           os.path.join(SCRIPT_DIR, "score_partab.py"),
+    "rerank_watchlist":       os.path.join(SCRIPT_DIR, "rerank_watchlist.py"),       # NEW Step 7.5
     "step9_pre_builder":      os.path.join(SCRIPT_DIR, "step9_pre_builder.py"),     # NEW Step 8
     "email_prefill":          os.path.join(SCRIPT_DIR, "email_prefill.py"),
 }
 
 # Memory files (read by analytics for prior portfolio and trades log)
 # These paths use the Windows path as passed through the bash mount.
-MEMORY_BASE = os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "..",
-                            "AppData", "Roaming", "Claude",
-                            "local-agent-mode-sessions",
-                            "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
-                            "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
-                            "spaces",
-                            "aa27f2f8-c3d3-4862-ba9a-a67b7f6d74b9",
-                            "memory")
+def _resolve_memory_base() -> str:
+    """Locate the Cowork memory dir. The previous relative ".." climb from
+    SCRIPT_DIR landed in the OneDrive tree, so memory files were never found and
+    Step 5 was skipped. Anchor at the USER HOME and fall back to a glob on the
+    stable memory-space id so session/project id drift does not break discovery."""
+    import glob as _g
+    home  = os.path.expanduser("~")
+    SPACE = "aa27f2f8-c3d3-4862-ba9a-a67b7f6d74b9"
+    base  = os.path.join(home, "AppData", "Roaming", "Claude", "local-agent-mode-sessions")
+    candidates = [os.path.join(base, "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
+                               "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
+                               "spaces", SPACE, "memory")]
+    candidates += _g.glob(os.path.join(base, "*", "*", "spaces", SPACE, "memory"))
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return candidates[0]
+
+
+MEMORY_BASE = _resolve_memory_base()
 
 
 def find_memory_file(pattern: str) -> str | None:
@@ -314,6 +327,7 @@ def main():
     warnings = []
     summary  = {}
     flags    = []
+    degraded = False   # True -> status downgraded to PARTIAL (step ran but data incomplete)
     watchlist_promotion_log = {}
 
     # ---------------------------------------------------------------------------
@@ -487,6 +501,19 @@ def main():
                 n_rem = len(watchlist_promotion_log.get("removals", []))
                 n_upd = len(watchlist_promotion_log.get("score_updates", []))
                 print(f"  Watchlist updated: +{n_add} added | -{n_rem} removed | {n_upd} score updates")
+            # Guardrail: a SUMMARY tab that parses to zero rows is a silent parser failure.
+            n_files = len(watchlist_promotion_log.get("xlsx_files_read", []))
+            n_rows  = watchlist_promotion_log.get("rows_parsed", 0)
+            if n_files == 0:
+                warnings.append("Step 4 guardrail: no Growth Stock Analysis xlsx found in working dir or month archive -- no candidates ingested.")
+                degraded = True
+            elif n_rows == 0:
+                warnings.append(f"Step 4 guardrail: {n_files} analysis file(s) read but 0 candidate rows parsed -- check SUMMARY tab headers.")
+                degraded = True
+            for _k in ("sleeve_phantom_removed", "sleeve_added", "held_removed_from_watchlist", "held_removed_from_vci"):
+                _v = watchlist_promotion_log.get(_k, [])
+                if _v:
+                    print(f"  Reconcile [{_k}]: {[x.get('ticker') for x in _v]}")
 
     # ---------------------------------------------------------------------------
     # Step 5: Sync VCI watchlist from memory file + refresh Part A scores
@@ -494,8 +521,9 @@ def main():
     print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
     vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
     if not vci_md_path:
-        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found -- VCI watchlist carries forward unchanged.")
-        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped.")
+        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found at resolved MEMORY_BASE -- VCI watchlist not synced. (Held names are still removed at Step 4.)")
+        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped. MEMORY_BASE={MEMORY_BASE}")
+        degraded = True
     elif not os.path.exists(watchlist_config_path):
         warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
         print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
@@ -506,6 +534,7 @@ def main():
                 "--watchlist-md",   vci_md_path,
                 "--watchlist-json", watchlist_config_path,
                 "--inv-dir",        SCRIPT_DIR,
+                "--portfolio-data", portfolio_path,
             ],
             dry_run=args.dry_run,
         )
@@ -546,12 +575,47 @@ def main():
         # Watchlist pull is non-fatal (yfinance may fail for some tickers)
         if not ok:
             msg = stderr or stdout or "Unknown error in fetch_watchlist_metrics"
-            warnings.append(f"Step 6 (fetch_watchlist): {msg}")
-            print(f"  WARNING: {msg}")
-            if not os.path.exists(watchlist_metrics_path):
-                with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
-                    json.dump({"_meta": {"month_label": month_label}, "tickers": {},
-                               "_warning": "fetch failed: " + msg}, f)
+            # ARCHITECTURE: fetch_watchlist_metrics.py runs in Composio (remote) and the
+            # metrics JSON is transferred to this folder out of band. A local yfinance
+            # ImportError is EXPECTED and benign IF a populated metrics file is already
+            # present. Only degrade when NO usable metrics exist (transfer never happened).
+            metrics_n = 0
+            metrics_tickers = []
+            if os.path.exists(watchlist_metrics_path):
+                try:
+                    with open(watchlist_metrics_path, encoding="utf-8") as f:
+                        _m = json.load(f)
+                    metrics_tickers = list(_m.get("tickers", {}).keys())
+                    metrics_n = len(metrics_tickers)
+                except Exception:
+                    metrics_n = 0
+            if metrics_n > 0:
+                # Check the transferred metrics actually cover the CURRENT ticker set.
+                try:
+                    with open(watchlist_config_path, encoding="utf-8") as f:
+                        _wl = json.load(f)
+                    needed = ({e.get("ticker") for e in _wl.get("watchlist", [])}
+                              | {e.get("ticker") for e in _wl.get("vci_watchlist", [])}
+                              | {s.get("ticker") for s in _wl.get("stock_sleeve", [])}
+                              | {p.get("ticker") for p in _wl.get("candidate_pool", [])})
+                    missing = sorted(t for t in needed if t and t not in set(metrics_tickers))
+                except Exception:
+                    missing = []
+                print(f"  NOTE: local yfinance unavailable (expected) -- using Composio-transferred metrics ({metrics_n} tickers).")
+                if missing:
+                    warnings.append(f"Step 6: using Composio-transferred metrics ({metrics_n} tickers), but "
+                                    f"{len(missing)} current name(s) are NOT covered and will be unscored: {missing[:20]}"
+                                    + (" ..." if len(missing) > 20 else ""))
+                    degraded = True
+            else:
+                warnings.append(f"Step 6 (fetch_watchlist): {msg} AND no Composio-transferred metrics file present "
+                                "-- downstream scoring will be empty. Run the Composio metrics pull + transfer.")
+                print(f"  WARNING: {msg} (no metrics available)")
+                degraded = True
+                if not os.path.exists(watchlist_metrics_path):
+                    with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+                        json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                                   "_warning": "fetch failed and no transfer: " + msg}, f)
         else:
             print(stdout.strip())
             valid, vmsg = validate_json_output(watchlist_metrics_path, ["_meta", "tickers"])
@@ -602,6 +666,43 @@ def main():
                 print("  Validation WARNING: " + vmsg)
             else:
                 print("  Validation: " + vmsg)
+
+    # ---------------------------------------------------------------------------
+    # Step 7.5: Re-rank the watchlist on LIVE re-scored values
+    # ---------------------------------------------------------------------------
+    # After fetch (Composio) + score_partab produce live Part A/B for the watchlist
+    # AND the candidate_pool, re-rank the top-10 on the live normalised score so the
+    # watchlist reflects fresh data, not stale screening scores. step9_pre_builder
+    # (below) reads the re-ranked watchlist_tickers.json, so downstream stays consistent.
+    print(f"\n[7.5] Re-ranking watchlist on live re-scored values...")
+    if not os.path.exists(watchlist_scored_path) or not os.path.exists(watchlist_config_path):
+        warnings.append("Step 7.5 (rerank_watchlist) skipped -- scored or watchlist file missing.")
+        print("  SKIPPED -- scored or watchlist file missing.")
+    else:
+        # Guard: don't re-rank off an empty/failed metrics scoring (would null the watchlist).
+        try:
+            with open(watchlist_scored_path, encoding="utf-8") as _f:
+                _sc = json.load(_f)
+            _live = sum(1 for e in _sc.get("conviction_ranking", [])
+                        if (e.get("total_score_54") or e.get("total_score_36")) is not None)
+        except Exception:
+            _live = 0
+        if _live == 0:
+            warnings.append("Step 7.5 (rerank): no live scores in conviction_ranking -- skipping re-rank "
+                            "(watchlist left on screening-score order). Metrics likely not yet transferred.")
+            print("  SKIPPED -- no live scores present (run the Composio metrics pull first).")
+            degraded = True
+        else:
+            ok, stdout, stderr = run_script(
+                "rerank_watchlist",
+                ["--scored", watchlist_scored_path, "--watchlist", watchlist_config_path],
+                dry_run=args.dry_run,
+            )
+            if not ok:
+                warnings.append(f"Step 7.5 (rerank_watchlist): {stderr or stdout}")
+                print(f"  WARNING: {stderr or stdout}")
+            else:
+                print(stdout.strip())
 
     # ---------------------------------------------------------------------------
     # Step 8: Build Step 9 pre-scored output
@@ -668,7 +769,12 @@ def main():
                 print("  Validation: " + vmsg)
 
     # Write run_context
-    status = "OK" if not errors else "ERROR" if len(errors) >= 2 else "PARTIAL"
+    if errors:
+        status = "ERROR" if len(errors) >= 2 else "PARTIAL"
+    elif degraded:
+        status = "PARTIAL"
+    else:
+        status = "OK"
     error_msg = "; ".join(errors) if errors else ""
     print("Writing run_context_" + month_label + ".json...")
     if watchlist_promotion_log:

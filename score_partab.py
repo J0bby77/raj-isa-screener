@@ -1255,7 +1255,8 @@ def run(metrics_path: str, out_path: str) -> dict:
             "in_window":         s.get("_in_window", False),
             "entry_level":       fmt_price(entry_level, ecur),
             "current_price":     fmt_price(c_price, currency_s),
-            "gap_pct":           f"{s.get('_pct_above_entry', 0):+.1f}%",
+            "gap_pct":           (f"{s.get('_pct_above_entry', 0):+.1f}%"
+                                 if is_resolved(s.get("_pct_above_entry")) else "—"),
             "analyst_rating":    s.get("analyst_rating", "—"),
             "analyst_disparity": s.get("_analyst_disparity_flag", False),
         }
@@ -1341,6 +1342,10 @@ def run(metrics_path: str, out_path: str) -> dict:
         "s5_watchlist_rows":    watchlist_rows,
         "s7_sleeve_rows":       sleeve_rows,
         "s3_case_skeletons":    s3_skeletons,
+        # Per-ticker enriched metrics passthrough. step9_pre_builder.py reads
+        # scored["tickers"] to tier in-window names (T1/T2/T3 + VCI tiers).
+        # Without this key its categorisation loop iterates nothing -> empty step9_pre.
+        "tickers":              tickers_data,
 
         "instructions_for_run": {
             "step_9": (
