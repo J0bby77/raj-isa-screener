@@ -1230,7 +1230,7 @@ def run(metrics_path: str, out_path: str) -> dict:
             s3_skeletons.append(skel)
 
     # Sort watchlist rows by rank (None ranks go last)
-    watchlist_rows.sort(key=lambda r: (r.get("rank") is None, r.get("rank") or 999))
+    watchlist_rows.sort(key=lambda r: (0, int(r["rank"])) if str(r.get("rank", "")).lstrip("-").isdigit() else (1, 10**6))
 
     # ── Conviction ranking table — pipeline-aware ────────────────────────────
     # Includes all watchlist + vci_watchlist entries

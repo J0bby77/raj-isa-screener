@@ -26,7 +26,7 @@ def _norm(total, pipeline):
     return round(total / mx * 100, 1)
 
 
-def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10):
+def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
     with open(scored_path, encoding="utf-8") as f:
         scored = json.load(f)
     with open(watchlist_path, encoding="utf-8") as f:
@@ -131,6 +131,45 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10):
     with open(watchlist_path, "w", encoding="utf-8") as f:
         json.dump(wt, f, indent=2, ensure_ascii=False)
 
+    # Refresh downstream scoring artefacts to the FINAL membership: update each
+    # candidate's _kind in the metrics file (promoted -> watchlist, demoted ->
+    # candidate_pool; sleeve/VCI untouched) and re-run score_partab so
+    # s5_watchlist_rows + conviction_ranking (which the Step 9 email is built from)
+    # match the re-ranked top-10. Without this the email table lags the re-rank by
+    # one step. No-op if --metrics not supplied (manual/legacy invocation).
+    if metrics_path and os.path.exists(metrics_path) and os.path.exists(scored_path):
+        try:
+            with open(metrics_path, encoding="utf-8") as f:
+                wm = json.load(f)
+            wl_by_t = {e["ticker"]: e for e in new_wl}
+            wl_set = set(wl_by_t)
+            for t, td in wm.get("tickers", {}).items():
+                if td.get("_kind") in ("stock_sleeve", "vci_watchlist"):
+                    continue
+                if t in wl_by_t:
+                    e = wl_by_t[t]
+                    td["_kind"] = "watchlist"
+                    td["_rank"] = e.get("rank")
+                    if e.get("entry_level") is not None:
+                        td["_entry_level"] = e.get("entry_level")
+                    if e.get("entry_currency"):
+                        td["_entry_currency"] = e.get("entry_currency")
+                    if e.get("status"):
+                        td["_status"] = e.get("status")
+                elif t in registry:
+                    td["_kind"] = "candidate_pool"
+                    td["_rank"] = None
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(wm, f, indent=2, ensure_ascii=False, default=str)
+            import importlib.util
+            sp_path = os.path.join(os.path.dirname(os.path.abspath(watchlist_path)), "score_partab.py")
+            spec = importlib.util.spec_from_file_location("score_partab", sp_path)
+            sp = importlib.util.module_from_spec(spec); spec.loader.exec_module(sp)
+            sp.run(metrics_path, scored_path)
+            print(f"  [rerank] refreshed scored membership to final top-{len(wl_set)}")
+        except Exception as ex:
+            print(f"  [rerank] WARNING: could not refresh scored membership: {ex}", file=sys.stderr)
+
     print(f"  [rerank] watchlist={len(new_wl)} (>= {hurdle}) | pool={len(new_pool)} | "
           f"live re-scored={log['rescored']} | promoted={log['promoted']} | demoted={log['demoted']}")
     print(json.dumps(log))
@@ -143,11 +182,13 @@ def main():
     ap.add_argument("--watchlist", required=True)
     ap.add_argument("--hurdle", type=float, default=70.0)
     ap.add_argument("--max", type=int, default=10)
+    ap.add_argument("--metrics", default=None,
+                    help="metrics JSON; if given, refresh _kind + re-score so the email matches the re-rank")
     a = ap.parse_args()
     if not os.path.exists(a.scored):
         print(f"  [rerank] scored file missing ({a.scored}) — skipping re-rank.", file=sys.stderr)
         sys.exit(0)
-    run(a.scored, a.watchlist, a.hurdle, a.max)
+    run(a.scored, a.watchlist, a.hurdle, a.max, a.metrics)
 
 
 if __name__ == "__main__":

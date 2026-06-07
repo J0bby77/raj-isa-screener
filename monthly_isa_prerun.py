@@ -695,7 +695,8 @@ def main():
         else:
             ok, stdout, stderr = run_script(
                 "rerank_watchlist",
-                ["--scored", watchlist_scored_path, "--watchlist", watchlist_config_path],
+                ["--scored", watchlist_scored_path, "--watchlist", watchlist_config_path,
+                 "--metrics", watchlist_metrics_path],
                 dry_run=args.dry_run,
             )
             if not ok:
