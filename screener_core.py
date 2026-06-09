@@ -77,7 +77,7 @@ STRUCTURAL_EXCLUSIONS = {"BION.SW"}
 # ── Index constituent source bounds ──────────────────────────────────────────
 CONSTITUENT_BOUNDS = {
     "SP500":      (490, 515),
-    "NASDAQ":     (1000, 1300),
+    "NASDAQ":     (750, 1300),
     "MIDCAP400":  (390, 415),
     "FTSE250":    (240, 270),
     "STOXX600":   (575, 625),
