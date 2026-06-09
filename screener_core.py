@@ -853,6 +853,8 @@ def fetch_spi():
         name_col = next((c for c in df.columns if "name" in c.lower()), None)
         if name_col:
             df = df.rename(columns={name_col: "company"})
+        # Yahoo needs the .SW suffix for SIX Swiss stocks; the CHSPI CSV lists BARE local tickers (NESN, NOVN...).
+        df["ticker"] = df["ticker"].apply(lambda t: str(t) if "." in str(t) else str(t) + ".SW")
         df["index"] = "SPI"
         cols = ["ticker", "company", "index"] if "company" in df.columns else ["ticker", "index"]
         rows_df, warn = _assert_count(df[cols], "SPI", "CHSPI_ISHARES_CSV")
