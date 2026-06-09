@@ -695,6 +695,17 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             scored["_pct_above_entry"] = window.get("pct_above_entry")
             scored["_in_window_note"]  = window.get("in_window_note", "")
             scored["ticker"] = ticker
+            # Volatility / ATR technical-anchor inputs (history already pulled at fetch;
+            # zero extra network calls). Consumed by entry_level_builder.py (Step 7.25).
+            try:
+                from enrich_volatility import compute_volatility_metrics
+                _vm = compute_volatility_metrics(data.get("history"), scored.get("current_price"))
+                scored["_realised_vol"] = _vm["realised_vol"]
+                scored["_atr_pct"]      = _vm["atr_pct"]
+                scored["_vol_profile"]  = _vm["vol_profile"]
+                scored["_vol_source"]   = _vm["vol_source"]
+            except Exception:
+                scored["_vol_profile"] = "unknown"
             scored_results[ticker] = scored
 
             # Log summary line per pipeline

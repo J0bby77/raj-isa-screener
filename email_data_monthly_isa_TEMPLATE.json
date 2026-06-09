@@ -1,0 +1,672 @@
+{
+  "_instructions": "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci | energy) that controls rendering. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
+  "meta": {
+    "run_date_display": "Saturday 1 June 2026",
+    "data_date": "1 June 2026",
+    "tax_year": "2026/27",
+    "tax_year_month": "Month 3",
+    "broker": "AJ Bell (ACB8G2I)",
+    "run_month_label": "Jun 2026"
+  },
+  "s1_decision_summary": {
+    "intro": "One-sentence summary of this month's decision.",
+    "actions": [
+      {
+        "action": "BUY",
+        "name": "Adobe Inc (ADBE)",
+        "size": "~£3,250 (~21 shares)",
+        "conviction": "82/100 High",
+        "conviction_level": "high",
+        "timing": "This week — obtain Citi preclearance first",
+        "note": "Limit order ~$207 USD. Preclearance valid 2 trading days. 30-day hold applies."
+      },
+      {
+        "action": "SELL",
+        "name": "Marks & Spencer (MKS)",
+        "size": "620 shares (~£2,088)",
+        "conviction": "Thesis broken",
+        "conviction_level": "broken",
+        "timing": "Day 31 from April purchase — verify date",
+        "note": "Proceeds to cash."
+      },
+      {
+        "action": "HOLD",
+        "name": "Broadcom (AVGO)",
+        "size": "17 shares £5,259",
+        "conviction": "High",
+        "conviction_level": "high",
+        "timing": "—",
+        "note": "Earnings 4 Jun 2026."
+      }
+    ],
+    "net_effect": "Stock sleeve rises from £X (X%) to ~£Y (~Y%) post-trade."
+  },
+  "s2_capital_allocation": {
+    "kpis": [
+      {
+        "label": "Stated Cash",
+        "value": "£8,571",
+        "sub": "Per AJ Bell 01-Jun-26",
+        "style": "normal"
+      },
+      {
+        "label": "Effective Cash",
+        "value": "£9,821",
+        "sub": "+£1,250 unprocessed S/O",
+        "style": "normal"
+      },
+      {
+        "label": "Available (after buffer)",
+        "value": "£9,621",
+        "sub": "Less £200 buffer retained",
+        "style": "normal"
+      }
+    ],
+    "items": [
+      {
+        "priority": "1 — Execute",
+        "allocation": "BUY ADBE",
+        "allocation_type": "buy",
+        "amount": "~£3,250",
+        "rationale": "Highest conviction watchlist name."
+      },
+      {
+        "priority": "2 — Reserve",
+        "allocation": "Cash hold",
+        "allocation_type": "reserve",
+        "amount": "~£6,371",
+        "rationale": "Retain for June deployment."
+      }
+    ],
+    "notes": ""
+  },
+  "s3_investment_cases": [
+    {
+      "action": "BUY",
+      "ticker": "ADBE",
+      "name": "Adobe Inc",
+      "conviction": "82/100",
+      "separator_after": true,
+      "metrics_table": [
+        {
+          "label": "Part A Score",
+          "value": "30/28",
+          "assessment": "Strong — all hard gates clear",
+          "signal": "green"
+        },
+        {
+          "label": "Part B Score",
+          "value": "33/26",
+          "assessment": "Strong — valuation attractive",
+          "signal": "green"
+        },
+        {
+          "label": "Combined Score",
+          "value": "63/54",
+          "assessment": "Strong Buy threshold exceeded",
+          "signal": "green"
+        },
+        {
+          "label": "Conviction Score",
+          "value": "82/100",
+          "assessment": "High Conviction",
+          "signal": "green"
+        },
+        {
+          "label": "Current Price",
+          "value": "$207.50",
+          "assessment": "",
+          "signal": ""
+        },
+        {
+          "label": "Entry Level",
+          "value": "$220.00",
+          "assessment": "In range",
+          "signal": "green"
+        },
+        {
+          "label": "Analyst Target",
+          "value": "$310 (14 analysts)",
+          "assessment": "+49% upside — Strong Buy consensus",
+          "signal": "green"
+        },
+        {
+          "label": "ROIC vs WACC",
+          "value": "+48pp",
+          "assessment": "Strong value creation confirmed",
+          "signal": "green"
+        }
+      ],
+      "paragraphs": [
+        "<strong>Thesis:</strong> Adobe's valuation has compressed on AI fears...",
+        "<strong>Trade mechanics:</strong> ~21 shares at limit ~$207 USD...",
+        "<strong>Downside case:</strong> Revenue growth decelerates to 5% -- fair value ~$180 USD (~13% downside)."
+      ],
+      "pipeline": "growth_stock",
+      "part_a_score": 30,
+      "part_b_score": 33,
+      "total_score": 63,
+      "scorecard_max": 54
+    },
+    {
+      "action": "SELL",
+      "ticker": "MKS",
+      "name": "Marks & Spencer",
+      "conviction": "Thesis broken",
+      "separator_after": false,
+      "metrics_table": [],
+      "paragraphs": [
+        "<strong>Original thesis:</strong> UK consumer recovery + M&amp;S digital transformation.",
+        "<strong>Thesis break:</strong> April 2026 cyberattack -- ~£300M FY2026 profit impact.",
+        "<strong>Decision:</strong> Sell all 620 shares. Unrealised loss ~£122 (-5.5%). Proceeds to cash for June deployment."
+      ],
+      "pipeline": "growth_stock"
+    },
+    {
+      "_schema_note": "PATH B (VCI ASYMMETRIC) — use this structure when action is a VCI candidate. No Part A/B tables. ACS summary + NVIDIA signals + T1-T7 status.",
+      "action": "BUY (asymmetric sub-sleeve)",
+      "ticker": "[TICKER]",
+      "name": "[Company Name]",
+      "pipeline": "vci",
+      "acs_score": 82,
+      "scorecard_max": 100,
+      "conviction": "ACS 82/100 — NVIDIA-Class",
+      "classification": "NVIDIA-CLASS",
+      "nvidia_signals": "5/6 — S1-PLATFORM, S2-CUST-COINVEST, S3-ECOSYSTEM, S4-BOTTLENECK, S5-MULT",
+      "vci_run_date": "2026-06-08",
+      "separator_after": false,
+      "metrics_table": [
+        {
+          "label": "ACS Score",
+          "value": "82/100",
+          "assessment": "NVIDIA-Class — deployment threshold met",
+          "signal": "green"
+        },
+        {
+          "label": "Classification",
+          "value": "NVIDIA-CLASS",
+          "assessment": "",
+          "signal": "green"
+        },
+        {
+          "label": "NVIDIA Signals",
+          "value": "5/6 active",
+          "assessment": "S5-MULT, S1-PLATFORM confirmed",
+          "signal": "green"
+        },
+        {
+          "label": "Deployment Ready",
+          "value": "Yes — ACS >=75",
+          "assessment": "Proceed to Step 9 asymmetric hurdle",
+          "signal": "green"
+        },
+        {
+          "label": "VCI Run Date",
+          "value": "2026-06-08",
+          "assessment": "",
+          "signal": ""
+        },
+        {
+          "label": "Current Price",
+          "value": "$[X]",
+          "assessment": "",
+          "signal": ""
+        },
+        {
+          "label": "Entry Level",
+          "value": "$[Y]",
+          "assessment": "[at/above/below] entry — 2b outcome: [full/reduced size]",
+          "signal": "green"
+        }
+      ],
+      "t1_t7_status": {
+        "T1": "CLEAR — no credible bottleneck bypass identified",
+        "T2": "CLEAR — CEO/founder intact, platform vision unchanged",
+        "T3": "CLEAR — no customer co-investment reversal",
+        "T4": "CLEAR — ecosystem growth continuing",
+        "T5": "CLEAR — no competing technology at production scale",
+        "T6": "CLEAR — no regulatory market removal risk",
+        "T7": "CLEAR — no paradigm shift undermining platform"
+      },
+      "part_a_table": null,
+      "part_b_table": null,
+      "paragraphs": [
+        "<strong>Asymmetric thesis:</strong> [Claude fills — VCI B1-B12 narrative, NVIDIA signals, structural bottleneck, platform inflection catalyst]",
+        "<strong>Entry and sizing:</strong> [Claude fills — 0.5-1.5% ISA per 2b outcome, limit price, ACS threshold for add/trim, max loss tolerance]",
+        "<strong>Thesis monitoring:</strong> [Claude fills — T1-T7 conditions, NVIDIA signal count to watch, next catalyst date]",
+        "<strong>Portfolio fit:</strong> [Claude fills — asymmetric sleeve budget remaining, Citigroup overlap, correlation to fund sleeve]",
+        "<strong>Execution:</strong> [Claude fills — shares, limit price, dealing cost, FX, preclearance reminder, 30-day hold]"
+      ]
+    },
+    {
+      "_schema_note": "PATH C (ENERGY/CLEAN-TECH) — use this structure for energy, renewables, or clean-tech stocks. Scorecard is /36 (not /54). Note: only the energy_screener.py thresholds apply.",
+      "action": "BUY",
+      "ticker": "[TICKER]",
+      "name": "[Energy Company Name]",
+      "pipeline": "energy",
+      "part_a_score": 14,
+      "part_b_score": 11,
+      "total_score": 25,
+      "scorecard_max": 36,
+      "conviction": "[X]/100",
+      "separator_after": false,
+      "metrics_table": [
+        {
+          "label": "Energy Gate",
+          "value": "PASS",
+          "assessment": "All energy gates cleared",
+          "signal": "green"
+        },
+        {
+          "label": "Part A Score",
+          "value": "14/20",
+          "assessment": "Strong Growth (>=14/20)",
+          "signal": "green"
+        },
+        {
+          "label": "Part B Score",
+          "value": "11/16",
+          "assessment": "Strong Buy (>=11/16)",
+          "signal": "green"
+        },
+        {
+          "label": "Combined Score",
+          "value": "25/36",
+          "assessment": "Strong Buy threshold exceeded",
+          "signal": "green"
+        },
+        {
+          "label": "Conviction Score",
+          "value": "[X]/100",
+          "assessment": "[High/Medium] Conviction",
+          "signal": "green"
+        },
+        {
+          "label": "Current Price",
+          "value": "$[X]",
+          "assessment": "",
+          "signal": ""
+        },
+        {
+          "label": "Entry Level",
+          "value": "$[Y]",
+          "assessment": "In range",
+          "signal": "green"
+        },
+        {
+          "label": "EBITDA Margin",
+          "value": "[X]%",
+          "assessment": "[>=20% = Strong]",
+          "signal": "green"
+        },
+        {
+          "label": "EV/EBITDA",
+          "value": "[X]x",
+          "assessment": "[<=15x = Strong]",
+          "signal": "green"
+        },
+        {
+          "label": "Analyst Target",
+          "value": "$[X] ([N] analysts)",
+          "assessment": "[X]% upside",
+          "signal": "green"
+        }
+      ],
+      "paragraphs": [
+        "<strong>Investment thesis:</strong> [Claude fills — energy transition angle, contracted vs merchant exposure, data centre / AI demand catalyst, capacity growth plan]",
+        "<strong>Valuation framing:</strong> [Claude fills — EV/EBITDA vs sector peers, commodity price deck assumptions, capex cycle stage, base/bull/bear cases]",
+        "<strong>Portfolio fit:</strong> [Claude fills — energy sleeve allocation, currency, sector diversification vs existing holdings, Citigroup overlap]",
+        "<strong>Execution:</strong> [Claude fills — shares, limit price, dealing cost, FX, preclearance reminder, 30-day hold]"
+      ]
+    }
+  ],
+  "s4_liquidation_tracker": {
+    "items": [
+      {
+        "ticker": "MKS",
+        "shares": "620",
+        "current_value": "£2,092.81",
+        "cost": "£2,214.51",
+        "gain_loss": "-£121.70 (-5.5%)",
+        "gain_loss_sign": "negative",
+        "action": "SELL ALL",
+        "action_type": "sell",
+        "earliest_sale": "Day 31 from April purchase -- verify date",
+        "reason": "£300M cyberattack profit impact. Thesis broken."
+      }
+    ],
+    "notes": "No other liquidation candidates active. VUAG/Vanguard US Eq Idx overlap flagged for June review."
+  },
+  "s5_watchlist": {
+    "items": [
+      {
+        "rank": 1,
+        "ticker": "ADBE",
+        "name": "Adobe Inc",
+        "score": "63 (82 conviction)",
+        "score_level": "high",
+        "sector": "Tech/Software",
+        "entry_level": "<$200 exceptional; <$220 good",
+        "status": "Active -- BUY this cycle",
+        "status_type": "buy",
+        "pipeline": "growth_stock"
+      },
+      {
+        "rank": 2,
+        "ticker": "PCTY",
+        "name": "Paylocity",
+        "score": "56",
+        "score_level": "medium",
+        "sector": "HR/Payroll SaaS",
+        "entry_level": "<$105 USD; analyst target $165 (+62%)",
+        "status": "Next -- after ADBE",
+        "status_type": "hold",
+        "pipeline": "growth_stock"
+      },
+      {
+        "_schema_note": "PATH B (VCI) watchlist item — score shows ACS/100",
+        "rank": "[N]",
+        "ticker": "[TICKER]",
+        "name": "[VCI Candidate]",
+        "pipeline": "vci",
+        "score": "ACS 82/100 — NVIDIA-Class",
+        "score_level": "high",
+        "sector": "[Sector]",
+        "entry_level": "$[Y] (VCI entry level from run [date])",
+        "status": "[In-window / Monitor]",
+        "status_type": "hold",
+        "action_trigger": "2a: Thesis [intact/strengthening] — [NVIDIA signals 5/6 active]. 2b: Price $[X] vs entry $[Y] — [at/above entry by X%] — [full/reduced size outcome]."
+      },
+      {
+        "_schema_note": "PATH C (energy) watchlist item — score shows X/36",
+        "rank": "[N]",
+        "ticker": "[TICKER]",
+        "name": "[Energy Company]",
+        "pipeline": "energy",
+        "score": "[X]/36 ([Y] conviction)",
+        "score_level": "medium",
+        "sector": "Energy / Clean-Tech",
+        "entry_level": "$[Y] ([Z]% below target)",
+        "status": "Monitor — await pullback",
+        "status_type": "hold",
+        "action_trigger": "Entry on pullback to $[Y]. Commodity price sensitivity: [note]."
+      }
+    ],
+    "excluded": "MORN, BR, FSG, PGHN -- Financial Services sector; excluded per Citi external exposure constraint.",
+    "detail_items": [
+      {
+        "ticker": "PCTY",
+        "name": "Paylocity",
+        "paragraphs": [
+          "HR + payroll SaaS for US mid-market employers (50--5,000 employees). Fwd P/E ~12.2x, Rev CAGR ~15%, NRR ~110%, GM ~65%, FCF positive."
+        ]
+      },
+      {
+        "_schema_note": "PATH B (VCI) detail item — no Part A/B metrics. ACS summary + T1-T7 status.",
+        "ticker": "[TICKER]",
+        "name": "[VCI Candidate]",
+        "pipeline": "vci",
+        "paragraphs": [
+          "ACS [X]/100 | NVIDIA-class: [Yes/No] | Signals: [N]/6 active ([list active signals]). Bottleneck: [one-sentence description]. VCI run: [date].",
+          "T1-T7 status: all clear. Next catalyst: [named event, date]. Entry level: $[Y] (2b outcome: [full/reduced size if above entry])."
+        ]
+      },
+      {
+        "_schema_note": "PATH C (energy) detail item — energy scorecard /36.",
+        "ticker": "[TICKER]",
+        "name": "[Energy Company]",
+        "pipeline": "energy",
+        "paragraphs": [
+          "Energy scorecard [X]/36 (Part A [A]/20 | Part B [B]/16). [One-sentence thesis: sector, contracted revenue %, AI demand angle]. EBITDA margin [X]% | EV/EBITDA [Y]x | CapEx [Z]% of revenue.",
+          "Commodity sensitivity: [note on oil/gas/power price exposure]. Entry level: $[Y]. Action trigger: [price or catalyst condition]."
+        ]
+      }
+    ]
+  },
+  "s6_portfolio_snapshot": {
+    "kpis": [
+      {
+        "label": "Total Value",
+        "value": "£133,480",
+        "sub": "As at 1 Jun 2026",
+        "style": "normal"
+      },
+      {
+        "label": "MoM Change",
+        "value": "+£X,XXX",
+        "sub": "+X.X% (incl. £1,250 contribution)",
+        "style": "positive"
+      },
+      {
+        "label": "vs Benchmark",
+        "value": "+X.XXpp",
+        "sub": "3M: +X.XX% vs +X.XX%",
+        "style": "positive"
+      },
+      {
+        "label": "1yr Alpha",
+        "value": "+XX.Xpp",
+        "sub": "+XX.X% vs +XX.X% bmark",
+        "style": "positive"
+      }
+    ],
+    "holdings": [
+      {
+        "name": "Artemis SmartGARP European Eq I Acc",
+        "value": "11,939.92",
+        "cost": "10,479.50",
+        "gain_pct": "+13.9%",
+        "gain_sign": "positive",
+        "weight_pct": "8.95%",
+        "ms_rating": "5",
+        "is_stock": false
+      }
+    ],
+    "notes": "Largest holding 8.95% -- within 12.5% concentration cap. No holding exceeds cap.",
+    "performance_header": "Portfolio Performance vs Benchmark (Global Large-Cap Blend Equity)",
+    "performance": [
+      {
+        "period": "3 Month",
+        "portfolio": "+7.00%",
+        "benchmark": "+4.75%",
+        "alpha": "+2.25pp"
+      },
+      {
+        "period": "6 Month",
+        "portfolio": "+11.52%",
+        "benchmark": "+9.71%",
+        "alpha": "+1.81pp"
+      },
+      {
+        "period": "YTD",
+        "portfolio": "+10.99%",
+        "benchmark": "+8.27%",
+        "alpha": "+2.72pp"
+      },
+      {
+        "period": "1 Year",
+        "portfolio": "+48.45%",
+        "benchmark": "+26.71%",
+        "alpha": "+21.74pp"
+      }
+    ],
+    "risk_metrics": "Sharpe ratio X.XX | Beta X.XX | Alpha XX.XX | R2 X.XX."
+  },
+  "s7_stock_sleeve": {
+    "kpis": [
+      {
+        "label": "Current Sleeve",
+        "value": "£10,085",
+        "sub": "7.55% of portfolio",
+        "style": "normal"
+      },
+      {
+        "label": "Post-trade (proj.)",
+        "value": "~£13,335",
+        "sub": "~9.9% -- approaches 10% target",
+        "style": "positive"
+      },
+      {
+        "label": "Phase 1 Target",
+        "value": "10--15%",
+        "sub": "Then 25--30% (Phase 2)",
+        "style": "warning"
+      }
+    ],
+    "holdings": [
+      {
+        "ticker": "AVGO",
+        "name": "Broadcom Inc",
+        "shares": "17",
+        "value": "£5,259.48",
+        "cost": "£4,016.87",
+        "gain_pct": "+30.9%",
+        "gain_sign": "positive",
+        "weight_pct": "3.94%",
+        "status": "HOLD",
+        "status_type": "hold",
+        "status_note": "Earnings 4 Jun"
+      }
+    ],
+    "notes": "<strong>Note on Scottish Mortgage (SMT):</strong> Classified as a fund for sleeve purposes -- not counted in stock sleeve %."
+  },
+  "s8_fund_review": {
+    "funds": [
+      {
+        "name": "Artemis SmartGARP European Eq I",
+        "value": "11,939.92",
+        "weight_pct": "8.95%",
+        "perf_1yr": "--",
+        "ms_rating": "5",
+        "bucket": "B2",
+        "target_pct": "9.0%",
+        "actual_pct": "8.95%",
+        "drift": "-0.05%",
+        "band": "Within",
+        "est_return": "11.5%",
+        "signal": "Hold",
+        "tilt": "--",
+        "status_html": "Core. Hold.",
+        "status_level": "ok"
+      }
+    ],
+    "step8a_summary": {
+      "section_a": {
+        "result": "PASS",
+        "value": "13.2%"
+      },
+      "section_b": {
+        "result": "Indicative",
+        "value": "+35% (AVGO+MU blended)",
+        "status": "on_track"
+      },
+      "section_c": {
+        "result": "On track",
+        "value": "13.6% estimated total ISA return",
+        "status": "on_track"
+      },
+      "overlap_check": "No material overlap detected.",
+      "regime": "REGIME: Expansion -- Watch: Fed rate cut timeline.",
+      "alt_research": "Not triggered this month."
+    },
+    "xray_summary": "Technology 28.21% vs 27.27% bmark (within band). Healthcare 7.36% vs 10.84% -- underweight -3.48pp (flagged).",
+    "_step8a_summary_note": "Key is named 'step8a_summary' for backward compatibility with build_monthly_isa_email.py. This section corresponds to Step 6 outputs in the current run context. Do not rename this key without also updating build_monthly_isa_email.py."
+  },
+  "s9_macro": {
+    "items": [
+      {
+        "title": "AI infrastructure capex",
+        "paragraphs": [
+          "<strong>Hyperscaler capex:</strong> MSFT, GOOGL, META, AMZN guidance remains robust for H1 2026. Directly drives AVGO custom silicon (XPUs) and networking revenue."
+        ]
+      },
+      {
+        "title": "US Federal Reserve",
+        "paragraphs": [
+          "No rate cuts expected near-term (Jun 2026 consensus). USD/GBP ~1.36. US stock sleeve denominated in USD -- FX exposure ~12% rising to ~15% post-ADBE. Accepted risk over 10--12yr horizon."
+        ]
+      }
+    ]
+  },
+  "s10_tax_tracker": {
+    "kpis": [
+      {
+        "label": "Annual Allowance",
+        "value": "£20,000",
+        "sub": "Tax year 26/27",
+        "style": "normal"
+      },
+      {
+        "label": "Committed to Date",
+        "value": "£7,500",
+        "sub": "£6,250 cleared + £1,250 May S/O",
+        "style": "warning"
+      },
+      {
+        "label": "Remaining Allowance",
+        "value": "£12,500",
+        "sub": "10 x £1,250 S/Os (Jun--Mar)",
+        "style": "info"
+      }
+    ],
+    "items": [
+      {
+        "component": "£5,000 opening lump sum (Apr 2026)",
+        "amount": "£5,000",
+        "status": "Cleared",
+        "status_type": "done"
+      },
+      {
+        "component": "£1,250 one-time top-up (May 2026)",
+        "amount": "£1,250",
+        "status": "Cleared",
+        "status_type": "done"
+      },
+      {
+        "component": "May 2026 standing order (1 May)",
+        "amount": "£1,250",
+        "status": "Cleared",
+        "status_type": "done"
+      },
+      {
+        "component": "Jun 2026 - Mar 2027 S/Os (10 x £1,250)",
+        "amount": "£12,500",
+        "status": "Scheduled",
+        "status_type": "scheduled"
+      },
+      {
+        "component": "Total",
+        "amount": "£20,000",
+        "status": "On track for full utilisation",
+        "status_type": "done"
+      }
+    ],
+    "notes": ""
+  },
+  "s11_retrospective": {
+    "_note": "1-5 items. Each item MUST have: title, problem, action, category (accuracy|completeness|efficiency|effectiveness), impact (XL|L|M|S|XS).",
+    "items": [
+      {
+        "title": "Portfolio change tracking gap",
+        "problem": "Six positions were sold and four new positions opened between the April 4 baseline and the May 1 run date. None of this was logged in advance -- all changes had to be reverse-engineered from the xlsx file comparison.",
+        "action": "Create a running project_isa_trades_log.md memory file and log each trade (date, ticker, shares, price, rationale) at the point of execution.",
+        "category": "completeness",
+        "impact": "L"
+      },
+      {
+        "title": "MKS thesis not formally documented at purchase",
+        "problem": "The original thesis for MKS was reconstructed from context, not from a written record. Thesis-break conditions could not be checked at point of event.",
+        "action": "Use the trades log to record thesis, expected holding period, and thesis-break conditions at point of purchase for every stock added.",
+        "category": "completeness",
+        "impact": "L"
+      },
+      {
+        "title": "Retrospective missing impact category and magnitude",
+        "problem": "Prior retrospective items did not include impact category (accuracy/completeness/efficiency/effectiveness) or impact rating (XL/L/M/S/XS) as specified in the Run_Context.",
+        "action": "All retrospective items now include category badge and impact rating badge via the pre-built email script.",
+        "category": "accuracy",
+        "impact": "S"
+      }
+    ]
+  }
+}

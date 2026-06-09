@@ -291,6 +291,8 @@ def compute_decision_bucket(
     probation_flag: bool,
     thesis_break_triggered: bool,
     acs_score: int | None = None,
+    entry_provisional: bool = False,
+    entry_missing: bool = False,
 ) -> str:
     """
     Returns a human-readable deployment decision label.
@@ -335,12 +337,20 @@ def compute_decision_bucket(
     if ns < 60 and not probation_flag:
         return "Remove / Reject"
 
+    # Entry level still missing after entry_level_builder — surface as a process failure
+    if entry_missing:
+        return "Entry Level Required"
+
     if tier == "T1":
         if probation_flag:
             return "Buy Now — Probation (score 60-69)"
+        # Provisional (pre-run auto-generated) entry levels can rank/tier but must
+        # be confirmed at Step 9/10 before deployment — never auto "Buy Now".
+        if entry_provisional:
+            return "Buy Now — Confirm Entry (Provisional)"
         return "Buy Now Candidate"
     elif tier == "T2":
-        return "Buy on Pullback"
+        return "Buy on Pullback (Provisional Entry)" if entry_provisional else "Buy on Pullback"
     else:
         return "Hold / Watch"
 
@@ -630,6 +640,13 @@ def main():
         sector_type, sector_type_source = derive_sector_type(wt_entry)
         acs_breakdown = wt_entry.get("acs_breakdown", "")
 
+        # Entry-level governance (from entry_level_builder.py)
+        entry_provisional = bool(wt_entry.get("entry_level_provisional"))
+        entry_status      = wt_entry.get("entry_level_status")
+        entry_confidence  = wt_entry.get("entry_level_confidence")
+        entry_confirm_req = bool(wt_entry.get("confirm_required")) or entry_provisional
+        entry_missing     = (entry_level is None) or (entry_status == "missing_after_builder")
+
         pct_vs_entry = None
         if current_price and entry_level:
             pct_vs_entry = round((current_price - entry_level) / entry_level * 100, 1)
@@ -651,6 +668,10 @@ def main():
             "sector_type":        sector_type,
             "sector_type_source": sector_type_source,
             "normalised_score":   wt_entry.get("normalised_score"),
+            "entry_level_status":      entry_status,
+            "entry_level_provisional": entry_provisional,
+            "entry_level_confidence":  entry_confidence,
+            "entry_level_confirm_required": entry_confirm_req,
             "entry_window_score": compute_entry_window_score(pct_vs_entry),
             "portfolio_overlap":  overlap_flags,
         }
@@ -708,6 +729,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible": False,
                 }
@@ -728,6 +751,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible": False,
                 }
@@ -746,6 +771,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible": False,
                 }
@@ -768,6 +795,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible":  False,
                 }
@@ -788,6 +817,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible": False,
                 }
@@ -806,6 +837,8 @@ def main():
                         stale_score_flag=wt_entry.get("stale_score_flag", False),
                         probation_flag=wt_entry.get("probation_flag", False),
                         thesis_break_triggered=False,
+                        entry_provisional=entry_provisional,
+                        entry_missing=entry_missing,
                     ),
                     "nvidia_bypass_eligible": False,
                 }

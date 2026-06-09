@@ -286,6 +286,8 @@ def main():
                         help="Investment Analysis folder (contains vci_acs_scorer.py)")
     parser.add_argument("--dry-run",        action="store_true",
                         help="Parse and score but do not write to watchlist_tickers.json")
+    parser.add_argument("--portfolio-data", required=False, default=None,
+                        help="Path to portfolio_data_mmm_yyyy.json — held names are dropped from the VCI watchlist")
     args = parser.parse_args()
 
     if not os.path.exists(args.watchlist_md):
@@ -391,6 +393,30 @@ def main():
 
     # Sort by rank
     updated_entries.sort(key=lambda e: e["rank"])
+
+    # 3b. Drop names already held in the portfolio (suffix-insensitive). The md
+    #     still lists them until the next VCI run migrates them to the VCI
+    #     portfolio, so the monthly pre-run excludes them here every time.
+    def _base(t):
+        t = str(t or "").strip().upper()
+        return t.split(".")[0] if "." in t else t
+    held_base = set()
+    if args.portfolio_data and os.path.exists(args.portfolio_data):
+        try:
+            with open(args.portfolio_data, encoding="utf-8") as pf:
+                pdata = json.load(pf)
+            held_base = {_base(s.get("ticker", "")) for s in pdata.get("stocks", []) if s.get("ticker")}
+        except Exception as e:
+            print(f"  WARNING: could not read portfolio_data for held-check: {e}")
+    if held_base:
+        before = len(updated_entries)
+        dropped = [e["ticker"] for e in updated_entries if _base(e.get("ticker", "")) in held_base]
+        updated_entries = [e for e in updated_entries if _base(e.get("ticker", "")) not in held_base]
+        # re-rank contiguously after removal
+        for i, e in enumerate(sorted(updated_entries, key=lambda x: x["rank"]), 1):
+            e["rank"] = i
+        if dropped:
+            print(f"  Dropped {before - len(updated_entries)} held name(s) from VCI watchlist: {dropped}")
 
     # 4. Write back to watchlist_tickers.json
     if not args.dry_run:

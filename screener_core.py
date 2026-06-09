@@ -551,6 +551,33 @@ def fetch_nasdaq():
 def fetch_midcap400():
     """Fetch S&P MidCap 400. Primary: IJH iShares CSV. Fallback: S&P DJI XLS."""
     log.info("Fetching S&P MidCap 400 constituents...")
+    # PRIMARY (local-friendly): SSGA SPDR MDY xlsx — same SSGA infra as SPY, not IP-blocked on local sandbox.
+    # (iShares IJH serves an HTML anti-bot page to the local sandbox; S&P DJI export 403s — both kept as fallbacks.)
+    try:
+        url = "https://www.ssga.com/us/en/intermediary/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-mdy.xlsx"
+        r = requests.get(url, headers=HEADERS, timeout=45)
+        r.raise_for_status()
+        df = pd.read_excel(BytesIO(r.content), skiprows=4)
+        df.columns = [str(c).strip() for c in df.columns]
+        tcol = next((c for c in df.columns if c.lower() == "ticker"), None)
+        wcol = next((c for c in df.columns if c.lower() == "weight"), None)
+        ncol = next((c for c in df.columns if c.lower() == "name"), None)
+        if not tcol:
+            raise ValueError("SSGA MDY: no Ticker column")
+        if wcol:
+            df = df[pd.to_numeric(df[wcol], errors="coerce").notna()]
+        df = df.rename(columns={tcol: "ticker"})
+        df["ticker"] = df["ticker"].astype(str).str.strip()
+        df = df[df["ticker"].apply(lambda t: bool(re.match(r'^[A-Za-z]', t)))]
+        if ncol:
+            df = df.rename(columns={ncol: "company"})
+        df = df[~df["ticker"].astype(str).str.upper().str.contains(r"CASH|^USD$|RECEIVABLE|PAYABLE|FUTURE", regex=True, na=False)]
+        df["index"] = "MIDCAP400"
+        cols = ["ticker", "company", "index"] if "company" in df.columns else ["ticker", "index"]
+        rows_df, warn = _assert_count(df[cols], "MIDCAP400", "SSGA_MDY_XLSX")
+        return rows_df.reset_index(drop=True), warn
+    except Exception as e:
+        log.warning(f"SSGA MDY failed: {e} — trying iShares IJH")
     try:
         url = "https://www.ishares.com/us/products/239467/ishares-core-sp-mid-cap-etf/1467271812596.ajax?fileType=csv&fileName=IJH_holdings&dataType=fund"
         r = requests.get(url, headers=HEADERS, timeout=45)

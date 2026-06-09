@@ -432,6 +432,30 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     xlsx_files = sorted(working_xlsx_files + [p for p in archived_xlsx_files
                                              if os.path.basename(p) not in _seen])
 
+    # Screen-freshness guard: warn if the newest growth screen is stale (>35 days).
+    SCREEN_STALE_DAYS = 35
+    import re as _re
+    from datetime import datetime as _DT
+    _newest = None
+    for _p in xlsx_files:
+        _m = _re.search(r"W-e\s+(\d{2})-([A-Za-z]{3})-(\d{2})", os.path.basename(_p))
+        if _m:
+            try:
+                _d = _DT.strptime(f"{_m.group(1)}-{_m.group(2)}-{_m.group(3)}", "%d-%b-%y").date()
+                if _newest is None or _d > _newest:
+                    _newest = _d
+            except Exception:
+                pass
+    if _newest is not None:
+        _age = (date.today() - _newest).days
+        promotion_log["screen_freshness"] = {"newest_screen": _newest.isoformat(), "age_days": _age}
+        if _age > SCREEN_STALE_DAYS:
+            _w = (f"STALE SCREEN: newest growth file is {_age} days old "
+                  f"({_newest.isoformat()}). Refresh Growth Stock Analysis xlsx so the "
+                  f"top-10 reflects the current universe.")
+            promotion_log.setdefault("warnings", []).append(_w)
+            print(f"  [update_watchlist] WARNING: {_w}")
+
     if not xlsx_files:
         print("  [update_watchlist] No Growth Stock Analysis xlsx files found — nothing to promote.")
 
@@ -794,34 +818,11 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     if not dry_run:
         wl_data["watchlist"] = new_wl
 
-        # --- Lossless carry-forward: never silently drop a name ---
-        # (i) Incumbents displaced from the top-10 that are neither held nor already
-        #     in the rebuilt pool are retained at their existing (curated) data,
-        #     flagged for a live re-score. (ii) Prior carry-forward names not
-        #     re-screened this cycle are preserved across the ephemeral pool wipe.
-        _pool_tickers = {p.get("ticker") for p in pool_entries}
-        _vci_tickers  = {e.get("ticker") for e in wl_data.get("vci_watchlist", [])}
-        for _e in current_watchlist.values():
-            _t = _e.get("ticker")
-            if not _t or _t in new_wl_set or _t in _pool_tickers:
-                continue
-            if _base_ticker(_t) in held_base:
-                continue
-            cf = dict(_e)
-            cf.update({"_carry_forward": True, "_needs_rescore": True,
-                       "candidate_pool_month": month_label,
-                       "status": "Carried forward — awaiting live re-score"})
-            pool_entries.append(cf); _pool_tickers.add(_t)
-            promotion_log.setdefault("carried_forward", []).append(_t)
-        for _p in prior_pool:
-            _t = _p.get("ticker")
-            if not _t or _t in _pool_tickers or _t in new_wl_set:
-                continue
-            if _base_ticker(_t) in held_base or _t in _vci_tickers:
-                continue
-            if _p.get("_carry_forward"):
-                pool_entries.append(_p); _pool_tickers.add(_t)
-                promotion_log.setdefault("carried_forward", []).append(_t)
+        # --- NO carry-forward (anti-stickiness, design decision 2026-06-07) ---
+        # The candidate pool = ONLY names freshly screened this cycle (>=70).
+        # Names displaced from the top-10, or absent from this cycle's screen, are
+        # NOT retained. The pool must represent the CURRENT opportunity set, not an
+        # accumulation of prior months. (prior_pool is intentionally unused now.)
 
         # Write candidate_pool (ephemeral — overwrites any prior month's pool)
         wl_data["candidate_pool"] = pool_entries

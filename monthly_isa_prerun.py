@@ -63,6 +63,7 @@ SCRIPTS = {
     "fetch_watchlist":        os.path.join(SCRIPT_DIR, "fetch_watchlist_metrics.py"),
     "score_partab":           os.path.join(SCRIPT_DIR, "score_partab.py"),
     "rerank_watchlist":       os.path.join(SCRIPT_DIR, "rerank_watchlist.py"),       # NEW Step 7.5
+    "entry_level_builder":    os.path.join(SCRIPT_DIR, "entry_level_builder.py"),    # NEW Step 7.25
     "step9_pre_builder":      os.path.join(SCRIPT_DIR, "step9_pre_builder.py"),     # NEW Step 8
     "email_prefill":          os.path.join(SCRIPT_DIR, "email_prefill.py"),
 }
@@ -222,6 +223,7 @@ def write_run_context(
             "watchlist_metrics":    watchlist_metrics_path,
             "watchlist_scored":     watchlist_scored_path,
             "step9_pre":            step9_pre_path,
+            "entry_level_audit":    os.path.join(SCRIPT_DIR, f"entry_level_audit_{month_label}.json"),
             "email_data":           email_path,
             "target_weights":       os.path.join(SCRIPT_DIR, "target_weights.json"),
             "watchlist_tickers":    os.path.join(SCRIPT_DIR, "watchlist_tickers.json"),
@@ -306,6 +308,7 @@ def main():
     watchlist_metrics_path  = os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
     watchlist_scored_path   = os.path.join(SCRIPT_DIR, f"watchlist_scored_{month_label}.json")
     step9_pre_path          = os.path.join(SCRIPT_DIR, f"step9_pre_{month_label}.json")
+    entry_audit_path        = os.path.join(SCRIPT_DIR, f"entry_level_audit_{month_label}.json")
     email_path              = os.path.join(SCRIPT_DIR, f"email_data_{month_label}.json")
     watchlist_config_path   = os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
 
@@ -666,6 +669,32 @@ def main():
                 print("  Validation WARNING: " + vmsg)
             else:
                 print("  Validation: " + vmsg)
+
+    # ---------------------------------------------------------------------------
+    # Step 7.25: Build / refresh composite entry levels (before tiering)
+    # ---------------------------------------------------------------------------
+    # entry_level_builder.py creates governed provisional entry levels for every
+    # watchlist + candidate_pool name BEFORE rerank/step9 tier on price-vs-entry,
+    # so high-scoring names with no manual entry no longer fall straight to T3.
+    print(f"\n[7.25] Building composite entry levels...")
+    if not os.path.exists(watchlist_metrics_path) or not os.path.exists(watchlist_config_path):
+        warnings.append("Step 7.25 (entry_level_builder) skipped -- metrics or watchlist file missing.")
+        print("  SKIPPED -- metrics or watchlist file missing.")
+    else:
+        ok, stdout, stderr = run_script(
+            "entry_level_builder",
+            ["--metrics",     watchlist_metrics_path,
+             "--watchlist",   watchlist_config_path, "--watchlist-out", watchlist_config_path,
+             "--scored",      watchlist_scored_path, "--scored-out",    watchlist_scored_path,
+             "--audit-out",   entry_audit_path,
+             "--month-label", month_label],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            warnings.append(f"Step 7.25 (entry_level_builder): {stderr or stdout}")
+            print(f"  WARNING: {stderr or stdout}")
+        else:
+            print(stdout.strip())
 
     # ---------------------------------------------------------------------------
     # Step 7.5: Re-rank the watchlist on LIVE re-scored values
