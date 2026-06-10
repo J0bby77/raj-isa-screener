@@ -231,28 +231,44 @@ def classify_sector_bucket(sector: str, industry: str, gross_margin: float = Non
     """
     Map yfinance sector/industry strings to a gross margin sector bucket.
 
-    Fabless vs IDM/hardware split resolved by (1) explicit anchor lists, then
-    (2) CAPEX INTENSITY (structural fab-ownership signal) — NOT gross margin (cyclical).
-    `gross_margin` retained for backward compatibility but no longer drives the split.
+    Used by gate2_pass() (hard gate threshold) and score_part_a() (segmented scoring).
+
+    Fabless vs IDM/hardware split (both return industry="Semiconductors" in yfinance):
+    resolved by (1) explicit anchor lists, then (2) CAPEX INTENSITY — the structural
+    fab-ownership signal — NOT gross margin. The old GM>=0.55 discriminator was cyclical
+    and mis-flagged IDMs like Micron as fabless in up-cycles (see _FIX_CHECKPOINT_partb).
+    `gross_margin` is retained in the signature for backward compatibility but no longer
+    drives the split.
+
+    Returns one of:
+      "software_saas" | "semiconductor_fabless" | "semiconductor_hardware"
+      | "semiconductor_equipment" | "default"
     """
     s = (sector or "").lower()
     i = (industry or "").lower()
-    si = s + " " + i
+    si = s + " " + i   # combined string for keyword checks
 
+    # ── Software / SaaS / Platform ───────────────────────────────────────────
     if any(kw in si for kw in [
             "software", "internet content", "data processing",
             "application software", "enterprise software",
             "infrastructure software", "system software"]):
         return "software_saas"
 
+    # ── Semiconductor equipment and materials ─────────────────────────────────
+    # Must check before generic "semiconductor" to avoid misclassifying AEHR/ICHR
     if "semiconductor" in si and any(kw in i for kw in ["equipment", "materials"]):
         return "semiconductor_equipment"
 
+    # Electronic components, scientific instruments, industrial machinery
+    # Catches ICHR (Electronic Components), AEHR (Scientific Instruments),
+    # UCTT (Electronic Components), FORM (Scientific Instruments)
     if any(kw in i for kw in [
             "electronic components", "scientific instruments",
             "industrial machinery", "electronic instruments"]):
         return "semiconductor_equipment"
 
+    # ── Semiconductor — fabless vs IDM/hardware split (anchors → capex) ───────
     if "semiconductor" in si:
         t = (ticker or "").upper()
         if t in IDM_ANCHORS:
@@ -260,9 +276,13 @@ def classify_sector_bucket(sector: str, industry: str, gross_margin: float = Non
         if t in FABLESS_ANCHORS:
             return "semiconductor_fabless"
         if capex_intensity is not None:
+            # Fabless are asset-light (<8% capex/rev); IDMs own fabs (>=8%).
             return "semiconductor_fabless" if capex_intensity < 0.08 else "semiconductor_hardware"
+        # No capex available and not anchored → conservative default of hardware
+        # (lower 25% Gate 2 bar) so cyclical IDMs are never gated out on a down-cycle margin.
         return "semiconductor_hardware"
 
+    # ── Default — all other sectors ───────────────────────────────────────────
     return "default"
 
 
@@ -2741,7 +2761,7 @@ def run_overlays(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     """Run all 7 overlays. Time cap enforced by caller."""
     out = {}
 
-    # organic_rev_growth, recurring_rev_pct and peg_3yr removed 10-Jun-26 - none are
+    # organic_rev_growth, recurring_rev_pct and peg_3yr removed 10-Jun-26 — none are
     # obtainable from yfinance (organic growth & recurring-rev % are disclosure-only;
     # a true 3yr-forward EPS CAGR needs +2y/+3y estimates yfinance does not provide).
     # See _FIX_CHECKPOINT_overlays_exclusions.md.
@@ -2919,6 +2939,9 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
     scored = {**pa, **pb}  # pb overrides pa on key conflicts (e.g. net_debt_ebitda, interest_coverage)
 
     # ── Part B v27 redesign: growth-adjusted valuation + estimate-revision ───────
+    # Replaces the absolute Fwd P/E / EV/EBITDA / Price/FCF scores with growth-adjusted
+    # (PEG-style) ones; drops the duplicate FCF Yield / Earnings Yield and the 52wk metric;
+    # adds a scored estimate-revision metric. Part B = 11 metrics, max 22; Total max 50.
     _g  = _growth_for_peg(safe_float(scored.get("eps_cagr")), safe_float(scored.get("fwd_eps_growth")))
     _fp = safe_float(scored.get("fwd_pe")); _ev = safe_float(scored.get("ev_ebitda")); _pf = safe_float(scored.get("price_fcf"))
     if _g:
@@ -2927,11 +2950,13 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         scored["score_b_ev_g"]   = _band(_ev / _gp, 1.0, 2.0) if (_ev and _ev > 0) else 0
         scored["score_b_pfcf_g"] = _band(_pf / _gp, 1.5, 3.0) if (_pf and _pf > 0) else 0
     else:
+        # No positive growth measure → fall back to the original absolute-multiple scores
         scored["score_b_peg"]    = scored.get("score_b_fwd_pe", 0) or 0
         scored["score_b_ev_g"]   = scored.get("score_b_ev_ebitda", 0) or 0
         scored["score_b_pfcf_g"] = scored.get("score_b_price_fcf", 0) or 0
     scored["score_b_est_rev"]   = _est_rev_score(info.get("eps_revisions"))
     scored["est_rev_direction"] = {2: "Improving", 1: "Neutral", 0: "Deteriorating"}[scored["score_b_est_rev"]]
+    # Deprecated metrics dropped from the Part B sum (values may remain for display)
     for _dead in ("score_b_fcf_yield", "score_b_earn_yield", "score_b_52wk"):
         scored[_dead] = None
     scored["_part_b_new_scores_sum"] = sum([
@@ -2941,7 +2966,7 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         scored.get("score_b_target_upside", 0) or 0,
         scored.get("score_b_stress", 0) or 0,
         scored["score_b_est_rev"],
-        scored.get("score_b_book_to_bill") or 0,
+        scored.get("score_b_book_to_bill") or 0,   # conditional (semis only); None→0
         scored.get("score_b_backlog_ev") or 0,
     ])
 
@@ -3250,51 +3275,4 @@ def run_intramonth(tickers: list, run_date: str, outputs_dir: str, inv_analysis_
             pa_out = {k: v for k, v in row.items() if k.startswith("score_") or k == "roic"}
             geo    = geography_group(ticker)
             try:
-                ovl = run_overlays(ticker, info, inc, cf, bal, d, pa_out, geo)
-                row.update(ovl)
-            except Exception as e:
-                log.warning(f"Intramonth overlay failed {ticker}: {e}")
-
-    run_qa = {
-        "group": group, "run_date": run_date,
-        "tickers": tickers,
-        "scored_count": len(scored_rows),
-        "tech_failure_count": len(tech_failures),
-        "elapsed_s": round(time.time() - start_time, 1),
-    }
-    save_full_data(scored_rows, outputs_dir, run_date, group)
-    save_run_qa(run_qa, inv_analysis_dir, run_date, group,
-                outputs_dir=outputs_dir, tech_failures=tech_failures)
-    log.info(f"=== Intramonth run complete in {run_qa['elapsed_s']}s ===")
-    return scored_rows, run_qa
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 9c. CLI ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="ISA Growth Stock Screener")
-    parser.add_argument("--group",    required=False, help="Index group (SP500, NASDAQ, MIDCAP400, STOXX600, F250-SPI, OTHER)")
-    parser.add_argument("--date",     required=True,  help="Run date YYYY-MM-DD")
-    parser.add_argument("--outputs",  required=True,  help="Session temp outputs directory path")
-    parser.add_argument("--inv-dir",  required=True,  dest="inv_dir", help="Investment Analysis folder path")
-    parser.add_argument("--ticker",   nargs="+",      help="Ticker list for intramonth mode")
-    parser.add_argument("--mode",     default="scheduled", choices=["scheduled", "intramonth"])
-    args = parser.parse_args()
-
-    # Normalise date to YYYYMMDD for filenames
-    run_date = args.date.replace("-", "")
-
-    if args.mode == "intramonth" or args.ticker:
-        if not args.ticker:
-            parser.error("--ticker required for intramonth mode")
-        run_intramonth(args.ticker, run_date, args.outputs, args.inv_dir)
-    else:
-        if not args.group:
-            parser.error("--group required for scheduled mode")
-        run_scheduled(args.group, run_date, args.outputs, args.inv_dir)
-
-
-if __name__ == "__main__":
-    main()
+                ovl = run_overlays(ticker, inf

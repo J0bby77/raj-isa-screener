@@ -470,6 +470,7 @@ def build_summary(wb, df_full, run_date, group):
                 val = fmt_price(raw_v, cur_sym)
                 fmt_fn = None
             elif field == "__valprofile__":
+                # Premium-growth tag: growth-adjusted valuation cluster (PEG+EVg+PFCFg, /6).
                 try:
                     _cl = (float(row.get("score_b_peg") or 0) + float(row.get("score_b_ev_g") or 0)
                            + float(row.get("score_b_pfcf_g") or 0))
@@ -1010,33 +1011,4 @@ def main():
             )
 
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove default sheet
-
-    print("[build_excel] Building SUMMARY ...", flush=True)
-    build_summary(wb, df_full, args.run_date, args.group)
-
-    print("[build_excel] Building CANDIDATES ...", flush=True)
-    build_candidates(wb, df_full, args.group, args.run_date)
-
-    print("[build_excel] Building SCORES ...", flush=True)
-    build_scores(wb, df_full, args.group, args.run_date)
-
-    print("[build_excel] Building EXCLUSIONS ...", flush=True)
-    build_exclusions(wb, df_gates if not df_gates.empty else df_full, args.group, args.run_date)
-
-    print("[build_excel] Building DATA QUALITY ...", flush=True)
-    build_data_quality(wb, df_full, df_unresolved, args.group, args.run_date)
-
-    print("[build_excel] Building DIAGNOSTICS ...", flush=True)
-    build_diagnostics(wb, df_full, df_const, df_run_qa, df_tech_fails, args.group, args.run_date)
-
-    out_path = args.output
-    os.makedirs(os.path.dirname(out_path), exist_ok=True) if os.path.dirname(out_path) else None
-    wb.save(out_path)
-    print(f"[build_excel] Saved: {out_path}", flush=True)
-    print(f"[build_excel] Tabs: {wb.sheetnames}", flush=True)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    wb.remove(wb.active)  # remove defaul
