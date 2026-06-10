@@ -37,8 +37,8 @@ EXPECTED COLUMN NAMES in full_data.csv (see FIELD_MAP below for aliases):
              score_b_earn_yield | score_b_52wk | score_b_div_payout | score_b_fwd_eps |
              score_b_target_upside | score_b_stress |
              score_b_book_to_bill | score_b_backlog_ev  (conditional: equipment sectors only)
-  Overlays : organic_rev_growth | recurring_rev_pct | est_rev_direction |
-             wacc_pct | roic_vs_wacc_spread | peg_3yr_cagr |
+  Overlays : est_rev_direction |
+             wacc_pct | roic_vs_wacc_spread |
              val_hist_pe_premium_disc | val_hist_pfcf_premium_disc |
              trailing_pe | val_hist_pe_status | overlay_status
   Other    : qualitative_commentary | gate_code | gate_reason | sector_bucket |
@@ -150,12 +150,9 @@ FIELD_MAP = {
     "number_of_analysts": "num_analysts", "analyst_count": "num_analysts",
     "next_earnings_date": "next_earnings",
     # Overlays
-    "organic_rev_growth_pct": "organic_rev_growth",
-    "recurring_rev_pct_value": "recurring_rev_pct",
     "est_rev_dir": "est_rev_direction", "est_revision_direction": "est_rev_direction",
     "wacc": "wacc_pct", "wacc_percent": "wacc_pct",
     "roic_wacc_spread": "roic_vs_wacc_spread", "roic_minus_wacc": "roic_vs_wacc_spread",
-    "peg_3yr": "peg_3yr_cagr", "peg_3yr_forward": "peg_3yr_cagr",
     "val_hist_pe_prem_disc": "val_hist_pe_premium_disc",
     "val_hist_pfcf_prem_disc": "val_hist_pfcf_premium_disc",
     "trailingPE": "trailing_pe", "trailing_p_e": "trailing_pe",
@@ -257,14 +254,6 @@ def pp_fmt(v):
         if pd.isna(f): return "N/A"
         sign = "+" if f >= 0 else ""
         return f"{sign}{f:.1f}pp"
-    except: return s(v)
-
-def peg_fmt(v):
-    """PEG: show as decimal or 'N/A'"""
-    try:
-        f = float(v)
-        if pd.isna(f): return "N/A"
-        return f"{f:.2f}"
     except: return s(v)
 
 def trailing_pe_fmt(v):

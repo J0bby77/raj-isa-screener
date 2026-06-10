@@ -2627,47 +2627,6 @@ def compute_wacc(ticker_sym, info, income_stmt, balance_sheet, part_a_out):
     return out
 
 
-def compute_peg_3yr(ticker_sym, scoring_data, geography):
-    """PEG 3-yr per Section 2.7. Finnhub skipped for .L/.SW (403)."""
-    out = {"peg_3yr_cagr": None, "peg_3yr_status": "unresolved",
-           "peg_3yr_source": "unresolved", "peg_3yr_analyst_count": None}
-    ee = scoring_data.get("earnings_estimate")
-    eps_estimates = {}
-    try:
-        if ee is not None and not (hasattr(ee, "empty") and ee.empty):
-            df = ee if isinstance(ee, pd.DataFrame) else pd.DataFrame(ee)
-            year_map = {"+1 year": "Y+1", "+2 years": "Y+2", "+3 years": "Y+3",
-                        "1y": "Y+1", "2y": "Y+2", "3y": "Y+3"}
-            for col in df.columns:
-                for k, v in year_map.items():
-                    if k.lower() in str(col).lower():
-                        avg_val = cnt_val = None
-                        for idx in df.index:
-                            if "avg" in str(idx).lower():
-                                avg_val = safe_float(df.at[idx, col])
-                            if "number" in str(idx).lower():
-                                cnt_val = safe_float(df.at[idx, col]) or 0
-                        if avg_val:
-                            eps_estimates[v] = {"epsAverage": avg_val, "numberAnalysts": cnt_val or 0}
-    except Exception:
-        pass
-
-    if len(eps_estimates) >= 3:
-        y1 = eps_estimates.get("Y+1", {}); y3 = eps_estimates.get("Y+3", {})
-        eps_y1 = y1.get("epsAverage"); eps_y3 = y3.get("epsAverage")
-        min_a  = min(y1.get("numberAnalysts", 0), eps_estimates.get("Y+2", {}).get("numberAnalysts", 0), y3.get("numberAnalysts", 0))
-        out["peg_3yr_analyst_count"] = min_a
-        if min_a >= 3 and eps_y1 and eps_y3 and eps_y1 > 0 and eps_y3 > 0:
-            out["peg_3yr_cagr"]   = round((eps_y3 / eps_y1) ** 0.5 - 1, 4)
-            out["peg_3yr_status"] = "calculated"
-            out["peg_3yr_source"] = "yfinance"
-        elif min_a < 3:
-            out["peg_3yr_status"] = "insufficient_analysts"
-        elif eps_y1 and eps_y1 <= 0:
-            out["peg_3yr_status"] = "eps_negative"
-    return out
-
-
 def compute_val_hist(ticker_sym, info, scoring_data, income_stmt, cashflow):
     """
     Valuation vs Own History per Section 2.11.
