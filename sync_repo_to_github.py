@@ -16,7 +16,7 @@ Mechanism (local authenticated git push — the clean way to sync large files):
   * NEVER touches secrets / non-code: only top-level tracked files; .env and *.partial.json excluded.
   * Commits + pushes only what changed; else prints NOTHING_TO_SYNC. Works entirely in /dev/shm (never /).
 """
-import argparse, os, sys, hashlib, subprocess, shutil, datetime, re
+import argparse, os, sys, hashlib, subprocess, shutil, datetime, re, ast
 
 NEW_FILES = ["screener_local.py", "sync_repo_to_github.py"]   # may not be tracked yet
 NEVER = {".env", ".env.local"}
@@ -70,6 +70,31 @@ def main():
                 if f.endswith(".py") and not f.startswith(("_", "test_"))
                 and os.path.isfile(os.path.join(a.inv_dir, f))]
     candidates = sorted(set(tracked) | set(NEW_FILES) | set(local_py) | RUNTIME_JSON)
+
+    # ── COMPILE GATE (anti-truncation / anti-corruption safeguard) ─────────────
+    # The recurring failure mode is a truncated / half-written local .py (an
+    # incomplete save, often a OneDrive->mount sync lag) that (a) crashes the
+    # local-primary run on import, and (b) gets pushed up over a good copy in the
+    # repo. Since this script runs as Step 0 of EVERY scheduled task, validating
+    # here protects BOTH paths. Any candidate .py that does not parse aborts the
+    # run (exit 3) and is NEVER pushed. ast.parse reliably catches truncation.
+    broken = []
+    for fn in candidates:
+        if not fn.endswith(".py") or fn in NEVER or "/" in fn:
+            continue
+        src = os.path.join(a.inv_dir, fn)
+        if not os.path.exists(src):
+            continue
+        try:
+            ast.parse(open(src, encoding="utf-8", errors="replace").read(), filename=fn)
+        except SyntaxError as e:
+            broken.append("%s (line %s: %s)" % (fn, e.lineno, e.msg))
+    if broken:
+        print("SYNC_ABORTED_INVALID_PY: local script(s) fail to compile (likely a "
+              "truncated/half-written save). Run HALTED; nothing pushed. Fix and re-run: "
+              + "; ".join(broken))
+        sys.exit(3)
+
     changed = []
     for fn in candidates:
         if fn in NEVER or "/" in fn or fn.endswith(".partial.json"):
