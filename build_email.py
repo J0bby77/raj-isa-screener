@@ -364,7 +364,14 @@ def get_coverage_counts(full_data, gate_data):
         a = sf(get_field(row, "part_a_score"))
         b = sf(get_field(row, "part_b_score"))
 
-        if status in ("PRE_SCREEN_EXCLUDED", "STRUCTURAL_NON_APPLICABLE"):
+        # Strong Buy is threshold-based (Part A >= 22 AND Part B >= 19), matching the
+        # SUMMARY tab / KPI tile / is_strong_buy(). Check it FIRST so a qualifying stock
+        # is never mis-bucketed into hard_gate_fail (which previously undercounted the
+        # headline by 1 when a Strong Buy also carried a MANDATORY_MINIMUM_FAIL status).
+        if is_strong_buy(row):
+            counts["analysed"] += 1
+            counts["strong_buys"] += 1
+        elif status in ("PRE_SCREEN_EXCLUDED", "STRUCTURAL_NON_APPLICABLE"):
             counts["pre_screen_excluded"] += 1
         elif status in ("HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL"):
             counts["hard_gate_fail"] += 1
@@ -373,9 +380,7 @@ def get_coverage_counts(full_data, gate_data):
         else:
             counts["analysed"] += 1
             if a is not None and b is not None:
-                if a >= 22 and b >= 19:
-                    counts["strong_buys"] += 1
-                elif a >= 22:
+                if a >= 22:
                     counts["fair_mixed"] += 1
                 elif a >= 14:
                     counts["acceptable"] += 1
@@ -788,41 +793,64 @@ def build_source_section(run_qa_rows, group, gate_data):
         '<tr><td>\n'
     )
 
-    # Gate 4 sector summary from gate_data
+    # Gate 4 sector summary from gate_data.
+    # NOTE: gate_results.csv does not carry a `sector` column for gate-excluded stocks
+    # (they are excluded before the scoring fetch that resolves sector), so sectors are
+    # frequently unavailable here. Only render the per-sector table for stocks whose
+    # sector actually resolved, and never flag a concentration warning on the "Unknown"
+    # bucket — otherwise an all-Unknown distribution falsely renders "100% concentration".
     gate4_exclusions = [r for r in gate_data if get_field(r, "gate_code") in ("Gate 4", "GATE4")]
     if gate4_exclusions:
-        sector_counts = {}
-        for row in gate4_exclusions:
-            s = get_field(row, "sector") or "Unknown"
-            sector_counts[s] = sector_counts.get(s, 0) + 1
-
         total_g4 = len(gate4_exclusions)
-        sorted_sectors = sorted(sector_counts.items(), key=lambda x: -x[1])
+        known_counts = {}
+        unknown = 0
+        for row in gate4_exclusions:
+            s = get_field(row, "sector")
+            if s:
+                known_counts[s] = known_counts.get(s, 0) + 1
+            else:
+                unknown += 1
 
-        html += (
-            f'<p style="font-size:13px;margin:0 0 10px 0"><strong>Gate 4 Sector Distribution '
-            f'({total_g4} eliminations):</strong></p>\n'
-            '<table style="width:60%;border-collapse:collapse;margin-bottom:12px" '
-            'cellpadding="0" cellspacing="0" border="0">\n'
-            '<tr style="background:#1a3a6b;color:#fff">'
-            '<th style="padding:5px 8px;text-align:left;font-size:11px">Sector</th>'
-            '<th style="padding:5px 8px;text-align:center;font-size:11px">Count</th>'
-            '<th style="padding:5px 8px;text-align:center;font-size:11px">%</th>'
-            '</tr>\n'
-        )
-        for i, (sector, count) in enumerate(sorted_sectors[:8]):
-            bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
-            pct_val = count / total_g4 * 100
-            concentration_flag = ' <span style="color:#c0392b">&nbsp;&#9888; concentration</span>' if pct_val > 35 else ""
+        if not known_counts:
+            # No sector data available in inputs — state the count, point to the workbook,
+            # and do NOT emit a misleading sector table or concentration warning.
             html += (
-                f'<tr style="background:{bg}">'
-                f'<td style="padding:4px 8px;font-size:12px">{safe_entities(sector)}</td>'
-                f'<td style="padding:4px 8px;font-size:12px;text-align:center">{count}</td>'
-                f'<td style="padding:4px 8px;font-size:12px;text-align:center">'
-                f'{pct_val:.1f}%{concentration_flag}</td>'
-                f'</tr>\n'
+                f'<p style="font-size:13px;margin:0 0 10px 0"><strong>Gate 4 eliminations:</strong> '
+                f'{total_g4}. Per-sector breakdown not available in the email inputs '
+                f'(gate results carry no sector field); see the Excel DIAGNOSTICS tab for the '
+                f'sector-stratified Gate 4 summary.</p>\n'
             )
-        html += '</table>\n'
+        else:
+            sorted_sectors = sorted(known_counts.items(), key=lambda x: -x[1])
+            note = ""
+            if unknown:
+                note = (f' <span style="color:#777">({unknown} of {total_g4} had no '
+                        f'resolved sector and are omitted below)</span>')
+            html += (
+                f'<p style="font-size:13px;margin:0 0 10px 0"><strong>Gate 4 Sector Distribution '
+                f'({total_g4} eliminations):</strong>{note}</p>\n'
+                '<table style="width:60%;border-collapse:collapse;margin-bottom:12px" '
+                'cellpadding="0" cellspacing="0" border="0">\n'
+                '<tr style="background:#1a3a6b;color:#fff">'
+                '<th style="padding:5px 8px;text-align:left;font-size:11px">Sector</th>'
+                '<th style="padding:5px 8px;text-align:center;font-size:11px">Count</th>'
+                '<th style="padding:5px 8px;text-align:center;font-size:11px">%</th>'
+                '</tr>\n'
+            )
+            for i, (sector, count) in enumerate(sorted_sectors[:8]):
+                bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
+                pct_val = count / total_g4 * 100
+                # Flag concentration only on a genuinely named sector exceeding 35%.
+                concentration_flag = ' <span style="color:#c0392b">&nbsp;&#9888; concentration</span>' if pct_val > 35 else ""
+                html += (
+                    f'<tr style="background:{bg}">'
+                    f'<td style="padding:4px 8px;font-size:12px">{safe_entities(sector)}</td>'
+                    f'<td style="padding:4px 8px;font-size:12px;text-align:center">{count}</td>'
+                    f'<td style="padding:4px 8px;font-size:12px;text-align:center">'
+                    f'{pct_val:.1f}%{concentration_flag}</td>'
+                    f'</tr>\n'
+                )
+            html += '</table>\n'
 
     # Source performance from run_qa
     source_rows = []
