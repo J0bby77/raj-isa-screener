@@ -1100,7 +1100,7 @@
       ]
     }
   },
-  "_last_run_notes": "SP500 run 2026-06-10 (LOCAL-PRIMARY, screener_local.py): 503 constituents (SPY SSGA XLSX), 149 scored, 354 excluded (Gate1=95, Gate2=51, Gate3=36, Gate4=155, GATE_DATA_UNRESOLVED=17), 0 technical failures, accounted=503 (100%). 30 Strong Buys; top PTC 51/54, TTD 51/54, ADBE 50/54. gate4_concentration=False. No fallback triggered despite /sessions disk at 100% (tmpfs /dev/shm install as designed). Retrospective: 20260610_SP500_retrospective.md.",
+  "_last_run_notes": "SP500 run 2026-06-10 v2 (LOCAL-PRIMARY, re-run): 503 constituents (SPY SSGA XLSX), 149 scored, 354 excluded, 0 tech failures. 31 Strong Buys; top PTC 51/54. build_excel.py + build_email.py main() completions applied. GitHub synced.",
   "runs": [
     {
       "run_date": "2026-05-22",
@@ -1298,8 +1298,8 @@
       "hard_gate_fails": 19,
       "unresolved_hard_gate": 2,
       "mandatory_minimum_fails": 21,
-      "strong_buys": 30,
-      "top_score": 51,
+      "strong_buys": 31,
+      "top_score": 51.0,
       "top_tickers": [
         "PTC",
         "TTD",
@@ -1309,7 +1309,7 @@
       "gate4_concentration_warning": false,
       "excel_file": "Growth Stock Analysis SP500 W-e 10-Jun-26.xlsx",
       "retrospective_file": "20260610_SP500_retrospective.md",
-      "notes": "Local-primary completed; /sessions disk 100% but tmpfs install prevented fill; no Composio fallback."
+      "notes": "v2 re-run; build_excel/build_email truncation fixed and pushed to GitHub"
     }
   ]
 }

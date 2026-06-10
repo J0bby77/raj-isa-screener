@@ -3275,4 +3275,51 @@ def run_intramonth(tickers: list, run_date: str, outputs_dir: str, inv_analysis_
             pa_out = {k: v for k, v in row.items() if k.startswith("score_") or k == "roic"}
             geo    = geography_group(ticker)
             try:
-                ovl = run_overlays(ticker, inf
+                ovl = run_overlays(ticker, info, inc, cf, bal, d, pa_out, geo)
+                row.update(ovl)
+            except Exception as e:
+                log.warning(f"Intramonth overlay failed {ticker}: {e}")
+
+    run_qa = {
+        "group": group, "run_date": run_date,
+        "tickers": tickers,
+        "scored_count": len(scored_rows),
+        "tech_failure_count": len(tech_failures),
+        "elapsed_s": round(time.time() - start_time, 1),
+    }
+    save_full_data(scored_rows, outputs_dir, run_date, group)
+    save_run_qa(run_qa, inv_analysis_dir, run_date, group,
+                outputs_dir=outputs_dir, tech_failures=tech_failures)
+    log.info(f"=== Intramonth run complete in {run_qa['elapsed_s']}s ===")
+    return scored_rows, run_qa
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 9c. CLI ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="ISA Growth Stock Screener")
+    parser.add_argument("--group",    required=False, help="Index group (SP500, NASDAQ, MIDCAP400, STOXX600, F250-SPI, OTHER)")
+    parser.add_argument("--date",     required=True,  help="Run date YYYY-MM-DD")
+    parser.add_argument("--outputs",  required=True,  help="Session temp outputs directory path")
+    parser.add_argument("--inv-dir",  required=True,  dest="inv_dir", help="Investment Analysis folder path")
+    parser.add_argument("--ticker",   nargs="+",      help="Ticker list for intramonth mode")
+    parser.add_argument("--mode",     default="scheduled", choices=["scheduled", "intramonth"])
+    args = parser.parse_args()
+
+    # Normalise date to YYYYMMDD for filenames
+    run_date = args.date.replace("-", "")
+
+    if args.mode == "intramonth" or args.ticker:
+        if not args.ticker:
+            parser.error("--ticker required for intramonth mode")
+        run_intramonth(args.ticker, run_date, args.outputs, args.inv_dir)
+    else:
+        if not args.group:
+            parser.error("--group required for scheduled mode")
+        run_scheduled(args.group, run_date, args.outputs, args.inv_dir)
+
+
+if __name__ == "__main__":
+    main()
