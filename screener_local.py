@@ -40,8 +40,27 @@ def preflight(shm, min_shm_mb=80):
 
 
 def load_core(inv_dir):
-    p = os.path.join(inv_dir, "screener_core.py")
-    spec = importlib.util.spec_from_file_location("screener_core", p)
+    # Stage screener_core.py OFF the OneDrive mount into tmpfs before importing.
+    # The mount can serve a stale/TRUNCATED copy right after an edit (OneDrive->mount
+    # sync lag) -- importing that directly either crashes on a SyntaxError or, worse,
+    # runs partial logic. Reading the full bytes, compile-checking, then exec'ing from
+    # /dev/shm removes that failure class for the scoring engine. (Root-cause fix for
+    # the 10-Jun-26 truncation incident.)
+    src = os.path.join(inv_dir, "screener_core.py")
+    with open(src, "r", encoding="utf-8") as fh:
+        code = fh.read()
+    try:
+        compile(code, "screener_core.py", "exec")
+    except SyntaxError as e:
+        raise RuntimeError(
+            f"screener_core.py failed to compile at line {e.lineno}: {e.msg}. This is "
+            "almost always a truncated/half-synced file on the OneDrive mount. Run HALTED "
+            "to avoid executing partial scoring logic; re-run once OneDrive has synced."
+        ) from e
+    staged = "/dev/shm/screener_core_staged.py"
+    with open(staged, "w", encoding="utf-8") as fh:
+        fh.write(code)
+    spec = importlib.util.spec_from_file_location("screener_core", staged)
     m = importlib.util.module_from_spec(spec)
     sys.modules["screener_core"] = m
     spec.loader.exec_module(m)

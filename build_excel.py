@@ -1024,6 +1024,28 @@ def main():
     wb.save(args.output)
     print(f"[build_excel] Saved: {args.output}", flush=True)
 
+    # ── SELF-VALIDATION GATE (anti-corruption / anti-stale-schema) ────────────
+    # Reopen the file we just wrote and assert it is a complete, valid v27 workbook.
+    # Catches: truncated/corrupt .xlsx (today's failure), missing tabs, empty scores,
+    # and pre-v27/stale schema. Exit non-zero so a bad deliverable is never emailed.
+    import sys as _sys, zipfile as _zip
+    _need = {"SUMMARY", "CANDIDATES", "SCORES", "EXCLUSIONS", "DATA QUALITY", "DIAGNOSTICS"}
+    try:
+        _chk = openpyxl.load_workbook(args.output, read_only=True)
+    except (_zip.BadZipFile, OSError) as e:
+        print(f"[build_excel] VALIDATION_FAILED: saved file is not a valid .xlsx ({e}). DO NOT SEND.", flush=True); _sys.exit(2)
+    _tabs = set(_chk.sheetnames)
+    if not _need.issubset(_tabs):
+        print(f"[build_excel] VALIDATION_FAILED: missing tabs {_need - _tabs}. DO NOT SEND.", flush=True); _sys.exit(2)
+    _diag = " ".join(str(c.value) for r in _chk["DIAGNOSTICS"].iter_rows() for c in r if c.value)
+    if "max 22" not in _diag:
+        print("[build_excel] VALIDATION_FAILED: DIAGNOSTICS lacks v27 marker 'max 22' - output may be pre-v27/stale. DO NOT SEND.", flush=True); _sys.exit(2)
+    _rows = _chk["SCORES"].max_row or 0
+    _chk.close()
+    if _rows < 3:
+        print(f"[build_excel] VALIDATION_FAILED: SCORES has no data rows ({_rows}). DO NOT SEND.", flush=True); _sys.exit(2)
+    print(f"[build_excel] VALIDATION_OK: valid v27 workbook, {len(_tabs)} tabs, SCORES rows={_rows}.", flush=True)
+
 
 if __name__ == "__main__":
     main()
