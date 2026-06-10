@@ -202,61 +202,67 @@ def safe_float(v, default=None):
         return default
 
 
-def classify_sector_bucket(sector: str, industry: str, gross_margin: float = None) -> str:
+# Semiconductor fabless-vs-IDM anchors (deterministic override for bellwethers).
+# The capex-intensity heuristic below handles the long tail / non-US names.
+IDM_ANCHORS     = {"MU", "TXN", "INTC", "STM", "ON", "ADI", "NXPI", "MCHP", "IFX.DE"}
+FABLESS_ANCHORS = {"NVDA", "AMD", "QCOM", "AVGO", "MRVL", "MPWR", "LSCC", "QRVO", "SWKS", "ALGM"}
+
+
+def compute_capex_intensity(income_stmt, cashflow):
+    """abs(CapEx) / Revenue from the latest annual period. Structural fabless-vs-IDM
+    discriminator (fabless are asset-light ~1-5%; IDMs own fabs ~15-40%). Returns
+    None if either input is missing."""
+    try:
+        cap = get_stmt_value(cashflow, [
+            "Capital Expenditure", "Capital Expenditures", "CapitalExpenditure",
+            "Purchase Of PPE", "Purchase of Property Plant and Equipment",
+            "Investments in Property Plant and Equipment"])
+        rev = get_stmt_value(income_stmt, [
+            "Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"])
+        if cap is not None and rev and rev > 0:
+            return abs(cap) / rev
+    except Exception:
+        pass
+    return None
+
+
+def classify_sector_bucket(sector: str, industry: str, gross_margin: float = None,
+                           capex_intensity: float = None, ticker: str = None) -> str:
     """
     Map yfinance sector/industry strings to a gross margin sector bucket.
 
-    Used by:
-      - gate2_pass()    → select hard gate threshold
-      - score_part_a()  → select scoring thresholds for gross margin, capex, op margin
-
-    gross_margin (float, 0–1 scale) is used as a discriminator within the
-    Semiconductors industry because yfinance returns both fabless companies
-    (NVDA, AMD, QCOM) and IDMs (MU, TXN) as sector="Technology",
-    industry="Semiconductors". String-matching alone cannot distinguish them.
-    Fabless companies structurally exceed 55% gross margin; IDMs do not.
-
-    Returns one of:
-      "software_saas" | "semiconductor_fabless" | "semiconductor_hardware"
-      | "semiconductor_equipment" | "default"
+    Fabless vs IDM/hardware split resolved by (1) explicit anchor lists, then
+    (2) CAPEX INTENSITY (structural fab-ownership signal) — NOT gross margin (cyclical).
+    `gross_margin` retained for backward compatibility but no longer drives the split.
     """
     s = (sector or "").lower()
     i = (industry or "").lower()
-    si = s + " " + i   # combined string for keyword checks
+    si = s + " " + i
 
-    # ── Software / SaaS / Platform ───────────────────────────────────────────
     if any(kw in si for kw in [
             "software", "internet content", "data processing",
             "application software", "enterprise software",
             "infrastructure software", "system software"]):
         return "software_saas"
 
-    # ── Semiconductor equipment and materials ─────────────────────────────────
-    # Must check before generic "semiconductor" to avoid misclassifying AEHR/ICHR
     if "semiconductor" in si and any(kw in i for kw in ["equipment", "materials"]):
         return "semiconductor_equipment"
 
-    # Electronic components, scientific instruments, industrial machinery
-    # Catches ICHR (Electronic Components), AEHR (Scientific Instruments),
-    # UCTT (Electronic Components), FORM (Scientific Instruments)
     if any(kw in i for kw in [
             "electronic components", "scientific instruments",
             "industrial machinery", "electronic instruments"]):
         return "semiconductor_equipment"
 
-    # ── Semiconductor — fabless vs IDM/hardware split on gross margin ─────────
-    # Both return sector="Technology", industry="Semiconductors" in yfinance.
-    # Fabless (NVDA, AMD, QCOM, AVGO) structurally exceed 55% GM.
-    # IDMs (MU, TXN, STM, ON, ADI) and optical hardware (LITE, AAOI) do not.
     if "semiconductor" in si:
-        if gross_margin is not None and gross_margin >= 0.55:
+        t = (ticker or "").upper()
+        if t in IDM_ANCHORS:
+            return "semiconductor_hardware"
+        if t in FABLESS_ANCHORS:
             return "semiconductor_fabless"
-        return "semiconductor_hardware"   # IDMs + optical hw (LITE, AAOI, STM, ON)
+        if capex_intensity is not None:
+            return "semiconductor_fabless" if capex_intensity < 0.08 else "semiconductor_hardware"
+        return "semiconductor_hardware"
 
-    # ── Default — all other sectors ───────────────────────────────────────────
-    # Covers: Consumer, Energy, Healthcare, Financials, Industrials, Materials,
-    # Real Estate, Utilities, Telecom, and all European/Canadian/LatAm companies
-    # that don't match above categories. Maps to former GATE2_GM_STANDARD (0.20).
     return "default"
 
 
@@ -1160,7 +1166,7 @@ def gate1_pass(info, nasdaq_mode=False):
     return True, "", ""
 
 
-def gate2_pass(income_stmt, info, nasdaq_mode=False):
+def gate2_pass(income_stmt, info, nasdaq_mode=False, cashflow=None, ticker=None):
     """
     Returns (pass: bool, reason: str, gate_code: str, gm_value: float|None).
     CRITICAL: None grossMargins → GATE_DATA_UNRESOLVED, NOT a gate fail.
@@ -1175,15 +1181,10 @@ def gate2_pass(income_stmt, info, nasdaq_mode=False):
     """
     sector   = (info.get("sector",   "") or "") if info else ""
     industry = (info.get("industry", "") or "") if info else ""
-    # Preliminary gross_margin from info for classification only (not scored here)
-    prelim_gm = None
-    gm_info = info.get("grossMargins") if info else None
-    if gm_info is not None:
-        try:
-            prelim_gm = float(gm_info)
-        except (TypeError, ValueError):
-            prelim_gm = None
-    bucket    = classify_sector_bucket(sector, industry, prelim_gm)
+    tkr      = ticker or (info.get("symbol") if info else None)
+    # Classify via capex intensity (+ anchors), NOT gross margin — see classify_sector_bucket.
+    capex_int = compute_capex_intensity(income_stmt, cashflow)
+    bucket    = classify_sector_bucket(sector, industry, capex_intensity=capex_int, ticker=tkr)
     threshold = GATE2_GM_THRESHOLD.get(bucket, GATE2_GM_THRESHOLD["default"])
     if income_stmt is None or income_stmt.empty:
         return None, "GATE_DATA_UNRESOLVED: income_stmt empty", "GATE_DATA_UNRESOLVED", None
@@ -1337,6 +1338,10 @@ def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
             "analyst_price_targets": tk.analyst_price_targets,
             "dividends":             tk.dividends,
         }
+        try:
+            data["eps_revisions"] = tk.eps_revisions   # now scored in Part B for ALL gate-passers
+        except Exception:
+            data["eps_revisions"] = None
         # next_earnings via calendar
         try:
             cal = tk.calendar
@@ -1372,12 +1377,8 @@ def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
         except Exception:
             data["history"] = None
 
-        # High-score overlays
+        # High-score overlays (eps_revisions already fetched above for all gate-passers)
         if score_gt38:
-            try:
-                data["eps_revisions"] = tk.eps_revisions
-            except Exception:
-                data["eps_revisions"] = None
             try:
                 data["upgrades_downgrades"] = tk.upgrades_downgrades
             except Exception:
@@ -1492,7 +1493,7 @@ def apply_gates_standard(ticker_sym, info, income_stmt, cashflow):
         return {"gate_pass": False, "gate_code": code1, "gate_reason": reason1}
 
     # Gate 2
-    g2, reason2, code2, gm = gate2_pass(income_stmt, info, nasdaq_mode=False)
+    g2, reason2, code2, gm = gate2_pass(income_stmt, info, nasdaq_mode=False, cashflow=cashflow, ticker=ticker_sym)
     if g2 is None:
         return {"gate_pass": None, "gate_code": code2, "gate_reason": reason2, "gross_margin": None}
     if not g2:
@@ -1624,7 +1625,7 @@ def screen_group_nasdaq(constituents_df, outputs_dir, group, run_date):
         cashflow    = stmts.get("cashflow")
 
         # Gate 2 (Nasdaq: 40% GM)
-        g2, reason2, code2, gm = gate2_pass(income_stmt, info_map.get(sym, {}), nasdaq_mode=True)
+        g2, reason2, code2, gm = gate2_pass(income_stmt, info_map.get(sym, {}), nasdaq_mode=True, cashflow=cashflow, ticker=sym)
         if g2 is None:
             phase2_excl.append({**row, "gate_code": code2, "gate_reason": reason2, "phase": 2})
             gate_data[sym] = {"gate_pass": None, "gate_code": code2, "gate_reason": reason2}
@@ -2002,7 +2003,9 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     # ── Sector bucket classification — used for all sector-segmented scoring ──
     # (Enhancement 2B / 2C) Computed once here; reused for capex and op margin.
     sector_bucket = classify_sector_bucket(
-        out.get("sector", ""), out.get("industry", ""), gross_margin
+        out.get("sector", ""), out.get("industry", ""), gross_margin,
+        capex_intensity=compute_capex_intensity(income_stmt, cashflow),
+        ticker=ticker_sym,
     )
     out["sector_bucket"] = sector_bucket   # stored for transparency in Excel output
 
@@ -2350,11 +2353,11 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     out["target_upside"]     = target_upside
     out["current_price"]     = current_price
     out["target_price_mean"] = target_price
-    if target_upside is None:
-        out["score_b_target_upside"] = 0
-    elif target_upside > 0.20:
+    # Recalibrated (v27): don't zero a fast grower that has merely caught up to a lagging
+    # target; only penalise a genuine premium to target. >=15% upside=2, -10%..15%=1, >10% above target=0.
+    if target_upside is not None and target_upside >= 0.15:
         out["score_b_target_upside"] = 2
-    elif target_upside >= 0.10:
+    elif target_upside is not None and target_upside >= -0.10:
         out["score_b_target_upside"] = 1
     else:
         out["score_b_target_upside"] = 0
@@ -2405,7 +2408,7 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     _industry_pb = (info.get("industry", "") or "") if info else ""
     # gross_margin not available here; use info["grossMargins"] for classification only
     _gm_pb       = safe_float(info.get("grossMargins")) if info else None
-    _bucket_pb   = classify_sector_bucket(_sector_pb, _industry_pb, _gm_pb)
+    _bucket_pb   = classify_sector_bucket(_sector_pb, _industry_pb, _gm_pb, capex_intensity=compute_capex_intensity(income_stmt, cashflow), ticker=ticker_sym)
     out["sector_bucket_pb"] = _bucket_pb
     out["b2b_applicable"]   = (_bucket_pb in B2B_APPLICABLE_BUCKETS)
 
@@ -2782,6 +2785,7 @@ FIELD_MAP = [
     "score_b_fwd_pe", "score_b_ev_ebitda", "score_b_price_fcf", "score_b_fcf_yield",
     "score_b_earn_yield", "score_b_52wk", "score_b_div_payout", "score_b_fwd_eps",
     "score_b_target_upside", "score_b_stress",
+    "score_b_peg", "score_b_ev_g", "score_b_pfcf_g", "score_b_est_rev",
     "est_rev_direction",
     "wacc_pct", "roic_vs_wacc_spread",
     "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
@@ -2808,8 +2812,7 @@ def _to_row(scored, gate_d, constituent_row, overlay_d=None):
     row["gate_code"]   = gate_d.get("gate_code", "")
     row["gate_reason"] = gate_d.get("gate_reason", "")
     if overlay_d:
-        for oc in ["est_rev_direction",
-                   "wacc_pct", "roic_vs_wacc_spread",
+        for oc in ["wacc_pct", "roic_vs_wacc_spread",
                    "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
                    "trailing_pe", "val_hist_pe_status", "overlay_status"]:
             row[oc] = overlay_d.get(oc)
@@ -2880,11 +2883,67 @@ def build_gate4_sector_summary(exclusions_df):
 # SECTION 9: MAIN — run_scheduled / run_intramonth / CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _est_rev_score(eps_rev_df):
+    """Estimate-revision score (v27): 2 improving / 0 deteriorating / 1 neutral or no-data.
+    Reads the current-fiscal-year ('0y') row: upLast30days vs downLast30days."""
+    try:
+        if eps_rev_df is None or (hasattr(eps_rev_df, "empty") and eps_rev_df.empty):
+            return 1
+        idx = list(getattr(eps_rev_df, "index", []))
+        row = eps_rev_df.loc["0y"] if "0y" in idx else eps_rev_df.iloc[0]
+        up = safe_float(row.get("upLast30days")) or 0
+        dn = safe_float(row.get("downLast30days")) or 0
+        return 2 if up > dn else (0 if dn > up else 1)
+    except Exception:
+        return 1
+
+
+def _growth_for_peg(eps_cagr, fwd_eps_growth):
+    """Growth denominator for growth-adjusted valuation: 3-5yr EPS CAGR primary,
+    forward EPS growth fallback, capped at 50% (so hyper-growth can't excuse any multiple)."""
+    g = eps_cagr if (eps_cagr is not None and eps_cagr > 0) else fwd_eps_growth
+    if g is None or g <= 0:
+        return None
+    return min(g, 0.50)
+
+
+def _band(v, lo, hi):
+    """2 if v<lo, 1 if v<hi, else 0. None passes through."""
+    return None if v is None else (2 if v < lo else (1 if v < hi else 0))
+
+
 def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
     """Helper: score one ticker and return a FIELD_MAP-aligned row dict."""
     pa = score_part_a(ticker, info, inc, cf, bal, inc_q)
     pb = score_part_b(ticker, info, inc, cf, bal, inc_q)
     scored = {**pa, **pb}  # pb overrides pa on key conflicts (e.g. net_debt_ebitda, interest_coverage)
+
+    # ── Part B v27 redesign: growth-adjusted valuation + estimate-revision ───────
+    _g  = _growth_for_peg(safe_float(scored.get("eps_cagr")), safe_float(scored.get("fwd_eps_growth")))
+    _fp = safe_float(scored.get("fwd_pe")); _ev = safe_float(scored.get("ev_ebitda")); _pf = safe_float(scored.get("price_fcf"))
+    if _g:
+        _gp = _g * 100.0
+        scored["score_b_peg"]    = _band(_fp / _gp, 1.0, 2.0) if (_fp and _fp > 0) else 0
+        scored["score_b_ev_g"]   = _band(_ev / _gp, 1.0, 2.0) if (_ev and _ev > 0) else 0
+        scored["score_b_pfcf_g"] = _band(_pf / _gp, 1.5, 3.0) if (_pf and _pf > 0) else 0
+    else:
+        scored["score_b_peg"]    = scored.get("score_b_fwd_pe", 0) or 0
+        scored["score_b_ev_g"]   = scored.get("score_b_ev_ebitda", 0) or 0
+        scored["score_b_pfcf_g"] = scored.get("score_b_price_fcf", 0) or 0
+    scored["score_b_est_rev"]   = _est_rev_score(info.get("eps_revisions"))
+    scored["est_rev_direction"] = {2: "Improving", 1: "Neutral", 0: "Deteriorating"}[scored["score_b_est_rev"]]
+    for _dead in ("score_b_fcf_yield", "score_b_earn_yield", "score_b_52wk"):
+        scored[_dead] = None
+    scored["_part_b_new_scores_sum"] = sum([
+        scored["score_b_peg"], scored["score_b_ev_g"], scored["score_b_pfcf_g"],
+        scored.get("score_b_div_payout", 0) or 0,
+        scored.get("score_b_fwd_eps", 0) or 0,
+        scored.get("score_b_target_upside", 0) or 0,
+        scored.get("score_b_stress", 0) or 0,
+        scored["score_b_est_rev"],
+        scored.get("score_b_book_to_bill") or 0,
+        scored.get("score_b_backlog_ev") or 0,
+    ])
 
     # ── Finalise Part B score ─────────────────────────────────────────────
     # Part B = score_roic (mandatory) + score_nd_ebitda (mandatory) +
@@ -2936,7 +2995,7 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         sector_str  = scored.get("sector", "") or scored.get("industry", "") or "unknown sector"
         status_str  = scored.get("part_b_status", "")
         scored["qualitative_commentary"] = (
-            f"Scores {pa_s}/28 Part A and {pb_s}/26 Part B (total {tot}/54). "
+            f"Scores {pa_s}/28 Part A and {pb_s}/22 Part B (total {tot}/50). "
             f"{sector_str}. Key metrics: {metrics_str}. "
             f"Part B status: {status_str}. Overlays not available — verify valuation and estimate trends before acting."
         )

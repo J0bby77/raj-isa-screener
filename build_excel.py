@@ -355,7 +355,6 @@ SUMMARY_COLS = [
     ("",                           "Price/FCF",          "price_fcf",                mult,              False),
     ("",                           "FCF Yield",          "fcf_yield",                pct,               False),
     ("",                           "Earnings Yield",     "earnings_yield",           pct,               False),
-    ("",                           "52wk Position",      "position_52wk",            pct,               False),
     ("",                           "Div Payout/FCF",     "div_payout_fcf",           pct,               False),
     ("",                           "Fwd EPS Growth",     "fwd_eps_growth",           pct,               False),
     ("",                           "Target Upside",      "target_upside",            upside_fmt,        False),
@@ -377,6 +376,7 @@ SUMMARY_COLS = [
     ("",                               "P/E vs 3yr Avg",      "val_hist_pe_premium_disc", pct_already,   False),
     ("",                               "P/FCF vs 3yr Avg",    "val_hist_pfcf_premium_disc", pct_already, False),
     ("",                               "Trailing P/E",        "trailing_pe",              trailing_pe_fmt, False),
+    ("",                               "Valuation Profile",   "__valprofile__",           None,          True),
     ("",                               "Commentary",          "qualitative_commentary",   s,             True),
 ]
 
@@ -388,7 +388,7 @@ def build_summary(wb, df_full, run_date, group):
     ws.freeze_panes = "A5"  # header rows 1-4 always visible
 
     # --- Row 1: Title ---
-    title = f"ISA Growth Stock Analysis — {group} | Strong Buys (Part A ≥22, Part B ≥19) | Run: {run_date}"
+    title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (Part A ≥22 · Total ≥43/50 · est-rev not deteriorating) | Run: {run_date}"
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
     c = ws.cell(row=1, column=1, value=title)
     c.fill = FILL_HDR_DARK; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
@@ -432,13 +432,17 @@ def build_summary(wb, df_full, run_date, group):
         ws.cell(row=5, column=1, value="No data available for this run.")
         return ws
 
+    # SUMMARY rule (v27): Part A >= 22 AND Total >= 43/50 AND est-rev not deteriorating
+    # AND Part B >= 14 (token guardrail). Biased to best growth-at-reasonable-price opportunities.
     sb = df_full[
         (df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 22) &
-        (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 19)
+        (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 14) &
+        (df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 43) &
+        (df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating")
     ].copy()
 
     if sb.empty:
-        ws.cell(row=5, column=1, value="No Strong Buy stocks identified this run.")
+        ws.cell(row=5, column=1, value="No summary candidates identified this run.")
         return ws
 
     sb = sb.sort_values(["total_score", "part_b_score", "company"],
@@ -464,6 +468,14 @@ def build_summary(wb, df_full, run_date, group):
                 cur_sym = get_currency_sym(row)
                 raw_v = row.get("target_price_mean", None)
                 val = fmt_price(raw_v, cur_sym)
+                fmt_fn = None
+            elif field == "__valprofile__":
+                try:
+                    _cl = (float(row.get("score_b_peg") or 0) + float(row.get("score_b_ev_g") or 0)
+                           + float(row.get("score_b_pfcf_g") or 0))
+                except (TypeError, ValueError):
+                    _cl = 0
+                val = "GARP" if _cl >= 4 else "Premium Growth"
                 fmt_fn = None
             else:
                 raw_v = row.get(field, None)
@@ -618,16 +630,14 @@ PART_A_METRIC_COLS = [
 PART_B_METRIC_COLS = [
     ("ROIC (MM)",        "score_b_roic",        "score_roic"),
     ("ND/EBITDA (MM)",   "score_b_nd_ebitda",   "score_nd_ebitda"),
-    ("Fwd P/E",          "score_b_fwd_pe",       None),
-    ("EV/EBITDA",        "score_b_ev_ebitda",    None),
-    ("Price/FCF",        "score_b_price_fcf",    None),
-    ("FCF Yield",        "score_b_fcf_yield",    None),
-    ("Earn Yield",       "score_b_earn_yield",   None),
-    ("52wk Pos",         "score_b_52wk",         None),
+    ("Fwd PEG",          "score_b_peg",          None),
+    ("EV/EBITDA-g",      "score_b_ev_g",         None),
+    ("P/FCF-g",          "score_b_pfcf_g",       None),
     ("Int Cov (r)",      "score_b_int_cov",      "score_int_cov"),  # reuse Part A
     ("Div Payout",       "score_b_div_payout",   None),
     ("Fwd EPS Grwth",    "score_b_fwd_eps",      None),
     ("Target Upside",    "score_b_target_upside", None),
+    ("Est Revision",     "score_b_est_rev",      None),
     ("Stress Test",      "score_b_stress",       None),
     ("Book/Bill*",       "score_b_book_to_bill", None),   # * = conditional: equip/hardware only
     ("Backlog/EV*",      "score_b_backlog_ev",   None),   # * = conditional: equip/hardware only
@@ -898,11 +908,13 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         )]
         strong_buys = df_full[
             (df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 22) &
-            (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 19)
+            (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 14) &
+            (df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 43) &
+            (df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating")
         ]
         kv("Total constituents",   total)
         kv("Gate passers scored",  len(scored))
-        kv("Strong Buys (A≥22, B≥19)", len(strong_buys))
+        kv("Summary candidates (A≥22, Total≥43/50, est-rev OK)", len(strong_buys))
         kv("Pre-screen excluded",  total - len(scored))
         kv("Coverage %",           f"{len(scored)/total*100:.1f}%" if total > 0 else "N/A")
     row_ptr[0] += 1
@@ -929,10 +941,10 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
     section("Methodology Summary")
     methodology = [
         ("Scoring", "Part A: 14 metrics, max 28 pts. Strong Growth >= 22. Hard gates: ROIC + FCF Pos Years."),
-        ("",        "Part B: 13 base metrics, max 26 pts (+2 conditional = max 30 for semiconductor_hardware/equipment)."),
-        ("",        "Conditional metrics: Book-to-Bill Trailing 2Q + Backlog/EV (scored when b2b_applicable=True)."),
-        ("",        "Strong Buy >= 19 (unchanged). Total base max 54 (up to 58 for equipment with b2b data)."),
-        ("",        "SUMMARY = Part A >= 22 AND Part B >= 19."),
+        ("",        "Part B (v27): 11 base metrics, max 22 pts (+2 conditional = max 26 for semiconductor_hardware/equipment)."),
+        ("",        "Part B metrics: ROIC, ND/EBITDA (mandatory mins), Fwd PEG, EV/EBITDA-to-growth, P/FCF-to-growth, Int Cov, Div Payout, Fwd EPS Growth, Target Upside, Est Revision, Stress (+ Book-to-Bill/Backlog conditional)."),
+        ("",        "Growth-adjusted valuation uses 3-5yr EPS CAGR (fwd fallback) capped at 50%. Total base max 50."),
+        ("",        "SUMMARY = Part A >= 22 AND Total >= 43/50 AND est-rev not deteriorating AND Part B >= 14. Valuation Profile tag: GARP if PEG+EVg+PFCFg >= 4 else Premium Growth."),
         ("Gates",   "Standard: Gate 1 (sector), Gate 2 (sector-segmented GM threshold — see below), Gate 3 (FCF 3/5yr), Gate 4 (Rev CAGR>=5%)."),
         ("",        "Gate 2 sector thresholds: software_saas>=40%, semiconductor_fabless>=50%, semiconductor_hardware>=25%, semiconductor_equipment>=20%, default>=20%."),
         ("",        "Gate 4 (2C-1): semiconductor_equipment only — 5yr CAGR >=3% override if 3yr CAGR fails. Flagged as 'Gate 4 (5yr override)' in diagnostics."),
