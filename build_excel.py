@@ -47,6 +47,10 @@ EXPECTED COLUMN NAMES in full_data.csv (see FIELD_MAP below for aliases):
 """
 
 import argparse
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import os
 import sys
 

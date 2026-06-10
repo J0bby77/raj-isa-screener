@@ -19,6 +19,10 @@ Last updated: June 2026.
 """
 
 import sys
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import math
 import time
 import yfinance as yf

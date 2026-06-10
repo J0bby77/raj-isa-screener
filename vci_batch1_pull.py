@@ -12,6 +12,10 @@ GBp correction applied automatically for UK-listed stocks.
 """
 
 import sys
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import math
 import yfinance as yf
 

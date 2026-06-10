@@ -31,6 +31,10 @@ If screener_core import fails, falls back to inline implementations.
 # SECTION 1: IMPORTS & CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 import os
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import sys
 import json
 import csv

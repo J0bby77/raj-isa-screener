@@ -126,6 +126,20 @@ def main():
     if a.shm and os.path.isdir(a.shm):
         sys.path.insert(0, a.shm)
 
+    # HARD disk guardrail: the HOME fs (/sessions) is tiny (~12 MB) and holds pip's DEFAULT temp dir + the
+    # yfinance cache (the May-2026 fill surface). Force ALL temp + the yfinance cache onto tmpfs /dev/shm, in
+    # code, independent of whatever the SKILL exported. Nothing this runner does can land on the tight fs.
+    for _d in ("/dev/shm/piptmp", "/dev/shm/yf_cache"):
+        try: os.makedirs(_d, exist_ok=True)
+        except Exception: pass
+    os.environ["TMPDIR"] = "/dev/shm/piptmp"
+    try:
+        import tempfile as _tf; _tf.tempdir = "/dev/shm/piptmp"
+    except Exception: pass
+    try:
+        import yfinance as _yf; _yf.set_tz_cache_location("/dev/shm/yf_cache")
+    except Exception: pass
+
     if not a.skip_preflight:
         pf = preflight(a.shm)
         if pf:
@@ -139,6 +153,12 @@ def main():
     group = a.group or "ADHOC"
     par_group = a.group if a.group in core.BATCH_PARAMS else "OTHER"
     os.makedirs(a.outputs, exist_ok=True)
+    try:
+        _ost = os.statvfs(a.outputs); _ofree = _ost.f_bavail * _ost.f_frsize / 1e6
+        if _ofree < 100:
+            print(f"FALLBACK_TO_COMPOSIO: outputs dir on a critically-low fs ({_ofree:.0f}MB free) — point --outputs at the OneDrive mount"); sys.exit(3)
+    except Exception:
+        pass
     partial = a.partial or os.path.join(a.outputs, f"{run_date}_{group}_screener.partial.json")
 
     state = None

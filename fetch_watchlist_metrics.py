@@ -37,6 +37,10 @@ Depends on: screener_core.py, energy_screener.py (must be in the same directory)
 """
 
 import argparse
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import importlib.util as _iutil
 import json
 import logging

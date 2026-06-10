@@ -33,6 +33,10 @@ Email Template Rules applied here:
 """
 
 import argparse
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import csv
 import os
 import re

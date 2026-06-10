@@ -30,6 +30,10 @@ Email Template Rules (identical to build_email.py):
 """
 
 import argparse
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import csv
 import math
 import os

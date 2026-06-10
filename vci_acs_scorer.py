@@ -23,6 +23,10 @@ Threshold rules (VCI_Asymmetric_Scorecard.md v2.0):
 """
 
 import sys
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 import math
 import json
 import argparse

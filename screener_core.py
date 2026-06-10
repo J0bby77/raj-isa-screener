@@ -15,12 +15,25 @@ import os, sys, re, time, json, math, logging, argparse, traceback
 from io import BytesIO
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# HARD disk guardrail (shared): keep pip temp + the yfinance cache OFF the tiny HOME fs (/sessions, ~12 MB on
+# local; harmless on Composio where /dev/shm also exists). Set BEFORE yfinance is used below.
+import os as _os, tempfile as _tf
+for _d in ("/dev/shm/piptmp", "/dev/shm/yf_cache"):
+    try: _os.makedirs(_d, exist_ok=True)
+    except Exception: pass
+if _os.path.isdir("/dev/shm"):
+    _os.environ.setdefault("TMPDIR", "/dev/shm/piptmp"); _tf.tempdir = "/dev/shm/piptmp"
 from pathlib import Path
 
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+try:
+    yf.set_tz_cache_location("/dev/shm/yf_cache") if _os.path.isdir("/dev/shm") else None
+except Exception:
+    pass
 try:
     import openpyxl
 except ImportError:

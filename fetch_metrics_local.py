@@ -23,6 +23,10 @@ Per-batch outputs are unioned (lists unioned, dicts merged, counts summed) so th
 final file is schema-identical to a single full fetch_watchlist_metrics.run().
 """
 import argparse, json, os, sys, importlib.util, datetime
+try:
+    import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
+except Exception:
+    pass
 
 def load_fwm(script_dir):
     p = os.path.join(script_dir, "fetch_watchlist_metrics.py")
