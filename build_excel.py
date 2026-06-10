@@ -1011,4 +1011,19 @@ def main():
             )
 
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove defaul
+    wb.remove(wb.active)  # remove default sheet
+
+    print(f"[build_excel] Building tabs ...", flush=True)
+    build_summary(wb, df_full, args.run_date, args.group)
+    build_candidates(wb, df_full, args.group, args.run_date)
+    build_scores(wb, df_full, args.group, args.run_date)
+    build_exclusions(wb, df_gates, args.group, args.run_date)
+    build_data_quality(wb, df_full, df_unresolved, args.group, args.run_date)
+    build_diagnostics(wb, df_full, df_const, df_run_qa, df_tech_fails, args.group, args.run_date)
+
+    wb.save(args.output)
+    print(f"[build_excel] Saved: {args.output}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

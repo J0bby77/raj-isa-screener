@@ -1060,4 +1060,59 @@ def main():
     full_data = load_csv(args.full_data)
     print(f"  Loaded {len(full_data)} rows")
 
-    print(f"Loading gate results: {a
+    print(f"Loading gate results: {args.gates}")
+    gate_data = load_csv(args.gates)
+    print(f"  Loaded {len(gate_data)} rows")
+
+    run_qa_rows      = load_csv(args.run_qa)      if args.run_qa      else []
+    unresolved_rows  = load_csv(args.unresolved)  if args.unresolved  else []
+    tech_fail_rows   = load_csv(args.tech_fails)  if args.tech_fails  else []
+
+    html_body = build_email_body(
+        group        = args.group,
+        run_date     = args.run_date,
+        full_data    = full_data,
+        gate_data    = gate_data,
+        retro_path   = args.retrospective,
+        run_qa_rows  = run_qa_rows,
+        unresolved_rows = unresolved_rows,
+        tech_fail_rows  = tech_fail_rows,
+    )
+
+    with open(args.output, "w", encoding="ascii", errors="xmlcharrefreplace") as fh:
+        fh.write(html_body)
+
+    print(f"[build_email] Saved: {args.output}")
+    print(f"[build_email] REMINDER: pass body with is_html=true in GMAIL_SEND_EMAIL")
+
+
+if __name__ == "__main__":
+    main()
+    print(f"Loading gate results: {args.gates}")
+    gate_data = load_csv(args.gates)
+    print(f"  Loaded {len(gate_data)} rows")
+
+    run_qa_rows     = load_csv(args.run_qa)     if args.run_qa     else []
+    unresolved_rows = load_csv(args.unresolved) if args.unresolved else []
+    tech_fail_rows  = load_csv(args.tech_fails) if args.tech_fails else []
+
+    html_body = build_email_body(
+        group           = args.group,
+        run_date        = args.run_date,
+        full_data       = full_data,
+        gate_data       = gate_data,
+        retro_path      = args.retrospective,
+        run_qa_rows     = run_qa_rows,
+        unresolved_rows = unresolved_rows,
+        tech_fail_rows  = tech_fail_rows,
+    )
+
+    with open(args.output, "w", encoding="ascii", errors="xmlcharrefreplace") as fh:
+        fh.write(html_body)
+
+    print(f"[build_email] Saved: {args.output}")
+    print("[build_email] REMINDER: pass body with is_html=true in GMAIL_SEND_EMAIL")
+
+
+if __name__ == "__main__":
+    main()
