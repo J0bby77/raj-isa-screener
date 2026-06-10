@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-05-25",
+  "last_updated": "2026-06-10",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -10,7 +10,7 @@
         "attempts": 1022,
         "successes": 1020,
         "success_rate": 0.998,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 505,
         "last_run_successes": 504,
         "last_run_rate": 0.998
@@ -20,7 +20,7 @@
         "attempts": 944,
         "successes": 940,
         "success_rate": 0.996,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 427,
         "last_run_successes": 424,
         "last_run_rate": 0.993
@@ -30,7 +30,7 @@
         "attempts": 944,
         "successes": 944,
         "success_rate": 1.0,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 427,
         "last_run_successes": 427,
         "last_run_rate": 1.0
@@ -40,7 +40,7 @@
         "attempts": 944,
         "successes": 939,
         "success_rate": 0.995,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 427,
         "last_run_successes": 424,
         "last_run_rate": 0.993
@@ -50,7 +50,7 @@
         "attempts": 352,
         "successes": 330,
         "success_rate": 0.938,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 163,
         "last_run_rate": 0.982
@@ -60,7 +60,7 @@
         "attempts": 352,
         "successes": 346,
         "success_rate": 0.983,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 160,
         "last_run_rate": 0.964
@@ -70,7 +70,7 @@
         "attempts": 352,
         "successes": 336,
         "success_rate": 0.955,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 155,
         "last_run_rate": 0.934
@@ -80,7 +80,7 @@
         "attempts": 352,
         "successes": 340,
         "success_rate": 0.966,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 160,
         "last_run_rate": 0.964
@@ -90,7 +90,7 @@
         "attempts": 352,
         "successes": 346,
         "success_rate": 0.983,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 160,
         "last_run_rate": 0.964
@@ -100,7 +100,7 @@
         "attempts": 352,
         "successes": 352,
         "success_rate": 1.0,
-        "last_run": "2026-05-16",
+        "last_run": "2026-06-10",
         "last_run_attempts": 166,
         "last_run_successes": 166,
         "last_run_rate": 1.0
@@ -1026,7 +1026,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq&download=true",
         "parse_path": "r.json()[\"data\"][\"rows\"]",
         "filter": "marketCap > $2bn applied at sourcing time",
-        "expected_count": "~1,100–1,300 post-filter",
+        "expected_count": "~1,100\u20131,300 post-filter",
         "status": "confirmed_working",
         "confirmed_date": "2026-05-22",
         "notes": "Returns all ~4,141 Nasdaq-listed stocks; $2bn market cap filter applied during fetch reduces to ~1,131. First used as fallback on 2026-05-22 run after ONEQ WAF block; now designated primary."
@@ -1036,7 +1036,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq",
         "parse_path": "r.json()[\"data\"][\"table\"][\"rows\"]",
         "status": "confirmed_working",
-        "notes": "Same endpoint without download=true param — different JSON parse path."
+        "notes": "Same endpoint without download=true param \u2014 different JSON parse path."
       },
       "dead_sources": [
         {
@@ -1054,7 +1054,10 @@
         "url": "https://etf.dws.com/etfdata/export/LUX/ENG/excel/product/constituent/LU0328475792/",
         "etf_isin": "LU0328475792",
         "etf_name": "Xtrackers STOXX Europe 600 UCITS ETF 1C",
-        "headers": {"User-Agent": "Mozilla/5.0", "Referer": "https://etf.dws.com/en-lu/LU0328475792-stoxx-europe-600-ucits-etf-1c/"},
+        "headers": {
+          "User-Agent": "Mozilla/5.0",
+          "Referer": "https://etf.dws.com/en-lu/LU0328475792-stoxx-europe-600-ucits-etf-1c/"
+        },
         "format": "XLSX",
         "data_starts_row": 5,
         "equity_filter": "row[6] == 'Equities'",
@@ -1069,10 +1072,10 @@
         "name": "stoxx_com_html_scrape",
         "url": "https://stoxx.com/index/sxxp/?components=true",
         "format": "HTML_table",
-        "fields": "Company, Supersector, Country, Weight — NO ISINs or tickers",
+        "fields": "Company, Supersector, Country, Weight \u2014 NO ISINs or tickers",
         "expected_count": "600 rows",
         "status": "confirmed_working_limited",
-        "notes": "Last resort only — no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
+        "notes": "Last resort only \u2014 no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
       },
       "dead_sources": [
         {
@@ -1097,7 +1100,7 @@
       ]
     }
   },
-  "_last_run_notes": "OTHER run 2026-06-05: 52 constituents (IBrX 50 only — TSX CONSTITUENT_SOURCE_FAILURE html5lib missing; IPC35 CONSTITUENT_SOURCE_FAILURE S&P DJI 403 + BMV fallback returned 4 invalid rows). 12 gate passers. 2 Strong Buys: LREN3.SA 47/54, TOTS3.SA 45/54. Composio mode (local /sessions disk 100%). .SA overlay 5yr history 404 errors for all high-score stocks. Retrospective: 20260605_OTHER_retrospective.md.",
+  "_last_run_notes": "SP500 run 2026-06-10 (LOCAL-PRIMARY, screener_local.py): 503 constituents (SPY SSGA XLSX), 149 scored, 354 excluded (Gate1=95, Gate2=51, Gate3=36, Gate4=155, GATE_DATA_UNRESOLVED=17), 0 technical failures, accounted=503 (100%). 30 Strong Buys; top PTC 51/54, TTD 51/54, ADBE 50/54. gate4_concentration=False. No fallback triggered despite /sessions disk at 100% (tmpfs /dev/shm install as designed). Retrospective: 20260610_SP500_retrospective.md.",
   "runs": [
     {
       "run_date": "2026-05-22",
@@ -1203,7 +1206,7 @@
         {
           "severity": "H",
           "event": "CONSTITUENT_SOURCE_FAILURE",
-          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward — Xtrackers XLSX now primary)"
+          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward \u2014 Xtrackers XLSX now primary)"
         },
         {
           "severity": "M",
@@ -1232,9 +1235,21 @@
       "disk_trigger": "DISK_CRITICAL_100pct",
       "constituents_fetched": 52,
       "constituent_sources": {
-        "TSX": {"status": "CONSTITUENT_SOURCE_FAILURE", "reason": "html5lib missing in Composio; XIC BlackRock CSV 404", "count": 0},
-        "IBRX50": {"status": "success", "source": "B3_JSON_API", "count": 50},
-        "IPC35": {"status": "CONSTITUENT_SOURCE_FAILURE", "reason": "S&P DJI XLS 403; BMV fallback 4 rows (2 invalid: ESTADISTICA.MX, INDICES.MX)", "count": 2}
+        "TSX": {
+          "status": "CONSTITUENT_SOURCE_FAILURE",
+          "reason": "html5lib missing in Composio; XIC BlackRock CSV 404",
+          "count": 0
+        },
+        "IBRX50": {
+          "status": "success",
+          "source": "B3_JSON_API",
+          "count": 50
+        },
+        "IPC35": {
+          "status": "CONSTITUENT_SOURCE_FAILURE",
+          "reason": "S&P DJI XLS 403; BMV fallback 4 rows (2 invalid: ESTADISTICA.MX, INDICES.MX)",
+          "count": 2
+        }
       },
       "gate1_excluded": 10,
       "gate2_excluded": 8,
@@ -1245,7 +1260,10 @@
       "gate_passers": 12,
       "scored": 12,
       "strong_buys": 2,
-      "strong_buy_tickers": ["LREN3.SA", "TOTS3.SA"],
+      "strong_buy_tickers": [
+        "LREN3.SA",
+        "TOTS3.SA"
+      ],
       "top_score": 47,
       "top_ticker": "LREN3.SA",
       "hard_gate_fails": 1,
@@ -1260,6 +1278,38 @@
       "elapsed_s": 192.5,
       "excel_file": "Growth Stock Analysis OTHER W-e 05-Jun-26.xlsx",
       "retrospective_file": "20260605_OTHER_retrospective.md"
+    },
+    {
+      "run_date": "2026-06-10",
+      "group": "SP500",
+      "task_id": "isa-sp500-sat1",
+      "run_mode": "local",
+      "constituent_source": "SPY_SSGA_XLSX",
+      "constituents_fetched": 503,
+      "accounted": 503,
+      "gate1_excluded": 95,
+      "gate2_excluded": 51,
+      "gate3_excluded": 36,
+      "gate4_excluded": 155,
+      "gate_data_unresolved": 17,
+      "scored": 149,
+      "technical_failures": 0,
+      "candidate_rankable": 107,
+      "hard_gate_fails": 19,
+      "unresolved_hard_gate": 2,
+      "mandatory_minimum_fails": 21,
+      "strong_buys": 30,
+      "top_score": 51,
+      "top_tickers": [
+        "PTC",
+        "TTD",
+        "ADBE"
+      ],
+      "high_score_overlay_stocks": 66,
+      "gate4_concentration_warning": false,
+      "excel_file": "Growth Stock Analysis SP500 W-e 10-Jun-26.xlsx",
+      "retrospective_file": "20260610_SP500_retrospective.md",
+      "notes": "Local-primary completed; /sessions disk 100% but tmpfs install prevented fill; no Composio fallback."
     }
   ]
 }
