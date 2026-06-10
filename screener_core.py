@@ -1562,6 +1562,11 @@ def screen_group_standard(constituents_df, info_map, stmt_map, save_csv_fn=None)
 
     passers_df    = pd.DataFrame(passers).reset_index(drop=True)
     exclusions_df = pd.DataFrame(exclusions).reset_index(drop=True)
+    # Attach yfinance sector/industry to every exclusion row (the bare constituent row
+    # carries neither for most indices). info_map holds the values used during gating.
+    if not exclusions_df.empty:
+        exclusions_df["sector"]   = exclusions_df["ticker"].map(lambda t: (info_map.get(t, {}) or {}).get("sector", "") or "")
+        exclusions_df["industry"] = exclusions_df["ticker"].map(lambda t: (info_map.get(t, {}) or {}).get("industry", "") or "")
     return passers_df, exclusions_df, gate_data
 
 
@@ -1666,6 +1671,11 @@ def screen_group_nasdaq(constituents_df, outputs_dir, group, run_date):
     all_excl = phase1_excl + phase2_excl
     passers_df    = pd.DataFrame(phase2_passers).reset_index(drop=True)
     exclusions_df = pd.DataFrame(all_excl).reset_index(drop=True)
+    # Attach yfinance sector/industry to every exclusion row (constituent feed has no industry
+    # and we prefer the yfinance sector used during gating).
+    if not exclusions_df.empty:
+        exclusions_df["sector"]   = exclusions_df["ticker"].map(lambda t: (info_map.get(t, {}) or {}).get("sector", "") or "")
+        exclusions_df["industry"] = exclusions_df["ticker"].map(lambda t: (info_map.get(t, {}) or {}).get("industry", "") or "")
     log.info(f"NASDAQ Phase 2 complete: {len(passers_df)} gate passers, {len(all_excl)} total excluded")
     return passers_df, exclusions_df, gate_data, info_map, stmt_map
 
@@ -2447,9 +2457,10 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     # ── Additional info fields ────────────────────────────────────────────
     out["analyst_rating"] = info.get("recommendationKey", "")
     out["num_analysts"]   = safe_float(info.get("numberOfAnalystOpinions"))
-    cal = info.get("calendar")
-    if isinstance(cal, dict):
-        out["next_earnings"] = str(cal.get("Earnings Date", ""))
+    # next_earnings: phase3 fetch merges it into `info` (run loop: info = {**info_map, **d}),
+    # so read it directly here. (Previously read info["calendar"], which is never present on
+    # the .info dict, leaving next_earnings blank for every stock.)
+    out["next_earnings"] = info.get("next_earnings", "") or "Unknown"
     out["currency"] = info.get("currency", "")
 
     # ── Partial Part B score (10 base + up to 2 conditional) ─────────────
@@ -2767,39 +2778,18 @@ def run_overlays(ticker_sym, info, income_stmt, cashflow, balance_sheet,
                  scoring_data, part_a_out, geography):
     """Run all 7 overlays. Time cap enforced by caller."""
     out = {}
-    biz = str(info.get("longBusinessSummary", "") or "").lower()
 
-    # 1. Organic Revenue Growth
-    if any(k in biz for k in ["organic", "like-for-like", "constant currency", "underlying revenue"]):
-        out.update({"organic_rev_status": "reported_likely_organic", "organic_rev_source": "yfinance_summary"})
-    elif not any(k in biz for k in ["acqui", "merger", "currency"]):
-        out.update({"organic_rev_status": "reported_likely_organic", "organic_rev_source": "no_ma_fx_detected"})
-    else:
-        out.update({"organic_rev_status": "unresolved", "organic_rev_source": "requires_transcript_check"})
-    out["organic_rev_growth"] = None
-
-    # 2. Recurring Revenue
-    sector_ind = str(info.get("sector","") or "").lower() + " " + str(info.get("industry","") or "").lower()
-    if any(k in sector_ind for k in ["manufacturing", "commodity", "distribution", "diversified industrial", "mining"]):
-        out.update({"recurring_rev_status": "not_applicable", "recurring_rev_source": "sector_exclusion",
-                    "recurring_rev_pct": None, "recurring_confirmed": False})
-    elif any(k in biz for k in ["subscription", "arr", "mrr", "recurring", "saas", "contract"]):
-        out.update({"recurring_rev_status": "disclosed_pct", "recurring_rev_source": "yfinance_summary",
-                    "recurring_confirmed": True, "recurring_rev_pct": None})
-    else:
-        out.update({"recurring_rev_status": "unresolved", "recurring_rev_source": "yfinance_summary",
-                    "recurring_confirmed": False, "recurring_rev_pct": None})
-
-    # 3–7
+    # organic_rev_growth, recurring_rev_pct and peg_3yr removed 10-Jun-26 - none are
+    # obtainable from yfinance (organic growth & recurring-rev % are disclosure-only;
+    # a true 3yr-forward EPS CAGR needs +2y/+3y estimates yfinance does not provide).
+    # See _FIX_CHECKPOINT_overlays_exclusions.md.
     out.update(overlay_estimate_revisions(ticker_sym, scoring_data, info))
     out.update(compute_wacc(ticker_sym, info, income_stmt, balance_sheet, part_a_out))
-    out.update(compute_peg_3yr(ticker_sym, scoring_data, geography))
     out.update(compute_val_hist(ticker_sym, info, scoring_data, income_stmt, cashflow))
     out.update(overlay_trailing_pe(ticker_sym, info))
 
     unresolved = [n for n, k in [
-        ("organic_rev", "organic_rev_status"), ("recurring_rev", "recurring_rev_status"),
-        ("est_rev", "est_rev_status"), ("wacc", "wacc_status"), ("peg_3yr", "peg_3yr_status"),
+        ("est_rev", "est_rev_status"), ("wacc", "wacc_status"),
         ("val_hist", "val_hist_status"), ("trailing_pe", "trailing_pe_status"),
     ] if out.get(k) in ("unresolved", "beta_unresolved", "insufficient_history", "insufficient_analysts")]
     out["overlay_status"]      = "partial" if unresolved else "complete"
@@ -2833,8 +2823,8 @@ FIELD_MAP = [
     "score_b_fwd_pe", "score_b_ev_ebitda", "score_b_price_fcf", "score_b_fcf_yield",
     "score_b_earn_yield", "score_b_52wk", "score_b_div_payout", "score_b_fwd_eps",
     "score_b_target_upside", "score_b_stress",
-    "organic_rev_growth", "recurring_rev_pct", "est_rev_direction",
-    "wacc_pct", "roic_vs_wacc_spread", "peg_3yr_cagr",
+    "est_rev_direction",
+    "wacc_pct", "roic_vs_wacc_spread",
     "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
     "trailing_pe", "val_hist_pe_status", "overlay_status",
     "qualitative_commentary", "gate_code", "gate_reason",
@@ -2859,8 +2849,8 @@ def _to_row(scored, gate_d, constituent_row, overlay_d=None):
     row["gate_code"]   = gate_d.get("gate_code", "")
     row["gate_reason"] = gate_d.get("gate_reason", "")
     if overlay_d:
-        for oc in ["organic_rev_growth", "recurring_rev_pct", "est_rev_direction",
-                   "wacc_pct", "roic_vs_wacc_spread", "peg_3yr_cagr",
+        for oc in ["est_rev_direction",
+                   "wacc_pct", "roic_vs_wacc_spread",
                    "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
                    "trailing_pe", "val_hist_pe_status", "overlay_status"]:
             row[oc] = overlay_d.get(oc)

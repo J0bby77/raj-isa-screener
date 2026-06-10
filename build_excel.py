@@ -189,6 +189,16 @@ def pct(v, dec=1):
         return f"{f*100:.{dec}f}%"
     except: return "N/A"
 
+def pct_already(v, dec=1):
+    """For values ALREADY stored as a percentage number (e.g. -78.8 -> '-78.8%').
+    screener_core stores val_hist premium/discount fields x100, so they must NOT be
+    multiplied by 100 again (that produced the -7880% 'thousands' display bug)."""
+    try:
+        f = float(v)
+        if pd.isna(f): return "N/A"
+        return f"{f:.{dec}f}%"
+    except: return "N/A"
+
 def mult(v, dec=1):
     try:
         f = float(v)
@@ -369,15 +379,14 @@ SUMMARY_COLS = [
     ("",                           "Analyst Rating",     "analyst_rating",           s,                 True),
     ("",                           "# Analysts",         "num_analysts",             score_int,         False),
     ("",                           "Next Earnings",      "next_earnings",            s,                 True),
-    # Group 5 — High-Score Overlays (9 overlays + commentary)
-    ("Group 5 — High-Score Overlays", "Organic Rev Growth",  "organic_rev_growth",       s,             False),
-    ("",                               "Recurring Rev %",     "recurring_rev_pct",        s,             False),
-    ("",                               "Est Rev Direction",   "est_rev_direction",        s,             True),
+    # Group 5 — High-Score Overlays (6 overlays + commentary)
+    # organic_rev_growth, recurring_rev_pct, peg_3yr removed 10-Jun-26 (not yfinance-obtainable).
+    # P/E & P/FCF vs 3yr avg use pct_already (values are stored x100 by screener_core).
+    ("Group 5 — High-Score Overlays", "Est Rev Direction",   "est_rev_direction",        s,             True),
     ("",                               "WACC %",              "wacc_pct",                 lambda v: num(v, 1, "%"), False),
     ("",                               "ROIC vs WACC",        "roic_vs_wacc_spread",      lambda v: num(v, 1, "pp"), False),
-    ("",                               "PEG 3yr Fwd",         "peg_3yr_cagr",             peg_fmt,       False),
-    ("",                               "P/E vs 3yr Avg",      "val_hist_pe_premium_disc", pct,           False),
-    ("",                               "P/FCF vs 3yr Avg",    "val_hist_pfcf_premium_disc", pct,         False),
+    ("",                               "P/E vs 3yr Avg",      "val_hist_pe_premium_disc", pct_already,   False),
+    ("",                               "P/FCF vs 3yr Avg",    "val_hist_pfcf_premium_disc", pct_already, False),
     ("",                               "Trailing P/E",        "trailing_pe",              trailing_pe_fmt, False),
     ("",                               "Commentary",          "qualitative_commentary",   s,             True),
 ]
