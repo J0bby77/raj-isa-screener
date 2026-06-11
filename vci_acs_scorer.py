@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 vci_acs_scorer.py — VCI Part A Auto-Scorer + ACS4 Calculator
-Version: 1.0 | June 2026
+Version: 1.1 | June 2026 (ACS8 now computed in-scorer (3yr range + FV-asymmetry); ACS4 uses effective denominator; emits acs8/range_position_score/a10/a11)
 Implements VCI_Asymmetric_Scorecard.md v2.0 (Part A, 13 metrics, max 26 points)
 
 Automatable from yfinance (11 of 13):  A1 A2 A3 A4 A5 A6 A7 A8 A9 A12 A13
@@ -232,6 +232,20 @@ def pull_data(sym):
         d['q_rev'] = q_rev   # [most_recent, q-1, q-2, ..., q-7]
     except Exception:
         d['q_rev'] = []
+
+    # 3yr price range for ACS8 (Entry Risk-Reward)
+    try:
+        hist = t.history(period='3y')
+        closes = [safe(c) for c in hist['Close'].tolist()] if hist is not None and not hist.empty else []
+        closes = [gbp_fix(c, sym) for c in closes if c is not None]
+        if len(closes) >= 2:
+            d['range3y_lo'] = min(closes)
+            d['range3y_hi'] = max(closes)
+            d['hist3y_months'] = len(closes) // 21  # ~21 trading days/month
+        else:
+            d['range3y_lo'] = None; d['range3y_hi'] = None; d['hist3y_months'] = 0
+    except Exception:
+        d['range3y_lo'] = None; d['range3y_hi'] = None; d['hist3y_months'] = 0
 
     return d
 
@@ -594,6 +608,54 @@ def score_a13(d):
         return MR(0, raw, 'GP growing slower than revenue')
 
 
+def compute_3yr_pos(d):
+    """Return 3yr price-range position (0-100) or None if unavailable."""
+    lo = d.get('range3y_lo'); hi = d.get('range3y_hi'); px = d.get('price')
+    if lo is None or hi is None or px is None or hi <= lo:
+        return None
+    return (px - lo) / (hi - lo) * 100.0
+
+
+def score_acs8(d, bottleneck_fv=None, has_catalyst=False):
+    """
+    ACS8 — Entry Risk-Reward (0-10). v1.1 redesign.
+    PRIMARY: upside to VCI bottleneck fair value (the asymmetry that matters).
+    FALLBACK: 3yr price-range position, COMPRESSED (9..5) so an already-inflecting
+              bottleneck name is not double-penalised for having run (Q5 fix).
+    Catalyst premium: +2 (cap 10) when a named catalyst <12mo AND B2>=2 (passed via flag).
+    Returns MR-like dict: {'score','raw','pos3y','method'}.
+    """
+    price = d.get('price')
+    pos3y = compute_3yr_pos(d)
+    prem = 2 if has_catalyst else 0
+
+    # PRIMARY — fair-value asymmetry
+    if bottleneck_fv is not None and price and price > 0:
+        upside = bottleneck_fv / price - 1.0
+        if   upside >= 2.00: base = 10
+        elif upside >= 1.00: base = 8
+        elif upside >= 0.50: base = 6
+        elif upside >= 0.25: base = 5
+        elif upside >= 0.10: base = 4
+        else:                base = 2
+        score = min(10, base + prem)
+        raw = f'FV-ASYMMETRY: {upside*100:+.0f}% upside to bottleneck FV {bottleneck_fv:.2f} (base {base}, +{prem} catalyst)'
+        return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': 'fair_value'}
+
+    # FALLBACK — compressed 3yr-range position (no FV available)
+    if pos3y is None:
+        # no 3yr data at all -> neutral 6 (do not zero; do not reward)
+        return {'score': min(10, 6 + prem), 'raw': '3yr range N/A — neutral base 6', 'pos3y': None, 'method': 'neutral'}
+    if   pos3y <= 20: base = 9
+    elif pos3y <= 40: base = 8
+    elif pos3y <= 60: base = 7
+    elif pos3y <= 80: base = 6
+    else:             base = 5
+    score = min(10, base + prem)
+    raw = f'3YR-RANGE FALLBACK (no FV): pos {pos3y:.0f}% (base {base}, +{prem} catalyst)'
+    return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': '3yr_range'}
+
+
 # ---------------------------------------------------------------------------
 # Pre-inflection override check
 # ---------------------------------------------------------------------------
@@ -616,7 +678,8 @@ def check_pre_inflection_override(scores, d):
 # ---------------------------------------------------------------------------
 # Main scoring orchestrator
 # ---------------------------------------------------------------------------
-def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=None):
+def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=None,
+                    bottleneck_fv=None, has_catalyst=False):
     """Pull data and score all 13 Part A metrics. Returns (d, scores_dict, summary)."""
     print(f'\n  Fetching data for {sym}...', end='', flush=True)
     d = pull_data(sym)
@@ -641,6 +704,7 @@ def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=
         'A13': score_a13(d),
     }
 
+    d['_acs8'] = score_acs8(d, bottleneck_fv=bottleneck_fv, has_catalyst=has_catalyst)
     return d, scores
 
 
@@ -656,8 +720,11 @@ def compute_totals(scores):
     # Pre-inflection override: raw_score >= 7 (checked externally with A/B/C conditions)
     override_eligible = raw_score >= 7
 
-    # ACS4: (raw_score / 26) * 15, rounded to nearest 0.5
-    acs4 = round((raw_score / 26) * 15 * 2) / 2  # round to 0.5
+    # ACS4: (raw_score / effective_denom) * 15, rounded to nearest 0.5.
+    # Uses the effective denominator (26 minus 2 per N/A metric) so unmeasured
+    # manual fields (A10/A11) do not deflate ACS4 — aligns with the null-handling rule.
+    _denom = effective_denom if effective_denom and effective_denom > 0 else 26
+    acs4 = round((raw_score / _denom) * 15 * 2) / 2  # round to 0.5
 
     return {
         'raw_score': raw_score,
@@ -731,7 +798,10 @@ def print_scorecard(sym, d, scores, totals, override_check=None):
     if manual > 0:
         print(f'  *** {manual} MANUAL METRIC{"S" if manual > 1 else ""} PENDING (A10/A11) — totals exclude these ***')
     print()
-    print(f'  ACS4 FORMULA:   ({raw}/26) × 15 = {acs4:.1f}  (rounded to nearest 0.5)')
+    print(f'  ACS4 FORMULA:   ({raw}/{denom}) × 15 = {acs4:.1f}  (effective denom; rounded to 0.5)')
+    _a8 = d.get('_acs8')
+    if _a8:
+        print(f'  ACS8 (Entry R-R): {_a8["score"]}/10  [{_a8["raw"]}]')
     print()
 
     # Threshold check
@@ -780,6 +850,13 @@ def build_json_output(sym, d, scores, totals, override_check=None):
             'applies': totals['override_eligible'] and a_met and b_met and c_met,
         },
         'acs4': totals['acs4'],
+        'acs8': d.get('_acs8', {}).get('score'),
+        'range_position_score': d.get('_acs8', {}).get('score'),
+        'acs8_method': d.get('_acs8', {}).get('method'),
+        'acs8_raw': d.get('_acs8', {}).get('raw'),
+        'three_yr_pos_pct': d.get('_acs8', {}).get('pos3y'),
+        'a10_score': scores['A10'].score,
+        'a11_score': scores['A11'].score,
         'part_a_str': f'{totals["raw_score"]}/{totals["effective_denom"]}',
     }
 
@@ -803,6 +880,22 @@ def parse_kv_arg(arg_str):
     return result
 
 
+def parse_fv_arg(arg_str):
+    """Parse 'TICKER:14.0,ONT.L:1.35' -> {'TICKER':14.0,...} (float values)."""
+    if not arg_str:
+        return {}
+    out = {}
+    for part in arg_str.split(','):
+        part = part.strip()
+        if ':' in part:
+            k, v = part.split(':', 1)
+            try:
+                out[k.strip().upper()] = float(v.strip())
+            except ValueError:
+                pass
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='VCI Part A Auto-Scorer — applies VCI_Asymmetric_Scorecard.md v2.0 rules'
@@ -816,11 +909,17 @@ def main():
                         help='Tickers where A9 5-10%%/yr dilution is a strategic capital raise')
     parser.add_argument('--json-out', default=None, metavar='PATH',
                         help='Write scored JSON to file (for build_vci_email.py candidates section)')
+    parser.add_argument('--bottleneck-fv', default=None,
+                        help='ACS8 fair-value asymmetry: "TICKER:14.0,ONT.L:1.35" (natural unit; GBP for .L)')
+    parser.add_argument('--catalyst', nargs='*', default=None, metavar='TICKER',
+                        help='Tickers with a named catalyst <12mo AND B2>=2 (applies ACS8 +2 catalyst premium)')
     args = parser.parse_args()
 
     a10_map = parse_kv_arg(args.a10) if args.a10 else {}
     a11_map = parse_kv_arg(args.a11) if args.a11 else {}
     a9_strategic = [t.upper() for t in args.a9_strategic] if args.a9_strategic else []
+    fv_map = parse_fv_arg(args.bottleneck_fv) if args.bottleneck_fv else {}
+    catalyst_set = {t.upper() for t in args.catalyst} if args.catalyst else set()
 
     print(f'\nVCI Part A Auto-Scorer | {len(args.tickers)} candidate(s)')
     print(f'Scorecard version: VCI_Asymmetric_Scorecard.md v2.0')
@@ -839,7 +938,10 @@ def main():
         a10_override = a10_map.get(sym_up) or a10_map.get(sym_up.replace('.L', ''))
         a11_override = a11_map.get(sym_up) or a11_map.get(sym_up.replace('.L', ''))
 
-        d, scores = score_candidate(sym, a10_override, a11_override, a9_strategic)
+        fv_override = fv_map.get(sym_up) or fv_map.get(sym_up.replace('.L', ''))
+        has_cat = (sym_up in catalyst_set) or (sym_up.replace('.L','') in catalyst_set)
+        d, scores = score_candidate(sym, a10_override, a11_override, a9_strategic,
+                                    bottleneck_fv=fv_override, has_catalyst=has_cat)
         totals = compute_totals(scores)
         override_check = check_pre_inflection_override(scores, d)
         print_scorecard(sym, d, scores, totals, override_check)

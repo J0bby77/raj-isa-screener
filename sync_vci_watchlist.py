@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 sync_vci_watchlist.py  --  VCI Watchlist Sync + Part A Refresh
-Version: 1.0  |  2026-06-04
+Version: 1.1  |  2026-06-10 (ACS8 sourced from scorer; A10/A11 + bottleneck-FV passed through and persisted; reliability guard never degrades a score on a missing/inconsistent breakdown)
 
 Purpose:
     Reads project_isa_vci_watchlist.md (the authoritative VCI memory file,
@@ -37,6 +37,76 @@ from datetime import datetime
 # Markdown parser — reads project_isa_vci_watchlist.md
 # ---------------------------------------------------------------------------
 
+def _header_map(header_cells):
+    """Map known column names -> index from a detected header row. Returns {} if not a header."""
+    aliases = {
+        "rank": "rank", "#": "rank",
+        "ticker": "ticker", "symbol": "ticker",
+        "company": "company", "name": "company",
+        "exchange": "exchange", "exch": "exchange",
+        "acs": "acs_score", "acs score": "acs_score",
+        "3yr pos": "three_yr_pos_pct", "3yr pos %": "three_yr_pos_pct",
+        "3yr_pos_pct": "three_yr_pos_pct", "3yr position": "three_yr_pos_pct",
+        "nvidia signals": "nvidia_signals", "nvidia": "nvidia_signals",
+        "classification": "classification", "class": "classification",
+        "entry level": "entry_level_str", "entry": "entry_level_str",
+        "last scored": "last_scored", "scored": "last_scored",
+        "status": "status", "note": "note", "notes": "note",
+    }
+    cmap = {}
+    for i, c in enumerate(header_cells):
+        key = aliases.get(c.strip().lower())
+        if key and key not in cmap:
+            cmap[key] = i
+    # Require at least ticker + acs to treat as a usable header
+    return cmap if ("ticker" in cmap and "acs_score" in cmap) else {}
+
+
+def _parse_by_header(table_lines):
+    """Parse rows using a detected header map. Returns list[dict] or None if no header."""
+    cmap = {}
+    rows = []
+    for line in table_lines:
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        if re.match(r"^\|[\s\-\|:]+\|$", line):
+            continue  # separator
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cmap:
+            cmap = _header_map(cells)
+            if cmap:
+                continue  # this was the header row
+            else:
+                continue  # skip until a header is found
+        def g(key, default=""):
+            i = cmap.get(key)
+            return cells[i] if (i is not None and i < len(cells)) else default
+        try:
+            rank = int(re.search(r"\d+", g("rank", "")).group())
+        except (AttributeError, ValueError):
+            continue
+        ticker = g("ticker")
+        if not ticker or ticker.lower() in ("ticker", ""):
+            continue
+        acs_m = re.search(r"\d+", g("acs_score", ""))
+        exchange = ticker.split(".")[-1] if "." in ticker else g("exchange").upper()
+        entry_str = g("entry_level_str")
+        currency = "GBP" if ("p" in entry_str.lower() or "£" in entry_str or ".L" in ticker) else "USD"
+        rows.append({
+            "rank": rank, "ticker": ticker, "company": g("company"),
+            "exchange": exchange,
+            "acs_score": int(acs_m.group()) if acs_m else None,
+            "three_yr_pos_pct": g("three_yr_pos_pct"),
+            "nvidia_signals": g("nvidia_signals"),
+            "classification": g("classification").upper(),
+            "entry_level_str": entry_str, "entry_currency": currency,
+            "entry_level_midpoint": _parse_entry_level_midpoint(entry_str, currency),
+            "last_scored": g("last_scored"), "status": g("status"), "note": g("note"),
+        })
+    return rows or None
+
+
 def parse_vci_watchlist_md(md_path: str) -> list[dict]:
     """
     Parse the markdown table under '## Current Asymmetric Watchlist' in the
@@ -50,17 +120,39 @@ def parse_vci_watchlist_md(md_path: str) -> list[dict]:
     with open(md_path, encoding="utf-8") as f:
         content = f.read()
 
-    # Find the table section
-    section_match = re.search(
-        r"##\s*Current Asymmetric Watchlist.*?(\|.*?\|(?:\n\|.*?\|)*)",
-        content,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not section_match:
-        print("  WARNING: Could not find 'Current Asymmetric Watchlist' table in md file.")
+    # Locate the heading, then collect the contiguous block of pipe-table lines that
+    # follow it (robust to spacing/column variation, unlike a single multiline regex).
+    lines = content.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(r"\s*#{1,6}\s*Current Asymmetric Watchlist", ln, re.IGNORECASE):
+            start = i + 1
+            break
+    if start is None:
+        print("  WARNING: Could not find 'Current Asymmetric Watchlist' heading in md file.")
         return []
 
-    table_text = section_match.group(1)
+    table_lines = []
+    seen_table = False
+    for ln in lines[start:]:
+        if ln.strip().startswith("|"):
+            seen_table = True
+            table_lines.append(ln)
+        elif seen_table and ln.strip() == "":
+            break  # blank line ends the table block
+        elif seen_table:
+            break  # non-table content ends the block
+        elif ln.strip().startswith("#"):
+            break  # next heading before any table -> no table here
+    if not table_lines:
+        print("  WARNING: No pipe-table found under 'Current Asymmetric Watchlist'.")
+        return []
+
+    header_rows = _parse_by_header(table_lines)
+    if header_rows:
+        return header_rows
+
+    table_text = "\n".join(table_lines)
     rows = []
     for line in table_text.splitlines():
         line = line.strip()
@@ -178,7 +270,9 @@ def _parse_entry_level_midpoint(entry_str: str, currency: str) -> float | None:
 
 def refresh_part_a(ticker: str, inv_dir: str,
                    a10_override: str | None = None,
-                   a11_override: str | None = None) -> dict | None:
+                   a11_override: str | None = None,
+                   fv_override: str | None = None,
+                   catalyst: bool = False) -> dict | None:
     """
     Call vci_acs_scorer.py for a single ticker.
     Returns parsed JSON output or None on failure.
@@ -197,6 +291,10 @@ def refresh_part_a(ticker: str, inv_dir: str,
         cmd += ["--a10", a10_override]
     if a11_override:
         cmd += ["--a11", a11_override]
+    if fv_override:
+        cmd += ["--bottleneck-fv", fv_override]
+    if catalyst:
+        cmd += ["--catalyst", ticker]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
@@ -208,6 +306,8 @@ def refresh_part_a(ticker: str, inv_dir: str,
             return None
         with open(tmp_path, encoding="utf-8") as f:
             data = json.load(f)
+        if isinstance(data, list):
+            data = data[0] if data else None
         return data
     except subprocess.TimeoutExpired:
         print(f"  WARNING: vci_acs_scorer.py timed out for {ticker}")
@@ -226,49 +326,66 @@ def refresh_part_a(ticker: str, inv_dir: str,
 
 def recompute_acs(fresh_part_a_data: dict, existing_entry: dict) -> tuple[int, str]:
     """
-    Recompute total ACS from fresh Part A scores and stored Part B scores.
-    Returns (new_acs, new_acs_breakdown_string).
+    Recompute total ACS from fresh Part A (ACS4, ACS8) and stored Part B dimensions.
+
+    Reliability guard (v1.1): a refresh must never DEGRADE a score because the stored
+    breakdown is missing or inconsistent. If the stored breakdown does not parse to all
+    nine dimensions, or the reconstructed total deviates from the stored ACS by >3, the
+    stored ACS is carried forward unchanged. Only when the breakdown is internally
+    consistent do we substitute the freshly-sourced ACS4 and ACS8.
 
     ACS dimensions:
-        ACS1–ACS3, ACS5–ACS7, ACS9  = Part B (carry forward from stored)
-        ACS4 = quantitative financial threshold (Part A)
-        ACS8 = 3yr price range position (Part A)
+        ACS1-3, ACS5-7, ACS9 = Part B (carried forward from stored breakdown)
+        ACS4 = quantitative financial threshold (Part A; refreshed)
+        ACS8 = entry risk-reward / 3yr range or FV-asymmetry (Part A; refreshed)
     """
     stored_breakdown = existing_entry.get("acs_breakdown", "") or ""
+    stored_acs = existing_entry.get("acs_score")
 
-    # Parse stored Part B dimensions from breakdown string
-    # Format example: "ACS1:8 ACS2:6 ACS3:7 ACS4:12 ACS5:8 ACS6:6 ACS7:5 ACS8:8 ACS9:4"
-    def parse_dim(dim_name: str, default: int = 0) -> int:
-        m = re.search(rf"{dim_name}:(\d+)", stored_breakdown)
-        return int(m.group(1)) if m else default
+    def parse_dim(dim_name: str):
+        m = re.search(rf"{dim_name}:([0-9]+(?:\.[0-9]+)?)", stored_breakdown)
+        return float(m.group(1)) if m else None
 
-    acs1 = parse_dim("ACS1")
-    acs2 = parse_dim("ACS2")
-    acs3 = parse_dim("ACS3")
-    acs5 = parse_dim("ACS5")
-    acs6 = parse_dim("ACS6")
-    acs7 = parse_dim("ACS7")
-    acs9 = parse_dim("ACS9")
+    dims = {n: parse_dim(f"ACS{n}") for n in range(1, 10)}
+    a10_stored = parse_dim("A10")
+    a11_stored = parse_dim("A11")
 
-    # Fresh Part A scores
-    acs4 = fresh_part_a_data.get("acs4", fresh_part_a_data.get("part_a_threshold_score", 0))
-    acs8 = fresh_part_a_data.get("acs8", fresh_part_a_data.get("range_position_score", 0))
+    fresh_acs4 = fresh_part_a_data.get("acs4")
+    fresh_acs8 = fresh_part_a_data.get("acs8", fresh_part_a_data.get("range_position_score"))
+    a10_fresh = fresh_part_a_data.get("a10_score")
+    a11_fresh = fresh_part_a_data.get("a11_score")
 
-    new_acs = acs1 + acs2 + acs3 + acs4 + acs5 + acs6 + acs7 + acs8 + acs9
+    partb_present = all(dims[n] is not None for n in (1, 2, 3, 5, 6, 7, 9))
+    reconstructable = partb_present and dims[4] is not None and dims[8] is not None
+    reliable = False
+    if reconstructable and isinstance(stored_acs, (int, float)):
+        recon = sum(dims[n] for n in range(1, 10))
+        reliable = abs(recon - stored_acs) <= 3
 
-    # Apply floor cap if applicable
+    if not reliable:
+        # Carry forward — never degrade on unreliable/absent breakdown.
+        return (int(stored_acs) if isinstance(stored_acs, (int, float)) else 0), stored_breakdown
+
+    new_acs4 = fresh_acs4 if fresh_acs4 is not None else dims[4]
+    new_acs8 = fresh_acs8 if fresh_acs8 is not None else dims[8]
+    new_acs = round(dims[1] + dims[2] + dims[3] + new_acs4 + dims[5] + dims[6]
+                    + dims[7] + new_acs8 + dims[9])
+
     if existing_entry.get("floor_applied"):
         floor_acs = existing_entry.get("floor_acs", existing_entry.get("acs_score", new_acs))
         if isinstance(floor_acs, (int, float)) and new_acs > floor_acs:
             new_acs = int(floor_acs)
 
+    a10v = a10_fresh if a10_fresh is not None else (a10_stored if a10_stored is not None else 0)
+    a11v = a11_fresh if a11_fresh is not None else (a11_stored if a11_stored is not None else 0)
+    def _i(x):
+        return int(x) if float(x).is_integer() else x
     new_breakdown = (
-        f"ACS1:{acs1} ACS2:{acs2} ACS3:{acs3} ACS4:{acs4} "
-        f"ACS5:{acs5} ACS6:{acs6} ACS7:{acs7} ACS8:{acs8} ACS9:{acs9}"
+        f"ACS1:{_i(dims[1])} ACS2:{_i(dims[2])} ACS3:{_i(dims[3])} ACS4:{_i(new_acs4)} "
+        f"ACS5:{_i(dims[5])} ACS6:{_i(dims[6])} ACS7:{_i(dims[7])} ACS8:{_i(new_acs8)} ACS9:{_i(dims[9])} "
+        f"A10:{_i(a10v)} A11:{_i(a11v)}"
     )
-
-    return new_acs, new_breakdown
-
+    return int(new_acs), new_breakdown
 
 # ---------------------------------------------------------------------------
 # Main
@@ -322,19 +439,31 @@ def main():
 
         existing = existing_vci.get(ticker, {})
 
-        # Extract A10/A11 overrides from existing breakdown
-        a10_override = None
-        a11_override = None
-        if existing.get("acs_breakdown"):
-            m10 = re.search(r"A10:(\d+)", existing["acs_breakdown"])
-            m11 = re.search(r"A11:(\d+)", existing["acs_breakdown"])
-            if m10:
-                a10_override = f"{ticker}:{m10.group(1)}"
-            if m11:
-                a11_override = f"{ticker}:{m11.group(1)}"
+        # A10/A11 manual scores: prefer explicit entry fields, fall back to the
+        # breakdown string. Without these the refresh would drop the web/Finnhub-sourced
+        # manual metrics and silently deflate Part A / ACS4.
+        def _entry_dim(field, dim):
+            v = existing.get(field)
+            if v is None and existing.get("acs_breakdown"):
+                m = re.search(rf"{dim}:([0-9]+)", existing["acs_breakdown"])
+                v = int(m.group(1)) if m else None
+            return v
+        a10_val = _entry_dim("a10_score", "A10")
+        a11_val = _entry_dim("a11_score", "A11")
+        a10_override = f"{ticker}:{int(a10_val)}" if a10_val is not None else None
+        a11_override = f"{ticker}:{int(a11_val)}" if a11_val is not None else None
+
+        # Bottleneck fair value (ACS8 primary path) + persisted catalyst-premium flag
+        fv_val = existing.get("bottleneck_fair_value_gbp") if existing.get("entry_currency") == "GBP" \
+                 else existing.get("bottleneck_fair_value_usd")
+        if fv_val is None:
+            fv_val = existing.get("bottleneck_fair_value_usd") or existing.get("bottleneck_fair_value_gbp")
+        fv_override = f"{ticker}:{fv_val}" if fv_val is not None else None
+        catalyst = bool(existing.get("acs8_catalyst_premium"))
 
         # Call scorer
-        scorer_result = refresh_part_a(ticker, args.inv_dir, a10_override, a11_override)
+        scorer_result = refresh_part_a(ticker, args.inv_dir, a10_override, a11_override,
+                                       fv_override=fv_override, catalyst=catalyst)
 
         old_acs = existing.get("acs_score", md_entry["acs_score"])
         fresh_part_a_score = None
@@ -377,6 +506,16 @@ def main():
                                 else existing.get("part_a_score"),
             "part_b_score":     existing.get("part_b_score"),
             "acs_breakdown":    new_breakdown or existing.get("acs_breakdown", ""),
+            "a10_score":        (scorer_result.get("a10_score") if scorer_result else None)
+                                if (scorer_result and scorer_result.get("a10_score") is not None)
+                                else existing.get("a10_score"),
+            "a11_score":        (scorer_result.get("a11_score") if scorer_result else None)
+                                if (scorer_result and scorer_result.get("a11_score") is not None)
+                                else existing.get("a11_score"),
+            "three_yr_pos_pct": (round(scorer_result["three_yr_pos_pct"], 1)
+                                 if (scorer_result and scorer_result.get("three_yr_pos_pct") is not None)
+                                 else existing.get("three_yr_pos_pct")),
+            "acs8_catalyst_premium": existing.get("acs8_catalyst_premium", False),
             "floor_applied":    existing.get("floor_applied", False),
             "floor_reason":     existing.get("floor_reason", ""),
             "thesis_break_summary": existing.get("thesis_break_summary", ""),

@@ -52,6 +52,28 @@ def main():
     ap.add_argument("--branch", default="main")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
+
+    # ---- LOCAL COMPILE GATE (runs ALWAYS — even with no token / --dry-run) -------
+    # A truncated/half-written .py is the recurring failure mode. Validate every local
+    # runtime script here so it is caught at Step 0 of EVERY task, regardless of whether
+    # a GitHub sync actually happens. This protects the LOCAL-PRIMARY path too.
+    _broken = []
+    for _fn in sorted(os.listdir(a.inv_dir)):
+        if not _fn.endswith(".py") or _fn.startswith(("_", "test_")) or _fn in NEVER:
+            continue
+        _p = os.path.join(a.inv_dir, _fn)
+        if not os.path.isfile(_p):
+            continue
+        try:
+            ast.parse(open(_p, encoding="utf-8", errors="replace").read(), filename=_fn)
+        except SyntaxError as e:
+            _broken.append("%s (line %s: %s)" % (_fn, e.lineno, e.msg))
+    if _broken:
+        print("SYNC_ABORTED_INVALID_PY: local script(s) fail to compile (likely a "
+              "truncated/half-written save). Run HALTED; nothing pushed. Fix and re-run: "
+              + "; ".join(_broken))
+        sys.exit(3)
+
     token = read_token(a.inv_dir)
     if not token and not a.dry_run:
         print("SYNC_SKIPPED_NO_TOKEN: add GH_PAT=<fine-grained PAT, contents:write> to Investment Analysis/.env "

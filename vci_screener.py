@@ -2,10 +2,14 @@
 """
 vci_screener.py — VCI Section 2 systematic screener
 Replaces Finviz for theme-based near-52wk-low discovery.
-Uses pre-built curated ticker universe per theme, filters to:
-  - 52wk position <= 30%  (stock within 30% of 52wk low)
-  - Market cap $300M – $50B
+Uses pre-built curated ticker universe per theme. Surfaces the FULL cap-band universe
+tagged by 52wk position — it no longer gates out already-inflecting bottleneck names
+(the old "<=30% of 52wk low" hard filter rewarded falling knives and hid names whose
+thesis had started to be recognised). Filters retained:
+  - Market cap $300M - $50B
   - Sufficient liquidity (price > $0.50 / £0.10)
+Each result is tagged NEAR-LOW (<=30%), MID-RANGE (30-70%) or ELEVATED (>70%).
+Use --near-low-only to restore the legacy <=30% behaviour; --max-pos N for a custom cap.
 
 Usage:
     python vci_screener.py 1           (Theme 1: AI compute substrate)
@@ -204,7 +208,8 @@ UNIVERSE = {
 UK_SUFFIXES = ('.L', '.l')
 MAX_MKTCAP = 50e9
 MIN_MKTCAP = 300e6
-MAX_52WK_POS = 30.0
+NEAR_LOW_MAX = 30.0   # <=30% of 52wk range => NEAR-LOW tag (legacy filter boundary)
+MID_MAX = 70.0        # 30-70% => MID-RANGE; >70% => ELEVATED
 MIN_PRICE = 0.10
 
 
@@ -228,8 +233,17 @@ def safe(val):
         return None
 
 
-def screen_ticker(sym):
-    """Return dict of metrics if passes filters, else None."""
+def position_tag(pos):
+    if pos <= NEAR_LOW_MAX:
+        return 'NEAR-LOW'
+    if pos <= MID_MAX:
+        return 'MID-RANGE'
+    return 'ELEVATED'
+
+
+def screen_ticker(sym, max_pos=None):
+    """Return dict of metrics if passes cap/liquidity filters, else None.
+    max_pos: optional upper 52wk-position cap (legacy behaviour when set to 30)."""
     try:
         t = yf.Ticker(sym)
         info = t.info
@@ -254,7 +268,7 @@ def screen_ticker(sym):
             return None
 
         pos52 = (price - lo52) / (hi52 - lo52) * 100
-        if pos52 > MAX_52WK_POS:
+        if max_pos is not None and pos52 > max_pos:
             return None
 
         p = '£' if is_uk(sym) else '$'
@@ -267,6 +281,7 @@ def screen_ticker(sym):
             'hi52': hi52,
             'lo52': lo52,
             'pos52': pos52,
+            'position_tag': position_tag(pos52),
             'mktcap': mktcap,
         }
     except Exception:
@@ -279,7 +294,7 @@ def fmt_cap(v):
     return f'{v/1e6:.0f}M'
 
 
-def run_themes(theme_ids):
+def run_themes(theme_ids, max_pos=None):
     results = []
     themes_run = []
 
@@ -292,11 +307,12 @@ def run_themes(theme_ids):
         tickers = theme['tickers']
         print(f'\nScreening Theme {tid}: {theme["name"]}')
         print(f'  {theme["description"]}')
-        print(f'  Universe: {len(tickers)} tickers | Filter: 52wk pos <=30%, cap $300M–$50B')
+        _filt = f'52wk pos <={max_pos:.0f}% (legacy)' if max_pos is not None else 'all positions tagged'
+        print(f'  Universe: {len(tickers)} tickers | Filter: cap $300M-$50B, {_filt}')
         print(f'  Fetching data', end='', flush=True)
 
         for sym in tickers:
-            result = screen_ticker(sym)
+            result = screen_ticker(sym, max_pos=max_pos)
             time.sleep(0.15)  # rate limiting
             print('.', end='', flush=True)
             if result:
@@ -314,20 +330,27 @@ def print_results(results):
         print('  Consider: (a) Finviz.com fallback, or (b) web search "[theme] stocks near 52-week low small-cap [year]"')
         return
 
-    results.sort(key=lambda r: r['pos52'])
+    # Sort by theme, then by position (NEAR-LOW first within a theme).
+    results.sort(key=lambda r: (r['theme_id'], r['pos52']))
 
-    print(f'\n{"="*80}')
-    print(f'  SCREENER RESULTS — {len(results)} tickers within 30% of 52wk low, cap $300M–$50B')
-    print(f'{"="*80}')
-    print(f'  {"Ticker":<8} {"Company":<36} {"Exch":<6} {"Price":>8} {"52wk Lo":>8} {"52wk Hi":>8} {"Pos%":>6} {"Cap":>7}  Theme')
-    print(f'  {"-"*7} {"-"*35} {"-"*5} {"-"*8} {"-"*8} {"-"*8} {"-"*6} {"-"*7}  -----')
+    n_low = sum(1 for r in results if r['position_tag'] == 'NEAR-LOW')
+    n_mid = sum(1 for r in results if r['position_tag'] == 'MID-RANGE')
+    n_elev = sum(1 for r in results if r['position_tag'] == 'ELEVATED')
+
+    print(f'\n{"="*92}')
+    print(f'  SCREENER RESULTS - {len(results)} tickers in cap band $300M-$50B '
+          f'(NEAR-LOW {n_low} | MID {n_mid} | ELEVATED {n_elev})')
+    print(f'  ELEVATED names are NOT discarded: an inflecting bottleneck name is a re-score trigger, not a reject.')
+    print(f'{"="*92}')
+    print(f'  {"Ticker":<8} {"Company":<36} {"Exch":<6} {"Price":>8} {"Pos%":>6} {"Position":<10} {"Cap":>7}  Theme')
+    print(f'  {"-"*7} {"-"*35} {"-"*5} {"-"*8} {"-"*6} {"-"*9} {"-"*7}  -----')
 
     for r in results:
         p = r['prefix']
         print(
             f'  {r["ticker"]:<8} {r["name"]:<36} {r["exchange"]:<6} '
-            f'{p}{r["price"]:>7.2f} {p}{r["lo52"]:>7.2f} {p}{r["hi52"]:>7.2f} '
-            f'{r["pos52"]:>5.1f}% {fmt_cap(r["mktcap"]):>7}  T{r["theme_id"]}'
+            f'{p}{r["price"]:>7.2f} {r["pos52"]:>5.1f}% {r["position_tag"]:<10} '
+            f'{fmt_cap(r["mktcap"]):>7}  T{r["theme_id"]}'
         )
 
     print(f'\n  Next step: run vci_batch1_pull.py on these tickers for Part A data.')
@@ -335,7 +358,21 @@ def print_results(results):
 
 
 def main():
-    args = sys.argv[1:]
+    raw = sys.argv[1:]
+    # Extract flags (theme numbers remain positional)
+    max_pos = None
+    if '--near-low-only' in raw:
+        max_pos = NEAR_LOW_MAX
+        raw = [a for a in raw if a != '--near-low-only']
+    if '--max-pos' in raw:
+        i = raw.index('--max-pos')
+        try:
+            max_pos = float(raw[i + 1])
+            del raw[i:i + 2]
+        except (IndexError, ValueError):
+            print('[WARN] --max-pos requires a number; ignoring.')
+            del raw[i:i + 1]
+    args = raw
     if not args:
         print('Usage: python vci_screener.py [theme_number|all] [theme2] ...')
         print('       python vci_screener.py 1')
@@ -344,6 +381,7 @@ def main():
         print()
         print('Themes: 1=AI Compute Substrate  2=AI-Native Workflow  3=Energy Infra for AI')
         print('        4=Biological Computation  5=Spatial Computing  6=Financial Infrastructure')
+        print('Flags:  --near-low-only (legacy <=30%)   --max-pos N (custom 52wk-position cap)')
         sys.exit(1)
 
     if args[0].lower() == 'all':
@@ -360,7 +398,7 @@ def main():
         print('No valid theme IDs provided.')
         sys.exit(1)
 
-    results, themes_run = run_themes(theme_ids)
+    results, themes_run = run_themes(theme_ids, max_pos=max_pos)
     print_results(results)
 
 
