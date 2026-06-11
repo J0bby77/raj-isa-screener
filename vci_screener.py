@@ -37,9 +37,8 @@ import yfinance as yf
 #                3=Energy infra for AI, 4=Biological computation,
 #                5=Spatial computing / physical-digital,
 #                6=Real-time financial infrastructure,
+#                7=Space economy, 8=Critical minerals,
 #                9=Optical/photonic infrastructure, 10=Quantum computing
-# (Themes 7=Space economy and 8=Critical minerals have no curated screener universe yet
-#  — they fall through to the Finviz/web fallback in Section 2.1A Pass 2.)
 # --------------------------------------------------------------------------
 
 UNIVERSE = {
@@ -204,6 +203,49 @@ UNIVERSE = {
             'MQ',     # Marqeta — card issuing platform
             'RPAY',   # Repay Holdings — integrated payments
             'PRTH',   # Priority Technology — embedded payments
+        ]
+    },
+    7: {
+        'name': 'Space Economy Expansion',
+        'description': 'Launch, satellite data networks, in-space manufacturing/logistics. Bottleneck layer: low-cost dedicated launch vehicles, sovereign ground segment, and the satellite->decision data pipeline. Section 2 priority: launch + sovereign-data names sub-$10B.',
+        'tickers': [
+            # Launch / propulsion (the scarcest bottleneck)
+            'RKLB',   # Rocket Lab — small/medium-lift launch + space systems (Neutron)
+            'FLY',    # Firefly Aerospace — responsive launch + lunar (IPO 2025)
+            # Mission-critical hardware / in-space manufacturing
+            'KRMN',   # Karman Holdings — rocket/missile/spacecraft hardware (IPO Feb 2025)
+            'RDW',    # Redwire — spacecraft components, deployable structures, in-space mfg
+            'VOYG',   # Voyager Technologies — space infrastructure / station (IPO 2025)
+            'LUNR',   # Intuitive Machines — cislunar/lunar services, NASA/defense backlog
+            # Sovereign / commercial satellite data pipeline
+            'PL',     # Planet Labs — daily earth-observation data
+            'BKSY',   # BlackSky — high-revisit geospatial intelligence
+            'SPIR',   # Spire Global — weather/maritime/aviation space data
+            'SATL',   # Satellogic — high-res earth imaging
+            'ASTS',   # AST SpaceMobile — direct-to-cell space broadband
+            'IRDM',   # Iridium — L-band satellite comms (profitable; ground/data layer)
+            'GSAT',   # Globalstar — satellite comms / spectrum
+            'MDA.TO', # MDA Space — satellite systems / robotics (TSX)
+            # Excluded: SpaceX (private), Astra (private/delisted), China launch names (structural exclusion).
+        ]
+    },
+    8: {
+        'name': 'Critical Minerals and Rare Earth Processing',
+        'description': 'China controls ~80% of rare-earth PROCESSING; repatriation via IRA / EU CRMA / US Project Vault ($12B reserve). Bottleneck layer: chemical separation, metallurgical processing and magnet manufacturing — NOT mining. Section 2 priority: processing/magnet names over pure miners.',
+        'tickers': [
+            # Processing / separation / magnets (where value + concentration accrue — PRIORITY)
+            'MP',     # MP Materials — Mountain Pass mine + NdFeB magnet manufacturing
+            'USAR',   # USA Rare Earth — Round Top heavy REE + magnet manufacturing
+            'UUUU',   # Energy Fuels — heavy REE oxide separation (White Mesa)
+            'LYC.AX', # Lynas Rare Earths — largest ex-China REE processor (ASX)
+            # Adjacent critical-mineral supply (mining-led; weaker bottleneck — assess on processing intent)
+            'NB',     # NioCorp Developments — niobium/scandium/REE
+            'CRML',   # Critical Metals Corp — Tanbreez (Greenland) heavy REE
+            'UAMY',   # United States Antimony — antimony (defence-critical)
+            'TMC',    # TMC the metals company — polymetallic nodules (Ni/Co/Mn)
+            'ALM',    # Almonty Industries — tungsten (defence-critical)
+            'IDR',    # Idaho Strategic Resources — REE + gold
+            # Excluded: Chinese processors (structural exclusion); OTC-only micro names (liquidity).
         ]
     },
     9: {
@@ -420,6 +462,7 @@ def main():
         print()
         print('Themes: 1=AI Compute Substrate  2=AI-Native Workflow  3=Energy Infra for AI')
         print('        4=Biological Computation  5=Spatial Computing  6=Financial Infrastructure')
+        print('        7=Space Economy  8=Critical Minerals')
         print('        9=Optical/Photonic Infrastructure  10=Quantum Computing')
         print('Flags:  --near-low-only (legacy <=30%)   --max-pos N (custom 52wk-position cap)')
         sys.exit(1)
