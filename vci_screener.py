@@ -36,7 +36,10 @@ import yfinance as yf
 # Theme mapping: 1=AI compute substrate, 2=AI-native workflow,
 #                3=Energy infra for AI, 4=Biological computation,
 #                5=Spatial computing / physical-digital,
-#                6=Real-time financial infrastructure
+#                6=Real-time financial infrastructure,
+#                9=Optical/photonic infrastructure, 10=Quantum computing
+# (Themes 7=Space economy and 8=Critical minerals have no curated screener universe yet
+#  — they fall through to the Finviz/web fallback in Section 2.1A Pass 2.)
 # --------------------------------------------------------------------------
 
 UNIVERSE = {
@@ -201,6 +204,42 @@ UNIVERSE = {
             'MQ',     # Marqeta — card issuing platform
             'RPAY',   # Repay Holdings — integrated payments
             'PRTH',   # Priority Technology — embedded payments
+        ]
+    },
+    9: {
+        'name': 'Optical / Photonic Infrastructure',
+        'description': 'CPO, optical circuit switch, silicon photonics, 800G/1.6T transceivers — the optical nervous system of AI compute. Section 2 priority: sub-$5B component/substrate layer (the large-cap optical names are partly priced).',
+        'tickers': [
+            # Sub-$5B component / pre-inflection bottleneck layer (PRIORITY)
+            'LWLG',   # Lightwave Logic — polymer electro-optic modulator platform
+            'POET',   # POET Technologies — optical interposer (electronics+photonics integration)
+            'AAOI',   # Applied Optoelectronics — datacenter optical transceivers
+            'MTSI',   # MACOM Technology — analog/RF + photonics for optical
+            'LASR',   # nLight — high-power semiconductor/fiber lasers
+            'AXTI',   # AXT Inc — InP/GaAs compound-semi substrates for optical (also Theme 1)
+            'VIAV',   # Viavi Solutions — optical test & measurement, 3D sensing
+            'FN',     # Fabrinet — precision optical manufacturing/packaging (assembles LITE/COHR)
+            # Larger optical names — cap filter ($50B) will drop any that have outgrown the band
+            'LITE',   # Lumentum — CPO/optical circuit switch leader (NVIDIA-backed)
+            'COHR',   # Coherent — vertically integrated optical/photonics (NVIDIA-backed)
+            'CIEN',   # Ciena — coherent optical networking / AI fibre backbone
+            'GLW',    # Corning — optical connectivity (NVIDIA partnership) [likely >$50B -> filtered]
+            # NOTE private bottleneck names to track (not investable): Ayar Labs, Lightmatter, Celestial AI.
+        ]
+    },
+    10: {
+        'name': 'Quantum Computing Infrastructure',
+        'description': 'Trapped-ion / superconducting / neutral-atom / photonic quantum hardware + post-quantum security silicon. Pre-inflection (3-5yr to commercial); R&D >50% of revenue is the defining feature, not a disqualifier.',
+        'tickers': [
+            'IONQ',   # IonQ — trapped-ion, most mature pure-play (~$19B)
+            'RGTI',   # Rigetti — superconducting gate-model
+            'QBTS',   # D-Wave Quantum — annealing + gate-model
+            'QUBT',   # Quantum Computing Inc — photonic / integrated-photonic chips + foundry
+            'INFQ',   # Infleqtion — neutral-atom quantum compute + sensing (NYSE from Feb 2026)
+            'ARQQ',   # Arqit Quantum — quantum-safe encryption / PQC
+            'LAES',   # SEALSQ — post-quantum cryptography secure semiconductors
+            # EXCLUDED by design: QMCO (Quantum Corp = data storage, name confusion),
+            #                     QSI (Quantum-Si = protein sequencing -> Theme 4, not compute).
         ]
     }
 }
@@ -381,6 +420,7 @@ def main():
         print()
         print('Themes: 1=AI Compute Substrate  2=AI-Native Workflow  3=Energy Infra for AI')
         print('        4=Biological Computation  5=Spatial Computing  6=Financial Infrastructure')
+        print('        9=Optical/Photonic Infrastructure  10=Quantum Computing')
         print('Flags:  --near-low-only (legacy <=30%)   --max-pos N (custom 52wk-position cap)')
         sys.exit(1)
 
