@@ -24,6 +24,7 @@ NEVER = {".env", ".env.local"}
 RUNTIME_JSON = {"energy_watchlist.json", "watchlist_tickers.json", "target_weights.json",
                 "source_performance_log.json", "yfinance_metric_label_map.json",
                 "update_vci_watchlist_TEMPLATE.json", "vci_email_data_TEMPLATE.json",
+                "theme_opportunity.json",
                 "email_data_monthly_isa_TEMPLATE.json"}
 
 def sha(p):

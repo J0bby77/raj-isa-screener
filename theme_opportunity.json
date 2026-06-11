@@ -1,0 +1,16 @@
+{
+  "_doc": "Per-theme size-of-opportunity constants for vci_prescore.py QMS Opportunity pillar. SET MONTHLY in Section 1. tam_tier: >$500B=3,$100-500B=2,<$100B=1. scarcity: 1 company at bottleneck=3, 2-3=2, commoditised=1.",
+  "_updated": "2026-06-10",
+  "themes": {
+    "1":  {"name": "AI compute substrate",        "tam_tier": 3, "scarcity": 2},
+    "2":  {"name": "AI-native enterprise workflow","tam_tier": 2, "scarcity": 2},
+    "3":  {"name": "Energy infrastructure for AI", "tam_tier": 3, "scarcity": 2},
+    "4":  {"name": "Biological computation",       "tam_tier": 2, "scarcity": 2},
+    "5":  {"name": "Spatial computing",            "tam_tier": 2, "scarcity": 1},
+    "6":  {"name": "Real-time financial infra",    "tam_tier": 2, "scarcity": 1},
+    "7":  {"name": "Space economy",                "tam_tier": 2, "scarcity": 2},
+    "8":  {"name": "Critical minerals processing", "tam_tier": 2, "scarcity": 3},
+    "9":  {"name": "Optical / photonic infra",     "tam_tier": 2, "scarcity": 3},
+    "10": {"name": "Quantum computing",            "tam_tier": 2, "scarcity": 3}
+  }
+}

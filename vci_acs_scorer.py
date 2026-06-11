@@ -233,7 +233,8 @@ def pull_data(sym):
     except Exception:
         d['q_rev'] = []
 
-    # 3yr price range for ACS8 (Entry Risk-Reward)
+    # 3yr price range for ACS8 + momentum DIAGNOSTIC (benchmark-free, from the same closes)
+    d['mom_3m'] = None; d['mom_6m'] = None; d['mom_vs200'] = None
     try:
         hist = t.history(period='3y')
         closes = [safe(c) for c in hist['Close'].tolist()] if hist is not None and not hist.empty else []
@@ -242,6 +243,15 @@ def pull_data(sym):
             d['range3y_lo'] = min(closes)
             d['range3y_hi'] = max(closes)
             d['hist3y_months'] = len(closes) // 21  # ~21 trading days/month
+            px = closes[-1]
+            if len(closes) > 64 and closes[-64]:
+                d['mom_3m'] = (px / closes[-64] - 1) * 100
+            if len(closes) > 127 and closes[-127]:
+                d['mom_6m'] = (px / closes[-127] - 1) * 100
+            tail = closes[-200:] if len(closes) >= 200 else closes
+            ma200 = sum(tail) / len(tail) if tail else None
+            if ma200:
+                d['mom_vs200'] = (px / ma200 - 1) * 100
         else:
             d['range3y_lo'] = None; d['range3y_hi'] = None; d['hist3y_months'] = 0
     except Exception:
@@ -608,6 +618,16 @@ def score_a13(d):
         return MR(0, raw, 'GP growing slower than revenue')
 
 
+def inflection_flag(d):
+    """Pre-inflection GUARDRAIL. Strong sustained price momentum + high 3yr-range position
+    means the bottleneck may already be market-recognised -> the name may have LEFT the
+    pre-inflection window. Returns a warning string or '' (never up-ranks)."""
+    m6 = d.get('mom_6m'); pos = compute_3yr_pos(d)
+    if m6 is not None and pos is not None and m6 > 50 and pos > 70:
+        return f"INFLECTION UNDERWAY (6m {m6:+.0f}%, 3yr pos {pos:.0f}%) -- verify still pre-inflection; treat as graduation/late-entry, do not chase"
+    return ""
+
+
 def compute_3yr_pos(d):
     """Return 3yr price-range position (0-100) or None if unavailable."""
     lo = d.get('range3y_lo'); hi = d.get('range3y_hi'); px = d.get('price')
@@ -855,6 +875,10 @@ def build_json_output(sym, d, scores, totals, override_check=None):
         'acs8_method': d.get('_acs8', {}).get('method'),
         'acs8_raw': d.get('_acs8', {}).get('raw'),
         'three_yr_pos_pct': d.get('_acs8', {}).get('pos3y'),
+        'mom_3m': d.get('mom_3m'),
+        'mom_6m': d.get('mom_6m'),
+        'mom_vs200': d.get('mom_vs200'),
+        'inflection_flag': inflection_flag(d),
         'a10_score': scores['A10'].score,
         'a11_score': scores['A11'].score,
         'part_a_str': f'{totals["raw_score"]}/{totals["effective_denom"]}',
