@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-06-11",
+  "last_updated": "2026-06-13",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -1341,6 +1341,36 @@
       "excel_file": "Growth Stock Analysis Nasdaq W-e 11-Jun-26.xlsx",
       "retrospective_file": "20260611_NASDAQ_retrospective.md",
       "notes": "v27 scoring; 57 scoring batches + 12 overlay batches; 0 tech failures; gate4_conc flagged (Tech 32.4%, below 35% threshold)"
+    },
+    {
+      "run_date": "2026-06-13",
+      "group": "F250-SPI",
+      "task_id": "isa-eu-b-sat2",
+      "run_mode": "local",
+      "constituent_source": "Composio_constituent_hybrid_dump_via_GitHub",
+      "constituents_fetched": 450,
+      "accounted": 450,
+      "gate1_excluded": 133,
+      "gate2_excluded": 32,
+      "gate3_excluded": 39,
+      "gate4_excluded": 98,
+      "gate_data_unresolved": 87,
+      "scored": 61,
+      "technical_failures": 0,
+      "candidate_rankable": 46,
+      "hard_gate_fails": 13,
+      "unresolved_hard_gate": 2,
+      "strong_buys": 5,
+      "top_score": 46.0,
+      "top_ticker": "TRN.L",
+      "high_score_overlay_stocks": 16,
+      "overlay_complete": 13,
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 29.5,
+      "excel_file": "Growth Stock Analysis F250 & SPI W-e 13-Jun-26.xlsx",
+      "retrospective_file": "20260613_F250-SPI_retrospective.md",
+      "notes": "v27 scoring; 30 scoring batches + 2 overlay batches; 0 tech failures; const dump bridged via GitHub (raj-isa-screener); 2 stocks (ALC.SW, SMG.SW) have part_a_score>=22 but final_status=HARD_GATE_FAIL overrides status to Not Growth/Avoid (see retrospective item 1); build_email.py has /54 label bug (should be /50) and a non-fatal post-save NameError"
     }
   ]
 }
