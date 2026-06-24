@@ -1399,6 +1399,20 @@ def _fetch_ticker_statements(ticker_sym):
 
 
 def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
+    """Phase-3 fetch with throttle-resilient retry (wraps _once; retries on TOTAL failure only,
+    so partial-data tolerance in the body is preserved)."""
+    def _pull():
+        sym, data, err = _fetch_ticker_scoring_data_once(ticker_sym, score_gt38)
+        if err or data is None:
+            raise RuntimeError(err or "empty_scoring (throttle?)")
+        return data
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
+    except Exception as e:
+        return ticker_sym, None, str(e)
+
+
+def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
     """Fetch all incremental data needed for Part A/B scoring and optionally overlays."""
     try:
         tk = yf.Ticker(ticker_sym)
