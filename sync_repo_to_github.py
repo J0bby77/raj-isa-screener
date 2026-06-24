@@ -6,7 +6,7 @@ Run as a PREFLIGHT at the start of EVERY scheduled ISA task (growth, energy, VCI
 Guarantees the Composio/GitHub fallback never runs stale code: any enhancement Raj makes to a tracked script
 on OneDrive — between sessions, by hand — is pushed to J0bby77/raj-isa-screener BEFORE a fallback could fire.
 Covers ALL tracked repo files automatically (screener_core, screener_local, energy_screener, build_*, the VCI
-scripts vci_*.py, score_partab, monthly_isa_prerun, fetch_*, etc.) — no per-file allowlist to maintain.
+scripts vci_*.py, normalise_adapter, monthly_isa_prerun, fetch_*, etc.) — no per-file allowlist to maintain.
 
 Mechanism (local authenticated git push — the clean way to sync large files):
   * Reads GH_PAT from the Investment Analysis .env (or GH_PAT env var). If absent -> prints

@@ -39,6 +39,15 @@ import re
 import sys
 from datetime import date, datetime
 
+# G1/G2 — fund-return sourcing + 12% gate + fund actions (single source; additive, flag-gated).
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import scoring_config as _cfg
+    import fund_returns as _fr
+except Exception:
+    _cfg = None
+    _fr = None
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -568,6 +577,34 @@ def run_analytics(
         "status":              "pending_estimated_returns",
     }
 
+    # G1/G2 — real fund-return sourcing + 12% gate + fund actions (flag-gated; additive).
+    # When off, Section A stays pending (Claude fills returns manually — unchanged behaviour).
+    fund_actions = []
+    if _fr is not None and getattr(_cfg, "FUND_RETURN_SOURCING", False):
+        try:
+            _cache = _fr.default_cache_path(SCRIPT_DIR)
+            _returns = _fr.source_fund_returns(funds_list, cache_path=_cache, fetch=True)
+            for _row in fund_drift_rows:
+                _k = (_row.get("ticker") or _row.get("name") or "").upper()
+                _ri = _returns.get(_k, {})
+                if _ri.get("est_return_pct") is not None:
+                    _row["est_return_pct"] = _ri["est_return_pct"]
+                    _row["est_return_source"] = _ri["source"]
+                    if _row.get("min_return_pct") is not None:
+                        _row["below_threshold"] = _ri["est_return_pct"] < _row["min_return_pct"]
+                _fa = _fr.classify_fund_action(_row, _ri)
+                if _fa:
+                    fund_actions.append(_fa)
+            _gate = _fr.compute_fund_gate(funds_list, _returns)
+            section_a["weighted_avg_return"] = _gate["weighted_avg_return"]
+            section_a["result"]              = _gate["result"]
+            section_a["status"]              = _gate["status"]
+            section_a["coverage_pct"]        = _gate["coverage_pct"]
+            section_a["pending_funds"]       = _gate["pending_funds"]
+            section_a["sourced_mechanically"] = True
+        except Exception as _ex:
+            section_a["sourcing_error"] = str(_ex)
+
     # ---------------------------------------------------------------------------
     # Section B: Stock sleeve aggregate return
     # ---------------------------------------------------------------------------
@@ -677,6 +714,7 @@ def run_analytics(
         "section_c": section_c,
         "overlap_check": overlap_check,
         "capital_summary": capital_summary,
+        "fund_actions":    fund_actions,
         "flags":           flags,
     }
 

@@ -140,9 +140,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--metrics", required=True, help="watchlist_metrics_mmm_yyyy.json to enrich in place")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--preflight", action="store_true",
+                    help="Local-primary preflight (yfinance/dev-shm/Yahoo). On failure prints "
+                         "FALLBACK_TO_COMPOSIO and exits 3. Default off = review run unchanged.")
     args = ap.parse_args()
     if not os.path.exists(args.metrics):
         print(f"ERROR: {args.metrics} not found", file=sys.stderr); sys.exit(1)
+    # Local-primary guardrail parity (opt-in). Fails over to Composio (exit 3) when the local
+    # sandbox can't fetch — the same decision screener_local makes for the growth path.
+    if getattr(args, "preflight", False):
+        try:
+            import isa_env_guard as _guard
+            _guard.run_preflight_or_fallback(outputs_dir=os.path.dirname(os.path.abspath(args.metrics)))
+        except SystemExit:
+            raise
+        except Exception:
+            pass
     enrich_metrics_file(args.metrics, args.workers)
 
 

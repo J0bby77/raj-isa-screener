@@ -333,7 +333,7 @@ SUMMARY_COLS = [
     # Group 2 — Scores (3 cols)
     ("Group 2 — Scores",           "Part A (/28)",       "part_a_score",             score_int,         False),
     ("",                           "Part B (/26-30)",    "part_b_score",             score_int,         False),
-    ("",                           "Total (/54-58)",     "total_score",              score_int,         False),
+    ("",                           "Total (/50-54)",     "total_score",              score_int,         False),
     # Group 3 — Growth Quality (14 cols)
     ("Group 3 — Growth Quality",   "Rev CAGR 3-5yr",     "rev_cagr",                pct,               False),
     ("",                           "Recent Rev Growth",  "recent_rev_growth",        pct,               False),
@@ -432,21 +432,36 @@ def build_summary(wb, df_full, run_date, group):
         ws.cell(row=5, column=1, value="No data available for this run.")
         return ws
 
-    # SUMMARY rule (v27): Part A >= 22 AND Total >= 43/50 AND est-rev not deteriorating
-    # AND Part B >= 14 (token guardrail). Biased to best growth-at-reasonable-price opportunities.
-    sb = df_full[
-        (df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 22) &
-        (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 14) &
-        (df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 43) &
-        (df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating")
-    ].copy()
+    # SUMMARY rule — legacy v27 (Part A>=22 & Total>=43 & est-rev not deteriorating & Part B>=14) OR,
+    # when scoring_config.SUMMARY_COUNT_BASED, top-N by a forward-led SCREEN Source Score (Part 3 §7/§13).
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import scoring_config as _cfg
+    _pa = df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float)
+    _pb = df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float)
+    _tot = df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float)
+    _notdet = df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating"
+    # P2-2: never admit a fail-status name to the SUMMARY (count-based path filtered on Part A/B only).
+    _fs = df_full.get("final_status", pd.Series(dtype=str)).fillna("").astype(str).str.upper()
+    _ok_status = ~_fs.isin({"HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL", "UNRESOLVED_HARD_GATE_NOT_RANKABLE"})
+    _paf = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 14)   # P2-1: single-source viability floor (= pool/rerank)
+    if getattr(_cfg, "SUMMARY_COUNT_BASED", False):
+        # Multi-door eligibility (viability, not quality) then rank by a forward-led screen Source Score.
+        sb = df_full[(_pa >= _paf) & (_pb >= 14) & _notdet & _ok_status].copy()
+        if not sb.empty:
+            _sw = getattr(_cfg, "SUMMARY_SOURCE_WEIGHTS", {"forward": 0.45, "quality": 0.30, "valuation": 0.25})
+            sb["_src"] = (_sw.get("forward", 0.45) * sb.get("forward_axis_score", pd.Series(dtype=float)).fillna(0).astype(float) / 100.0
+                          + _sw.get("quality", 0.30) * sb.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) / 28.0
+                          + _sw.get("valuation", 0.25) * sb.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) / 22.0)
+            sb = sb.sort_values("_src", ascending=False).head(int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
+    else:
+        sb = df_full[(_pa >= 22) & (_pb >= 14) & (_tot >= 43) & _notdet & _ok_status].copy()
+        if not sb.empty:
+            sb = sb.sort_values(["total_score", "part_b_score", "company"], ascending=[False, False, True]).reset_index(drop=True)
 
     if sb.empty:
         ws.cell(row=5, column=1, value="No summary candidates identified this run.")
         return ws
-
-    sb = sb.sort_values(["total_score", "part_b_score", "company"],
-                        ascending=[False, False, True]).reset_index(drop=True)
 
     # --- Data rows ---
     for r_idx, row in sb.iterrows():
@@ -535,7 +550,7 @@ CAND_COLS = [
     ("Final Status",    "final_status",         s),
     ("Part A (/28)",    "part_a_score",         score_int),
     ("Part B (/26-30)", "part_b_score",         score_int),
-    ("Total (/54-58)",  "total_score",          score_int),
+    ("Total (/50-54)",  "total_score",          score_int),
     ("Rev CAGR",        "rev_cagr",             pct),
     ("Gross Margin",    "gross_margin",         pct),
     ("ROIC",            "roic",                 pct),

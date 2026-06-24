@@ -42,6 +42,16 @@ import shutil
 import sys
 from datetime import date, datetime
 
+# Single source of truth for the fluid-pool decay flags (Raj: pool+watchlist must turn over).
+try:
+    import scoring_config as _cfg
+except Exception:
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import scoring_config as _cfg
+    except Exception:
+        _cfg = None
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -256,7 +266,7 @@ def classify_part_b_driver(prior_total: int, new_total: int,
     Returns one of: 'valuation_led', 'quality_concern', 'broad_deterioration',
                     'broad_improvement', 'valuation_improvement', None (no material change).
     Uses Part A/B delta to attribute: Part A = quality metrics; Part B = valuation/resilience.
-    This is a heuristic from SUMMARY tab data; score_partab.py provides metric-level detail.
+    This is a heuristic from SUMMARY tab data; normalise_adapter.py provides metric-level detail.
     """
     if new_total is None or prior_total is None:
         return None
@@ -305,6 +315,57 @@ def normalised_score(total: int | None, path: str) -> float | None:
     return round(total / max_score * 100, 1)
 
 
+def _pool_admit(ns, part_a, path, override) -> bool:
+    """Candidate-pool admission (H2 fix). Default = ns >= NORMALISED_SCORE_PROMOTION_GATE (quality-total).
+    When FORWARD_ELIGIBILITY is on, a Part A VIABILITY floor (path-aware) replaces the total gate so
+    forward-confirmed lower-total names are NOT dropped here — rerank then applies forward eligibility +
+    the Source Score. NOTE: SUMMARY Part A is on the path scale (growth /28, energy /20)."""
+    if override:
+        return True
+    if getattr(_cfg, "FORWARD_ELIGIBILITY", False):
+        floor = (getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14) if path == "C"
+                 else getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 21))
+        return (part_a or 0) >= floor
+    return (ns or 0) >= NORMALISED_SCORE_PROMOTION_GATE
+
+
+# ---------------------------------------------------------------------------
+# Fluid-pool decay helpers (redesign Part3 §4 Layer4 / §13)
+# ---------------------------------------------------------------------------
+
+def _fluid_on() -> bool:
+    return bool(getattr(_cfg, "FLUID_POOL_DECAY", False))
+
+
+def _ageout_months() -> int:
+    return int(getattr(_cfg, "POOL_AGEOUT_MONTHS", 3))
+
+
+def _decay_penalty() -> float:
+    return float(getattr(_cfg, "POOL_DECAY_PENALTY", 5.0))
+
+
+def _months_since(label, now_label):
+    """Whole months between two '%b-%Y' month labels ('Mar-2026'->'Jun-2026' = 3).
+    None if either is unparseable."""
+    try:
+        a = datetime.strptime(str(label), "%b-%Y")
+        b = datetime.strptime(str(now_label), "%b-%Y")
+        return (b.year - a.year) * 12 + (b.month - a.month)
+    except Exception:
+        return None
+
+
+def _pool_decay_decision(last_confirmed_label, now_label, ageout_months=None):
+    """Age-out decision for a name ABSENT from this cycle's screens. Returns
+    (months_since_confirmed, age_out:bool). age_out True -> drop (not re-screened for
+    > ageout_months ~= 90d). This is the time-based replacement for score_history-length
+    staleness, which could freeze a <3-history name on a stale score indefinitely."""
+    ageout = _ageout_months() if ageout_months is None else ageout_months
+    ms = _months_since(last_confirmed_label, now_label)
+    return ms, (ms is not None and ms > ageout)
+
+
 # ---------------------------------------------------------------------------
 # Main logic
 # ---------------------------------------------------------------------------
@@ -323,6 +384,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
 
     # Snapshot the prior pool so carry-forward incumbents survive the ephemeral wipe.
     prior_pool = list(wl_data.get("candidate_pool", []))
+    # Fluid pool: preserve first_seen across runs (durable-pool memory, CONTRACTS candidate-pool).
+    _prior_first_seen = {e.get("ticker"): e.get("first_seen") for e in prior_pool if e.get("ticker")}
 
     # Load portfolio_data for duplicate check
     portfolio_tickers = set()
@@ -594,6 +657,15 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             elif "part_b_driver" in updated_entry:
                 del updated_entry["part_b_driver"]
 
+            if _fluid_on():
+                # Confirmed in this cycle's fresh screens -> reset decay. Score-driven removal
+                # (removal_flag above, ns < hard floor) still applies — turnover stays score-driven.
+                updated_entry["first_seen"]         = entry.get("first_seen") or month_label
+                updated_entry["last_confirmed"]     = month_label
+                updated_entry["decay_state"]        = "below_floor" if removal_flag else "active"
+                updated_entry["reconfirm_required"] = False
+                updated_entry["in_pool"]            = not removal_flag
+
             updated_existing[ticker] = updated_entry
 
             if delta is not None:
@@ -607,27 +679,71 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         else:
             # Not in this month's SUMMARY tabs — carry forward
             updated_entry = dict(entry)
-            history = list(entry.get("score_history", []))
-            stale = False
-            if history and len(history) >= MAX_SCORE_HISTORY:
-                stale = True
-                updated_entry["stale_score_flag"] = True
-                promotion_log["stale_scores"].append({
-                    "ticker":       ticker,
-                    "last_screened": history[0].get("month", "unknown"),
-                })
-            # Existing names absent from SUMMARY are not removed automatically.
-            # They carry forward at their last known score unless stale + below floor.
             ns = updated_entry.get("normalised_score")
-            removal_flag = False
-            probation_flag = False
-            if stale and ns is not None and ns < NORMALISED_SCORE_HARD_REMOVE_BELOW and not override_reason:
-                removal_flag = True
-            elif ns is not None and ns < NORMALISED_SCORE_PROMOTION_GATE and not override_reason:
-                probation_flag = True
-            updated_entry["probation_flag"]  = probation_flag
-            updated_entry["_removal_flag"]   = removal_flag
-            updated_existing[ticker] = updated_entry
+            if _fluid_on():
+                # Absence is NOT thesis-break (gated screens are noisy) -> FLAG for re-confirmation,
+                # don't auto-eject. Turnover is driven by score (hard floor) + a long-stop age-out;
+                # names with a confirmed catalyst / override are protected from the age-out.
+                # M4: first fluid run for this entry (no last_confirmed) -> seed to THIS month (grace),
+                # NOT the old score_history month, so activating fluidity doesn't mass-age-out incumbents.
+                lc = entry.get("last_confirmed") or month_label
+                updated_entry["first_seen"]     = entry.get("first_seen") or lc
+                updated_entry["last_confirmed"] = lc
+                months_since, age_out = _pool_decay_decision(lc, month_label)
+                protected = bool(override_reason or entry.get("catalyst_protected")
+                                 or entry.get("confirmed_catalyst"))
+                removal_flag = False
+                probation_flag = False
+                if protected:
+                    updated_entry["decay_state"] = "protected_catalyst"
+                    updated_entry["reconfirm_required"] = True
+                elif age_out:
+                    removal_flag = True            # LONG-STOP backstop (no catalyst/override)
+                    updated_entry["decay_state"] = "aged_out"
+                    promotion_log["stale_scores"].append({
+                        "ticker": ticker, "last_confirmed": lc, "months_since": months_since,
+                        "reason": (f"long-stop age-out — not re-screened {months_since}m "
+                                   f"(> {_ageout_months()}) and no catalyst/override"),
+                    })
+                else:
+                    updated_entry["decay_state"] = "stale_unconfirmed"
+                    updated_entry["reconfirm_required"] = True
+                    probation_flag = True          # surfaces for review re-confirmation, NOT removed
+                    promotion_log.setdefault("reconfirm_required", []).append({
+                        "ticker": ticker, "last_confirmed": lc, "months_since": months_since,
+                    })
+                    if ns is not None and months_since:
+                        updated_entry["_decayed_score"] = max(0.0, ns - _decay_penalty() * months_since)
+                # Score-driven removal still applies to a carried sub-floor score (unless protected).
+                if (not protected) and ns is not None and ns < NORMALISED_SCORE_HARD_REMOVE_BELOW and not override_reason:
+                    removal_flag = True
+                    updated_entry["decay_state"] = "below_floor"
+                updated_entry["in_pool"]        = not removal_flag
+                updated_entry["probation_flag"] = probation_flag
+                updated_entry["_removal_flag"]  = removal_flag
+                updated_existing[ticker] = updated_entry
+            else:
+                # --- legacy (score_history-length) staleness — pre-fluid behaviour ---
+                history = list(entry.get("score_history", []))
+                stale = False
+                if history and len(history) >= MAX_SCORE_HISTORY:
+                    stale = True
+                    updated_entry["stale_score_flag"] = True
+                    promotion_log["stale_scores"].append({
+                        "ticker":       ticker,
+                        "last_screened": history[0].get("month", "unknown"),
+                    })
+                # Existing names absent from SUMMARY are not removed automatically.
+                # They carry forward at their last known score unless stale + below floor.
+                removal_flag = False
+                probation_flag = False
+                if stale and ns is not None and ns < NORMALISED_SCORE_HARD_REMOVE_BELOW and not override_reason:
+                    removal_flag = True
+                elif ns is not None and ns < NORMALISED_SCORE_PROMOTION_GATE and not override_reason:
+                    probation_flag = True
+                updated_entry["probation_flag"]  = probation_flag
+                updated_entry["_removal_flag"]   = removal_flag
+                updated_existing[ticker] = updated_entry
 
     # -----------------------------------------------------------------------
     # Phase 5: Provisional entry levels for new candidates
@@ -643,9 +759,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         ns    = normalised_score(total, path) or 0.0
         override = row.get("eligibility_override_reason")
 
-        # GATE: normalised_score >= 70 for automatic promotion
-        # Below 70: reject unless explicit override_reason set in candidate data
-        if ns < NORMALISED_SCORE_PROMOTION_GATE and not override:
+        # GATE: ns >= 70 for promotion (default) OR Part A viability floor (FORWARD_ELIGIBILITY).
+        if not _pool_admit(ns, row.get("part_a"), path, override):
             promotion_log["rejected_candidates"].append({
                 "ticker":           ticker,
                 "normalised_score": ns,
@@ -686,6 +801,11 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "probation_flag":          False,
             "eligibility_override_reason": override,
         }
+        if _fluid_on():
+            new_candidates[ticker].update({
+                "first_seen": month_label, "last_confirmed": month_label,
+                "decay_state": "active", "in_pool": True, "reconfirm_required": False,
+            })
 
     # -----------------------------------------------------------------------
     # Phase 6: Combined ranking and top-10 selection
@@ -705,7 +825,12 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                 combined.pop(_t, None)
 
     def rank_key(item):
-        return -(item.get("normalised_score") or 0)
+        # Fluid pool: stale-but-carried names rank on their decayed score so freshly-confirmed
+        # names displace them; falls back to normalised_score when no decay applied.
+        s = item.get("_decayed_score")
+        if s is None:
+            s = item.get("normalised_score") or 0
+        return -s
 
     # Separate removal candidates before ranking
     removal_candidates = {t: e for t, e in combined.items() if e.get("_removal_flag")}
@@ -762,7 +887,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         entry["rank"] = i
 
     # Strip internal (_-prefixed) fields before writing to JSON
-    INTERNAL_FIELDS = {"_removal_flag"}
+    INTERNAL_FIELDS = {"_removal_flag", "_decayed_score"}
     for entry in new_wl:
         for f in INTERNAL_FIELDS:
             entry.pop(f, None)
@@ -773,7 +898,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     for ticker, row in candidate_pool.items():
         ns = normalised_score(row.get("total", 0), row.get("path", "A")) or 0.0
         override = row.get("eligibility_override_reason")
-        if ns < NORMALISED_SCORE_PROMOTION_GATE and not override:
+        if not _pool_admit(ns, row.get("part_a"), row.get("path", "A"), override):
             continue  # below gate — already in rejected_candidates log
         if ticker in new_wl_set:
             continue  # already in top-10 — not duplicated in candidate_pool
@@ -807,6 +932,9 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "sector":                  row.get("sector", ""),
             "candidate_pool_month":    month_label,
             "eligibility_override_reason": override,
+            **({"first_seen": _prior_first_seen.get(ticker) or month_label,
+                "last_confirmed": month_label, "decay_state": "active",
+                "in_pool": True, "reconfirm_required": False} if _fluid_on() else {}),
         })
 
     # Sort pool by normalised_score descending
@@ -818,11 +946,12 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     if not dry_run:
         wl_data["watchlist"] = new_wl
 
-        # --- NO carry-forward (anti-stickiness, design decision 2026-06-07) ---
-        # The candidate pool = ONLY names freshly screened this cycle (>=70).
-        # Names displaced from the top-10, or absent from this cycle's screen, are
-        # NOT retained. The pool must represent the CURRENT opportunity set, not an
-        # accumulation of prior months. (prior_pool is intentionally unused now.)
+        # --- Membership is fresh-screen-driven (anti-stickiness, design decision 2026-06-07) ---
+        # The candidate pool membership = ONLY names freshly screened this cycle (>=70); names
+        # displaced from the top-10 or absent from this cycle's screen are NOT retained as pool
+        # members. The pool represents the CURRENT opportunity set, not an accumulation of prior
+        # months. WHEN FLUID_POOL_DECAY is on, prior_pool is used ONLY to carry each name's
+        # first_seen forward (durable-pool memory) — membership stays fresh-screen-driven.
 
         # Write candidate_pool (ephemeral — overwrites any prior month's pool)
         wl_data["candidate_pool"] = pool_entries
@@ -915,7 +1044,12 @@ def main():
                         help="Output path for updated watchlist_tickers.json (usually same as input)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would be done without writing or deleting files")
+    parser.add_argument("--fluid-pool", action="store_true",
+                        help="Activate fluid-pool decay for this run (overrides scoring_config.FLUID_POOL_DECAY)")
     args = parser.parse_args()
+
+    if args.fluid_pool and _cfg is not None:
+        _cfg.FLUID_POOL_DECAY = True
 
     run(
         portfolio_path = args.portfolio_data or "",

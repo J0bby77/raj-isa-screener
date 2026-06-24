@@ -51,6 +51,9 @@ from pathlib import Path
 import requests
 import pandas as pd
 import numpy as np
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import scoring_config as _cfg  # SINGLE SOURCE OF TRUTH
 
 try:
     import yfinance as yf
@@ -82,6 +85,7 @@ try:
         pence_divisor    = _sc.pence_divisor
         compute_ebitda   = _sc.compute_ebitda
         compute_roic     = _sc.compute_roic
+        compute_forward_axis = _sc.compute_forward_axis   # shared forward axis (Part 3 §13) — energy parity
         _SCREENER_CORE_AVAILABLE = True
 except Exception as _e:
     pass  # fallback inline below
@@ -226,8 +230,8 @@ A_CAPEX_INTENSITY_ACCEPT = 0.03   # 3-7% = 1pt
 A_FCF_NEAR_BREAKEVEN     = -0.10  # FCF margin > -10% = "near breakeven"
 
 # Part A classification
-PART_A_STRONG_GROWTH     = 14     # out of 20
-PART_A_ACCEPTABLE        = 8      # 8-13 = Acceptable Growth
+PART_A_STRONG_GROWTH     = _cfg.ENERGY_PART_A_STRONG       # 14 (scoring_config)
+PART_A_ACCEPTABLE        = _cfg.ENERGY_PART_A_ACCEPTABLE   # 8
 # <8 = Not Growth
 
 # Part B thresholds (max 16 pts — 8 metrics × 2pts each)
@@ -249,8 +253,8 @@ B_ANALYST_COUNT_STRONG   = 10     # ≥10 analysts = 2pts (well-covered)
 B_ANALYST_COUNT_ACCEPT   = 5      # 5-9 = 1pt
 
 # Part B classification
-PART_B_STRONG_BUY        = 11     # out of 16
-PART_B_WATCH             = 6      # 6-10 = Watch/Fair
+PART_B_STRONG_BUY        = _cfg.ENERGY_PART_B_STRONG       # 11 (scoring_config)
+PART_B_WATCH             = _cfg.ENERGY_PART_B_WATCH        # 6
 # <6 = Avoid
 
 # Status codes
@@ -304,6 +308,10 @@ def _fetch_statements(ticker_sym):
             "income_stmt":   tk.income_stmt,
             "cashflow":      tk.cashflow,
             "balance_sheet": tk.balance_sheet,
+            "quarterly_income_stmt": tk.quarterly_income_stmt,   # forward axis: margin trajectory
+            "eps_trend":         tk.eps_trend,                   # forward axis: eps_trend momentum + revision stage
+            "growth_estimates":  tk.growth_estimates,            # forward axis: forward revenue growth
+            "history":           tk.history(period="1y"),        # forward axis: price momentum
         }, None
     except Exception as e:
         return ticker_sym, None, str(e)
@@ -840,14 +848,29 @@ def score_part_b(ticker_sym, info, income_stmt, balance_sheet, part_a_data):
         out["score_analyst_count"] = 0
 
     # ── Total Part B ──────────────────────────────────────────────────────────
-    score_keys_b = [
-        "score_ev_ebitda", "score_nd_ebitda", "score_analyst_rec",
-        "score_upside", "score_52wk", "score_fwd_pe",
-        "score_eps_growth", "score_analyst_count"
-    ]
-    part_b_total = sum(out.get(k, 0) for k in score_keys_b)
+    if getattr(_cfg, "ENERGY_VALUATION_PARITY", False):
+        # Part 2 §F parity: growth-ADJUST valuation (high multiple justified by growth not penalised) +
+        # DROP the stale 52-week-position metric. Growth from yfinance info (earnings/revenue growth).
+        _g = safe_float(info.get("earningsGrowth")) or safe_float(info.get("revenueGrowth"))
+        if _g and _g > 0:
+            _gp = _g * 100.0
+            _ev = safe_float(out.get("ev_ebitda"))
+            _fp = safe_float(out.get("fwd_pe"))
+            if _ev and _ev > 0:
+                out["score_ev_ebitda"] = 2 if (_ev / _gp) < 1.0 else (1 if (_ev / _gp) < 2.0 else 0)
+            if _fp and _fp > 0:
+                out["score_fwd_pe"] = 2 if (_fp / _gp) < 1.0 else (1 if (_fp / _gp) < 2.0 else 0)
+        score_keys_b = ["score_ev_ebitda", "score_nd_ebitda", "score_analyst_rec",
+                        "score_upside", "score_fwd_pe", "score_eps_growth", "score_analyst_count"]  # 52wk dropped
+        part_b_max = 14
+    else:
+        score_keys_b = ["score_ev_ebitda", "score_nd_ebitda", "score_analyst_rec",
+                        "score_upside", "score_52wk", "score_fwd_pe",
+                        "score_eps_growth", "score_analyst_count"]
+        part_b_max = 16
+    part_b_total = sum(out.get(k, 0) or 0 for k in score_keys_b)
     out["part_b_score"]      = part_b_total
-    out["part_b_max"]        = 16
+    out["part_b_max"]        = part_b_max
     out["part_b_unresolved"] = len(unresolved)
 
     if part_b_total >= PART_B_STRONG_BUY:
@@ -1120,7 +1143,8 @@ def build_excel(full_rows, gate_rows, run_date_str, inv_dir, group="ENERGY"):
         "Rank", "Ticker", "Company", "Sector", "Sub-Type", "Region",
         "Part A\n(/20)", "Part B\n(/16)", "Total\n(/36)",
         "Rev Growth\nTTM", "EBITDA\nMargin", "Gross\nMargin",
-        "EBITDA\nGrowth", "ROE", "EV/EBITDA", "Upside vs\nTarget"
+        "EBITDA\nGrowth", "ROE", "EV/EBITDA", "Upside vs\nTarget",
+        "Fwd Axis\n(/100)"   # forward axis (Part 3 §13) — growth/energy parity; display only
     ]
     for c, h in enumerate(summary_headers, 1):
         cell = ws.cell(row=3, column=c, value=h)
@@ -1143,6 +1167,7 @@ def build_excel(full_rows, gate_rows, run_date_str, inv_dir, group="ENERGY"):
             a_score, b_score, total,
             row.get("rev_growth_ttm"), row.get("ebitda_margin"), row.get("gross_margin"),
             row.get("ebitda_growth"), row.get("roe"), row.get("ev_ebitda"), row.get("upside_pct"),
+            row.get("forward_axis_score"),
         ]
         for c, v in enumerate(values, 1):
             cell = ws.cell(row=r, column=c, value=v)
@@ -1154,7 +1179,7 @@ def build_excel(full_rows, gate_rows, run_date_str, inv_dir, group="ENERGY"):
             if c in (2, 3):
                 cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    col_widths = [5, 8, 24, 14, 18, 6, 8, 8, 8, 11, 11, 10, 10, 8, 10, 11]
+    col_widths = [5, 8, 24, 14, 18, 6, 8, 8, 8, 11, 11, 10, 10, 8, 10, 11, 9]
     for c, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -1232,6 +1257,8 @@ def build_excel(full_rows, gate_rows, run_date_str, inv_dir, group="ENERGY"):
         # Part B
         "B1:EV/EBITDA", "B2:ND/EBITDA", "B3:AnalystRec", "B4:Upside",
         "B5:52wk", "B6:FwdPE", "B7:EPS_G", "B8:Coverage",
+        # Forward axis (Part 3 §13) — growth/energy parity, display only (not in selection until flagged)
+        "Fwd/100", "F:EPStr", "F:Marg", "F:RevEst", "F:PxMom", "RevStage",
     ]
     for c, h in enumerate(score_headers, 1):
         cell = ws3.cell(row=1, column=c, value=h)
@@ -1250,6 +1277,9 @@ def build_excel(full_rows, gate_rows, run_date_str, inv_dir, group="ENERGY"):
             row.get("sb_ev_ebitda"), row.get("sb_nd_ebitda"), row.get("sb_analyst_rec"),
             row.get("sb_upside"), row.get("sb_52wk"), row.get("sb_fwd_pe"),
             row.get("sb_eps_growth"), row.get("sb_analyst_count"),
+            row.get("forward_axis_score"), row.get("score_f_eps_trend"),
+            row.get("score_f_margin_traj"), row.get("score_f_rev_est"),
+            row.get("score_f_price_mom"), row.get("revision_stage"),
         ]
         bg = WHITE if r_idx % 2 else ROW_ALT
         for c, v in enumerate(vals, 1):
@@ -1555,6 +1585,12 @@ def run_energy(run_date, outputs_dir, inv_dir):
                 part_b = {"part_b_score": 0, "part_b_grade": "Avoid"}
 
         row = build_output_row(entry, info, gate_data, part_a, part_b)
+        if _SCREENER_CORE_AVAILABLE:
+            # Forward axis (Part 3 §13) — ENERGY PARITY via the SHARED compute: eps_trend momentum, margin
+            # trajectory, forward revenue estimate, price momentum, revision-journey stage. Additive.
+            compute_forward_axis(row, {**info, "eps_trend": stmts.get("eps_trend"),
+                                       "growth_estimates": stmts.get("growth_estimates")},
+                                 stmts.get("quarterly_income_stmt"), stmts.get("history"))
         full_rows.append(row)
 
     # ── Step 4: Write CSVs ────────────────────────────────────────────────────
@@ -1657,7 +1693,21 @@ def main():
                         help="Ephemeral outputs directory path")
     parser.add_argument("--inv-dir",  required=True, dest="inv_dir",
                         help="Investment Analysis folder path")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Local-primary preflight (yfinance/dev-shm/Yahoo). On failure prints "
+                             "FALLBACK_TO_COMPOSIO and exits 3. Default off = scheduled run unchanged.")
     args = parser.parse_args()
+
+    # Local-primary guardrail parity (opt-in). Fails over to Composio (exit 3) when the local
+    # sandbox can't fetch — the same decision screener_local makes for the growth path.
+    if getattr(args, "preflight", False):
+        try:
+            import isa_env_guard as _guard
+            _guard.run_preflight_or_fallback(outputs_dir=args.outputs)
+        except SystemExit:
+            raise
+        except Exception:
+            pass
 
     # Normalise date
     run_date = args.date.replace("-", "")

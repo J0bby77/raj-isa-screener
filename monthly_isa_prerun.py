@@ -14,7 +14,7 @@ Pipeline (in order):
   Step 4: update_watchlist.py        -> updated watchlist_tickers.json + promotion log
   Step 5: sync_vci_watchlist.py      -> watchlist_tickers.json (vci_watchlist section refreshed)
   Step 6: fetch_watchlist_metrics.py -> watchlist_metrics_mmm_yyyy.json
-  Step 7: score_partab.py            -> watchlist_scored_mmm_yyyy.json
+  Step 7: normalise_adapter.py            -> watchlist_scored_mmm_yyyy.json
   Step 8: step9_pre_builder.py       -> step9_pre_mmm_yyyy.json
   Step 9: email_prefill.py           -> email_data_mmm_yyyy.json (pre-filled skeleton)
   Step 10: write run_context_mmm_yyyy.json (staging file with all paths + summary)
@@ -65,7 +65,7 @@ SCRIPTS = {
     "update_watchlist_py":    os.path.join(SCRIPT_DIR, "update_watchlist.py"),
     "sync_vci_watchlist":     os.path.join(SCRIPT_DIR, "sync_vci_watchlist.py"),    # NEW Step 5
     "fetch_watchlist":        os.path.join(SCRIPT_DIR, "fetch_watchlist_metrics.py"),
-    "score_partab":           os.path.join(SCRIPT_DIR, "score_partab.py"),
+    "normalise_adapter":           os.path.join(SCRIPT_DIR, "normalise_adapter.py"),
     "rerank_watchlist":       os.path.join(SCRIPT_DIR, "rerank_watchlist.py"),       # NEW Step 7.5
     "entry_level_builder":    os.path.join(SCRIPT_DIR, "entry_level_builder.py"),    # NEW Step 7.25
     "step9_pre_builder":      os.path.join(SCRIPT_DIR, "step9_pre_builder.py"),     # NEW Step 8
@@ -231,6 +231,10 @@ def write_run_context(
             "email_data":           email_path,
             "target_weights":       os.path.join(SCRIPT_DIR, "target_weights.json"),
             "watchlist_tickers":    os.path.join(SCRIPT_DIR, "watchlist_tickers.json"),
+            "action_stack":         os.path.join(SCRIPT_DIR, f"action_stack_{month_label}.json"),
+            "decision_ledger":      os.path.join(SCRIPT_DIR, "decision_ledger.json"),
+            "ai_disruption":        os.path.join(SCRIPT_DIR, "ai_disruption.json"),
+            "fund_returns_cache":   os.path.join(SCRIPT_DIR, "fund_returns_cache.json"),
         },
         "summary": summary,
         "flags":   flags,
@@ -385,6 +389,36 @@ def main():
                         "type": "CONCENTRATION",
                         "message": f"Position(s) over 12.5%: {port_data['flags']['concentration_over_12_5pct']}",
                     })
+
+    # ---------------------------------------------------------------------------
+    # Step 1.5: Reconcile prior recommendations vs broker truth (recommendations != executions).
+    # The system never assumes a prior recommendation was executed; it confirms from THIS month's
+    # actual holdings (broker file). Additive — no-op until a decision ledger exists.
+    # ---------------------------------------------------------------------------
+    if not errors and os.path.exists(portfolio_path):
+        ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
+        if os.path.exists(ledger_path):
+            print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
+            try:
+                sys.path.insert(0, SCRIPT_DIR)
+                import decision_ledger as _dl_mod
+                with open(portfolio_path, encoding="utf-8") as _pf:
+                    _pd = json.load(_pf)
+                _held = {s.get("ticker"): s.get("quantity") for s in _pd.get("stocks", []) if s.get("ticker")}
+                _prior_h = None
+                if prior_port_path and os.path.exists(prior_port_path):
+                    try:
+                        with open(prior_port_path, encoding="utf-8") as _ppf:
+                            _ppd = json.load(_ppf)
+                        _prior_h = {s.get("ticker"): s.get("quantity") for s in _ppd.get("stocks", []) if s.get("ticker")}
+                    except Exception:
+                        _prior_h = None
+                _rc = _dl_mod.reconcile_executions(ledger_path, _held, prior_holdings=_prior_h, date=run_date.isoformat())
+                summary["ledger_reconcile"] = _rc
+                print(f"  Reconciled prior recommendations vs broker truth: {_rc}")
+            except Exception as _ex:
+                warnings.append(f"Step 1.5 (ledger reconcile) skipped: {_ex}")
+                print(f"  WARNING: {_ex}")
 
     # ---------------------------------------------------------------------------
     # Step 2: Extract X-Ray
@@ -650,13 +684,13 @@ def main():
                        "s7_sleeve_rows": [], "s3_case_skeletons": []}, f)
     else:
         ok, stdout, stderr = run_script(
-            "score_partab",
+            "normalise_adapter",
             ["--metrics", watchlist_metrics_path, "--out", watchlist_scored_path],
             dry_run=args.dry_run,
         )
         if not ok:
-            msg = stderr or stdout or "Unknown error in score_partab"
-            warnings.append("Step 7 (score_partab): " + msg)
+            msg = stderr or stdout or "Unknown error in normalise_adapter"
+            warnings.append("Step 7 (normalise_adapter): " + msg)
             print("  WARNING: " + msg)
             if not os.path.exists(watchlist_scored_path):
                 with open(watchlist_scored_path, "w", encoding="utf-8") as f:
@@ -701,9 +735,34 @@ def main():
             print(stdout.strip())
 
     # ---------------------------------------------------------------------------
+    # Inject recorded AI-disruption scores onto the scored tickers (after entry-level, before rerank/
+    # step9) so deployment_flags can cap an existential name (E4 -> E3 -> E1). Additive; no-op until
+    # assessments exist in ai_disruption.json.
+    # ---------------------------------------------------------------------------
+    _ai_store = os.path.join(SCRIPT_DIR, "ai_disruption.json")
+    if os.path.exists(_ai_store) and os.path.exists(watchlist_scored_path):
+        try:
+            sys.path.insert(0, SCRIPT_DIR)
+            import ai_disruption as _ai_mod
+            with open(watchlist_scored_path, encoding="utf-8") as _sf:
+                _scored = json.load(_sf)
+            _n = 0
+            for _t, _td in (_scored.get("tickers") or {}).items():
+                _a = _ai_mod.get_assessment(_ai_store, _t)
+                if _a and _a.get("score") is not None:
+                    _td["ai_disruption_score"] = _a["score"]
+                    _n += 1
+            if _n:
+                with open(watchlist_scored_path, "w", encoding="utf-8") as _sf:
+                    json.dump(_scored, _sf, indent=2, ensure_ascii=False, default=str)
+                print(f"  Injected AI-disruption scores onto {_n} scored ticker(s).")
+        except Exception as _ex:
+            warnings.append(f"AI-disruption injection skipped: {_ex}")
+
+    # ---------------------------------------------------------------------------
     # Step 7.5: Re-rank the watchlist on LIVE re-scored values
     # ---------------------------------------------------------------------------
-    # After fetch (Composio) + score_partab produce live Part A/B for the watchlist
+    # After fetch (Composio) + normalise_adapter produce live Part A/B for the watchlist
     # AND the candidate_pool, re-rank the top-10 on the live normalised score so the
     # watchlist reflects fresh data, not stale screening scores. step9_pre_builder
     # (below) reads the re-ranked watchlist_tickers.json, so downstream stays consistent.
@@ -737,6 +796,29 @@ def main():
                 print(f"  WARNING: {stderr or stdout}")
             else:
                 print(stdout.strip())
+
+    # ---------------------------------------------------------------------------
+    # H1 fix — RE-inject AI-disruption scores after rerank. rerank's end-of-run refresh regenerates
+    # watchlist_scored from the metrics (which don't carry the AI score), dropping the pre-rerank
+    # injection — so step9's gate_flags would lose ai_existential. Re-stamp here, before step9 reads it.
+    # ---------------------------------------------------------------------------
+    if os.path.exists(_ai_store) and os.path.exists(watchlist_scored_path):
+        try:
+            sys.path.insert(0, SCRIPT_DIR)
+            import ai_disruption as _ai_mod
+            with open(watchlist_scored_path, encoding="utf-8") as _sf:
+                _scored = json.load(_sf)
+            _n = 0
+            for _t, _td in (_scored.get("tickers") or {}).items():
+                _a = _ai_mod.get_assessment(_ai_store, _t)
+                if _a and _a.get("score") is not None:
+                    _td["ai_disruption_score"] = _a["score"]
+                    _n += 1
+            if _n:
+                with open(watchlist_scored_path, "w", encoding="utf-8") as _sf:
+                    json.dump(_scored, _sf, indent=2, ensure_ascii=False, default=str)
+        except Exception as _ex:
+            warnings.append(f"AI-disruption re-injection (post-rerank) skipped: {_ex}")
 
     # ---------------------------------------------------------------------------
     # Step 8: Build Step 9 pre-scored output

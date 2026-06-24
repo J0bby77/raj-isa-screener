@@ -443,9 +443,11 @@ def build_kpi_tiles(strong_buys, gate_passers):
         top = strong_buys[0]
         top_score = score_int(get_field(top, "total_score"))
         top_ticker = get_field(top, "ticker")
+        top_max = int(sf(get_field(top, "total_max")) or 50)   # P2-6: max-aware (/50 base, /54 semis)
     else:
         top_score = "N/A"
         top_ticker = "N/A"
+        top_max = 50
 
     # Avg upside of top 10
     top10 = strong_buys[:10]
@@ -464,7 +466,7 @@ def build_kpi_tiles(strong_buys, gate_passers):
         f'</td>\n'
         f'<td style="width:25%;padding:0 6px">\n'
         f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#1a3a6b;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{top_score}/54</td></tr>\n'
+        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{top_score}/{top_max}</td></tr>\n'
         f'  <tr><td style="color:#b3c6e6;font-size:11px">Top Score ({safe_entities(top_ticker)})</td></tr>\n'
         f'  </table>\n'
         f'</td>\n'
@@ -598,6 +600,7 @@ def build_top3_picks(strong_buys):
         sector = safe_entities(get_field(row, "sector") or "N/A")
         industry = safe_entities(get_field(row, "industry") or "N/A")
         total = score_int(get_field(row, "total_score"))
+        tmax = int(sf(get_field(row, "total_max")) or 50)   # P2-6: max-aware total denominator
         curr_sym = _currency_sym(row)
 
         # Price info
@@ -621,7 +624,7 @@ def build_top3_picks(strong_buys):
         commentary_raw = get_field(row, "commentary") or ""
         if not commentary_raw or commentary_raw in ("N/A", "nan", "None", ""):
             commentary_raw = (
-                f"{company} scores {total}/54 with strong Part A growth quality and Part B valuation metrics. "
+                f"{company} scores {total}/{tmax} with strong Part A growth quality and Part B valuation metrics. "
                 f"Sector: {sector}. Industry: {industry}. "
                 f"Refer to SUMMARY tab in Excel for full overlay data and detailed analysis."
             )
@@ -645,7 +648,7 @@ def build_top3_picks(strong_buys):
             f'<div style="margin-bottom:6px">'
             f'<strong style="font-size:16px;color:#1a3a6b">{rank}. {ticker} &mdash; {company}</strong> '
             f'<span style="background:#1a6b2a;color:#fff;padding:2px 8px;border-radius:3px;'
-            f'font-size:11px;font-weight:bold">{total}/54</span> '
+            f'font-size:11px;font-weight:bold">{total}/{tmax}</span> '
             f'<span style="color:#888;font-size:12px">&nbsp;{sector} / {industry}</span>'
             f'</div>\n'
             # Price info row

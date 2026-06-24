@@ -4,7 +4,7 @@ step9_pre_builder.py  --  Step 9 Pre-Scored Conviction Builder
 Version: 1.0  |  2026-06-04
 
 Purpose:
-    Reads watchlist_scored_[mmm_yyyy].json (produced by score_partab.py) and
+    Reads watchlist_scored_[mmm_yyyy].json (produced by normalise_adapter.py) and
     watchlist_tickers.json, assigns every watchlist name to a tier
     (T1/T2/T3 for main watchlist; T1-A/T2-A/T3-A for VCI candidates),
     computes 7 of 10 conviction dimensions for all T1 names from the scored
@@ -25,7 +25,15 @@ import argparse
 import json
 import os
 import re
+import sys
 from datetime import datetime
+
+# Shared deployment-gate pre-flags (CONTRACTS #4 gate_flags / forward_axis_flags). Additive.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import deployment_flags as _dflags
+except Exception:
+    _dflags = None
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +662,12 @@ def main():
         # Compute portfolio overlap flags (used in all tier records)
         overlap_flags = compute_portfolio_overlap_flags(ticker, ts, sleeve_tickers, sleeve_sectors)
 
+        # E3 — deployment-gate pre-flags (shared with rerank action-stack caps). Catalyst rebuts
+        # the revision-cut disqualifier (Door-C carve-out). Judgement gates are surfaced, not applied.
+        _has_catalyst = bool(wt_entry.get("confirmed_catalyst") or wt_entry.get("catalyst_protected"))
+        _gf = (_dflags.compute_gate_flags(ts, _has_catalyst) if _dflags
+               else {"disqualifier_flags": [], "review_flags": [], "forward_axis_flags": []})
+
         base_record = {
             "ticker":             ticker,
             "rank":               rank,
@@ -674,6 +688,13 @@ def main():
             "entry_level_confirm_required": entry_confirm_req,
             "entry_window_score": compute_entry_window_score(pct_vs_entry),
             "portfolio_overlap":  overlap_flags,
+            # E3 — CONTRACTS #4 deployment-gate pre-flags + forward-axis tags + Step 9/10 checklist
+            "dims_precomputed":      "7/10",
+            "forward_axis_flags":    _gf["forward_axis_flags"],
+            "gate_flags":            _gf["disqualifier_flags"] + _gf["review_flags"],
+            "disqualifier_flags":    _gf["disqualifier_flags"],
+            "review_flags":          _gf["review_flags"],
+            "judgment_gates_pending": list(_dflags.JUDGMENT_GATES) if _dflags else [],
         }
 
         # Determine kind from scored data

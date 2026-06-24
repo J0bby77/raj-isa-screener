@@ -33,6 +33,13 @@ import argparse
 from datetime import datetime
 
 try:
+    import os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import scoring_config as _cfg
+except Exception:
+    _cfg = None
+
+try:
     import yfinance as yf
 except ImportError:
     print("ERROR: yfinance not installed. Run: pip install yfinance --break-system-packages")
@@ -757,6 +764,39 @@ def compute_totals(scores):
     }
 
 
+def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
+                          has_catalyst=False, cfg=None):
+    """F1-F4 VCI final-layer gates (redesign Part2 §3.5). Applied to the FINAL ACS at the
+    DEPLOYMENT layer only — never folded into Part A / ACS4 (F4). Returns the adjusted ACS,
+    which gates fired, and deployment eligibility.
+      F1 management instability  -> ACS - VCI_MGMT_PENALTY (capital discipline)
+      F2 catalyst-confirmation   -> VCI thesis needs a confirmed bottleneck catalyst; absent = review
+      F3 price-falls-on-beat     -> hard NO-DEPLOY (the value-trap signal, same as growth)
+    Reusable by the review/deployment step (pass the full ACS); the CLI demos it on ACS4."""
+    cfg = cfg or _cfg
+    pen = getattr(cfg, "VCI_MGMT_PENALTY", 5.0)
+    thr = getattr(cfg, "VCI_DEPLOY_THRESHOLD", 75)
+    gates = []
+    adj = acs_total if acs_total is not None else 0.0
+    blocked = False
+    if mgmt_unstable:
+        adj -= pen
+        gates.append(f"mgmt_instability:-{pen:g}")
+    if falls_on_beat:
+        blocked = True
+        gates.append("price_falls_on_beat:NO_DEPLOY")
+    if not has_catalyst:
+        gates.append("catalyst_unconfirmed:review")
+    return {
+        "acs_in": acs_total,
+        "adjusted_acs": round(adj, 1),
+        "gates_fired": gates,
+        "deploy_blocked": blocked,
+        "deploy_eligible": (not blocked) and adj >= thr,
+        "catalyst_confirmed": bool(has_catalyst),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Output formatter
 # ---------------------------------------------------------------------------
@@ -937,6 +977,12 @@ def main():
                         help='ACS8 fair-value asymmetry: "TICKER:14.0,ONT.L:1.35" (natural unit; GBP for .L)')
     parser.add_argument('--catalyst', nargs='*', default=None, metavar='TICKER',
                         help='Tickers with a named catalyst <12mo AND B2>=2 (applies ACS8 +2 catalyst premium)')
+    parser.add_argument('--mgmt-unstable', nargs='*', default=None, metavar='TICKER',
+                        help='F1 VCI gate: tickers with management instability (ACS -VCI_MGMT_PENALTY)')
+    parser.add_argument('--falls-on-beat', nargs='*', default=None, metavar='TICKER',
+                        help='F3 VCI gate: tickers that fell on an earnings beat (hard NO-DEPLOY)')
+    parser.add_argument('--final-gates', action='store_true',
+                        help='Apply F1-F4 VCI final-layer gates (overrides scoring_config.VCI_FINAL_LAYER_GATES)')
     args = parser.parse_args()
 
     a10_map = parse_kv_arg(args.a10) if args.a10 else {}
@@ -944,6 +990,9 @@ def main():
     a9_strategic = [t.upper() for t in args.a9_strategic] if args.a9_strategic else []
     fv_map = parse_fv_arg(args.bottleneck_fv) if args.bottleneck_fv else {}
     catalyst_set = {t.upper() for t in args.catalyst} if args.catalyst else set()
+    mgmt_set = {t.upper() for t in args.mgmt_unstable} if args.mgmt_unstable else set()
+    fob_set = {t.upper() for t in args.falls_on_beat} if args.falls_on_beat else set()
+    _final_gates_on = bool(args.final_gates or getattr(_cfg, "VCI_FINAL_LAYER_GATES", False))
 
     print(f'\nVCI Part A Auto-Scorer | {len(args.tickers)} candidate(s)')
     print(f'Scorecard version: VCI_Asymmetric_Scorecard.md v2.0')
@@ -971,7 +1020,15 @@ def main():
         print_scorecard(sym, d, scores, totals, override_check)
 
         if args.json_out:
-            all_results.append(build_json_output(sym, d, scores, totals, override_check))
+            _res = build_json_output(sym, d, scores, totals, override_check)
+            if _final_gates_on:
+                _sb = sym_up.replace('.L', '')
+                _res["vci_final_gates"] = apply_vci_final_gates(
+                    totals["acs4"],
+                    mgmt_unstable=(sym_up in mgmt_set or _sb in mgmt_set),
+                    falls_on_beat=(sym_up in fob_set or _sb in fob_set),
+                    has_catalyst=has_cat, cfg=_cfg)
+            all_results.append(_res)
 
     # Summary table
     if len(args.tickers) > 1:
