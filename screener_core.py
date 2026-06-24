@@ -1356,27 +1356,44 @@ def gate4_pass(income_stmt, sector_bucket: str = "default"):
 # SECTION 5: DATA FETCHING (batched, chunked, with cooldowns)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resilient(fn, sym, tries=4, base=2.0, cap=45.0):
+    """Retry fn() on exception with exponential backoff + full jitter. Call sites RAISE on an
+    empty/throttle response so yfinance's silent empty-after-200 (the dominant rate-limit failure)
+    becomes retryable instead of an instant fetch-miss. Strictly more robust; no scoring change."""
+    import random as _rand
+    for _attempt in range(tries):
+        try:
+            return fn()
+        except Exception:
+            if _attempt == tries - 1:
+                raise
+            time.sleep(min(cap, base * (2 ** _attempt)) * (0.5 + _rand.random()))
+
+
 def _fetch_ticker_info(ticker_sym):
     """Fetch ticker.info for a single ticker. Returns (ticker_sym, info_dict | None, error)."""
-    try:
-        tk = yf.Ticker(ticker_sym)
-        info = tk.info or {}
+    def _pull():
+        info = yf.Ticker(ticker_sym).info or {}
         if not info or len(info) < 5:
-            return ticker_sym, None, "empty_info"
-        return ticker_sym, info, None
+            raise RuntimeError("empty_info (throttle?)")
+        return info
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
     except Exception as e:
         return ticker_sym, None, str(e)
 
 
 def _fetch_ticker_statements(ticker_sym):
     """Fetch annual statements for a single ticker."""
-    try:
+    def _pull():
         tk = yf.Ticker(ticker_sym)
-        return ticker_sym, {
-            "income_stmt":   tk.income_stmt,
-            "cashflow":      tk.cashflow,
-            "balance_sheet": tk.balance_sheet,
-        }, None
+        d = {"income_stmt": tk.income_stmt, "cashflow": tk.cashflow,
+             "balance_sheet": tk.balance_sheet}
+        if all((v is None or (hasattr(v, "empty") and v.empty)) for v in d.values()):
+            raise RuntimeError("empty_statements (throttle?)")
+        return d
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
     except Exception as e:
         return ticker_sym, None, str(e)
 
