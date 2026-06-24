@@ -955,6 +955,7 @@ def build_s7_row(ticker: str, s: dict) -> dict:
         "target_upside": fmt_pct(s.get("target_upside")),
         "score_summary": score_summary,
         "total_score":   s.get("total_score"),
+        "total_max":     s.get("total_max"),
         "part_a_score":  s.get("part_a_score"),
         "part_b_score":  s.get("part_b_score"),
     }

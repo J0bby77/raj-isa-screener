@@ -542,7 +542,7 @@ def skeleton_s5() -> dict:
                 "rank":         1,
                 "ticker":       "[TICKER]",
                 "name":         "[Company]",
-                "score":        "[XX/54 | Conv: XX/100]",
+                "score":        "[XX/50 | Conv: XX/100]",
                 "score_level":  "high",
                 "sector":       "[Sector]",
                 "entry_level":  "[$XX or £XX]",
@@ -681,7 +681,7 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
             h["status_note"] = (
                 f"Analyst: {analyst} | Target upside: {upside} | "
                 f"Next earnings: {ne}"
-                + (f" | Score: {score}/54" if score else "")
+                + (f" | Score: {score}/{s.get('total_max') or 50}" if score else "")
                 + " | [Claude: update thesis status at Step 8]"
             )
 
