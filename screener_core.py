@@ -1364,9 +1364,18 @@ def _resilient(fn, sym, tries=4, base=2.0, cap=45.0):
     for _attempt in range(tries):
         try:
             return fn()
-        except Exception:
+        except Exception as _e:
             if _attempt == tries - 1:
                 raise
+            # crumb/401 refresh: a stale Yahoo crumb won't recover on a plain retry — force YfData
+            # to re-fetch cookie+crumb so the next attempt is authenticated (cuts the 'Invalid Crumb'
+            # 401 jitter). Defensive: never let the internal poke break the retry loop.
+            if any(_k in str(_e).lower() for _k in ("crumb", "401", "unauthorized")):
+                try:
+                    import yfinance.data as _yd
+                    _ys = _yd.YfData(); _ys._crumb = None; _ys._cookie = None
+                except Exception:
+                    pass
             time.sleep(min(cap, base * (2 ** _attempt)) * (0.5 + _rand.random()))
 
 
