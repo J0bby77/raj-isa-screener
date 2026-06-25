@@ -668,6 +668,23 @@ PART_B_METRIC_COLS = [
     ("Grand Total",      "total_score",          None),
 ]
 
+# Part F — Forward Axis decomposition (S5). kind: axis=/100 aggregate, score=0-2 sub-signal,
+# raw=underlying driver (%, pp), text=revision stage label.
+PART_F_METRIC_COLS = [
+    ("Fwd Axis /100",  "forward_axis_score",   "axis"),
+    ("EPS Trend",      "score_f_eps_trend",    "score"),
+    ("EPS Mom %",      "eps_trend_mom_pct",    "raw"),
+    ("Mgn Traj",       "score_f_margin_traj",  "score"),
+    ("Mgn d-pp",       "margin_traj_delta_pp", "raw"),
+    ("Rev Est",        "score_f_rev_est",      "score"),
+    ("Rev Est %",      "rev_est_fwd_pct",      "raw"),
+    ("Price Mom",      "score_f_price_mom",    "score"),
+    ("Price 3m %",     "price_mom_3m_pct",     "raw"),
+    ("Est Rev (B)",    "score_b_est_rev",      "score"),
+    ("Rev Runway",     "revision_runway",      "score"),
+    ("Stage",          "revision_stage",       "text"),
+]
+
 
 def build_scores(wb, df_full, group, run_date):
     ws = wb.create_sheet("SCORES")
@@ -676,9 +693,11 @@ def build_scores(wb, df_full, group, run_date):
     id_cols = [("Ticker", "ticker"), ("Company", "company"), ("Final Status", "final_status")]
     all_a = [(h, f) for h, f in [(h, f) for h, f in PART_A_METRIC_COLS]]
     all_b = [(h, f, alt) for h, f, alt in PART_B_METRIC_COLS]
+    show_f = ("forward_axis_score" in df_full.columns) and bool(df_full["forward_axis_score"].notna().any())
+    all_f = list(PART_F_METRIC_COLS) if show_f else []
 
     # Title
-    total_cols = len(id_cols) + len(all_a) + len(all_b)
+    total_cols = len(id_cols) + len(all_a) + len(all_b) + len(all_f)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     c = ws.cell(row=1, column=1, value=f"{group} — Part A & Part B Metric Scores | {run_date}")
     c.fill = FILL_HDR_DARK; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
@@ -700,8 +719,16 @@ def build_scores(wb, df_full, group, run_date):
                 value="Part B — Strong Buy Assessment (13 base metrics max 26; +2 conditional for equipment/hardware = max 30 | * = N/A for non-equipment)")
     c.fill = FILL_GRP4; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
 
+    if all_f:
+        f_start = b_end + 1; f_end = f_start + len(all_f) - 1
+        ws.merge_cells(start_row=2, start_column=f_start, end_row=2, end_column=f_end)
+        c = ws.cell(row=2, column=f_start,
+                    value="Part F — Forward Axis (S5: aggregate /100 + 5 sub-signal scores 0-2 with raw drivers + revision stage)")
+        c.fill = FILL_GRP5; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
+
     # Column headers (row 3)
     all_hdrs = [h for h, _ in id_cols] + [h for h, _ in all_a] + [h for h, _, *_ in all_b]
+    all_hdrs += [h for h, _, _ in all_f]
     for ci, hdr in enumerate(all_hdrs, start=1):
         c = ws.cell(row=3, column=ci, value=hdr)
         c.fill = FILL_HDR_DARK; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
@@ -741,6 +768,23 @@ def build_scores(wb, df_full, group, run_date):
             if (raw is None or (isinstance(raw, float) and pd.isna(raw))) and alt_field:
                 raw = row.get(alt_field, None)
             val = score_int(raw)
+            c = ws.cell(row=er, column=ci, value=val)
+            c.alignment = ALIGN_CTR; c.fill = row_fill; c.border = THIN; c.font = FONT_NORM
+            ci += 1
+
+        # Part F — Forward Axis decomposition (S5)
+        for _fh, _ff, _fk in all_f:
+            raw = row.get(_ff, None)
+            _missing = raw is None or (isinstance(raw, float) and pd.isna(raw))
+            if _fk == "text":
+                val = s(raw) if not _missing else "-"
+            elif _fk == "raw":
+                try:
+                    val = round(float(raw), 1) if not _missing else None
+                except (TypeError, ValueError):
+                    val = None
+            else:
+                val = score_int(raw)
             c = ws.cell(row=er, column=ci, value=val)
             c.alignment = ALIGN_CTR; c.fill = row_fill; c.border = THIN; c.font = FONT_NORM
             ci += 1
