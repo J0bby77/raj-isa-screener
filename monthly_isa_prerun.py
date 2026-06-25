@@ -776,7 +776,7 @@ def main():
             with open(watchlist_scored_path, encoding="utf-8") as _f:
                 _sc = json.load(_f)
             _live = sum(1 for e in _sc.get("conviction_ranking", [])
-                        if (e.get("total_score_54") or e.get("total_score_36")) is not None)
+                        if (e.get("total_score_54") or e.get("total_score_50") or e.get("total_score_36")) is not None)
         except Exception:
             _live = 0
         if _live == 0:

@@ -366,9 +366,9 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
         live = cr.get(t)
         total = None
         if live:
-            total = live.get("total_score_36") if pipeline == "energy" else live.get("total_score_54")
+            total = live.get("total_score_36") if pipeline == "energy" else (live.get("total_score_50") or live.get("total_score_54"))
             if total is None:
-                total = live.get("total_score_54") or live.get("total_score_36")
+                total = live.get("total_score_50") or live.get("total_score_54") or live.get("total_score_36")
         src = live
         if total is None:
             tkd = tk.get(t)
