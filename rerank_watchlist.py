@@ -390,7 +390,7 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
     old_wl = {e["ticker"] for e in wt.get("watchlist", [])}
     log["compliance_excluded"] = []
     _use_fe = getattr(_cfg, "FORWARD_ELIGIBILITY", False)
-    _pa_floor_a = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 21)
+    _pa_floor_a = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)
     _pa_floor_c = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14)
     eligible = []
     for t, e in registry.items():

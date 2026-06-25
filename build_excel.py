@@ -444,7 +444,7 @@ def build_summary(wb, df_full, run_date, group):
     # P2-2: never admit a fail-status name to the SUMMARY (count-based path filtered on Part A/B only).
     _fs = df_full.get("final_status", pd.Series(dtype=str)).fillna("").astype(str).str.upper()
     _ok_status = ~_fs.isin({"HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL", "UNRESOLVED_HARD_GATE_NOT_RANKABLE"})
-    _paf = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 14)   # P2-1: single-source viability floor (= pool/rerank)
+    _paf = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)   # P2-1: single-source viability floor (= pool/rerank)
     if getattr(_cfg, "SUMMARY_COUNT_BASED", False):
         # Multi-door eligibility (viability, not quality) then rank by a forward-led screen Source Score.
         sb = df_full[(_pa >= _paf) & (_pb >= 14) & _notdet & _ok_status].copy()

@@ -324,7 +324,7 @@ def _pool_admit(ns, part_a, path, override) -> bool:
         return True
     if getattr(_cfg, "FORWARD_ELIGIBILITY", False):
         floor = (getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14) if path == "C"
-                 else getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 21))
+                 else getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10))
         return (part_a or 0) >= floor
     return (ns or 0) >= NORMALISED_SCORE_PROMOTION_GATE
 
