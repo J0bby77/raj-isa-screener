@@ -542,7 +542,7 @@ def skeleton_s5() -> dict:
                 "rank":         1,
                 "ticker":       "[TICKER]",
                 "name":         "[Company]",
-                "score":        "[XX/54 | Conv: XX/100]",
+                "score":        "[XX/50 | Conv: XX/100]",
                 "score_level":  "high",
                 "sector":       "[Sector]",
                 "entry_level":  "[$XX or £XX]",
@@ -564,7 +564,7 @@ def skeleton_s5() -> dict:
 def build_s5_from_scored(scored: dict) -> dict:
     """
     Build s5 watchlist section from watchlist_scored.json output.
-    Items are pre-populated with quantitative fields from score_partab.py.
+    Items are pre-populated with quantitative fields from normalise_adapter.py.
     Claude fills: detail_items paragraphs (thesis for top 3), excluded notes, conviction scores.
     """
     raw_items = scored.get("s5_watchlist_rows", [])
@@ -681,7 +681,7 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
             h["status_note"] = (
                 f"Analyst: {analyst} | Target upside: {upside} | "
                 f"Next earnings: {ne}"
-                + (f" | Score: {score}/54" if score else "")
+                + (f" | Score: {score}/{s.get('total_max') or 50}" if score else "")
                 + " | [Claude: update thesis status at Step 8]"
             )
 
@@ -767,7 +767,7 @@ def main():
     parser.add_argument("--analytics", required=True)
     parser.add_argument("--xray",      required=True)
     parser.add_argument("--scored",    default=None,
-                        help="Path to watchlist_scored_mmm_yyyy.json from score_partab.py")
+                        help="Path to watchlist_scored_mmm_yyyy.json from normalise_adapter.py")
     parser.add_argument("--out",       default=None)
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 """
 entry_level_builder.py  --  Pre-run Step 7.25: create / refresh composite entry levels.
 
-Runs AFTER score_partab.py (needs live prices + metrics) and BEFORE
+Runs AFTER normalise_adapter.py (needs live prices + metrics) and BEFORE
 rerank_watchlist.py / step9_pre_builder.py (which use entry_level for tiering).
 
 Scope: main `watchlist` + `candidate_pool` growth/energy names.
@@ -57,19 +57,46 @@ RATIO_LO, RATIO_HI = 0.2, 5.0          # sane own-multiple ratio band (guardrail
 REFRESH_AGE_DAYS = 92                    # ~3 months
 
 
-def classify_stock_type(t: dict) -> str:
+# Sector/industry keyword fallback used ONLY when sector_bucket is missing — so a name is
+# never silently mislabelled as a quality-compounder ("SaaS default", retro item 6).
+_SECTOR_TYPE_KEYWORDS = [
+    ("energy",             ("oil", "gas", " energy", "petroleum", "drilling", "coal", "lng", "midstream")),
+    ("healthcare",         ("health", "biotech", "pharma", "medical", "life science", "drug")),
+    ("cyclical",           ("semiconductor", "chip", "auto", "mining", "metals", "materials", "machinery")),
+    ("quality_compounder", ("software", "saas", "internet content", "application software", "it services")),
+]
+
+
+def classify_stock_type_detail(t: dict) -> dict:
+    """Robust sector_type classification (retro item 6 fix). Prefers the explicit
+    sector_bucket; when that is absent, infers from sector/industry KEYWORDS rather than
+    silently defaulting to a quality compounder. Returns
+    {sector_type, sector_type_inferred, sector_type_basis}."""
     pipeline = (t.get("_source_pipeline") or t.get("source_pipeline") or "growth_stock")
-    bucket   = t.get("sector_bucket") or ""
+    bucket   = (t.get("sector_bucket") or "").strip().lower()
     sector   = (t.get("sector") or "")
+    industry = (t.get("industry") or "")
     if pipeline == "energy":
-        return "energy"
+        return {"sector_type": "energy", "sector_type_inferred": False, "sector_type_basis": "pipeline=energy"}
     if bucket in SEMI_BUCKETS:
-        return "cyclical"
+        return {"sector_type": "cyclical", "sector_type_inferred": False, "sector_type_basis": f"bucket={bucket}"}
     if bucket == "software_saas":
-        return "quality_compounder"
+        return {"sector_type": "quality_compounder", "sector_type_inferred": False, "sector_type_basis": "bucket=software_saas"}
     if sector == "Healthcare":
-        return "healthcare"
-    return "normal_growth"
+        return {"sector_type": "healthcare", "sector_type_inferred": False, "sector_type_basis": "sector=Healthcare"}
+    hay = f" {sector} {industry} ".lower()
+    if hay.strip():
+        for stype, kws in _SECTOR_TYPE_KEYWORDS:
+            if any(k in hay for k in kws):
+                return {"sector_type": stype, "sector_type_inferred": True,
+                        "sector_type_basis": f"inferred from '{sector}/{industry}'"}
+    return {"sector_type": "normal_growth", "sector_type_inferred": True,
+            "sector_type_basis": "default normal_growth (no sector signal — NOT SaaS)"}
+
+
+def classify_stock_type(t: dict) -> str:
+    """Back-compat string accessor; full detail via classify_stock_type_detail()."""
+    return classify_stock_type_detail(t)["sector_type"]
 
 
 def _num(v):
@@ -124,13 +151,17 @@ def _own_fair_value(t: dict, stock_type: str):
 def build_entry_for_ticker(t: dict, existing: dict) -> dict:
     """Return an audit record (dict) with all anchors + selected entry + governance."""
     price = _num(t.get("current_price"))
-    stock_type = classify_stock_type(t)
+    _st = classify_stock_type_detail(t)
+    stock_type = _st["sector_type"]
     req_up = REQUIRED_UPSIDE[stock_type]
     prices = t.get("_prices") or {}
 
     rec = {
         "ticker": t.get("ticker"),
-        "stock_type": stock_type,
+        "stock_type": stock_type,                       # back-compat
+        "sector_type": stock_type,                      # CONTRACTS #5 field (FIXED — no SaaS default)
+        "sector_type_inferred": _st["sector_type_inferred"],
+        "sector_type_basis": _st["sector_type_basis"],
         "required_upside": req_up,
         "current_price": price,
         "entry_currency": existing.get("entry_currency") or t.get("currency") or "USD",
@@ -140,6 +171,8 @@ def build_entry_for_ticker(t: dict, existing: dict) -> dict:
         rec.update({"entry_level": None, "entry_level_status": "missing_no_price",
                     "entry_level_confidence": "low", "entry_level_provisional": True,
                     "confirm_required": True, "selected_entry_reason": "no current price",
+                    "null_after_builder": True,            # CONTRACTS #5 — run status -> PARTIAL
+                    "full_size_requires_review": True,     # §I.3 — low confidence != full size
                     "anchors": {}})
         return rec
 
@@ -250,6 +283,8 @@ def build_entry_for_ticker(t: dict, existing: dict) -> dict:
         "confirm_required": True,
         "entry_level_method": "pre_run_composite",
         "entry_level_confidence": confidence,
+        "null_after_builder": False,
+        "full_size_requires_review": (confidence == "low"),   # §I.3 — low conf != full size
         "vol_profile": vol_profile,
         "realised_vol": t.get("_realised_vol"),
         "selected_entry_reason": sel,
@@ -307,6 +342,8 @@ def apply_governance(existing: dict, rec: dict) -> tuple[dict, str]:
             "entry_level_status": "missing_after_builder",
             "entry_level_provisional": True,
             "confirm_required": True,
+            "null_after_builder": True,             # CONTRACTS #5 — run status -> PARTIAL
+            "full_size_requires_review": True,
         }, "missing_after_builder")
 
     fields = {
@@ -435,7 +472,7 @@ def run(metrics_path: str, watchlist_path: str, watchlist_out: str,
         "entries": audit,
     }
 
-    # Propagate entry levels into the metrics file so score_partab (and any rerun in
+    # Propagate entry levels into the metrics file so normalise_adapter (and any rerun in
     # rerank_watchlist) computes in_window / pct_above_entry from fresh entry data.
     for _sym, _el in entry_map.items():
         if _sym in tickers:

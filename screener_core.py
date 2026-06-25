@@ -30,6 +30,8 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scoring_config as _cfg  # SINGLE SOURCE OF TRUTH for scoring thresholds (path scorers + pre-run adapter import this)
 try:
     yf.set_tz_cache_location("/dev/shm/yf_cache") if _os.path.isdir("/dev/shm") else None
 except Exception:
@@ -77,7 +79,7 @@ COUNTRY_EXCHANGES = {
 GATE1_EXCLUDE_SECTORS = {"Real Estate"}
 GATE1_EXCLUDE_KEYWORDS = [
     "bank", "insur", "asset manag", "investment trust", "fund", "reit",
-    "mining", "metals", "gold", "silver", "copper", "royalt", "streaming",
+    "mining", "metals", "gold", "silver", "copper", "royalt", "streaming vehicle",
     "spac", "blank check", "holding compan",
 ]
 GATE1_FINTECH_KEEP_KEYWORDS = [
@@ -172,10 +174,10 @@ BOOK_TO_BILL_SCORE_THRESHOLDS = (1.20, 1.00)   # (strong >= 1.20, acceptable >= 
 BACKLOG_EV_SCORE_THRESHOLDS   = (2.00, 1.00)   # (strong >= 2.00, acceptable >= 1.00)
 
 # ── Scoring thresholds (do not change without checklist update) ───────────────
-PART_A_STRONG_THRESHOLD   = 22
-PART_A_ACCEPTABLE_MIN     = 14
-PART_B_STRONG_THRESHOLD   = 19
-PART_B_ACCEPTABLE_MIN     = 11
+PART_A_STRONG_THRESHOLD   = _cfg.GROWTH_PART_A_STRONG       # 22  (scoring_config — single source of truth)
+PART_A_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_A_ACCEPTABLE   # 14
+PART_B_STRONG_THRESHOLD   = _cfg.GROWTH_PART_B_STRONG       # 16  (v27-recalibrated; was hardcoded 19 on the old /26 scale)
+PART_B_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_B_ACCEPTABLE   # 11
 OVERLAY_SCORE_TRIGGER     = 38   # total score threshold to attempt overlays
 OVERLAY_TIME_CAP_SECS     = 480  # 8 minutes
 
@@ -1106,6 +1108,18 @@ def fetch_constituents(group):
 # SECTION 4: GATE FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _kw_word_start_hit(text, keywords):
+    """Return the first keyword occurring at a WORD START in text, else None.
+    Word-start (left-boundary) matching fixes the substring-within-word false positive
+    (e.g. 'spac' must NOT match the 'spac' inside 'aerospace') while preserving intended
+    PREFIX keywords: 'insur'->'insurance', 'royalt'->'royalty', 'asset manag'->'asset
+    management', 'holding compan'->'holding company'."""
+    for kw in keywords:
+        if re.search(r"\b" + re.escape(kw), text):
+            return kw
+    return None
+
+
 def _sector_excluded_standard(info):
     """
     Returns (excluded: bool, reason: str) for standard Gate 1 (non-Nasdaq).
@@ -1130,11 +1144,11 @@ def _sector_excluded_standard(info):
         if not keep:
             return True, f"Sector exclusion: financial services ({industry})"
 
-    # Broad keyword exclusions
+    # Broad keyword exclusions (word-start match — see _kw_word_start_hit)
     combined_text = sector + " " + industry
-    for kw in GATE1_EXCLUDE_KEYWORDS:
-        if kw in combined_text:
-            return True, f"Sector exclusion: {kw}"
+    _hit = _kw_word_start_hit(combined_text, GATE1_EXCLUDE_KEYWORDS)
+    if _hit:
+        return True, f"Sector exclusion: {_hit}"
 
     return False, ""
 
@@ -1164,14 +1178,14 @@ def _sector_excluded_nasdaq(info):
         if not any(kw in industry for kw in keep_kws):
             return True, f"Sector exclusion (Nasdaq): financial services ({industry})"
 
-    # SPACs / investment trusts / royalty
+    # SPACs / investment trusts / royalty (word-start match — 'spac' must not hit 'aerospace')
     spac_kws = ["spac", "blank check", "investment trust", "royalt", "streaming vehicle"]
-    if any(kw in industry for kw in spac_kws):
+    if _kw_word_start_hit(industry, spac_kws):
         return True, f"Sector exclusion (Nasdaq): {industry}"
 
-    # Mining
+    # Mining (word-start match)
     mining_kws = ["gold", "silver", "copper", "mining", "royalty"]
-    if any(kw in industry for kw in mining_kws):
+    if _kw_word_start_hit(industry, mining_kws):
         return True, f"Sector exclusion (Nasdaq): mining/metals ({industry})"
 
     return False, ""
@@ -1217,9 +1231,18 @@ def gate2_pass(income_stmt, info, nasdaq_mode=False, cashflow=None, ticker=None)
         return None, "GATE_DATA_UNRESOLVED: gross_profit or revenue missing", "GATE_DATA_UNRESOLVED", None
 
     gm = gross_profit / revenue
-    if gm >= threshold:
-        return True, "", "", gm
-    return False, f"Gross margin {gm*100:.1f}% below {threshold*100:.0f}% threshold ({bucket})", "Gate 2", gm
+    # Redesign Part 3 §8: GM is a SECTOR-SEGMENTED SCORE (GROSS_MARGIN_SCORE_THRESHOLDS),
+    # not a hard quality gate. When RELAX_GM_GATE is on, only genuinely non-viable businesses
+    # (GM < GM_VIABILITY_FLOOR) are gated; low-GM-for-sector names survive and are differentiated
+    # by the sector-segmented Part A GM score. Legacy hard gate retained behind the flag.
+    if not getattr(_cfg, "RELAX_GM_GATE", False):
+        if gm >= threshold:
+            return True, "", "", gm
+        return False, f"Gross margin {gm*100:.1f}% below {threshold*100:.0f}% threshold ({bucket})", "Gate 2", gm
+    if gm < getattr(_cfg, "GM_VIABILITY_FLOOR", 0.0):
+        return False, f"Gross margin {gm*100:.1f}% below viability floor ({bucket})", "Gate 2", gm
+    note = "" if gm >= threshold else f"low GM {gm*100:.1f}% < {threshold*100:.0f}% sector floor — scored not gated ({bucket})"
+    return True, note, "", gm
 
 
 def gate3_pass(cashflow):
@@ -1252,6 +1275,15 @@ def gate3_pass(cashflow):
     pos = len([v for _, v in fcf_series if v is not None and v > 0])
     if pos >= 3:
         return True, "", "", pos, avail
+    if getattr(_cfg, "RELAX_FCF_GATE", False):
+        # Redesign Part 3 §8: FCF-negative from strategic capex is acceptable IF operations
+        # generate cash (most-recent OCF > 0). Genuine ops cash-burners (OCF<=0) still fail.
+        ocf_series = get_stmt_series(cashflow,
+            ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities",
+             "Net Cash Provided By Operating Activities", "Total Cash From Operating Activities"])
+        ocf_recent = next((v for _, v in ocf_series if v is not None), None)
+        if ocf_recent is not None and ocf_recent > 0:
+            return True, f"FCF positive {pos}/{avail}yr but OCF>0 (capex-driven; scored not gated)", "", pos, avail
     return False, f"FCF positive only {pos}/{avail} years", "Gate 3", pos, avail
 
 
@@ -1313,6 +1345,10 @@ def gate4_pass(income_stmt, sector_bucket: str = "default"):
             )
             return True, reason, "Gate 4 (5yr override)", cagr_5
 
+    # Redesign Part 3 §8: forward-inclusive relaxation — low-trailing-growth names (UNH +2%,
+    # turnarounds) survive if not declining; forward growth/estimate momentum is scored downstream.
+    if getattr(_cfg, "RELAX_CAGR_GATE", False) and cagr is not None and cagr >= getattr(_cfg, "GATE4_RELAXED_CAGR_MIN", 0.0):
+        return True, f"Revenue CAGR {cagr*100:.1f}% < 5% but >= relaxed floor — scored not gated", "", cagr
     return False, f"Revenue CAGR {cagr*100:.1f}% below 5% threshold", "Gate 4", cagr
 
 
@@ -1320,32 +1356,72 @@ def gate4_pass(income_stmt, sector_bucket: str = "default"):
 # SECTION 5: DATA FETCHING (batched, chunked, with cooldowns)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resilient(fn, sym, tries=4, base=2.0, cap=45.0):
+    """Retry fn() on exception with exponential backoff + full jitter. Call sites RAISE on an
+    empty/throttle response so yfinance's silent empty-after-200 (the dominant rate-limit failure)
+    becomes retryable instead of an instant fetch-miss. Strictly more robust; no scoring change."""
+    import random as _rand
+    for _attempt in range(tries):
+        try:
+            return fn()
+        except Exception as _e:
+            if _attempt == tries - 1:
+                raise
+            # crumb/401 refresh: a stale Yahoo crumb won't recover on a plain retry — force YfData
+            # to re-fetch cookie+crumb so the next attempt is authenticated (cuts the 'Invalid Crumb'
+            # 401 jitter). Defensive: never let the internal poke break the retry loop.
+            if any(_k in str(_e).lower() for _k in ("crumb", "401", "unauthorized")):
+                try:
+                    import yfinance.data as _yd
+                    _ys = _yd.YfData(); _ys._crumb = None; _ys._cookie = None
+                except Exception:
+                    pass
+            time.sleep(min(cap, base * (2 ** _attempt)) * (0.5 + _rand.random()))
+
+
 def _fetch_ticker_info(ticker_sym):
     """Fetch ticker.info for a single ticker. Returns (ticker_sym, info_dict | None, error)."""
-    try:
-        tk = yf.Ticker(ticker_sym)
-        info = tk.info or {}
+    def _pull():
+        info = yf.Ticker(ticker_sym).info or {}
         if not info or len(info) < 5:
-            return ticker_sym, None, "empty_info"
-        return ticker_sym, info, None
+            raise RuntimeError("empty_info (throttle?)")
+        return info
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
     except Exception as e:
         return ticker_sym, None, str(e)
 
 
 def _fetch_ticker_statements(ticker_sym):
     """Fetch annual statements for a single ticker."""
-    try:
+    def _pull():
         tk = yf.Ticker(ticker_sym)
-        return ticker_sym, {
-            "income_stmt":   tk.income_stmt,
-            "cashflow":      tk.cashflow,
-            "balance_sheet": tk.balance_sheet,
-        }, None
+        d = {"income_stmt": tk.income_stmt, "cashflow": tk.cashflow,
+             "balance_sheet": tk.balance_sheet}
+        if all((v is None or (hasattr(v, "empty") and v.empty)) for v in d.values()):
+            raise RuntimeError("empty_statements (throttle?)")
+        return d
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
     except Exception as e:
         return ticker_sym, None, str(e)
 
 
 def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
+    """Phase-3 fetch with throttle-resilient retry (wraps _once; retries on TOTAL failure only,
+    so partial-data tolerance in the body is preserved)."""
+    def _pull():
+        sym, data, err = _fetch_ticker_scoring_data_once(ticker_sym, score_gt38)
+        if err or data is None:
+            raise RuntimeError(err or "empty_scoring (throttle?)")
+        return data
+    try:
+        return ticker_sym, _resilient(_pull, ticker_sym), None
+    except Exception as e:
+        return ticker_sym, None, str(e)
+
+
+def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
     """Fetch all incremental data needed for Part A/B scoring and optionally overlays."""
     try:
         tk = yf.Ticker(ticker_sym)
@@ -1362,6 +1438,10 @@ def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
             data["eps_revisions"] = tk.eps_revisions   # now scored in Part B for ALL gate-passers
         except Exception:
             data["eps_revisions"] = None
+        try:
+            data["eps_trend"] = tk.eps_trend   # forward axis: +1y consensus EPS momentum (Part 3 §13)
+        except Exception:
+            data["eps_trend"] = None
         # next_earnings via calendar
         try:
             cal = tk.calendar
@@ -1868,7 +1948,11 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["roic_hardgate"] = "pass"
     else:
         out["score_roic"]    = 0
-        out["roic_hardgate"] = "HARD_GATE_FAIL"
+        if getattr(_cfg, "RELAX_PARTA_HARDGATES", False):
+            out["roic_hardgate"] = "FLAG_LOW_ROIC"          # H7: rankable with a low-quality flag, not a hard fail
+            out.setdefault("quality_flags", []).append("low_roic")
+        else:
+            out["roic_hardgate"] = "HARD_GATE_FAIL"
 
     # Sanity flag
     if roic and abs(roic) > 1.0:
@@ -1893,7 +1977,11 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["fcf_hardgate"]     = "pass"
     else:
         out["score_fcf_pos"]    = 0
-        out["fcf_hardgate"]     = "HARD_GATE_FAIL"
+        if getattr(_cfg, "RELAX_PARTA_HARDGATES", False):
+            out["fcf_hardgate"] = "FLAG_LOW_FCF"            # H7: capex-driven negative FCF stays rankable (flag)
+            out.setdefault("quality_flags", []).append("low_fcf_positive_years")
+        else:
+            out["fcf_hardgate"]     = "HARD_GATE_FAIL"
 
     # ── Revenue series ───────────────────────────────────────────────────────
     rev_series = get_stmt_series(income_stmt,
@@ -2218,6 +2306,16 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     out["net_debt_ebitda"] = nd_ebitda
 
     nd_mand_fail = (nd_ebitda is not None and nd_ebitda > 3.0)
+    if nd_mand_fail and getattr(_cfg, "RELAX_ND_MANDATORY", False):
+        # H8: ND/EBITDA>3 is NOT a hard fail when the leverage is comfortably SERVICEABLE (net cash, or
+        # interest coverage >= threshold) -> flag instead, name stays rankable (leverage still scored, so
+        # penalised). Genuinely distressed over-leverage (weak/zero coverage) still fails.
+        _serviceable = ((isinstance(int_cov, str) and "NET_CASH" in int_cov)
+                        or (isinstance(int_cov, (int, float))
+                            and int_cov >= getattr(_cfg, "ND_SERVICEABLE_INT_COV", 4.0)))
+        if _serviceable:
+            nd_mand_fail = False
+            out.setdefault("quality_flags", []).append("high_leverage_serviceable")
 
     # ── Metric 1: Forward P/E ─────────────────────────────────────────────
     fwd_pe = safe_float(info.get("forwardPE"))
@@ -2431,6 +2529,11 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     _bucket_pb   = classify_sector_bucket(_sector_pb, _industry_pb, _gm_pb, capex_intensity=compute_capex_intensity(income_stmt, cashflow), ticker=ticker_sym)
     out["sector_bucket_pb"] = _bucket_pb
     out["b2b_applicable"]   = (_bucket_pb in B2B_APPLICABLE_BUCKETS)
+    # Per-stock Part B / Total max: 22/50 base; 26/54 for semi-hardware/equipment with the
+    # book-to-bill + backlog/EV conditional metrics. Read by the pre-run adapter for max-aware
+    # /50-vs-/54 display + conviction brackets (single source of truth = scoring_config).
+    out["part_b_max"] = _cfg.GROWTH_PART_B_MAX_EXTENDED if out["b2b_applicable"] else _cfg.GROWTH_PART_B_MAX
+    out["total_max"]  = _cfg.GROWTH_PART_A_MAX + out["part_b_max"]
 
     # Metric 12: Book-to-Bill Trailing 2 Quarters
     # Source: earnings call disclosures — not available in automated run.
@@ -2805,6 +2908,10 @@ FIELD_MAP = [
     "score_b_fwd_pe", "score_b_ev_ebitda", "score_b_price_fcf", "score_b_fcf_yield",
     "score_b_earn_yield", "score_b_52wk", "score_b_div_payout", "score_b_fwd_eps",
     "score_b_target_upside", "score_b_stress",
+    # Forward axis (Part 3 §13) + per-stock max — carried into the screen output for SUMMARY + shadow
+    "forward_axis_score", "score_f_eps_trend", "score_f_margin_traj", "score_f_rev_est", "score_f_price_mom",
+    "eps_trend_mom_pct", "margin_traj_delta_pp", "rev_est_fwd_pct", "price_mom_3m_pct", "total_max", "part_b_max",
+    "revision_stage", "revision_runway",
     "score_b_peg", "score_b_ev_g", "score_b_pfcf_g", "score_b_est_rev",
     "est_rev_direction",
     "wacc_pct", "roic_vs_wacc_spread",
@@ -2932,6 +3039,149 @@ def _band(v, lo, hi):
     return None if v is None else (2 if v < lo else (1 if v < hi else 0))
 
 
+# ── Forward axis (redesign Part 3 §13) — ADDITIVE: separate from Part A/B; carried for the Source Score ──
+def _eps_trend_momentum(eps_trend_df):
+    """(+1y consensus EPS now vs 90d ago) % magnitude + 0/1/2 score. Annual row for non-US robustness."""
+    try:
+        if eps_trend_df is None or (hasattr(eps_trend_df, "empty") and eps_trend_df.empty):
+            return None, None
+        idx = list(getattr(eps_trend_df, "index", []))
+        key = "+1y" if "+1y" in idx else ("0y" if "0y" in idx else (idx[-1] if idx else None))
+        if key is None:
+            return None, None
+        row = eps_trend_df.loc[key]
+        cur = safe_float(row.get("current")); old = safe_float(row.get("90daysAgo"))
+        if cur is None or old is None or old == 0:
+            return None, None
+        mom = (cur - old) / abs(old) * 100.0
+        strong, accept = _cfg.EPS_TREND_MOM_THRESHOLDS
+        return round(mom, 1), (2 if mom >= strong else (1 if mom >= accept else 0))
+    except Exception:
+        return None, None
+
+
+def _margin_trajectory_score(quarterly_income_stmt):
+    """Revenue up AND operating margin up over the last 2 quarters (pricing power). 2/1/0; None if no data."""
+    try:
+        if quarterly_income_stmt is None or quarterly_income_stmt.empty:
+            return None, None
+        rev = get_stmt_series(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], max_periods=3)
+        oi  = get_stmt_series(quarterly_income_stmt, ["Operating Income", "OperatingIncome", "Total Operating Income As Reported"], max_periods=3)
+        if len(rev) < 2 or len(oi) < 2:
+            return None, None
+        rn, rp = rev[0][1], rev[1][1]; on, op = oi[0][1], oi[1][1]
+        if None in (rn, rp, on, op) or rn <= 0 or rp <= 0:
+            return None, None
+        rev_up = rn > rp
+        m_delta = (on / rn) - (op / rp)
+        margin_up = m_delta > 0
+        return round(m_delta * 100, 1), (2 if (rev_up and margin_up) else (1 if (rev_up or margin_up) else 0))
+    except Exception:
+        return None, None
+
+
+def _rev_estimate_score(growth_estimates, info):
+    """Forward revenue growth consensus % + 0/1/2. growth_estimates (already fetched) or info fallback."""
+    try:
+        g = None
+        if growth_estimates is not None and hasattr(growth_estimates, "index") and "+1y" in list(growth_estimates.index):
+            r = growth_estimates.loc["+1y"]
+            for col in ("stockTrend", "growth", "revenueGrowth"):
+                try:
+                    v = safe_float(r.get(col))
+                except Exception:
+                    v = None
+                if v is not None:
+                    g = v; break
+        if g is None and info is not None:
+            g = safe_float(info.get("revenueGrowth"))
+        if g is None:
+            return None, None
+        gp = g * 100.0 if abs(g) < 3 else g
+        strong, accept = _cfg.REV_EST_FWD_THRESHOLDS
+        return round(gp, 1), (2 if gp >= strong else (1 if gp >= accept else 0))
+    except Exception:
+        return None, None
+
+
+def _price_momentum_score(history, lookback=63):
+    """Trailing ~3-month ABSOLUTE price return % + 0/1/2 (sector-relative is a later refinement)."""
+    try:
+        if history is None or (hasattr(history, "empty") and history.empty):
+            return None, None
+        cols = getattr(history, "columns", [])
+        close = history["Close"].dropna() if "Close" in cols else None
+        if close is None or len(close) < 40:
+            return None, None
+        last = float(close.iloc[-1])
+        ref = float(close.iloc[-lookback] if len(close) >= lookback else close.iloc[0])
+        if ref <= 0:
+            return None, None
+        mom = (last / ref - 1) * 100.0
+        strong, accept = _cfg.PRICE_MOM_THRESHOLDS
+        return round(mom, 1), (2 if mom >= strong else (1 if mom >= accept else 0))
+    except Exception:
+        return None, None
+
+
+def _revision_journey_stage(eps_trend_df):
+    """Classify WHERE a rising +1y EPS estimate sits in its UPGRADE JOURNEY (revision drift decays late).
+    Returns (stage_label, runway 0-2 | None) from the eps_trend 90d trajectory; degrades gracefully.
+    Igniting / Accelerating = most drift ahead (runway 2); Sustained = 1; Maturing / Rolling-over = 0."""
+    try:
+        if eps_trend_df is None or (hasattr(eps_trend_df, "empty") and eps_trend_df.empty):
+            return None, None
+        idx = list(getattr(eps_trend_df, "index", []))
+        key = "+1y" if "+1y" in idx else ("0y" if "0y" in idx else (idx[-1] if idx else None))
+        if key is None:
+            return None, None
+        row = eps_trend_df.loc[key]
+        cur = safe_float(row.get("current")); v30 = safe_float(row.get("30daysAgo")); v90 = safe_float(row.get("90daysAgo"))
+        if cur is None or v90 is None or v90 == 0:
+            return None, None
+        tot = (cur - v90) / abs(v90)
+        if tot <= 0.005:                       # not a meaningful upgrade journey
+            return ("Flat/Down" if tot <= 0 else "Marginal"), None
+        if v30 is not None and v30 != 0:
+            recent_rate = (cur - v30) / abs(v30) / 30.0   # per-day, last 30d
+            early_rate  = (v30 - v90) / abs(v90) / 60.0   # per-day, prior 60d
+            if early_rate <= 0 and recent_rate > 0:
+                return "Igniting", 2                       # just turned up
+            if recent_rate >= early_rate * 1.25:
+                return "Accelerating", 2                   # upgrades speeding up — runway ahead
+            if recent_rate <= max(0.0, early_rate * 0.5):
+                return ("Rolling over" if recent_rate <= 0 else "Maturing"), 0  # rising but late
+            return "Sustained", 1
+        return ("Sustained" if tot >= 0.03 else "Early/unconfirmed"), 1          # endpoints-only fallback
+    except Exception:
+        return None, None
+
+
+def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
+    """Compute forward-axis sub-signals + a 0-100 Forward score (F). Sets fields on `scored` ADDITIVELY
+    (does NOT change Part A/B/total). Shared by the weekly screen and the pre-run fetch.
+    NOTE: price-momentum is ABSOLUTE trailing-3m (sector-relative is a later refinement); the
+    weekly screen passes history=None until the two-pass fetch supplies it (watchlist path has 5y history)."""
+    info = info or {}
+    mom, scored["score_f_eps_trend"] = _eps_trend_momentum(info.get("eps_trend"))
+    scored["eps_trend_mom_pct"] = mom
+    mtj, scored["score_f_margin_traj"] = _margin_trajectory_score(quarterly_income_stmt)
+    scored["margin_traj_delta_pp"] = mtj
+    rev, scored["score_f_rev_est"] = _rev_estimate_score(info.get("growth_estimates"), info)
+    scored["rev_est_fwd_pct"] = rev
+    pm, scored["score_f_price_mom"] = _price_momentum_score(history)
+    scored["price_mom_3m_pct"] = pm
+    scored["revision_stage"], scored["revision_runway"] = _revision_journey_stage(info.get("eps_trend"))
+    subs = [scored.get("score_f_eps_trend"), scored.get("score_f_margin_traj"),
+            scored.get("score_f_rev_est"), scored.get("score_f_price_mom"),
+            scored.get("score_b_est_rev")]
+    if getattr(_cfg, "REVISION_RUNWAY_IN_F", False) and scored.get("revision_runway") is not None:
+        subs.append(scored["revision_runway"])   # journey-stage runway joins F once shadow-validated
+    avail = [v for v in subs if v is not None]
+    scored["forward_axis_score"] = round(100.0 * sum(avail) / (len(avail) * 2), 1) if avail else None
+    return scored
+
+
 def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
     """Helper: score one ticker and return a FIELD_MAP-aligned row dict."""
     pa = score_part_a(ticker, info, inc, cf, bal, inc_q)
@@ -2994,6 +3244,9 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         scored["part_b_status"] = "Avoid"
 
     scored["total_score"] = (scored.get("part_a_score") or 0) + part_b
+
+    # Forward axis (Part 3 §13) — additive, separate from Part A/B; consumed by the Source Score (rerank)
+    compute_forward_axis(scored, info, inc_q)
 
     # ── Set final_status for ranked stocks (only failures were set above) ─────
     if not scored.get("final_status"):

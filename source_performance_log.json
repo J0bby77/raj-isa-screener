@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-06-13",
+  "last_updated": "2026-06-19",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -211,113 +211,113 @@
     "S&P MidCap 400": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 800,
-        "successes": 800,
+        "attempts": 1200,
+        "successes": 1200,
         "success_rate": 1.0,
-        "last_run": "2026-05-15",
+        "last_run": "2026-06-19",
         "last_run_attempts": 400,
         "last_run_successes": 400,
         "last_run_rate": 1.0
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 627,
-        "successes": 616,
-        "success_rate": 0.982,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 312,
-        "last_run_successes": 308,
-        "last_run_rate": 0.987
+        "attempts": 931,
+        "successes": 920,
+        "success_rate": 0.988,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 304,
+        "last_run_successes": 304,
+        "last_run_rate": 1.0
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 627,
-        "successes": 616,
-        "success_rate": 0.982,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 312,
-        "last_run_successes": 308,
-        "last_run_rate": 0.987
+        "attempts": 931,
+        "successes": 920,
+        "success_rate": 0.988,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 304,
+        "last_run_successes": 304,
+        "last_run_rate": 1.0
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 627,
-        "successes": 616,
-        "success_rate": 0.982,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 312,
-        "last_run_successes": 308,
-        "last_run_rate": 0.987
+        "attempts": 931,
+        "successes": 920,
+        "success_rate": 0.988,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 304,
+        "last_run_successes": 304,
+        "last_run_rate": 1.0
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 216,
-        "success_rate": 0.973,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 109,
-        "last_run_rate": 0.991
+        "attempts": 327,
+        "successes": 321,
+        "success_rate": 0.982,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
+        "last_run_rate": 1.0
       },
       "forward_pe": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 217,
-        "success_rate": 0.977,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 107,
-        "last_run_rate": 0.973
+        "attempts": 327,
+        "successes": 322,
+        "success_rate": 0.985,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
+        "last_run_rate": 1.0
       },
       "ev_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 213,
-        "success_rate": 0.959,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
+        "attempts": 327,
+        "successes": 318,
+        "success_rate": 0.972,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
         "last_run_successes": 105,
-        "last_run_rate": 0.955
+        "last_run_rate": 1.0
       },
       "net_debt_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 218,
-        "success_rate": 0.982,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 109,
-        "last_run_rate": 0.991
+        "attempts": 327,
+        "successes": 323,
+        "success_rate": 0.988,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
+        "last_run_rate": 1.0
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 219,
-        "success_rate": 0.986,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 108,
-        "last_run_rate": 0.982
+        "attempts": 327,
+        "successes": 324,
+        "success_rate": 0.991,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
+        "last_run_rate": 1.0
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 222,
+        "attempts": 327,
+        "successes": 327,
         "success_rate": 1.0,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 110,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
         "last_run_rate": 1.0
       },
       "fcf_margin": {
         "primary_source": "yfinance",
-        "attempts": 222,
-        "successes": 218,
-        "success_rate": 0.982,
-        "last_run": "2026-05-15",
-        "last_run_attempts": 110,
-        "last_run_successes": 108,
-        "last_run_rate": 0.982
+        "attempts": 327,
+        "successes": 323,
+        "success_rate": 0.988,
+        "last_run": "2026-06-19",
+        "last_run_attempts": 105,
+        "last_run_successes": 105,
+        "last_run_rate": 1.0
       }
     },
     "FTSE 100": {
@@ -1100,7 +1100,7 @@
       ]
     }
   },
-  "_last_run_notes": "NASDAQ run 2026-06-11 (LOCAL-PRIMARY): 845 constituents, 229 scored, 149 rankable, 0 tech failures. 40 Strong Buys; top NVDA 50/50. All 92 overlays complete. Gate4 Technology 32.4%.",
+  "_last_run_notes": "MIDCAP400 run 2026-06-19 (LOCAL-PRIMARY): 400 constituents, 105 scored, 70 rankable, 0 tech failures. 22 Strong Buys (SUMMARY 11); top NYT 49/50. All 37 overlays complete. Gate4 Industrials 25.2%.",
   "runs": [
     {
       "run_date": "2026-05-22",
@@ -1371,6 +1371,38 @@
       "excel_file": "Growth Stock Analysis F250 & SPI W-e 13-Jun-26.xlsx",
       "retrospective_file": "20260613_F250-SPI_retrospective.md",
       "notes": "v27 scoring; 30 scoring batches + 2 overlay batches; 0 tech failures; const dump bridged via GitHub (raj-isa-screener); 2 stocks (ALC.SW, SMG.SW) have part_a_score>=22 but final_status=HARD_GATE_FAIL overrides status to Not Growth/Avoid (see retrospective item 1); build_email.py has /54 label bug (should be /50) and a non-fatal post-save NameError"
+    },
+    {
+      "run_date": "2026-06-19",
+      "group": "MIDCAP400",
+      "task_id": "isa-sp-midcap400-fri3",
+      "run_mode": "local",
+      "constituent_source": "SSGA_MDY_XLSX",
+      "constituents_fetched": 400,
+      "accounted": 400,
+      "gate1_excluded": 96,
+      "gate2_excluded": 60,
+      "gate3_excluded": 28,
+      "gate4_excluded": 103,
+      "gate_data_unresolved": 8,
+      "scored": 105,
+      "technical_failures": 0,
+      "candidate_rankable": 70,
+      "hard_gate_fails": 16,
+      "mandatory_minimum_fails": 19,
+      "strong_buys": 22,
+      "summary_stocks": 11,
+      "top_score": 49,
+      "top_ticker": "NYT",
+      "high_score_overlay_stocks": 37,
+      "overlay_complete": 37,
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 25.2,
+      "summary_deteriorating_exclusions": ["MORN", "APPF", "PCTY", "EXLS", "GMED", "STRL", "CART", "SN"],
+      "excel_file": "Growth Stock Analysis MIDCAP400 W-e 19-Jun-26.xlsx",
+      "retrospective_file": "20260619_MIDCAP400_retrospective.md",
+      "notes": "v27 scoring; 27 scoring batches + 5 overlay batches; 0 tech failures; SSGA MDY XLSX primary source (400 rows); build_email.py non-fatal post-save NameError (known bug); gate4_conc=True from screener but highest sector 25.2% (below 35% threshold)"
     }
   ]
 }

@@ -271,8 +271,12 @@ def main():
                 print(f"FALLBACK_TO_COMPOSIO: cumulative fetch failure {fr:.0%} > {a.max_fail_rate:.0%}"); sys.exit(3)
             if remaining > 0:
                 print(f"NOT_DONE - {remaining} score batch(es) left. Call again."); return
+        # P2-4: overlay-enrich high-TOTAL names AND (when forward selection is on) forward-strong names,
+        # so forward-admitted lower-total reversals aren't left with under-populated Part B resilience.
+        _fe = getattr(getattr(core, "_cfg", None), "FORWARD_ELIGIBILITY", False)
         hs = [r["ticker"] for r in state["scored"]
-              if (r.get("part_a_score") or 0) + (r.get("part_b_score") or 0) > core.OVERLAY_SCORE_TRIGGER]
+              if ((r.get("part_a_score") or 0) + (r.get("part_b_score") or 0) > core.OVERLAY_SCORE_TRIGGER)
+              or (_fe and (r.get("forward_axis_score") or 0) >= 50)]
         ob = a.overlay_batch
         state["overlay_plan"] = [hs[i:i + ob] for i in range(0, len(hs), ob)]
         state["overlay_done"] = {}

@@ -128,6 +128,7 @@ def _fetch_all_for_ticker(ticker_sym: str) -> tuple[str, dict, str | None]:
             "growth_estimates":        tk.growth_estimates,
             "analyst_price_targets":   tk.analyst_price_targets,
             "eps_revisions":           tk.eps_revisions,
+            "eps_trend":               tk.eps_trend,
             "upgrades_downgrades":     tk.upgrades_downgrades,
             "recommendations_summary": tk.recommendations_summary,
         }
@@ -264,6 +265,8 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
 
     # Merge (pb overrides pa on key conflicts — matches screener_core behaviour)
     scored = {**pa, **pb}
+    # Forward axis (Part 3 §13) — same shared compute as the weekly screen; passes the forward data explicitly
+    sc.compute_forward_axis(scored, {**info, "eps_trend": data.get("eps_trend"), "growth_estimates": data.get("growth_estimates")}, inc_q, data.get("history"))
 
     # Finalise Part B score
     roic_s = scored.get("score_roic", 0) or 0
@@ -309,7 +312,7 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
     scored["currency"]  = info.get("currency", "")
     scored["market_cap"] = sc.safe_float(info.get("marketCap"))
 
-    # Analyst rating (text key — used by score_partab.py analyst summary)
+    # Analyst rating (text key — used by normalise_adapter.py analyst summary)
     scored["analyst_rating"] = info.get("recommendationKey", "")
 
     scored["source_pipeline"] = "growth_stock"
@@ -391,7 +394,7 @@ def score_ticker_energy(ticker_sym: str, data: dict) -> dict:
         scored["part_a_status"] = "Data Unresolved"
         scored["part_b_status"] = "Data Unresolved"
 
-    # Analyst rating text (for consistency with analyst_summary in score_partab.py)
+    # Analyst rating text (for consistency with analyst_summary in normalise_adapter.py)
     scored["analyst_rating"] = info.get("recommendationKey", "")
 
     # target_upside alias (energy Part B uses upside_pct — provide standard alias)
@@ -424,7 +427,7 @@ def build_vci_entry(ticker_sym: str, data: dict, meta: dict) -> dict:
     for the in-window check.
 
     The full VCI scorecard lives in project_vci_output_mmm_yyyy.md — readable
-    by Claude at the monthly review. score_partab.py renders it using the VCI
+    by Claude at the monthly review. normalise_adapter.py renders it using the VCI
     formatting path.
     """
     info = data.get("info", {})
@@ -439,7 +442,7 @@ def build_vci_entry(ticker_sym: str, data: dict, meta: dict) -> dict:
         "classification":   meta.get("classification", ""),
         # Price data (for in-window check and display)
         "current_price":    prices["current_price"],
-        # Not applicable for VCI — leave for analyst display in score_partab.py
+        # Not applicable for VCI — leave for analyst display in normalise_adapter.py
         "target_upside":    None,
         "analyst_rating":   info.get("recommendationKey", ""),
         "num_analysts":     sc.safe_float(info.get("numberOfAnalystOpinions")),
@@ -595,7 +598,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
 
     # Candidate pool (newly eligible names beyond top-10)
     # These entries are scored with the same pipeline as their path indicates.
-    # kind = "candidate_pool" so score_partab.py excludes them from s5_watchlist_rows
+    # kind = "candidate_pool" so normalise_adapter.py excludes them from s5_watchlist_rows
     # and conviction_ranking, but step9_pre_builder.py processes them separately.
     # Precedence rule: if a candidate_pool ticker is already in watchlist/vci/sleeve,
     # the existing entry takes priority (sleeve wins, then watchlist, then vci).
@@ -679,7 +682,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             scored["_shares"]          = meta.get("shares")
             scored["_note"]            = meta.get("note", "")
 
-            # VCI-specific metadata (also stored as _ fields for score_partab.py)
+            # VCI-specific metadata (also stored as _ fields for normalise_adapter.py)
             if pipeline == "vci":
                 scored["_acs_score"]      = meta.get("acs_score")
                 scored["_vci_run_date"]   = meta.get("vci_run_date")
@@ -851,11 +854,25 @@ def main():
                         help="Output JSON path. Defaults to watchlist_metrics_mmm_yyyy.json.")
     parser.add_argument("--month-label", default=None,
                         help="Month label e.g. jun_2026. Defaults to current month.")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Local-primary preflight (yfinance/dev-shm/Yahoo). On failure prints "
+                             "FALLBACK_TO_COMPOSIO and exits 3. Default off = pre-run unchanged.")
     args = parser.parse_args()
 
     watchlist_path = args.watchlist or os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
     month_label    = args.month_label or date.today().strftime("%b_%Y").lower()
     out_path       = args.out or os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
+
+    # Local-primary guardrail parity (opt-in). Fails over to Composio (exit 3) when the local
+    # sandbox can't fetch — the same decision screener_local makes for the growth path.
+    if getattr(args, "preflight", False):
+        try:
+            import isa_env_guard as _guard
+            _guard.run_preflight_or_fallback(outputs_dir=os.path.dirname(out_path))
+        except SystemExit:
+            raise
+        except Exception:
+            pass
 
     run(watchlist_path, out_path, month_label)
 
