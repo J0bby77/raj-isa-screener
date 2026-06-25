@@ -433,6 +433,30 @@ def build_coverage_line(counts, group, run_date):
     return html
 
 
+def _cfg_get(name, default):
+    try:
+        import scoring_config as _c; return getattr(_c, name, default)
+    except Exception:
+        return default
+
+def _source_score(row):
+    """S5 forward-led screen Source Score (0-1) — mirrors build_excel SUMMARY (_src)."""
+    sw = _cfg_get("SUMMARY_SOURCE_WEIGHTS", {"forward":0.45,"quality":0.30,"valuation":0.25})
+    fwd = sf(get_field(row,"forward_axis_score")) or 0.0
+    a   = sf(get_field(row,"part_a_score")) or 0.0
+    b   = sf(get_field(row,"part_b_score")) or 0.0
+    return sw.get("forward",0.45)*fwd/100.0 + sw.get("quality",0.30)*a/28.0 + sw.get("valuation",0.25)*b/22.0
+
+def _summary_eligible(row):
+    """S5 SUMMARY viability eligibility — mirrors build_excel (floor + Part B + not-deteriorating + not-fail)."""
+    a = sf(get_field(row,"part_a_score")); b = sf(get_field(row,"part_b_score"))
+    if a is None or b is None: return False
+    paf = _cfg_get("FORWARD_ELIG_PART_A_FLOOR", 10)
+    st = str(get_field(row,"final_status") or "").upper()
+    ok = st not in {"HARD_GATE_FAIL","MANDATORY_MINIMUM_FAIL","UNRESOLVED_HARD_GATE_NOT_RANKABLE"}
+    notdet = str(get_field(row,"est_rev_direction") or "").lower() != "deteriorating"
+    return a >= paf and b >= 14 and notdet and ok
+
 def build_kpi_tiles(strong_buys, gate_passers):
     """KPI tiles row using table layout (Rule 3 — no flexbox)."""
     sb_count = len(strong_buys)
@@ -442,10 +466,12 @@ def build_kpi_tiles(strong_buys, gate_passers):
     if strong_buys:
         top = strong_buys[0]
         top_score = score_int(get_field(top, "total_score"))
+        top_fwd = score_int(get_field(top, "forward_axis_score"))
         top_ticker = get_field(top, "ticker")
         top_max = int(sf(get_field(top, "total_max")) or 50)   # P2-6: max-aware (/50 base, /54 semis)
     else:
         top_score = "N/A"
+        top_fwd = "N/A"
         top_ticker = "N/A"
         top_max = 50
 
@@ -461,13 +487,13 @@ def build_kpi_tiles(strong_buys, gate_passers):
         f'<td style="width:25%;padding:0 6px 0 0">\n'
         f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#1a6b2a;border-radius:6px;text-align:center">\n'
         f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{sb_count}</td></tr>\n'
-        f'  <tr><td style="color:#c8e6c9;font-size:11px">Strong Buys</td></tr>\n'
+        f'  <tr><td style="color:#c8e6c9;font-size:11px">Candidates (fwd-led)</td></tr>\n'
         f'  </table>\n'
         f'</td>\n'
         f'<td style="width:25%;padding:0 6px">\n'
         f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#1a3a6b;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{top_score}/{top_max}</td></tr>\n'
-        f'  <tr><td style="color:#b3c6e6;font-size:11px">Top Score ({safe_entities(top_ticker)})</td></tr>\n'
+        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{top_fwd}/100</td></tr>\n'
+        f'  <tr><td style="color:#b3c6e6;font-size:11px">Top Forward ({safe_entities(top_ticker)})</td></tr>\n'
         f'  </table>\n'
         f'</td>\n'
         f'<td style="width:25%;padding:0 6px">\n'
@@ -491,14 +517,14 @@ def build_kpi_tiles(strong_buys, gate_passers):
 def build_top10_table(strong_buys):
     """Section 2 — Top 10 stocks table (exactly 12 columns per Run_Context spec)."""
     if not strong_buys:
-        return '<p style="color:#666;font-style:italic">No Strong Buy candidates identified this run.</p>\n'
+        return '<p style="color:#666;font-style:italic">No SUMMARY candidates identified this run.</p>\n'
 
     header_cols = [
         "Rank", "Ticker", "Company", "Sector",
-        "Part A", "Part B", "Total",
-        "Rev CAGR", "Gr. Margin", "ROIC", "FCF Yield", "Upside"
+        "Fwd /100", "Src", "Stage",
+        "Part A", "Part B", "Total", "ROIC", "Upside"
     ]
-    widths = ["4%", "6%", "18%", "12%", "5%", "5%", "5%", "8%", "8%", "7%", "7%", "8%"]
+    widths = ["4%", "6%", "16%", "11%", "6%", "5%", "11%", "5%", "5%", "6%", "7%", "8%"]
 
     # Header row
     header_html = "".join(
@@ -517,16 +543,12 @@ def build_top10_table(strong_buys):
         a = score_int(get_field(row, "part_a_score"))
         b = score_int(get_field(row, "part_b_score"))
         total = score_int(get_field(row, "total_score"))
-        rev_cagr_raw = sf(get_field(row, "rev_cagr"))
-        gm_raw = sf(get_field(row, "gross_margin"))
+        fwd = score_int(get_field(row, "forward_axis_score"))
+        src = round(_source_score(row) * 100)
+        stage = safe_entities(str(get_field(row, "revision_stage") or "—")[:11])
         roic_raw = sf(get_field(row, "roic"))
-        fcf_y_raw = sf(get_field(row, "fcf_yield"))
         upside_raw = sf(get_field(row, "upside_pct"))
-
-        rev_cagr_str = pct(rev_cagr_raw) if rev_cagr_raw is not None else "N/A"
-        gm_str = pct(gm_raw) if gm_raw is not None else "N/A"
         roic_str = pct(roic_raw) if roic_raw is not None else "N/A"
-        fcfy_str = pct(fcf_y_raw) if fcf_y_raw is not None else "N/A"
 
         # Upside with colour
         if upside_raw is not None:
@@ -544,19 +566,19 @@ def build_top10_table(strong_buys):
             f'<td style="{cell_style};font-weight:bold">{ticker}</td>'
             f'<td style="{cell_style};text-align:left">{company}</td>'
             f'<td style="{cell_style};text-align:left">{sector}</td>'
+            f'<td style="{cell_style};font-weight:bold;color:#6a1b9a">{fwd}</td>'
+            f'<td style="{cell_style};font-weight:bold">{src}</td>'
+            f'<td style="{cell_style};text-align:left;font-size:11px">{stage}</td>'
             f'<td style="{cell_style}">{a}</td>'
             f'<td style="{cell_style}">{b}</td>'
-            f'<td style="{cell_style};font-weight:bold;color:#1a6b2a">{total}</td>'
-            f'<td style="{cell_style}">{safe_entities(rev_cagr_str)}</td>'
-            f'<td style="{cell_style}">{safe_entities(gm_str)}</td>'
+            f'<td style="{cell_style};color:#555">{total}</td>'
             f'<td style="{cell_style}">{safe_entities(roic_str)}</td>'
-            f'<td style="{cell_style}">{safe_entities(fcfy_str)}</td>'
             f'<td style="{cell_style}">{upside_str}</td>'
             f'</tr>\n'
         )
 
     return (
-        '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 10 Stocks &mdash; By Total Score</h3>\n'
+        '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 10 Stocks &mdash; By Source Score (forward-led)</h3>\n'
         '<table style="width:100%;border-collapse:collapse;margin-bottom:24px" '
         'cellpadding="0" cellspacing="0" border="0">\n'
         f'<tr>{header_html}</tr>\n'
@@ -989,10 +1011,13 @@ def build_email_body(
     tech_fail_rows = tech_fail_rows or []
 
     # Classify stocks
-    strong_buys = sorted(
-        [r for r in full_data if is_strong_buy(r)],
-        key=lambda r: -(sf(get_field(r, "total_score")) or 0)
-    )
+    # S5: headline ranking MIRRORS the Excel SUMMARY — count-based, forward-led Source Score.
+    _sb_all = [r for r in full_data if is_strong_buy(r)]  # informational Strong-Buy set (badge secondary under S5)
+    if _cfg_get("SUMMARY_COUNT_BASED", False):
+        strong_buys = sorted([r for r in full_data if _summary_eligible(r)],
+                             key=lambda r: -_source_score(r))[:int(_cfg_get("SUMMARY_TARGET_COUNT", 30))]
+    else:
+        strong_buys = sorted(_sb_all, key=lambda r: -(sf(get_field(r, "total_score")) or 0))
     gate_passers = [r for r in full_data if is_gate_passer(r)]
     counts = get_coverage_counts(full_data, gate_data)
 

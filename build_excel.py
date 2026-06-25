@@ -334,6 +334,8 @@ SUMMARY_COLS = [
     ("Group 2 — Scores",           "Part A (/28)",       "part_a_score",             score_int,         False),
     ("",                           "Part B (/26-30)",    "part_b_score",             score_int,         False),
     ("",                           "Total (/50-54)",     "total_score",              score_int,         False),
+    ("",                           "Fwd Axis (/100)",    "forward_axis_score",       score_int,         False),
+    ("",                           "Source Score",       "source_score",             score_int,         False),
     # Group 3 — Growth Quality (14 cols)
     ("Group 3 — Growth Quality",   "Rev CAGR 3-5yr",     "rev_cagr",                pct,               False),
     ("",                           "Recent Rev Growth",  "recent_rev_growth",        pct,               False),
@@ -459,6 +461,9 @@ def build_summary(wb, df_full, run_date, group):
         if not sb.empty:
             sb = sb.sort_values(["total_score", "part_b_score", "company"], ascending=[False, False, True]).reset_index(drop=True)
 
+    if not sb.empty:
+        sb["source_score"] = (sb["_src"] * 100).round().astype("Int64") if "_src" in sb.columns else pd.NA
+
     if sb.empty:
         ws.cell(row=5, column=1, value="No summary candidates identified this run.")
         return ws
@@ -523,6 +528,8 @@ def build_summary(wb, df_full, run_date, group):
         "index":                     10,
         "final_status":              20,
         "part_a_score":              8,
+        "forward_axis_score":        9,
+        "source_score":              11,
         "part_b_score":              9,
         "total_score":               9,
         "book_to_bill_trailing_2q":  11,  # new
