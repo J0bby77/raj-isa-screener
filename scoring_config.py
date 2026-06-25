@@ -94,7 +94,7 @@ PRICE_MOM_THRESHOLDS     = (10.0, 0.0)  # trailing ~3m price return % : strong>=
 # Revision-journey stage (PEAD/revision drift decays late): classify WHERE a rising +1y estimate sits in
 # its upgrade cycle from the eps_trend trajectory. Igniting/Accelerating=runway 2, Sustained=1, Maturing/
 # Rolling-over=0. Carried as a field + review timing context; added to F only when this flag is on (post-shadow).
-REVISION_RUNWAY_IN_F     = False
+REVISION_RUNWAY_IN_F     = True
 
 # Energy valuation parity (redesign Part 2 §F) — bring energy Part B into line with growth v27:
 # growth-ADJUST EV/EBITDA + Forward P/E (vs raw multiples) and DROP the stale 52-week-position metric
