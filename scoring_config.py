@@ -90,7 +90,7 @@ ND_SERVICEABLE_INT_COV = 4.0
 # strong band sits above the noise). Sub-scores are 0/1/2.
 EPS_TREND_MOM_THRESHOLDS = (8.0, 2.0)   # +1y consensus EPS, now vs 90d ago, % : strong>=8, acceptable>=2
 REV_EST_FWD_THRESHOLDS   = (15.0, 5.0)  # forward revenue growth % : strong>=15, acceptable>=5
-PRICE_MOM_THRESHOLDS     = (10.0, 0.0)  # trailing ~3m price return % : strong>=10, acceptable>=0 (price not declining)
+PRICE_MOM_THRESHOLDS     = (30.0, 0.0)  # 12-1m price return % : strong>=30, acceptable>=0 (Jun-26 backtest; old 3m bands were (10,0))
 # Revision-journey stage (PEAD/revision drift decays late): classify WHERE a rising +1y estimate sits in
 # its upgrade cycle from the eps_trend trajectory. Igniting/Accelerating=runway 2, Sustained=1, Maturing/
 # Rolling-over=0. Carried as a field + review timing context; added to F only when this flag is on (post-shadow).
@@ -236,3 +236,8 @@ FORWARD_AXIS_BUCKETED      = True
 # Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
 # but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
 FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 1.0, "margin": 1.0, "price": 1.0}
+
+# Price-momentum window (Jun-26 backtest): 12-1 month = 252-day window ending ~21 trading days ago.
+# 3-month (63) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
+PRICE_MOM_LOOKBACK         = 252
+PRICE_MOM_SKIP             = 21

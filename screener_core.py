@@ -3104,8 +3104,12 @@ def _rev_estimate_score(growth_estimates, info):
         return None, None
 
 
-def _price_momentum_score(history, lookback=63):
-    """Trailing ~3-month ABSOLUTE price return % + 0/1/2 (sector-relative is a later refinement)."""
+def _price_momentum_score(history, lookback=None, skip=None):
+    """Price-momentum return % + 0/1/2. DEFAULT = 12-1 month (a 12-month window ending ~1 month ago).
+    Jun-26 backtest (280 names / 42 dates): trailing 3-month momentum had ZERO / mildly NEGATIVE forward
+    edge (reversal-prone); 12-1m carries the real edge (top-quintile fwd return beats 3m at 3/6/12m).
+    The ~1-month skip removes short-term reversal noise. Window + thresholds are config-driven
+    (PRICE_MOM_LOOKBACK, PRICE_MOM_SKIP, PRICE_MOM_THRESHOLDS)."""
     try:
         if history is None or (hasattr(history, "empty") and history.empty):
             return None, None
@@ -3113,11 +3117,15 @@ def _price_momentum_score(history, lookback=63):
         close = history["Close"].dropna() if "Close" in cols else None
         if close is None or len(close) < 40:
             return None, None
-        last = float(close.iloc[-1])
-        ref = float(close.iloc[-lookback] if len(close) >= lookback else close.iloc[0])
+        lb = int(getattr(_cfg, "PRICE_MOM_LOOKBACK", 252)) if lookback is None else lookback
+        sk = int(getattr(_cfg, "PRICE_MOM_SKIP", 21)) if skip is None else skip
+        n = len(close)
+        end = float(close.iloc[-(sk + 1)]) if n > sk else float(close.iloc[-1])
+        ref_pos = n - 1 - sk - lb
+        ref = float(close.iloc[ref_pos]) if ref_pos >= 0 else float(close.iloc[0])  # short history -> degrade
         if ref <= 0:
             return None, None
-        mom = (last / ref - 1) * 100.0
+        mom = (end / ref - 1) * 100.0
         strong, accept = _cfg.PRICE_MOM_THRESHOLDS
         return round(mom, 1), (2 if mom >= strong else (1 if mom >= accept else 0))
     except Exception:

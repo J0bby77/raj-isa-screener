@@ -691,7 +691,7 @@ PART_F_METRIC_COLS = [
     ("Rev Est",        "score_f_rev_est",      "score"),
     ("Rev Est %",      "rev_est_fwd_pct",      "raw"),
     ("Price Mom",      "score_f_price_mom",    "score"),
-    ("Price 3m %",     "price_mom_3m_pct",     "raw"),
+    ("Price 12-1m %",  "price_mom_3m_pct",     "raw"),
     ("Est Rev (B)",    "score_b_est_rev",      "score"),
     ("Rev Runway",     "revision_runway",      "score"),
     ("Stage",          "revision_stage",       "text"),
