@@ -390,7 +390,19 @@ def build_summary(wb, df_full, run_date, group):
     ws.freeze_panes = "A5"  # header rows 1-4 always visible
 
     # --- Row 1: Title ---
-    title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (Part A ≥22 · Total ≥43/50 · est-rev not deteriorating) | Run: {run_date}"
+    try:
+        import os as _os0, sys as _sys0
+        _sys0.path.insert(0, _os0.path.dirname(_os0.path.abspath(__file__)))
+        import scoring_config as _cfg0
+        _cb0 = getattr(_cfg0, "SUMMARY_COUNT_BASED", False)
+        _paf0 = getattr(_cfg0, "FORWARD_ELIG_PART_A_FLOOR", 10)
+        _tc0 = getattr(_cfg0, "SUMMARY_TARGET_COUNT", 30)
+    except Exception:
+        _cb0 = False
+    if _cb0:
+        title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (S5 forward-led: top {_tc0} by Source Score · Part A viability floor {_paf0} · est-rev not deteriorating) | Run: {run_date}"
+    else:
+        title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (Part A ≥22 · Total ≥43/50 · est-rev not deteriorating) | Run: {run_date}"
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
     c = ws.cell(row=1, column=1, value=title)
     c.fill = FILL_HDR_DARK; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
@@ -981,7 +993,7 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         ]
         kv("Total constituents",   total)
         kv("Gate passers scored",  len(scored))
-        kv("Summary candidates (A≥22, Total≥43/50, est-rev OK)", len(strong_buys))
+        kv("Summary candidates (S5: top-N by Source Score / legacy A≥22 · Total≥43)", len(strong_buys))
         kv("Pre-screen excluded",  total - len(scored))
         kv("Coverage %",           f"{len(scored)/total*100:.1f}%" if total > 0 else "N/A")
     row_ptr[0] += 1
@@ -1011,7 +1023,7 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         ("",        "Part B (v27): 11 base metrics, max 22 pts (+2 conditional = max 26 for semiconductor_hardware/equipment)."),
         ("",        "Part B metrics: ROIC, ND/EBITDA (mandatory mins), Fwd PEG, EV/EBITDA-to-growth, P/FCF-to-growth, Int Cov, Div Payout, Fwd EPS Growth, Target Upside, Est Revision, Stress (+ Book-to-Bill/Backlog conditional)."),
         ("",        "Growth-adjusted valuation uses 3-5yr EPS CAGR (fwd fallback) capped at 50%. Total base max 50."),
-        ("",        "SUMMARY = Part A >= 22 AND Total >= 43/50 AND est-rev not deteriorating AND Part B >= 14. Valuation Profile tag: GARP if PEG+EVg+PFCFg >= 4 else Premium Growth."),
+        ("",        "SUMMARY (S5 forward-led) = Part A >= viability floor (10) AND Part B >= 14 AND est-rev not deteriorating, then top-N by Source Score (0.45*Fwd/100 + 0.30*PartA/28 + 0.25*PartB/22). [Legacy v27: Part A>=22 AND Total>=43/50.] Valuation Profile tag: GARP if PEG+EVg+PFCFg >= 4 else Premium Growth."),
         ("Gates",   "Standard: Gate 1 (sector), Gate 2 (sector-segmented GM threshold — see below), Gate 3 (FCF 3/5yr), Gate 4 (Rev CAGR>=5%)."),
         ("",        "Gate 2 sector thresholds: software_saas>=40%, semiconductor_fabless>=50%, semiconductor_hardware>=25%, semiconductor_equipment>=20%, default>=20%."),
         ("",        "Gate 4 (2C-1): semiconductor_equipment only — 5yr CAGR >=3% override if 3yr CAGR fails. Flagged as 'Gate 4 (5yr override)' in diagnostics."),
