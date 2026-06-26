@@ -225,3 +225,14 @@ STRONG_RATINGS = {"strongbuy", "strong buy", "buy"}
 
 # S5 go-live: VCI F1-F4 final-layer gates ON (was getattr-default False)
 VCI_FINAL_LAYER_GATES = True
+
+# ── Forward Axis re-weighting (Jun-26) ─────────────────────────────────────────
+# REVISION_RUNWAY_CAP: cap journey-stage runway at 1 unless est-rev direction is "Improving".
+REVISION_RUNWAY_CAP        = True
+# FORWARD_AXIS_BUCKETED: weight the forward axis by independent dimension (estimates / margin /
+# price) instead of equal-per-signal, so the 4 correlated estimate-revision signals can't swamp
+# price momentum. False => legacy equal-per-signal (kept only for backtest comparison).
+FORWARD_AXIS_BUCKETED      = True
+# Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
+# but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
+FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 1.0, "margin": 1.0, "price": 1.0}

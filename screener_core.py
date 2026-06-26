@@ -3169,16 +3169,51 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     scored["margin_traj_delta_pp"] = mtj
     rev, scored["score_f_rev_est"] = _rev_estimate_score(info.get("growth_estimates"), info)
     scored["rev_est_fwd_pct"] = rev
+    # Price momentum: thread the screen's already-fetched history (info["history"]) when not passed
+    # explicitly. FIX (Jun-26): the weekly screen previously passed history=None, so price momentum
+    # was silently absent for EVERY name. It is now wired in here.
+    if history is None:
+        history = info.get("history")
     pm, scored["score_f_price_mom"] = _price_momentum_score(history)
     scored["price_mom_3m_pct"] = pm
     scored["revision_stage"], scored["revision_runway"] = _revision_journey_stage(info.get("eps_trend"))
-    subs = [scored.get("score_f_eps_trend"), scored.get("score_f_margin_traj"),
-            scored.get("score_f_rev_est"), scored.get("score_f_price_mom"),
-            scored.get("score_b_est_rev")]
-    if getattr(_cfg, "REVISION_RUNWAY_IN_F", False) and scored.get("revision_runway") is not None:
-        subs.append(scored["revision_runway"])   # journey-stage runway joins F once shadow-validated
-    avail = [v for v in subs if v is not None]
-    scored["forward_axis_score"] = round(100.0 * sum(avail) / (len(avail) * 2), 1) if avail else None
+    # Runway cap: a rising-estimate "runway" of 2 is only credible when estimate revisions are
+    # actually improving; cap at 1 when est-rev direction is neutral/deteriorating (avoids the
+    # over-crediting that lifted e.g. ADBE 50->60 while its est-rev was only "neutral").
+    if getattr(_cfg, "REVISION_RUNWAY_CAP", True) and scored.get("revision_runway") == 2:
+        if str(scored.get("est_rev_direction") or "").lower() != "improving":
+            scored["revision_runway"] = 1
+    _runway_on = getattr(_cfg, "REVISION_RUNWAY_IN_F", False) and scored.get("revision_runway") is not None
+    if getattr(_cfg, "FORWARD_AXIS_BUCKETED", True):
+        # Independent-dimension buckets so the four correlated estimate-revision signals
+        # (eps_trend, rev_est, est_rev, runway) cannot collectively dominate price + margin.
+        # Each bucket -> fraction of its 0-2 max; axis = weighted mean of available buckets * 100.
+        bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"estimates": 1.0, "margin": 1.0, "price": 1.0})
+        est_subs = [scored.get("score_f_eps_trend"), scored.get("score_f_rev_est"),
+                    scored.get("score_b_est_rev")]
+        if _runway_on:
+            est_subs.append(scored.get("revision_runway"))
+        est_av = [v for v in est_subs if v is not None]
+        # Price bucket: impute 0 when momentum is unmeasurable (penalise, do NOT exclude the stock).
+        pm_score = scored.get("score_f_price_mom")
+        pm_bucket = pm_score if pm_score is not None else 0
+        buckets = []
+        if est_av:
+            buckets.append((bw.get("estimates", 1.0), sum(est_av) / (len(est_av) * 2.0)))
+        if scored.get("score_f_margin_traj") is not None:
+            buckets.append((bw.get("margin", 1.0), scored["score_f_margin_traj"] / 2.0))
+        buckets.append((bw.get("price", 1.0), pm_bucket / 2.0))
+        wsum = sum(w for w, _ in buckets)
+        scored["forward_axis_score"] = round(100.0 * sum(w * f for w, f in buckets) / wsum, 1) if wsum > 0 else None
+    else:
+        # Legacy equal-per-signal average (retained for backtest comparison only).
+        subs = [scored.get("score_f_eps_trend"), scored.get("score_f_margin_traj"),
+                scored.get("score_f_rev_est"), scored.get("score_f_price_mom"),
+                scored.get("score_b_est_rev")]
+        if _runway_on:
+            subs.append(scored["revision_runway"])
+        avail = [v for v in subs if v is not None]
+        scored["forward_axis_score"] = round(100.0 * sum(avail) / (len(avail) * 2), 1) if avail else None
     return scored
 
 
