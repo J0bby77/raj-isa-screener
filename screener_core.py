@@ -1471,7 +1471,7 @@ def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
                 data["next_earnings"] = "Unknown"
 
         # Price history
-        period = "5y" if score_gt38 else "1y"
+        period = "5y" if score_gt38 else "2y"   # >=2y so the 12-1m price-momentum window (~273d) is always spannable
         try:
             data["history"] = tk.history(period=period)
         except Exception:
