@@ -1016,7 +1016,8 @@ def build_email_body(
     # S5: headline ranking MIRRORS the Excel SUMMARY — count-based, forward-led Source Score.
     _sb_all = [r for r in full_data if is_strong_buy(r)]  # informational Strong-Buy set (badge secondary under S5)
     if _cfg_get("SUMMARY_COUNT_BASED", False):
-        strong_buys = sorted([r for r in full_data if _summary_eligible(r)],
+        _flr = _cfg_get("SUMMARY_SOURCE_FLOOR", 0.0)
+        strong_buys = sorted([r for r in full_data if _summary_eligible(r) and _source_score(r) * 100 >= _flr],
                              key=lambda r: -_source_score(r))[:int(_cfg_get("SUMMARY_TARGET_COUNT", 30))]
     else:
         strong_buys = sorted(_sb_all, key=lambda r: -(sf(get_field(r, "total_score")) or 0))

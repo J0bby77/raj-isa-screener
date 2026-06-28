@@ -247,3 +247,8 @@ PRICE_MOM_SKIP             = 21
 # (runway>=1) qualify; Maturing/Rolling over/Flat-Down/Marginal (runway 0/None) are excluded. Stage=None
 # (missing estimate data) is NOT excluded (ranks low via forward axis). Price still RANKS the eligible names.
 SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]
+
+# SUMMARY source-score floor (Jul-26): a SUMMARY/candidate name must clear this Source Score to be a
+# genuine capital opportunity (the count-based top-N won't backfill with weak names). Excludes the
+# low-source tail (e.g. ADBE ~48). Screen-source scale (0.75 fwd / 0.05 quality / 0.20 valuation).
+SUMMARY_SOURCE_FLOOR = 60.0

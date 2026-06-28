@@ -469,6 +469,8 @@ def build_summary(wb, df_full, run_date, group):
             sb["_src"] = (_sw.get("forward", 0.45) * sb.get("forward_axis_score", pd.Series(dtype=float)).fillna(0).astype(float) / 100.0
                           + _sw.get("quality", 0.30) * sb.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) / 28.0
                           + _sw.get("valuation", 0.25) * sb.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) / 22.0)
+            _floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 0.0)
+            sb = sb[sb["_src"].fillna(0) * 100 >= _floor]
             sb = sb.sort_values("_src", ascending=False).head(int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
     else:
         sb = df_full[(_pa >= 22) & (_pb >= 14) & (_tot >= 43) & _notdet & _ok_status & _stage_ok].copy()
