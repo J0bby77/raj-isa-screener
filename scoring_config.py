@@ -131,7 +131,7 @@ SOURCE_SCORE_WEIGHTS = {"forward": 0.45, "quality": 0.20, "deployability": 0.30,
 # not deteriorating). Activate together with the gate relaxations + two-pass fetch.
 SUMMARY_COUNT_BASED    = True
 SUMMARY_TARGET_COUNT   = 30
-SUMMARY_SOURCE_WEIGHTS = {"forward": 0.45, "quality": 0.30, "valuation": 0.25}
+SUMMARY_SOURCE_WEIGHTS = {"forward": 0.75, "quality": 0.05, "valuation": 0.20}  # Jul-26: forward-heavy (quality->gate); unified screen=summary
 
 # ===========================================================================
 # ENERGY  (energy_screener.py — Part A /20 + Part B /16 = Total /36)

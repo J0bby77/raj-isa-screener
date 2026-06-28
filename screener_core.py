@@ -2700,15 +2700,15 @@ def overlay_estimate_revisions(ticker_sym, scoring_data, info):
     out["est_rev_consensus_trend"] = consensus_trend
     net_revision = up_30 - down_30
     if net_revision > 0 and consensus_trend == "improving":
-        out["est_rev_direction"] = "improving"
+        out["est_rev_direction_raw"] = "improving"
     elif net_revision < 0 or consensus_trend == "deteriorating":
-        out["est_rev_direction"] = "deteriorating"
+        out["est_rev_direction_raw"] = "deteriorating"
     else:
-        out["est_rev_direction"] = "neutral"
+        out["est_rev_direction_raw"] = "neutral"
 
     if not rev_parsed:
         out["est_rev_status"]    = "unresolved"
-        out["est_rev_direction"] = "neutral"
+        out["est_rev_direction_raw"] = "neutral"
     return out
 
 
@@ -3185,6 +3185,11 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     pm, scored["score_f_price_mom"] = _price_momentum_score(history)
     scored["price_mom_3m_pct"] = pm
     scored["revision_stage"], scored["revision_runway"] = _revision_journey_stage(info.get("eps_trend"))
+    # Stage-label gate (Jul-26): a high-conviction price/estimate label ("Accelerating"/"Igniting") is only
+    # credible when est-rev direction confirms; otherwise downgrade to "Sustained" so the label can't
+    # over-read (e.g. ADBE "Accelerating" while direction is only "neutral").
+    if str(scored.get("est_rev_direction") or "").lower() != "improving" and scored.get("revision_stage") in ("Accelerating", "Igniting"):
+        scored["revision_stage"] = "Sustained"
     # Runway cap: a rising-estimate "runway" of 2 is only credible when estimate revisions are
     # actually improving; cap at 1 when est-rev direction is neutral/deteriorating (avoids the
     # over-crediting that lifted e.g. ADBE 50->60 while its est-rev was only "neutral").
@@ -3248,7 +3253,17 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         scored["score_b_ev_g"]   = scored.get("score_b_ev_ebitda", 0) or 0
         scored["score_b_pfcf_g"] = scored.get("score_b_price_fcf", 0) or 0
     scored["score_b_est_rev"]   = _est_rev_score(info.get("eps_revisions"))
-    scored["est_rev_direction"] = {2: "Improving", 1: "Neutral", 0: "Deteriorating"}[scored["score_b_est_rev"]]
+    # Bug#4 fix: SINGLE canonical est_rev_direction via CONSERVATIVE MERGE of the two sources
+    # (revision-count "_raw" from the fetch layer + the scored Est-Rev metric). Deteriorating if EITHER
+    # flags it (capital protection); improving only when neither deteriorates and at least one improves.
+    _raw = str(info.get("est_rev_direction_raw") or scored.get("est_rev_direction_raw") or "").lower()
+    _scb = scored.get("score_b_est_rev")
+    if _raw == "deteriorating" or _scb == 0:
+        scored["est_rev_direction"] = "deteriorating"
+    elif _raw == "improving" or _scb == 2:
+        scored["est_rev_direction"] = "improving"
+    else:
+        scored["est_rev_direction"] = "neutral"
     # Deprecated metrics dropped from the Part B sum (values may remain for display)
     for _dead in ("score_b_fcf_yield", "score_b_earn_yield", "score_b_52wk"):
         scored[_dead] = None
