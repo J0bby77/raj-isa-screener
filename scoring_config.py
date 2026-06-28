@@ -241,3 +241,9 @@ FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 1.0, "margin": 1.0, "price": 1.0}
 # 3-month (63) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
 PRICE_MOM_LOOKBACK         = 252
 PRICE_MOM_SKIP             = 21
+
+# SUMMARY forward-runway gate (Jul-26): exclude estimate-cycle stages with no forward runway from the
+# SUMMARY candidate pool (the pre-run deployment funnel). Igniting/Accelerating/Sustained/Early-unconfirmed
+# (runway>=1) qualify; Maturing/Rolling over/Flat-Down/Marginal (runway 0/None) are excluded. Stage=None
+# (missing estimate data) is NOT excluded (ranks low via forward axis). Price still RANKS the eligible names.
+SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]

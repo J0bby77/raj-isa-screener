@@ -459,9 +459,11 @@ def build_summary(wb, df_full, run_date, group):
     _fs = df_full.get("final_status", pd.Series(dtype=str)).fillna("").astype(str).str.upper()
     _ok_status = ~_fs.isin({"HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL", "UNRESOLVED_HARD_GATE_NOT_RANKABLE"})
     _paf = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)   # P2-1: single-source viability floor (= pool/rerank)
+    _stage_excl = set(getattr(_cfg, "SUMMARY_STAGE_EXCLUDE", []))
+    _stage_ok = ~df_full.get("revision_stage", pd.Series(dtype=str)).fillna("").astype(str).isin(_stage_excl)  # forward-runway gate
     if getattr(_cfg, "SUMMARY_COUNT_BASED", False):
         # Multi-door eligibility (viability, not quality) then rank by a forward-led screen Source Score.
-        sb = df_full[(_pa >= _paf) & (_pb >= 14) & _notdet & _ok_status].copy()
+        sb = df_full[(_pa >= _paf) & (_pb >= 14) & _notdet & _ok_status & _stage_ok].copy()
         if not sb.empty:
             _sw = getattr(_cfg, "SUMMARY_SOURCE_WEIGHTS", {"forward": 0.45, "quality": 0.30, "valuation": 0.25})
             sb["_src"] = (_sw.get("forward", 0.45) * sb.get("forward_axis_score", pd.Series(dtype=float)).fillna(0).astype(float) / 100.0
@@ -469,7 +471,7 @@ def build_summary(wb, df_full, run_date, group):
                           + _sw.get("valuation", 0.25) * sb.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) / 22.0)
             sb = sb.sort_values("_src", ascending=False).head(int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
     else:
-        sb = df_full[(_pa >= 22) & (_pb >= 14) & (_tot >= 43) & _notdet & _ok_status].copy()
+        sb = df_full[(_pa >= 22) & (_pb >= 14) & (_tot >= 43) & _notdet & _ok_status & _stage_ok].copy()
         if not sb.empty:
             sb = sb.sort_values(["total_score", "part_b_score", "company"], ascending=[False, False, True]).reset_index(drop=True)
 

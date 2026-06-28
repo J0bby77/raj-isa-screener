@@ -455,7 +455,9 @@ def _summary_eligible(row):
     st = str(get_field(row,"final_status") or "").upper()
     ok = st not in {"HARD_GATE_FAIL","MANDATORY_MINIMUM_FAIL","UNRESOLVED_HARD_GATE_NOT_RANKABLE"}
     notdet = str(get_field(row,"est_rev_direction") or "").lower() != "deteriorating"
-    return a >= paf and b >= 14 and notdet and ok
+    stage = str(get_field(row,"revision_stage") or "")
+    stage_ok = stage not in set(_cfg_get("SUMMARY_STAGE_EXCLUDE", []))
+    return a >= paf and b >= 14 and notdet and ok and stage_ok
 
 def build_kpi_tiles(strong_buys, gate_passers):
     """KPI tiles row using table layout (Rule 3 — no flexbox)."""

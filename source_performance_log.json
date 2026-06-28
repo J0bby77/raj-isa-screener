@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-06-27",
+  "last_updated": "2026-06-28",
   "indices": {
     "S&P 500": {
       "sector": {
