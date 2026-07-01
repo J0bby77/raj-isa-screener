@@ -654,11 +654,11 @@
         "primary_source": "yfinance",
         "attempts": 273,
         "successes": 221,
-        "success_rate": 0.810,
+        "success_rate": 0.81,
         "last_run": "2026-06-27",
         "last_run_attempts": 273,
         "last_run_successes": 221,
-        "last_run_rate": 0.810,
+        "last_run_rate": 0.81,
         "note": "Lower coverage for Eastern European / smaller exchanges (WSE, CPH, OSL)"
       },
       "ev_ebitda": {
@@ -1217,7 +1217,7 @@
       ]
     }
   },
-  "_last_run_notes": "STOXX600 run 2026-06-27 (LOCAL-PRIMARY + constituent-hybrid): 598 constituents, 273 scored, 260 rankable, 0 tech failures. 17 Strong Buys (v27). Top GTT.PA 48/50. Overlays: 122 complete, 5 partial. quoteSummary 404 for ~65% of EU high-score tickers (CRITICAL). Gate4 Industrials 21.2% (warning flag set but below 35% threshold).",
+  "_last_run_notes": "F250-SPI run 2026-06-28 (LOCAL-PRIMARY + constituent-hybrid): 448 constituents, 136 scored, 125 rankable, 0 tech failures. 7 Strong Buys. Top TRN.L/TEMN.SW 46/50. Overlays: 56 complete, 9 partial. Industrials 43.9% Gate4 (above 35% threshold). 87 GATE_DATA_UNRESOLVED.",
   "runs": [
     {
       "run_date": "2026-05-22",
@@ -1487,4 +1487,42 @@
       "gate4_largest_sector_pct": 29.5,
       "excel_file": "Growth Stock Analysis F250 & SPI W-e 13-Jun-26.xlsx",
       "retrospective_file": "20260613_F250-SPI_retrospective.md",
-      "notes": "v27 scoring; 30 scoring batches + 2 overlay batches; 0 tech failures; const dump bridged via GitHub (raj-isa-screener); 2 stocks (ALC.SW, SMG.SW) have part_a_score>=22 but final_status=HARD_GATE_FAIL overrides status to Not Growth/Avoid (see retrospective item 1); build_email.py has /54 label bug (should be /50) and a non-fatal post-save 
+      "notes": "v27 scoring; 30 scoring batches + 2 overlay batches; 0 tech failures; const dump bridged via GitHub (raj-isa-screener); 2 stocks (ALC.SW, SMG.SW) have part_a_score>=22 but final_status=HARD_GATE_FAIL overrides status to Not Growth/Avoid (see retrospective item 1); build_email.py /54 label corrected to /50 in v27"
+    },
+    {
+      "run_date": "2026-06-28",
+      "group": "F250-SPI",
+      "task_id": "isa-eu-b-sat2",
+      "run_mode": "local_primary_constituent_hybrid",
+      "constituent_source": "Composio_constituent_hybrid_dump_via_GitHub",
+      "constituents_fetched": 448,
+      "accounted": 448,
+      "gate1_excluded": 130,
+      "gate2_excluded": 0,
+      "gate3_excluded": 13,
+      "gate4_excluded": 82,
+      "gate_data_unresolved": 87,
+      "scored": 136,
+      "technical_failures": 0,
+      "candidate_rankable": 125,
+      "hard_gate_fails": 0,
+      "mandatory_minimum_fails": 9,
+      "unresolved_hard_gate": 2,
+      "strong_buys": 7,
+      "top_score": 46,
+      "top_tickers": [
+        "TRN.L",
+        "TEMN.SW"
+      ],
+      "high_score_overlay_stocks": 65,
+      "overlay_complete": 56,
+      "overlay_partial": 9,
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 43.9,
+      "excel_file": "Growth Stock Analysis F250 & SPI W-e 28-Jun-26.xlsx",
+      "retrospective_file": "20260628_F250-SPI_retrospective.md",
+      "notes": "v27 scoring; 30 scoring batches + 9 overlay batches; 0 tech failures; constituent-hybrid (Composio dump n=448 via GitHub bridge); 7 strong buys; 87 GATE_DATA_UNRESOLVED (thin yfinance coverage for smaller FTSE250/SPI); quoteSummary 404 for some .L/.SW overlay stocks (known EU issue); Composio .env recreated one-time (persistent /mnt/files/isa_env/.env reset); gate4_conc Industrials 43.9% above 35% threshold (structural FTSE250 feature)"
+    }
+  ]
+}

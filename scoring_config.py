@@ -123,15 +123,17 @@ FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-
 # Source Score weights (redesign Part 3 §13) — the FORWARD-LED ranking composite in rerank_watchlist.
 # F dominant, quality de-emphasised, cheapness earns no separate credit. PROVISIONAL — calibrate in
 # shadow. Used ONLY when FORWARD_AXIS_IN_RANKING=True (else rerank runs its legacy deployment composite).
-SOURCE_SCORE_WEIGHTS = {"forward": 0.45, "quality": 0.20, "deployability": 0.30, "analyst": 0.05}
+# Jul-26 Part 1: THE single Source-Score weight dict (used by source_score.compute_source_score,
+# inherited by build_excel / build_email / rerank_watchlist / screener_core overlay). forward 0.60 /
+# revisions 0.15 / deployability 0.10 / quality 0.05 / analyst 0.10 (higher-end, per Raj's call).
+SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}
 
-# SUMMARY tab selection (redesign Part 3 §7/§13). DEFAULT False = legacy v27 rule (Part A>=22 & Total>=43
+# SUMMARY tab selection (forward-led). Legacy fixed-total v27 rule retired (source_score.summary_eligible
 # & est-rev not deteriorating & Part B>=14). When True: top-N by a forward-led SCREEN Source Score (no
 # deployability/entry data at screen time), multi-door eligibility (viability Part A>=14 + Part B>=14 +
 # not deteriorating). Activate together with the gate relaxations + two-pass fetch.
 SUMMARY_COUNT_BASED    = True
 SUMMARY_TARGET_COUNT   = 30
-SUMMARY_SOURCE_WEIGHTS = {"forward": 0.75, "quality": 0.05, "valuation": 0.20}  # Jul-26: forward-heavy (quality->gate); unified screen=summary
 
 # ===========================================================================
 # ENERGY  (energy_screener.py — Part A /20 + Part B /16 = Total /36)
@@ -235,10 +237,11 @@ REVISION_RUNWAY_CAP        = True
 FORWARD_AXIS_BUCKETED      = True
 # Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
 # but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
-FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 1.0, "margin": 1.0, "price": 1.0}
+FORWARD_AXIS_BUCKET_WEIGHTS = {"margin": 0.30, "price": 0.70}   # Jul-26 Part 2: forward axis = price+margin ONLY;
+#   estimate-revision signals pulled OUT into a separate revisions_score (SOURCE_WEIGHTS["revisions"]=0.15)
 
 # Price-momentum window (Jun-26 backtest): 12-1 month = 252-day window ending ~21 trading days ago.
-# 3-month (63) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
+# 63-day (one-quarter) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
 PRICE_MOM_LOOKBACK         = 252
 PRICE_MOM_SKIP             = 21
 
@@ -251,4 +254,27 @@ SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]
 # SUMMARY source-score floor (Jul-26): a SUMMARY/candidate name must clear this Source Score to be a
 # genuine capital opportunity (the count-based top-N won't backfill with weak names). Excludes the
 # low-source tail (e.g. ADBE ~48). Screen-source scale (0.75 fwd / 0.05 quality / 0.20 valuation).
-SUMMARY_SOURCE_FLOOR = 60.0
+SUMMARY_SOURCE_FLOOR = 70.0
+
+# ===========================================================================
+# JUL-26 FORWARD-LED CALIBRATION (implementation plan ISA_Forward_Calibration_..._Jul2026.md)
+# Authoritative parameter set (§0.5). SOURCE_WEIGHTS + FORWARD_AXIS_BUCKET_WEIGHTS + SUMMARY_SOURCE_FLOOR
+# are set inline above; the remaining structural constants live here.
+# ===========================================================================
+# Part 4 — relax the SUMMARY/candidate Part B hard gate from 14 -> 10 (balance-sheet risk is still
+# protected by the separate ND/EBITDA MANDATORY_MINIMUM_FAIL gate). Used by source_score.summary_eligible.
+SUMMARY_PART_B_FLOOR      = 10
+
+# Part 3 — deployability entry-weight rework (backtested: penalising a stock for having run is backwards).
+# Gentler, floored decay so extended momentum winners keep deployability.
+DEPLOY_ENTRY_DECAY        = 0.50      # was 0.25 (steeper)
+DEPLOY_ENTRY_FLOOR        = 0.50      # entry-weight floor (was ~0)
+
+# Part 7 — held-stock upgrade / replacement test. A middling HOLD (floor<=source<bar) is reclassified
+# TRIM (sell-to-upgrade) when the best eligible candidate's Source beats it by >= this margin.
+UPGRADE_DELTA             = 15
+
+# Part 8 — sleeve sector / theme concentration caps (netted against fund look-through) + diversification.
+SLEEVE_SECTOR_CAP_ISA     = 0.12      # max one GICS sector across direct stocks (share of ISA)
+SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
+DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by

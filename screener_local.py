@@ -271,12 +271,12 @@ def main():
                 print(f"FALLBACK_TO_COMPOSIO: cumulative fetch failure {fr:.0%} > {a.max_fail_rate:.0%}"); sys.exit(3)
             if remaining > 0:
                 print(f"NOT_DONE - {remaining} score batch(es) left. Call again."); return
-        # P2-4: overlay-enrich high-TOTAL names AND (when forward selection is on) forward-strong names,
-        # so forward-admitted lower-total reversals aren't left with under-populated Part B resilience.
-        _fe = getattr(getattr(core, "_cfg", None), "FORWARD_ELIGIBILITY", False)
+        # Jul-26 Part 5: overlay-enrich the SUMMARY-eligible set whose Source Score >= floor (replaces the
+        # retired fixed total-score trigger), so forward-admitted lower-total reversals get their overlay data.
+        import source_score as _ss
+        _ov_floor = getattr(getattr(core, "_cfg", None), "SUMMARY_SOURCE_FLOOR", 70.0)
         hs = [r["ticker"] for r in state["scored"]
-              if ((r.get("part_a_score") or 0) + (r.get("part_b_score") or 0) > core.OVERLAY_SCORE_TRIGGER)
-              or (_fe and (r.get("forward_axis_score") or 0) >= 50)]
+              if _ss.summary_eligible(r) and _ss.source_score_for_row(r) >= _ov_floor]
         ob = a.overlay_batch
         state["overlay_plan"] = [hs[i:i + ob] for i in range(0, len(hs), ob)]
         state["overlay_done"] = {}

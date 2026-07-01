@@ -62,7 +62,12 @@ def compute_gate_flags(td: dict, has_catalyst: bool = False) -> dict:
 
     # HARD (auto-cap):
     # Revision-direction cut = the value-trap signature and the Door-A killer. A live catalyst rebuts it.
-    if (direction == "down" or dn > up) and not has_catalyst:
+    # Jul-26 Part 6: read the CANONICAL est_rev_direction (screener_core's conservative-merge value,
+    # vocabulary "improving"/"neutral"/"deteriorating"; legacy "up"/"down" still honoured). This is the
+    # SINGLE source — the raw up/down counts are only a fallback when no direction field is present, so
+    # a name the canonical merge deemed "neutral" is NOT re-cut here from a stale recompute.
+    _deteriorating = direction in ("down", "deteriorating")
+    if (_deteriorating or (not direction and dn > up)) and not has_catalyst:
         disq.append("revision_direction_down")
     # Near the 52-week low AND a deteriorating score = falling knife.
     if pos is not None and pos < 0.15 and delta is not None and delta < -2:

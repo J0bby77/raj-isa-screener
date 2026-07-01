@@ -22,9 +22,9 @@ import argparse, os, sys, datetime, statistics as stx
 import warnings; warnings.filterwarnings("ignore")
 
 HORIZONS = {"1m": 21, "3m": 63, "6m": 126, "12m": 252}
-SIGNALS = ["forward_axis_score", "source_score", "score_f_price_mom", "price_mom_3m_pct",
-           "score_f_eps_trend", "score_f_rev_est", "score_b_est_rev", "revision_runway",
-           "score_f_margin_traj", "part_a_score", "part_b_score", "total_score"]
+SIGNALS = ["forward_axis_score", "revisions_score", "source_score", "score_f_price_mom",
+           "price_mom_12_1m_pct", "score_f_eps_trend", "score_f_rev_est", "score_b_est_rev",
+           "revision_runway", "score_f_margin_traj", "part_a_score", "part_b_score", "total_score"]
 
 
 def _rank_ic(a, b):

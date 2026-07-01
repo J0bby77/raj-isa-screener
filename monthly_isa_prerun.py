@@ -70,6 +70,7 @@ SCRIPTS = {
     "entry_level_builder":    os.path.join(SCRIPT_DIR, "entry_level_builder.py"),    # NEW Step 7.25
     "step9_pre_builder":      os.path.join(SCRIPT_DIR, "step9_pre_builder.py"),     # NEW Step 8
     "email_prefill":          os.path.join(SCRIPT_DIR, "email_prefill.py"),
+    "calibration_report":     os.path.join(SCRIPT_DIR, "calibration_report.py"),   # Jul-26 Part 9c
 }
 
 # Memory files (read by analytics for prior portfolio and trades log)
@@ -235,6 +236,8 @@ def write_run_context(
             "decision_ledger":      os.path.join(SCRIPT_DIR, "decision_ledger.json"),
             "ai_disruption":        os.path.join(SCRIPT_DIR, "ai_disruption.json"),
             "fund_returns_cache":   os.path.join(SCRIPT_DIR, "fund_returns_cache.json"),
+            "calibration_report":   os.path.join(SCRIPT_DIR, f"calibration_report_{month_label}.md"),
+            "score_panel":          os.path.join(SCRIPT_DIR, "score_panel.csv"),
         },
         "summary": summary,
         "flags":   flags,
@@ -883,6 +886,35 @@ def main():
                 print("  Validation WARNING: " + vmsg)
             else:
                 print("  Validation: " + vmsg)
+
+    # ---------------------------------------------------------------------------
+    # Step 9c (Jul-26 Part 9): Calibration report — surface each signal's forward-return IC by horizon
+    # (1m/3m/6m/12m, filling left-to-right as the score panel matures). Evidence only; never blocks.
+    # ---------------------------------------------------------------------------
+    print(f"\n[cal] Calibration report (signal IC by horizon)...")
+    calib_report_path = os.path.join(SCRIPT_DIR, f"calibration_report_{month_label}.md")
+    calib_summary = {}
+    try:
+        _panel_store = os.path.join(SCRIPT_DIR, "score_panel.csv")
+        if os.path.exists(_panel_store):
+            ok, stdout, stderr = run_script(
+                "calibration_report",
+                ["--store", _panel_store, "--asof", run_date.isoformat(), "--out", calib_report_path],
+                dry_run=args.dry_run,
+            )
+            if ok:
+                calib_summary = {"report_path": calib_report_path, "ic_table": stdout.strip()}
+                print(stdout.strip()[:800])
+            else:
+                warnings.append("Calibration report: " + (stderr or stdout or "unknown error"))
+                print("  WARNING: " + (stderr or stdout or "unknown error"))
+        else:
+            calib_summary = {"note": "score_panel.csv not present yet -- screens begin logging it this cycle."}
+            print("  SKIPPED -- no score_panel.csv yet (screens start logging the panel this cycle).")
+    except Exception as _ce:
+        warnings.append("Calibration report step: " + str(_ce))
+        print("  WARNING: calibration step: " + str(_ce))
+    summary["calibration"] = calib_summary
 
     # Write run_context
     if errors:

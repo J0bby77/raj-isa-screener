@@ -19,19 +19,18 @@ import argparse, os, sys
 
 PANEL_COLS = [
     "run_date", "group", "ticker", "part_a_score", "part_b_score", "total_score",
-    "forward_axis_score", "score_f_eps_trend", "score_f_rev_est", "score_b_est_rev",
-    "revision_runway", "score_f_margin_traj", "score_f_price_mom", "price_mom_3m_pct",
+    "forward_axis_score", "revisions_score", "score_f_eps_trend", "score_f_rev_est", "score_b_est_rev",
+    "revision_runway", "score_f_margin_traj", "score_f_price_mom", "price_mom_12_1m_pct",
     "est_rev_direction", "source_score", "current_price", "target_price",
 ]
 
 
 def _src_score(row, paf=28.0, pbf=22.0):
-    """Recompute the screen Source Score if not present (0.45 F + 0.30 A + 0.25 B)."""
+    """The canonical screen Source Score (Jul-26 Part 1) — via source_score.source_score_for_row so the
+    panel logs EXACTLY what the screen/email/rerank use. paf/pbf retained for signature compatibility."""
     try:
-        f = float(row.get("forward_axis_score") or 0) / 100.0
-        a = float(row.get("part_a_score") or 0) / paf
-        b = float(row.get("part_b_score") or 0) / pbf
-        return round((0.45 * f + 0.30 * a + 0.25 * b) * 100, 1)
+        import source_score as _ss
+        return _ss.source_score_for_row(row)
     except Exception:
         return None
 

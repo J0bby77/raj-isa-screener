@@ -77,15 +77,18 @@ def _extract_fwd_eps(eps_trend):
     return None, None
 
 
-def record_snapshot(store, ticker, eps_fwd1y, eps_fwd0y, date=None, src="yfinance") -> bool:
+def record_snapshot(store, ticker, eps_fwd1y, eps_fwd0y, date=None, src="yfinance", target_mean=None) -> bool:
     """Append one point. Idempotent per (ticker, ISO-week): at most one point per week.
-    Returns True if appended, False if this week was already captured."""
+    Returns True if appended, False if this week was already captured.
+    Jul-26 Part 9b: also snapshots the analyst target_mean, so the reporter can quantify analyst
+    target LAG (how late consensus targets move relative to the price/estimate signal)."""
     date = date or _today()
     wk = _isoweek(date)
     ser = store["series"].setdefault((ticker or "").upper(), [])
     if any(_isoweek(p["date"]) == wk for p in ser):
         return False
-    ser.append({"date": date, "eps_fwd1y": eps_fwd1y, "eps_fwd0y": eps_fwd0y, "src": src})
+    ser.append({"date": date, "eps_fwd1y": eps_fwd1y, "eps_fwd0y": eps_fwd0y,
+                "target_mean": target_mean, "src": src})
     return True
 
 
@@ -99,9 +102,20 @@ def snapshot_tickers(path, tickers, date=None, preflight=False) -> dict:
     added = skipped = failed = 0
     for t in tickers:
         try:
-            et = getattr(yf.Ticker(t), "eps_trend", None)
+            _tk = yf.Ticker(t)
+            et = getattr(_tk, "eps_trend", None)
             f1, f0 = _extract_fwd_eps(et)
-            if record_snapshot(store, t, f1, f0, date=date):
+            tgt = None
+            try:
+                _info = getattr(_tk, "info", None) or {}
+                tgt = _info.get("targetMeanPrice")
+                if tgt is None:
+                    _apt = getattr(_tk, "analyst_price_targets", None)
+                    if isinstance(_apt, dict):
+                        tgt = _apt.get("mean")
+            except Exception:
+                tgt = None
+            if record_snapshot(store, t, f1, f0, date=date, target_mean=tgt):
                 added += 1
             else:
                 skipped += 1

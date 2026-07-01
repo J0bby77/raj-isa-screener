@@ -178,7 +178,7 @@ PART_A_STRONG_THRESHOLD   = _cfg.GROWTH_PART_A_STRONG       # 22  (scoring_confi
 PART_A_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_A_ACCEPTABLE   # 14
 PART_B_STRONG_THRESHOLD   = _cfg.GROWTH_PART_B_STRONG       # 16  (v27-recalibrated; was hardcoded 19 on the old /26 scale)
 PART_B_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_B_ACCEPTABLE   # 11
-OVERLAY_SCORE_TRIGGER     = 38   # total score threshold to attempt overlays
+# OVERLAY_SCORE_TRIGGER retired (Jul-26 Part 5): overlay set is now SUMMARY-eligible + Source>=floor
 OVERLAY_TIME_CAP_SECS     = 480  # 8 minutes
 
 # ── Revenue anomaly multiple ──────────────────────────────────────────────────
@@ -1554,7 +1554,7 @@ def fetch_phase2_statements(tickers, group):
 def fetch_phase3_scoring(tickers, group, high_score_tickers=None):
     """
     Fetch incremental scoring data for gate passers.
-    high_score_tickers: set of tickers where total score > 38 (fetch 5yr history + overlay objects).
+    high_score_tickers: set of SUMMARY-eligible names at/above the Source floor (fetch 5yr history + overlay objects).
     """
     params  = BATCH_PARAMS.get(group, BATCH_PARAMS["OTHER"])
     high_set = set(high_score_tickers or [])
@@ -2615,7 +2615,7 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 7: OVERLAY RETRIEVAL (Total Score > 38 only)
+# SECTION 7: OVERLAY RETRIEVAL (SUMMARY-eligible + Source Score >= floor only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_eps_revisions_robust(eps_rev_df):
@@ -2909,8 +2909,8 @@ FIELD_MAP = [
     "score_b_earn_yield", "score_b_52wk", "score_b_div_payout", "score_b_fwd_eps",
     "score_b_target_upside", "score_b_stress",
     # Forward axis (Part 3 §13) + per-stock max — carried into the screen output for SUMMARY + shadow
-    "forward_axis_score", "score_f_eps_trend", "score_f_margin_traj", "score_f_rev_est", "score_f_price_mom",
-    "eps_trend_mom_pct", "margin_traj_delta_pp", "rev_est_fwd_pct", "price_mom_3m_pct", "total_max", "part_b_max",
+    "forward_axis_score", "revisions_score", "score_f_eps_trend", "score_f_margin_traj", "score_f_rev_est", "score_f_price_mom",
+    "eps_trend_mom_pct", "margin_traj_delta_pp", "rev_est_fwd_pct", "price_mom_12_1m_pct", "total_max", "part_b_max",
     "revision_stage", "revision_runway",
     "score_b_peg", "score_b_ev_g", "score_b_pfcf_g", "score_b_est_rev",
     "est_rev_direction",
@@ -2955,6 +2955,17 @@ def save_full_data(rows, outputs_dir, run_date, group):
     df   = pd.DataFrame(rows, columns=FIELD_MAP)
     path = os.path.join(outputs_dir, f"{run_date}_{group}_full_data.csv")
     save_csv(df, path)
+    # Jul-26 Part 9a: append the point-in-time score panel (learning module). Best-effort — a logging
+    # failure must never break a screen. Persistent store lives beside the scripts (synced with the repo).
+    try:
+        import score_panel_logger as _spl
+        _store = os.path.join(os.path.dirname(os.path.abspath(__file__)), "score_panel.csv")
+        _spl.log_from_full_data(df, group=group, run_date=run_date, store=_store)
+    except Exception as _e:
+        try:
+            log.warning(f"score-panel log skipped: {_e}")
+        except Exception:
+            pass
     return path
 
 
@@ -3106,7 +3117,7 @@ def _rev_estimate_score(growth_estimates, info):
 
 def _price_momentum_score(history, lookback=None, skip=None):
     """Price-momentum return % + 0/1/2. DEFAULT = 12-1 month (a 12-month window ending ~1 month ago).
-    Jun-26 backtest (280 names / 42 dates): trailing 3-month momentum had ZERO / mildly NEGATIVE forward
+    Jun-26 backtest (280 names / 42 dates): trailing 63-day (one-quarter) momentum had ZERO / mildly NEGATIVE forward
     edge (reversal-prone); 12-1m carries the real edge (top-quintile fwd return beats 3m at 3/6/12m).
     The ~1-month skip removes short-term reversal noise. Window + thresholds are config-driven
     (PRICE_MOM_LOOKBACK, PRICE_MOM_SKIP, PRICE_MOM_THRESHOLDS)."""
@@ -3168,7 +3179,7 @@ def _revision_journey_stage(eps_trend_df):
 def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     """Compute forward-axis sub-signals + a 0-100 Forward score (F). Sets fields on `scored` ADDITIVELY
     (does NOT change Part A/B/total). Shared by the weekly screen and the pre-run fetch.
-    NOTE: price-momentum is ABSOLUTE trailing-3m (sector-relative is a later refinement); the
+    NOTE: price-momentum is the ABSOLUTE 12-1m window (252d skip 21d; sector-relative is a later refinement); the
     weekly screen passes history=None until the two-pass fetch supplies it (watchlist path has 5y history)."""
     info = info or {}
     mom, scored["score_f_eps_trend"] = _eps_trend_momentum(info.get("eps_trend"))
@@ -3183,7 +3194,7 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     if history is None:
         history = info.get("history")
     pm, scored["score_f_price_mom"] = _price_momentum_score(history)
-    scored["price_mom_3m_pct"] = pm
+    scored["price_mom_12_1m_pct"] = pm
     scored["revision_stage"], scored["revision_runway"] = _revision_journey_stage(info.get("eps_trend"))
     # Stage-label gate (Jul-26): a high-conviction price/estimate label ("Accelerating"/"Igniting") is only
     # credible when est-rev direction confirms; otherwise downgrade to "Sustained" so the label can't
@@ -3197,36 +3208,27 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
         if str(scored.get("est_rev_direction") or "").lower() != "improving":
             scored["revision_runway"] = 1
     _runway_on = getattr(_cfg, "REVISION_RUNWAY_IN_F", False) and scored.get("revision_runway") is not None
-    if getattr(_cfg, "FORWARD_AXIS_BUCKETED", True):
-        # Independent-dimension buckets so the four correlated estimate-revision signals
-        # (eps_trend, rev_est, est_rev, runway) cannot collectively dominate price + margin.
-        # Each bucket -> fraction of its 0-2 max; axis = weighted mean of available buckets * 100.
-        bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"estimates": 1.0, "margin": 1.0, "price": 1.0})
-        est_subs = [scored.get("score_f_eps_trend"), scored.get("score_f_rev_est"),
-                    scored.get("score_b_est_rev")]
-        if _runway_on:
-            est_subs.append(scored.get("revision_runway"))
-        est_av = [v for v in est_subs if v is not None]
-        # Price bucket: impute 0 when momentum is unmeasurable (penalise, do NOT exclude the stock).
-        pm_score = scored.get("score_f_price_mom")
-        pm_bucket = pm_score if pm_score is not None else 0
-        buckets = []
-        if est_av:
-            buckets.append((bw.get("estimates", 1.0), sum(est_av) / (len(est_av) * 2.0)))
-        if scored.get("score_f_margin_traj") is not None:
-            buckets.append((bw.get("margin", 1.0), scored["score_f_margin_traj"] / 2.0))
-        buckets.append((bw.get("price", 1.0), pm_bucket / 2.0))
-        wsum = sum(w for w, _ in buckets)
-        scored["forward_axis_score"] = round(100.0 * sum(w * f for w, f in buckets) / wsum, 1) if wsum > 0 else None
-    else:
-        # Legacy equal-per-signal average (retained for backtest comparison only).
-        subs = [scored.get("score_f_eps_trend"), scored.get("score_f_margin_traj"),
-                scored.get("score_f_rev_est"), scored.get("score_f_price_mom"),
-                scored.get("score_b_est_rev")]
-        if _runway_on:
-            subs.append(scored["revision_runway"])
-        avail = [v for v in subs if v is not None]
-        scored["forward_axis_score"] = round(100.0 * sum(avail) / (len(avail) * 2), 1) if avail else None
+
+    # ── Jul-26 Part 2: STRUCTURAL SPLIT ──────────────────────────────────────────────────────────
+    # The forward AXIS is now PRICE + MARGIN only (the estimate-revision signals are pulled OUT into a
+    # separate `revisions_score` so SOURCE_WEIGHTS can weight "forward" (0.60) and "revisions" (0.15)
+    # independently without double-counting). Bucket weights: margin 0.30 / price 0.70 (price-dominant).
+    bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"margin": 0.30, "price": 0.70})
+    # Price bucket: impute 0 when momentum is unmeasurable (penalise, do NOT exclude the stock).
+    pm_score = scored.get("score_f_price_mom")
+    pm_bucket = pm_score if pm_score is not None else 0
+    buckets = [(bw.get("price", 0.70), pm_bucket / 2.0)]
+    if scored.get("score_f_margin_traj") is not None:
+        buckets.append((bw.get("margin", 0.30), scored["score_f_margin_traj"] / 2.0))
+    wsum = sum(w for w, _ in buckets)
+    scored["forward_axis_score"] = round(100.0 * sum(w * f for w, f in buckets) / wsum, 1) if wsum > 0 else None
+
+    # Separate revisions_score (0-100): the estimate-revision JOURNEY (eps_trend, fwd rev-est,
+    # scored est-rev, and the runway stage) — averaged over available sub-signals, each 0-2.
+    rev_subs = [scored.get("score_f_eps_trend"), scored.get("score_f_rev_est"),
+                scored.get("score_b_est_rev"), scored.get("revision_runway")]
+    rev_av = [v for v in rev_subs if v is not None]
+    scored["revisions_score"] = round(100.0 * sum(rev_av) / (len(rev_av) * 2.0), 1) if rev_av else None
     return scored
 
 
@@ -3475,10 +3477,15 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     run_qa["tech_failure_count"] = len(tech_failures)
     log.info(f"Scored: {len(scored_rows)} | Tech failures: {len(tech_failures)}")
 
-    # ── OVERLAYS (total score > 38, 8-min cap) ────────────────────────────
+    # ── OVERLAYS (Jul-26 Part 5: SUMMARY-eligible AND Source Score >= floor, 8-min cap) ──
+    # Overlays are only shown for SUMMARY names, so gate on the SUMMARY-eligibility set + the single
+    # Source Score (>= SUMMARY_SOURCE_FLOOR) instead of the old fixed total-score cut, which missed
+    # high-forward / low-total names (e.g. MU: total 32 / source ~80). Source is final before overlays.
+    import source_score as _ss
+    _ov_floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 70.0)
     high_score_tickers = [
         r["ticker"] for r in scored_rows
-        if (r.get("part_a_score") or 0) + (r.get("part_b_score") or 0) > 38
+        if _ss.summary_eligible(r) and _ss.source_score_for_row(r) >= _ov_floor
     ]
     log.info(f"High-score overlay candidates: {len(high_score_tickers)}")
 

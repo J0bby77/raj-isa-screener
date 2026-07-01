@@ -446,39 +446,25 @@ def build_summary(wb, df_full, run_date, group):
         ws.cell(row=5, column=1, value="No data available for this run.")
         return ws
 
-    # SUMMARY rule — legacy v27 (Part A>=22 & Total>=43 & est-rev not deteriorating & Part B>=14) OR,
-    # when scoring_config.SUMMARY_COUNT_BASED, top-N by a forward-led SCREEN Source Score (Part 3 §7/§13).
+    # SUMMARY rule (Jul-26 forward-led): ONE unified path. Multi-door VIABILITY eligibility +
+    # top-N by the single Source Score, both from source_score.py (no inline weighted sum, no legacy
+    # legacy fixed-total v27 branch). Part B floor is SUMMARY_PART_B_FLOOR (10). Balance-sheet risk
+    # stays gated by the separate ND/EBITDA MANDATORY_MINIMUM_FAIL (reflected in final_status).
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     import scoring_config as _cfg
-    _pa = df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float)
-    _pb = df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float)
-    _tot = df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float)
-    _notdet = df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating"
-    # P2-2: never admit a fail-status name to the SUMMARY (count-based path filtered on Part A/B only).
-    _fs = df_full.get("final_status", pd.Series(dtype=str)).fillna("").astype(str).str.upper()
-    _ok_status = ~_fs.isin({"HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL", "UNRESOLVED_HARD_GATE_NOT_RANKABLE"})
-    _paf = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)   # P2-1: single-source viability floor (= pool/rerank)
-    _stage_excl = set(getattr(_cfg, "SUMMARY_STAGE_EXCLUDE", []))
-    _stage_ok = ~df_full.get("revision_stage", pd.Series(dtype=str)).fillna("").astype(str).isin(_stage_excl)  # forward-runway gate
-    if getattr(_cfg, "SUMMARY_COUNT_BASED", False):
-        # Multi-door eligibility (viability, not quality) then rank by a forward-led screen Source Score.
-        sb = df_full[(_pa >= _paf) & (_pb >= 14) & _notdet & _ok_status & _stage_ok].copy()
-        if not sb.empty:
-            _sw = getattr(_cfg, "SUMMARY_SOURCE_WEIGHTS", {"forward": 0.45, "quality": 0.30, "valuation": 0.25})
-            sb["_src"] = (_sw.get("forward", 0.45) * sb.get("forward_axis_score", pd.Series(dtype=float)).fillna(0).astype(float) / 100.0
-                          + _sw.get("quality", 0.30) * sb.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) / 28.0
-                          + _sw.get("valuation", 0.25) * sb.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) / 22.0)
-            _floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 0.0)
-            sb = sb[sb["_src"].fillna(0) * 100 >= _floor]
-            sb = sb.sort_values("_src", ascending=False).head(int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
-    else:
-        sb = df_full[(_pa >= 22) & (_pb >= 14) & (_tot >= 43) & _notdet & _ok_status & _stage_ok].copy()
-        if not sb.empty:
-            sb = sb.sort_values(["total_score", "part_b_score", "company"], ascending=[False, False, True]).reset_index(drop=True)
+    import source_score as _ss
+    _elig = df_full.apply(lambda r: _ss.summary_eligible(r.to_dict()), axis=1)
+    sb = df_full[_elig].copy()
+    if not sb.empty:
+        sb["source_score"] = sb.apply(lambda r: _ss.source_score_for_row(r.to_dict()), axis=1)
+        _floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 0.0)
+        sb = sb[sb["source_score"].fillna(0) >= _floor]
+        sb = sb.sort_values("source_score", ascending=False).head(
+            int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
 
     if not sb.empty:
-        sb["source_score"] = (sb["_src"] * 100).round().astype("Int64") if "_src" in sb.columns else pd.NA
+        sb["source_score"] = sb["source_score"].round().astype("Int64")
 
     if sb.empty:
         ws.cell(row=5, column=1, value="No summary candidates identified this run.")
@@ -695,7 +681,7 @@ PART_F_METRIC_COLS = [
     ("Rev Est",        "score_f_rev_est",      "score"),
     ("Rev Est %",      "rev_est_fwd_pct",      "raw"),
     ("Price Mom",      "score_f_price_mom",    "score"),
-    ("Price 12-1m %",  "price_mom_3m_pct",     "raw"),
+    ("Price 12-1m %",  "price_mom_12_1m_pct",     "raw"),
     ("Est Rev (B)",    "score_b_est_rev",      "score"),
     ("Rev Runway",     "revision_runway",      "score"),
     ("Stage",          "revision_stage",       "text"),
@@ -989,12 +975,12 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         scored = df_full[~df_full.get("final_status", pd.Series(dtype=str)).fillna("").str.upper().isin(
             {"PRE_SCREEN_EXCLUDED", "STRUCTURAL_NON_APPLICABLE"}
         )]
-        strong_buys = df_full[
-            (df_full.get("part_a_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 22) &
-            (df_full.get("part_b_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 14) &
-            (df_full.get("total_score", pd.Series(dtype=float)).fillna(0).astype(float) >= 43) &
-            (df_full.get("est_rev_direction", pd.Series(dtype=str)).fillna("").astype(str).str.lower() != "deteriorating")
-        ]
+        # Jul-26 forward-led count: SUMMARY-eligible AND Source Score >= floor (matches the SUMMARY tab).
+        import source_score as _ss_cov, scoring_config as _cfg_cov
+        _cov_floor = getattr(_cfg_cov, "SUMMARY_SOURCE_FLOOR", 70.0)
+        _elig_cov = df_full.apply(lambda r: _ss_cov.summary_eligible(r.to_dict())
+                                  and _ss_cov.source_score_for_row(r.to_dict()) >= _cov_floor, axis=1)
+        strong_buys = df_full[_elig_cov]
         kv("Total constituents",   total)
         kv("Gate passers scored",  len(scored))
         kv("Summary candidates (S5: top-N by Source Score / legacy A≥22 · Total≥43)", len(strong_buys))
@@ -1023,11 +1009,11 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
     # Methodology
     section("Methodology Summary")
     methodology = [
-        ("Scoring", "Part A: 14 metrics, max 28 pts. Strong Growth >= 22. Hard gates: ROIC + FCF Pos Years."),
+        ("Scoring", "Part A: 14 metrics, max 28 pts. Strong Growth band at 22/28. Hard gates: ROIC + FCF Pos Years."),
         ("",        "Part B (v27): 11 base metrics, max 22 pts (+2 conditional = max 26 for semiconductor_hardware/equipment)."),
         ("",        "Part B metrics: ROIC, ND/EBITDA (mandatory mins), Fwd PEG, EV/EBITDA-to-growth, P/FCF-to-growth, Int Cov, Div Payout, Fwd EPS Growth, Target Upside, Est Revision, Stress (+ Book-to-Bill/Backlog conditional)."),
         ("",        "Growth-adjusted valuation uses 3-5yr EPS CAGR (fwd fallback) capped at 50%. Total base max 50."),
-        ("",        "SUMMARY (S5 forward-led) = Part A >= viability floor (10) AND Part B >= 14 AND est-rev not deteriorating, then top-N by Source Score (0.45*Fwd/100 + 0.30*PartA/28 + 0.25*PartB/22). [Legacy v27: Part A>=22 AND Total>=43/50.] Valuation Profile tag: GARP if PEG+EVg+PFCFg >= 4 else Premium Growth."),
+        ("",        "SUMMARY (forward-led) = Part A >= viability floor (FORWARD_ELIG_PART_A_FLOOR) AND Part B >= SUMMARY_PART_B_FLOOR AND est-rev not deteriorating AND revision stage has forward runway, then top-N by the single Source Score (SOURCE_WEIGHTS: forward/revisions/deployability/quality/analyst) floored at SUMMARY_SOURCE_FLOOR. Valuation Profile tag: GARP if PEG+EVg+PFCFg cluster is cheap else Premium Growth."),
         ("Gates",   "Standard: Gate 1 (sector), Gate 2 (sector-segmented GM threshold — see below), Gate 3 (FCF 3/5yr), Gate 4 (Rev CAGR>=5%)."),
         ("",        "Gate 2 sector thresholds: software_saas>=40%, semiconductor_fabless>=50%, semiconductor_hardware>=25%, semiconductor_equipment>=20%, default>=20%."),
         ("",        "Gate 4 (2C-1): semiconductor_equipment only — 5yr CAGR >=3% override if 3yr CAGR fails. Flagged as 'Gate 4 (5yr override)' in diagnostics."),
@@ -1035,7 +1021,7 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         ("Scoring v2","CapEx scoring: hardware/equipment INVERTED — 8-25% intensity = 2pts (capacity investment). Default unchanged."),
         ("",         "Op margin scoring: semiconductor_equipment strong>=12%/acceptable>=5%; semiconductor_hardware strong>=12%/acceptable>=6%."),
         ("",         "Sector bucket field in output: classifies each company as software_saas | semiconductor_fabless | semiconductor_hardware | semiconductor_equipment | default."),
-        ("Overlays","7 overlays for total score > 38: Organic Rev, Recurring Rev, Est Revisions, ROIC vs WACC,"),
+        ("Overlays","7 overlays for the SUMMARY-eligible + Source>=floor set: Organic Rev, Recurring Rev, Est Revisions, ROIC vs WACC,"),
         ("",        "PEG 3yr Fwd, Valuation vs Own History (P/E + P/FCF), Trailing P/E. Max 8 min retrieval."),
         ("Sources", "yfinance primary. US fallbacks: Finnhub -> Finviz -> StockAnalysis -> GuruFocus -> Alpha Vantage."),
         ("",        "EU/CA fallbacks: Finnhub -> MarketScreener -> GuruFocus -> TradingView -> Alpha Vantage."),

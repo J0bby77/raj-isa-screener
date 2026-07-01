@@ -315,11 +315,17 @@ def get_field(row, *fields, default=""):
 # Data classification
 # ---------------------------------------------------------------------------
 def is_strong_buy(row):
+    """Jul-26: the 'Strong Buy' badge is now FORWARD-LED — SUMMARY-eligible AND Source Score at/above
+    the floor (retires the legacy fixed Part-A / Part-B quality-badge gate). Falls back to status when the
+    scored fields are absent."""
     a = sf(get_field(row, "part_a_score"))
     b = sf(get_field(row, "part_b_score"))
     status = get_field(row, "final_status")
     if a is not None and b is not None:
-        return a >= 22 and b >= 19
+        try:
+            return _summary_eligible(row) and _source_score(row) * 100 >= _cfg_get("SUMMARY_SOURCE_FLOOR", 70.0)
+        except Exception:
+            return status in STRONG_BUY_STATUSES
     return status in STRONG_BUY_STATUSES
 
 
@@ -364,8 +370,8 @@ def get_coverage_counts(full_data, gate_data):
         a = sf(get_field(row, "part_a_score"))
         b = sf(get_field(row, "part_b_score"))
 
-        # Strong Buy is threshold-based (Part A >= 22 AND Part B >= 19), matching the
-        # SUMMARY tab / KPI tile / is_strong_buy(). Check it FIRST so a qualifying stock
+        # Strong Buy is now forward-led (is_strong_buy = SUMMARY-eligible + Source >= floor), matching the
+        # SUMMARY tab / KPI tile. Check it FIRST so a qualifying stock
         # is never mis-bucketed into hard_gate_fail (which previously undercounted the
         # headline by 1 when a Strong Buy also carried a MANDATORY_MINIMUM_FAIL status).
         if is_strong_buy(row):
@@ -380,9 +386,11 @@ def get_coverage_counts(full_data, gate_data):
         else:
             counts["analysed"] += 1
             if a is not None and b is not None:
-                if a >= 22:
+                _a_strong = _cfg_get("GROWTH_PART_A_STRONG", 22)
+                _a_accept = _cfg_get("GROWTH_PART_A_ACCEPTABLE", 14)
+                if a >= _a_strong:
                     counts["fair_mixed"] += 1
-                elif a >= 14:
+                elif a >= _a_accept:
                     counts["acceptable"] += 1
 
     # Count gate exclusions from gate data not already in full_data
@@ -439,25 +447,16 @@ def _cfg_get(name, default):
     except Exception:
         return default
 
+import source_score as _ss  # Jul-26 Part 1: THE single Source Score + eligibility
+
 def _source_score(row):
-    """S5 forward-led screen Source Score (0-1) — mirrors build_excel SUMMARY (_src)."""
-    sw = _cfg_get("SUMMARY_SOURCE_WEIGHTS", {"forward":0.45,"quality":0.30,"valuation":0.25})
-    fwd = sf(get_field(row,"forward_axis_score")) or 0.0
-    a   = sf(get_field(row,"part_a_score")) or 0.0
-    b   = sf(get_field(row,"part_b_score")) or 0.0
-    return sw.get("forward",0.45)*fwd/100.0 + sw.get("quality",0.30)*a/28.0 + sw.get("valuation",0.25)*b/22.0
+    """Forward-led screen Source Score (0-1) — thin wrapper over source_score (the single source of
+    truth). build_email historically works in the 0-1 space, so divide the 0-100 canonical by 100."""
+    return _ss.source_score_for_row(row, get=lambda r, k: get_field(r, k)) / 100.0
 
 def _summary_eligible(row):
-    """S5 SUMMARY viability eligibility — mirrors build_excel (floor + Part B + not-deteriorating + not-fail)."""
-    a = sf(get_field(row,"part_a_score")); b = sf(get_field(row,"part_b_score"))
-    if a is None or b is None: return False
-    paf = _cfg_get("FORWARD_ELIG_PART_A_FLOOR", 10)
-    st = str(get_field(row,"final_status") or "").upper()
-    ok = st not in {"HARD_GATE_FAIL","MANDATORY_MINIMUM_FAIL","UNRESOLVED_HARD_GATE_NOT_RANKABLE"}
-    notdet = str(get_field(row,"est_rev_direction") or "").lower() != "deteriorating"
-    stage = str(get_field(row,"revision_stage") or "")
-    stage_ok = stage not in set(_cfg_get("SUMMARY_STAGE_EXCLUDE", []))
-    return a >= paf and b >= 14 and notdet and ok and stage_ok
+    """SUMMARY viability eligibility — thin wrapper over source_score.summary_eligible (single source)."""
+    return _ss.summary_eligible(row, get=lambda r, k: get_field(r, k))
 
 def build_kpi_tiles(strong_buys, gate_passers):
     """KPI tiles row using table layout (Rule 3 — no flexbox)."""

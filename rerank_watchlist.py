@@ -19,6 +19,7 @@ import argparse, json, os, sys
 from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scoring_config as _cfg  # Source Score weights / forward-axis flag (single source of truth)
+import source_score as _ss     # Jul-26 Part 1: THE single Source Score
 try:
     import deployment_flags as _dflags  # shared deployment-gate pre-flags (action-stack caps)
 except Exception:
@@ -103,9 +104,12 @@ def _deployability(e, tk_d):
     up_norm = max(0.0, min(up, UPSIDE_CAP)) / UPSIDE_CAP if up is not None else 0.0
     if el and cp and el > 0:
         pct_above = max(0.0, (cp - el) / el)
-        # Smooth decay (no hard cliff): 1.0 at/below entry, ~0.5 at +25%,
-        # ~0.33 at +50%, ~0.2 at +100% -- lets justified winners retain deployability.
-        ew = 1.0 / (1.0 + pct_above / 0.25)
+        # Jul-26 Part 3 (backtested): gentler, FLOORED decay so extended momentum winners are not
+        # crushed for having run (12-1m momentum had +0.044 fwd-6m rank-IC vs -0.034 for the pullback
+        # proxy). DEPLOY_ENTRY_DECAY 0.50 (was 0.25) widens the window; DEPLOY_ENTRY_FLOOR 0.50 caps
+        # the penalty at half rather than letting it collapse toward 0.
+        ew = max(getattr(_cfg, "DEPLOY_ENTRY_FLOOR", 0.0),
+                 1.0 / (1.0 + pct_above / getattr(_cfg, "DEPLOY_ENTRY_DECAY", 0.25)))
     else:
         ew = 0.0
     cw = CONF_WEIGHT.get(conf, 0.6)
@@ -168,9 +172,11 @@ def _both_positive(eps, price):
     return (eps is not None and eps > 0) and (price is not None and price >= 0)
 
 
-def _resolve_action(name, cfg):
+def _resolve_action(name, cfg, ctx=None):
     """(action, tier, aps, cap, exception_required) for one scored name.
-    §13.3 resolution + §13.4 caps-before-ranking + §13.5 APS."""
+    §13.3 resolution + §13.4 caps-before-ranking + §13.5 APS. `ctx` carries cross-name context for the
+    Jul-26 Part 7 held-stock upgrade/replacement test (best candidate source, market regime, capital)."""
+    ctx   = ctx or {}
     bar   = getattr(cfg, "APS_FRESH_CAPITAL_BAR", 65.0)
     floor = getattr(cfg, "APS_HOLD_FLOOR", 50.0)
     pen   = getattr(cfg, "APS_TOPUP_PENALTY", 12.0)
@@ -190,6 +196,24 @@ def _resolve_action(name, cfg):
         if s >= bar:
             return ACTION_TOPUP, TIER_D, round(max(0.0, s - pen), 1), None, False
         if s >= floor:
+            # Jul-26 Part 7 — held-stock UPGRADE / REPLACEMENT test. A middling HOLD (floor<=source<bar)
+            # is rotated (HOLD -> TRIM sell-to-upgrade) when the best eligible candidate's Source beats
+            # this holding's by >= UPGRADE_DELTA AND fresh capital is insufficient to fund the candidate
+            # outright AND we're NOT in a down market AND an upgrade slot remains AND no active-sell-off /
+            # 30-day-hold / preclearance block. Otherwise stays HOLD (context only). blockers default to
+            # permissive so the pre-run can tighten them from portfolio state.
+            best      = ctx.get("best_candidate_source")
+            best_tk   = ctx.get("best_candidate_ticker")
+            delta     = getattr(cfg, "UPGRADE_DELTA", 15)
+            insufficient_capital = ctx.get("insufficient_fresh_capital", True)
+            slots     = ctx.get("upgrade_slots", 1)
+            blocked   = bool(name.get("upgrade_blocked") or name.get("in_30day_hold")
+                             or name.get("active_selloff") or name.get("preclearance_block"))
+            if (best is not None and (best - s) >= delta and insufficient_capital
+                    and not ctx.get("down_market") and slots > 0 and not blocked):
+                name["_upgrade_replace"] = best_tk
+                aps = round(min(90.0, best - s), 1)
+                return ACTION_TRIM, TIER_R, aps, ("UPGRADE_REPLACE->%s" % (best_tk or "?")), False
             return ACTION_HOLD, TIER_H, None, None, False            # context only
         return ACTION_TRIM, TIER_R, round(min(90.0, floor - s), 1), None, False
     # not owned
@@ -217,6 +241,13 @@ def _apply_replacement_test(stack, cfg):
     for r in stack:
         if r["action"] != ACTION_TRIM:
             continue
+        # Jul-26 Part 7: a held-stock UPGRADE_REPLACE already names the candidate it funds — keep that
+        # tag (it takes precedence over the generic 2-of-3 reallocation search).
+        if r.get("upgrade_replace"):
+            r["funds_ticker"] = r["upgrade_replace"]
+            r["replacement_status"] = "UPGRADE_REPLACE->%s" % r["upgrade_replace"]
+            r["aps"] = round((r.get("aps") or 0) + getattr(cfg, "APS_REALLOC_BONUS", 10.0), 1)
+            continue
         for b in buys:
             tests = 0
             if (b.get("source_score") or 0) - (r.get("source_score") or 0) >= ret_pp:
@@ -232,14 +263,89 @@ def _apply_replacement_test(stack, cfg):
                 break
 
 
-def build_action_stack(universe, cfg, month_label):
+def _apply_diversification(stack, cfg, ctx):
+    """Jul-26 Part 8 — sleeve sector/theme concentration cap + diversification-aware selection.
+    ctx (populated by the pre-run from the X-Ray/portfolio look-through) supplies:
+      sector_of   {ticker: GICS sector}         theme_of {ticker: theme}
+      sector_exposure {sector: fraction of ISA} (funds + held look-through, NETTED)
+      theme_exposure  {theme: fraction of sleeve}
+      target_weight {ticker: fraction of ISA} + default_buy_weight (fallback)
+      overrep_line  sector-exposure level above which a sector is 'over-represented' (default 0.75*cap)
+    HARD cap: a BUY/STARTER whose target weight would push its GICS sector past SLEEVE_SECTOR_CAP_ISA
+    (or its theme past SLEEVE_THEME_CAP) is downgraded to WATCH, or capped to the residual room if that
+    room is investable. SOFT tilt: over-represented-sector BUYs carry a DIVERSIFY_OVERRIDE_DELTA sort
+    penalty, so an under-represented alternative wins unless the over-rep name beats it by >= the delta.
+    No-op when ctx has no sector map (standalone rerank) — the pre-run supplies the look-through."""
+    if not ctx:
+        return
+    cap       = getattr(cfg, "SLEEVE_SECTOR_CAP_ISA", 0.12)
+    theme_cap = getattr(cfg, "SLEEVE_THEME_CAP", 0.50)
+    delta     = getattr(cfg, "DIVERSIFY_OVERRIDE_DELTA", 10)
+    sec_of    = ctx.get("sector_of", {})
+    thm_of    = ctx.get("theme_of", {})
+    sec_exp   = dict(ctx.get("sector_exposure", {}))     # mutated as we admit
+    thm_exp   = dict(ctx.get("theme_exposure", {}))
+    w_of      = ctx.get("target_weight", {})
+    default_w = ctx.get("default_buy_weight", 0.025)
+    min_w     = ctx.get("min_buy_weight", 0.01)
+    overrep_line = ctx.get("overrep_line", cap * 0.75)
+    base_exp  = dict(ctx.get("sector_exposure", {}))     # frozen snapshot for over-rep test
+    # HARD caps, applied in APS (opportunity) order so the strongest names get first claim on the room.
+    buys = sorted([r for r in stack if r["action"] in (ACTION_BUY, ACTION_STARTER)],
+                  key=lambda r: -(r.get("aps") or 0))
+    for r in buys:
+        sec = sec_of.get(r["ticker"]); thm = thm_of.get(r["ticker"])
+        w   = w_of.get(r["ticker"], default_w)
+        if sec:
+            cur = sec_exp.get(sec, 0.0)
+            if cur + w > cap + 1e-9:
+                residual = max(0.0, cap - cur)
+                if residual < min_w:
+                    r["action"] = ACTION_WATCH; r["tier"] = TIER_H; r["cap"] = "sleeve_sector_cap"
+                    r["sector_cap_note"] = "sector %s at cap %.0f%%" % (sec, cap * 100)
+                    continue
+                r["capped_weight"] = round(residual, 4)
+                r["sector_cap_note"] = "capped to residual %.1f%% (%s)" % (residual * 100, sec)
+                w = residual
+        if thm:
+            tcur = thm_exp.get(thm, 0.0)
+            if tcur + w > theme_cap + 1e-9:
+                r["action"] = ACTION_WATCH; r["tier"] = TIER_H; r["cap"] = "sleeve_theme_cap"
+                r["sector_cap_note"] = "theme %s at cap %.0f%% of sleeve" % (thm, theme_cap * 100)
+                continue
+        if sec:
+            sec_exp[sec] = sec_exp.get(sec, 0.0) + w
+        if thm:
+            thm_exp[thm] = thm_exp.get(thm, 0.0) + w
+    # SOFT diversification tilt (sort penalty on over-represented sectors).
+    for r in stack:
+        if r["action"] in (ACTION_BUY, ACTION_STARTER):
+            sec = sec_of.get(r["ticker"])
+            r["_divpen"] = float(delta) if (sec and base_exp.get(sec, 0.0) >= overrep_line) else 0.0
+
+
+def build_action_stack(universe, cfg, month_label, ctx=None):
     """Assemble the ranked action stack from a unified universe of scored names
-    (candidates + held). Returns the stack rows per CONTRACTS #6."""
+    (candidates + held). Returns the stack rows per CONTRACTS #6.
+    Jul-26 Part 7: `ctx` supplies the held-stock upgrade/replacement context (best candidate source,
+    down-market veto, upgrade-slot budget). Built here from the universe when not supplied."""
     bar   = getattr(cfg, "APS_FRESH_CAPITAL_BAR", 65.0)
     floor = getattr(cfg, "APS_HOLD_FLOOR", 50.0)
+    ctx   = dict(ctx or {})
+    # Best eligible CANDIDATE (non-owned, no disqualifier, at/above the fresh-capital bar) — the name a
+    # sell-to-upgrade would fund. Used by the Part 7 test in _resolve_action.
+    _cands = [n for n in universe if not n.get("owned") and not (n.get("disqualifier_flags"))
+              and (n.get("source_score") or 0) >= bar]
+    if _cands and "best_candidate_source" not in ctx:
+        _best = max(_cands, key=lambda n: (n.get("source_score") or 0))
+        ctx["best_candidate_source"] = _best.get("source_score")
+        ctx["best_candidate_ticker"] = _best.get("ticker")
+    ctx.setdefault("upgrade_slots", 1)   # cap one upgrade-rotation / month (Part 7)
     stack = []
     for name in universe:
-        action, tier, aps, cap, exc = _resolve_action(name, cfg)
+        action, tier, aps, cap, exc = _resolve_action(name, cfg, ctx)
+        if name.get("_upgrade_replace"):
+            ctx["upgrade_slots"] = ctx.get("upgrade_slots", 1) - 1   # consume the monthly slot
         if action in (ACTION_HOLD, ACTION_WATCH):
             continue   # context only — not in the stack
         # E2 — held-name 2-axis tag: add_worthy (>=fresh-capital bar) / retain_only (>=hold floor)
@@ -255,15 +361,19 @@ def build_action_stack(universe, cfg, month_label):
             "key_neg": list(name.get("key_neg") or [])[:3], "cap": cap,
             "replacement_status": None, "exception_required": exc,
             "held_axis": held_axis, "dead_money": bool(owned and _s < floor),
+            "upgrade_replace": name.get("_upgrade_replace"),
             "canonical_action": (_alang.normalize_action(action) if _alang else action),
             "action_label": (_alang.label_for(action) if _alang else action),
             "_upside": name.get("upside"), "_catalyst": name.get("catalyst"),
         })
     _apply_replacement_test(stack, cfg)
+    _apply_diversification(stack, cfg, ctx)   # Jul-26 Part 8 sector/theme caps + diversification tilt
+    # Drop any BUY that the sector/theme cap downgraded to WATCH/HOLD (context only, not in the stack).
+    stack = [r for r in stack if r["action"] not in (ACTION_HOLD, ACTION_WATCH)]
     top_n = getattr(cfg, "APS_TOP_N", 10)
-    # Tiebreak chain when APS is equal: source_score (forward+quality) -> upside (deployability) ->
-    # ticker (deterministic). Source-equal BUYs then rank on upside; everything is reproducible.
-    _stack_key = lambda r: (-(r.get("aps") or 0), -(r.get("source_score") or 0),
+    # Tiebreak chain when APS is equal: diversification-adjusted APS -> source_score (forward+quality)
+    # -> upside (deployability) -> ticker (deterministic). Everything is reproducible.
+    _stack_key = lambda r: (-((r.get("aps") or 0) - (r.get("_divpen") or 0)), -(r.get("source_score") or 0),
                             -(r.get("_upside") or 0), str(r.get("ticker") or ""))
     stack.sort(key=_stack_key)
     top = stack[:top_n]
@@ -274,11 +384,11 @@ def build_action_stack(universe, cfg, month_label):
     top.sort(key=_stack_key)
     for i, r in enumerate(top, 1):
         r["rank"] = i
-        r.pop("_upside", None); r.pop("_catalyst", None)
+        r.pop("_upside", None); r.pop("_catalyst", None); r.pop("_divpen", None)
     return top
 
 
-def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_span=1.0, sw=None):
+def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_span=1.0):
     """Unified scored list for the action stack: candidates (source_score from rerank) + held
     positions (forward/normalised score). Each: ticker, route, owned, source_score, eps/price mom,
     upside, disqualifier_flags, catalyst, key_pos/neg."""
@@ -300,18 +410,19 @@ def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_spa
             "catalyst": e.get("confirmed_catalyst") or e.get("catalyst_protected"),
             "key_pos": e.get("key_pos"), "key_neg": e.get("key_neg"),
         })
-    _w = sw or getattr(_cfg, "SOURCE_SCORE_WEIGHTS", {})
     for t in held:
         td = tk.get(t) or {}
         mm = mom_map.get(t) or {}
         # H3: score held on the SAME forward-led Source Score as candidates (§13.1) so buy-X vs
         # top-up-Y vs sell-Z compare on one metric. Deployability is neutral (0.5) for an owned name.
         _fr = mm.get("forward_axis_score")
-        _f = (_fr / 100.0) if _fr is not None else 0.5
+        _fwd_axis = _fr if _fr is not None else 50.0   # neutral forward when unmeasured
+        _rev_raw = mm.get("revisions_score")
+        _rev = (_rev_raw / 100.0) if _rev_raw is not None else 0.0
         _hns = _norm(td.get("total_score"), td.get("_source_pipeline", "growth_stock"), td.get("total_max"))
         _q = max(0.0, min(1.0, ((_hns or hurdle) - hurdle) / q_span))
-        ss = round((_w.get("forward", 0.45) * _f + _w.get("quality", 0.20) * _q
-                    + _w.get("deployability", 0.30) * 0.5 + _w.get("analyst", 0.05) * _analyst_signal(td)) * 100, 1)
+        ss = _ss.compute_source_score(forward_axis=_fwd_axis, revisions=_rev, deployability=0.5,
+                                      quality_norm=_q, analyst=_analyst_signal(td))
         _score_missing = (_fr is None and _hns is None)   # M3: no forward AND no quality score = data gap
         uni.append({
             "ticker": t, "route": "sleeve", "owned": True, "source_score": ss,
@@ -327,7 +438,7 @@ def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_spa
     return uni
 
 
-def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
+def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, action_stack_ctx=None):
     with open(scored_path, encoding="utf-8") as f:
         scored = json.load(f)
     with open(watchlist_path, encoding="utf-8") as f:
@@ -347,7 +458,8 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
                                "est_rev_direction": _td.get("est_rev_direction"),
                                "est_rev_eps_up_30d": _td.get("est_rev_eps_up_30d"),
                                "est_rev_eps_down_30d": _td.get("est_rev_eps_down_30d"),
-                               "forward_axis_score": _td.get("forward_axis_score")}
+                               "forward_axis_score": _td.get("forward_axis_score"),
+                               "revisions_score": _td.get("revisions_score")}
         except Exception:
             ind_map = {}
     held = {s.get("ticker") for s in wt.get("stock_sleeve", [])}
@@ -359,8 +471,8 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
         registry.setdefault(e["ticker"], dict(e))
     log = {"run_date": date.today().strftime("%Y-%m-%d"), "promoted": [], "demoted": [],
            "below_hurdle_in_pool": [], "no_live_score": [], "rescored": 0,
-           "selection_method": ("source_score_v1" if getattr(_cfg,"FORWARD_AXIS_IN_RANKING",False) else "deployment_composite_v1"),
-           "weights": {"quality": W_QUALITY, "deployability": W_DEPLOY, "momentum": W_MOMENTUM, "analyst": W_ANALYST}}
+           "selection_method": "source_score_v2",   # Jul-26: single forward-led compute_source_score
+           "weights": dict(getattr(_cfg, "SOURCE_WEIGHTS", {}))}
     for t, e in registry.items():
         pipeline = e.get("source_pipeline", "growth_stock")
         live = cr.get(t)
@@ -424,31 +536,28 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
                   if t not in held and t not in vci and id(e) not in elig_ids]
     max_ns = max(((e.get("normalised_score") or hurdle) for e in eligible), default=hurdle)
     q_span = (max_ns - hurdle) or 1.0
-    use_fwd = getattr(_cfg, "FORWARD_AXIS_IN_RANKING", False)
-    sw = getattr(_cfg, "SOURCE_SCORE_WEIGHTS", {})
     for e in eligible:
         q_norm = max(0.0, min(1.0, ((e.get("normalised_score") or hurdle) - hurdle) / q_span))
         d, dbasis = _deployability(e, tk.get(e["ticker"]))
         m = _momentum(mom_map.get(e["ticker"]))
         a = _analyst_signal(tk.get(e["ticker"]))
-        if use_fwd:
-            # Source Score (Part 3 §13): FORWARD-led. F from forward_axis_score; falls back to the
-            # legacy momentum proxy when F is absent. Cheapness earns no separate credit.
-            f_raw = (mom_map.get(e["ticker"]) or {}).get("forward_axis_score")
-            f = (f_raw / 100.0) if f_raw is not None else m
-            comp = round(sw.get("forward", 0.45) * f + sw.get("quality", 0.20) * q_norm
-                         + sw.get("deployability", 0.30) * d + sw.get("analyst", 0.05) * a, 4)
-            e["source_score"] = round(comp * 100, 1)
-            e["selection_basis"] = {"source_score": e["source_score"], "forward": round(f, 3),
-                                    "forward_axis_score": f_raw, "quality_norm": round(q_norm, 3),
-                                    "deployability": d, "analyst": round(a, 3), **dbasis}
-        else:
-            comp = round(W_QUALITY * q_norm + W_DEPLOY * d + W_MOMENTUM * m + W_ANALYST * a, 4)
-            e["selection_basis"] = {"composite": comp, "quality_norm": round(q_norm, 3),
-                                    "deployability": d, "momentum": m, "analyst": round(a, 3), **dbasis}
+        # Jul-26 Part 1/2: the single forward-led Source Score. forward_axis is now price+margin only;
+        # revisions come in separately (SOURCE_WEIGHTS["revisions"]). F falls back to the momentum
+        # proxy (0-1 -> 0-100) when the forward axis is absent. Watchlist passes the FULL deployability
+        # (entry-weight * upside), unlike the screen's part_b proxy.
+        _mm = mom_map.get(e["ticker"]) or {}
+        f_raw = _mm.get("forward_axis_score")
+        fwd_axis = f_raw if f_raw is not None else round(m * 100, 1)
+        _rev_raw = _mm.get("revisions_score")
+        rev = (_rev_raw / 100.0) if _rev_raw is not None else 0.0
+        e["source_score"] = _ss.compute_source_score(forward_axis=fwd_axis, revisions=rev,
+                                                     deployability=d, quality_norm=q_norm, analyst=a)
+        comp = round(e["source_score"] / 100.0, 4)
+        e["selection_basis"] = {"source_score": e["source_score"], "forward": round(fwd_axis / 100.0, 3),
+                                "forward_axis_score": f_raw, "revisions": round(rev, 3),
+                                "quality_norm": round(q_norm, 3),
+                                "deployability": d, "analyst": round(a, 3), **dbasis}
         e["_composite"] = comp
-        # Ensure a Source Score exists for the action stack even when forward ranking is off.
-        e["source_score"] = e.get("source_score") or round(comp * 100, 1)
     eligible.sort(key=lambda e: (-e.get("_composite", 0.0),
                                  -(e.get("normalised_score") or 0),
                                  str(e.get("ticker", ""))))
@@ -510,8 +619,20 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
     if getattr(_cfg, "BUILD_ACTION_STACK", False):
         try:
             month_label = date.today().strftime("%b_%Y").lower()
-            universe = _assemble_universe(eligible, held, tk, mom_map, registry, hurdle, q_span, sw)
-            stack = build_action_stack(universe, _cfg, month_label)
+            universe = _assemble_universe(eligible, held, tk, mom_map, registry, hurdle, q_span)
+            # Jul-26 Part 8: sector/theme-cap + diversification context. The pre-run builds it from the
+            # X-Ray/portfolio look-through and passes it in (or drops action_stack_ctx.json beside the
+            # watchlist). Absent context -> caps are inert (no sector map), so standalone rerank is safe.
+            _ctx = action_stack_ctx
+            if _ctx is None:
+                _ctx_path = os.path.join(os.path.dirname(os.path.abspath(watchlist_path)), "action_stack_ctx.json")
+                if os.path.exists(_ctx_path):
+                    try:
+                        with open(_ctx_path, encoding="utf-8") as _cf:
+                            _ctx = json.load(_cf)
+                    except Exception:
+                        _ctx = None
+            stack = build_action_stack(universe, _cfg, month_label, ctx=_ctx)
             stack_path = os.path.join(os.path.dirname(os.path.abspath(watchlist_path)),
                                       f"action_stack_{month_label}.json")
             with open(stack_path, "w", encoding="utf-8") as f:
@@ -526,6 +647,27 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None):
             print(f"  [rerank] action_stack: {len(stack)} rows -> {os.path.basename(stack_path)}")
         except Exception as ex:
             print(f"  [rerank] WARNING: action stack build failed: {ex}", file=sys.stderr)
+
+    # Jul-26 Part 9a: append the watchlist rerank output to the point-in-time score panel (learning
+    # module) so the reranked names (with the LIVE deployability-aware Source Score) are also tracked.
+    # Best-effort — never fail the rerank on a logging error.
+    try:
+        import pandas as _pd, score_panel_logger as _spl
+        _rows = []
+        for _e in eligible:
+            _mm = mom_map.get(_e["ticker"]) or {}
+            _rows.append({"ticker": _e["ticker"], "source_score": _e.get("source_score"),
+                          "forward_axis_score": _mm.get("forward_axis_score"),
+                          "revisions_score": _mm.get("revisions_score"),
+                          "part_a_score": _e.get("part_a"), "part_b_score": _e.get("part_b"),
+                          "est_rev_direction": _mm.get("est_rev_direction"),
+                          "current_price": _e.get("current_price")})
+        if _rows:
+            _store = os.path.join(os.path.dirname(os.path.abspath(__file__)), "score_panel.csv")
+            _spl.log_from_full_data(_pd.DataFrame(_rows), group="WATCHLIST_RERANK",
+                                    run_date=log["run_date"], store=_store)
+    except Exception as _ex:
+        print(f"  [rerank] score-panel log skipped: {_ex}", file=sys.stderr)
 
     print(f"  [rerank] watchlist={len(new_wl)} (gate >= {hurdle}, composite) | pool={len(new_pool)} | "
           f"live re-scored={log['rescored']} | promoted={log['promoted']} | demoted={log['demoted']}")
