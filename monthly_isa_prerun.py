@@ -47,6 +47,7 @@ except Exception:
     pass
 import json
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -328,13 +329,24 @@ def main():
     prior_port_path  = args.prior_portfolio
 
     if not prior_port_path:
-        # Try to find last month's portfolio JSON
+        # Try to find last month's portfolio JSON.
+        # NOTE: sort CHRONOLOGICALLY, not lexicographically -- month
+        # abbreviations (jun/may/...) do not sort by date alphabetically,
+        # which previously caused the wrong (older) prior to be selected.
         import glob as _glob
-        candidates = sorted(_glob.glob(
-            os.path.join(SCRIPT_DIR, "portfolio_data_*.json")
-        ))
+        _MON = {m: i for i, m in enumerate(
+            ["jan","feb","mar","apr","may","jun",
+             "jul","aug","sep","oct","nov","dec"], start=1)}
+        def _mkey(path):
+            b = os.path.basename(path)
+            mm = re.search(r"portfolio_data_([a-z]{3})_(\d{4})", b, re.I)
+            if not mm:
+                return (0, 0)
+            return (int(mm.group(2)), _MON.get(mm.group(1).lower(), 0))
+        candidates = _glob.glob(os.path.join(SCRIPT_DIR, "portfolio_data_*.json"))
         # Exclude current month
         candidates = [c for c in candidates if month_label not in c]
+        candidates = sorted(candidates, key=_mkey)
         prior_port_path = candidates[-1] if candidates else None
 
     errors   = []
