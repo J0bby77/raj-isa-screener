@@ -310,8 +310,8 @@ def compute_decision_bucket(
     Main watchlist:
       T1 + no flags           → "Buy Now Candidate"
       T1 + probation          → "Buy Now — Probation (score 60–69)"
-      T2                      → "Buy on Pullback"
-      T3                      → "Hold / Watch"
+      T2                      → "Accumulate (Secondary Conviction)"
+      T3                      → "Monitor / Watch"
       any + stale_score       → "Re-score Required"
       any + thesis_break      → "Thesis Review Required"
       normalised_score < 60   → "Remove / Reject"
@@ -358,9 +358,9 @@ def compute_decision_bucket(
             return "Buy Now — Confirm Entry (Provisional)"
         return "Buy Now Candidate"
     elif tier == "T2":
-        return "Buy on Pullback (Provisional Entry)" if entry_provisional else "Buy on Pullback"
+        return "Accumulate (Secondary Conviction)"
     else:
-        return "Hold / Watch"
+        return "Monitor / Watch"
 
 
 def compute_portfolio_overlap_flags(ticker: str, ticker_scored: dict,
@@ -493,16 +493,25 @@ def compute_7_dimensions(ticker: str, ticker_scored: dict,
 # Tier assignment
 # ---------------------------------------------------------------------------
 
-def assign_main_tier(current_price: float | None,
-                      entry_level: float | None) -> str:
-    if current_price is None or entry_level is None or entry_level == 0:
+def assign_main_tier(source_score: float | None,
+                      t1_cut: float, t2_cut: float,
+                      normalised_score: float | None = None) -> str:
+    """Jul-2026 (Raj): FORWARD-LED tiering. Tier is a rank band on the Source Score
+    (forward + revisions + implied-upside*confidence + quality), NOT the price window.
+    Top names -> T1 (up to ~5, the review's deep-dive set), next -> T2, rest -> T3.
+    The old price-vs-entry-level tiering has been removed entirely.
+    HARD QUALITY FLOOR: a name below the removal floor (normalised_score < 60) can never
+    be T1/T2 regardless of Source Score -- it is not deployable (prevents a low-quality,
+    high-implied-upside 'cheap because it crashed' name from tiering as Buy Now)."""
+    if normalised_score is not None and normalised_score < 60:
         return "T3"
-    if current_price <= entry_level:
+    if source_score is None:
+        return "T3"
+    if t1_cut > 0 and source_score >= t1_cut:
         return "T1"
-    elif current_price <= entry_level * 1.20:
+    if source_score >= t2_cut:
         return "T2"
-    else:
-        return "T3"
+    return "T3"
 
 
 def assign_vci_tier(acs_score: int | None, current_price: float | None,
@@ -630,6 +639,16 @@ def main():
         if entry.get("sector")
     }
 
+    # Jul-2026 (Raj): Source-Score rank-band cutoffs for forward-led tiering.
+    # Growth (main watchlist + candidate_pool) names only; top ~5 -> T1, next ~5 -> T2.
+    _growth_names = ({e["ticker"] for e in wt_raw.get("watchlist", [])}
+                     | {e["ticker"] for e in wt_raw.get("candidate_pool", [])})
+    _growth_scores = sorted(
+        [(wt_lookup.get(t, {}).get("source_score") or 0.0) for t in _growth_names],
+        reverse=True)
+    _T1_CUT = _growth_scores[4] if len(_growth_scores) >= 5 else (_growth_scores[-1] if _growth_scores else 0.0)
+    _T2_CUT = _growth_scores[9] if len(_growth_scores) >= 10 else (_growth_scores[-1] if _growth_scores else 0.0)
+
     # Categorise tickers
     main_t1, main_t2, main_t3 = [], [], []
     vci_t1a, vci_t2a, vci_t3a = [], [], []
@@ -682,6 +701,7 @@ def main():
             "sector_type":        sector_type,
             "sector_type_source": sector_type_source,
             "normalised_score":   wt_entry.get("normalised_score"),
+            "source_score":       wt_entry.get("source_score"),
             "entry_level_status":      entry_status,
             "entry_level_provisional": entry_provisional,
             "entry_level_confidence":  entry_confidence,
@@ -734,8 +754,9 @@ def main():
                 vci_t3a.append(vci_record)
 
         elif scored_kind == "candidate_pool":
-            # Candidate pool entry: score T1/T2/T3 by price vs entry, compute 7 dimensions
-            tier = assign_main_tier(current_price, entry_level)
+            # Candidate pool entry: tier by Source Score rank band (forward-led), 7 dims
+            tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
+                                    normalised_score=wt_entry.get("normalised_score"))
             if tier == "T1":
                 dim_data = compute_7_dimensions(ticker, ts, wt_entry, pct_vs_entry=pct_vs_entry)
                 pool_record = {
@@ -801,7 +822,8 @@ def main():
 
         else:
             # Main watchlist
-            tier = assign_main_tier(current_price, entry_level)
+            tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
+                                    normalised_score=wt_entry.get("normalised_score"))
             if tier == "T1":
                 dim_data = compute_7_dimensions(ticker, ts, wt_entry, pct_vs_entry=pct_vs_entry)
                 t1_record = {
@@ -877,27 +899,25 @@ def main():
     # Sorted by tier (T1 first) then strategic_conviction_score desc
 
     def _deployment_sort_key(entry: dict) -> tuple:
-        """
-        Returns a sort key for deployment priority ordering.
-        Lower tuple = higher priority (sort ascending to get highest priority first).
-        Tier: T1=0, T2=1, T3=2
-        """
-        tier_map = {"T1": 0, "T2": 1, "T3": 2}
-        tier_num = tier_map.get(entry.get("tier", "T3"), 2)
-        # T1: sort by strategic_conviction_score; T2: t2_partial; T3: normalised_score
-        if tier_num == 0:
-            score = -(entry.get("strategic_conviction_score") or entry.get("partial_score_subtotal") or 0)
-        elif tier_num == 1:
-            score = -(entry.get("t2_partial") or 0)
-        else:
-            score = -(entry.get("normalised_score") or 0)
-        return (tier_num, score)
+        """Jul-2026 (Raj): FORWARD-LED. Order strictly by the Source Score (forward +
+        revisions + implied-upside*confidence + quality), which now excludes the price
+        window. Tiebreak: normalised_score, then ticker (deterministic)."""
+        return (-(entry.get("source_score") or 0.0),
+                -(entry.get("normalised_score") or 0.0),
+                str(entry.get("ticker", "")))
 
     _deployment_pool = []
+    # Jul-2026 (Raj): the deployment priority stack lists DEPLOYABLE names only. Exclude any
+    # name below the quality floor (normalised_score < 60 -> "Remove / Reject"); it is not a
+    # buy candidate and must not appear in the action stack even with a high Source Score.
+    def _deployable(entry):
+        return (entry.get("normalised_score") or 0) >= 60
     for entry in (main_t1 + main_t2 + main_t3):
-        _deployment_pool.append({**entry, "_source": "watchlist"})
+        if _deployable(entry):
+            _deployment_pool.append({**entry, "_source": "watchlist"})
     for entry in (pool_t1 + pool_t2 + pool_t3):
-        _deployment_pool.append({**entry, "_source": "candidate_pool"})
+        if _deployable(entry):
+            _deployment_pool.append({**entry, "_source": "candidate_pool"})
 
     _deployment_pool.sort(key=_deployment_sort_key)
 
@@ -908,6 +928,7 @@ def main():
             "ticker":                     entry.get("ticker"),
             "tier":                       entry.get("tier"),
             "source":                     entry.get("_source"),
+            "source_score":               entry.get("source_score"),
             "normalised_score":           entry.get("normalised_score"),
             "strategic_conviction_score": entry.get("strategic_conviction_score"),
             "entry_window_score":         entry.get("entry_window_score"),

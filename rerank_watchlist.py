@@ -113,9 +113,14 @@ def _deployability(e, tk_d):
     else:
         ew = 0.0
     cw = CONF_WEIGHT.get(conf, 0.6)
-    d = round(ew * up_norm * cw, 4)
+    # Jul-2026 (Raj): PRICE WINDOW REMOVED FROM RANKING. Ranking deployability = implied
+    # UPSIDE-to-fair-value x confidence ONLY. `ew` (entry_window = price vs stored entry level)
+    # is retained in the basis for DISPLAY / target-buy-price but is NOT multiplied into the
+    # ranking score. Implied upside (up_norm) therefore remains a first-class ranking factor.
+    d = round(up_norm * cw, 4)
     return d, {"upside_to_fv": round(up, 3) if up is not None else None,
-              "entry_window": round(ew, 3), "conf_weight": cw, "fair_value": fv}
+              "entry_window": round(ew, 3), "conf_weight": cw, "fair_value": fv,
+              "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"}
 
 
 def _momentum(mom_d):
@@ -505,10 +510,18 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     _pa_floor_a = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)
     _pa_floor_c = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14)
     eligible = []
+    _q_floor = getattr(_cfg, "NORMALISED_SCORE_HARD_REMOVE_BELOW", 60.0)
     for t, e in registry.items():
         if t in held or t in vci:
             continue
         ns = e.get("normalised_score")
+        # Jul-2026 (Raj): HARD QUALITY FLOOR (applies in BOTH modes). A name below the
+        # quality/removal floor (normalised_score < 60) is NOT deployable or rankable, so it
+        # never enters the watchlist or the action stack. This stops low-quality, high-implied-
+        # upside "cheap because it has lost value" names from ranking. Forward-led selection
+        # ranks AMONG quality names; it is not a bypass of the quality floor.
+        if ns is None or ns < _q_floor:
+            continue
         if _use_fe:
             # H2: viability floor (Part A, path-aware) + forward eligibility (eps_trend positive OR a
             # confirmed catalyst) — NOT the fixed ns>=70 quality-total gate. Admits forward-confirmed,
@@ -550,6 +563,9 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         fwd_axis = f_raw if f_raw is not None else round(m * 100, 1)
         _rev_raw = _mm.get("revisions_score")
         rev = (_rev_raw / 100.0) if _rev_raw is not None else 0.0
+        # Jul-2026 (Raj): deployability `d` now = implied UPSIDE-to-fair-value x confidence ONLY
+        # (the entry-window price gap has been removed inside _deployability). Implied upside is
+        # therefore STILL a ranking factor via this term; the price window is not.
         e["source_score"] = _ss.compute_source_score(forward_axis=fwd_axis, revisions=rev,
                                                      deployability=d, quality_norm=q_norm, analyst=a)
         comp = round(e["source_score"] / 100.0, 4)

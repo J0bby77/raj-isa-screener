@@ -105,8 +105,10 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
     try:
         wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
     except Exception as e:
+        # Return None (NOT []) so the caller can distinguish "file unreadable / cloud stub"
+        # from "parsed but genuinely empty". Purge-on-absence must never fire on a failed read.
         print(f"  [update_watchlist] Cannot open {os.path.basename(xlsx_path)}: {e}")
-        return rows
+        return None
 
     # Find SUMMARY sheet (case-insensitive)
     sheet = None
@@ -488,12 +490,54 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     # Ingest analysis xlsx from BOTH the working dir and THIS MONTH's archive, so
     # the (ephemeral) candidate pool rebuilds completely and idempotently on every
     # run — even after a prior run already archived the source files.
-    archive_month_dir   = os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, run_date[:7])
-    working_xlsx_files  = sorted(glob.glob(os.path.join(inv_dir, "Growth Stock Analysis*.xlsx")))
-    archived_xlsx_files = sorted(glob.glob(os.path.join(archive_month_dir, "Growth Stock Analysis*.xlsx")))
-    _seen = {os.path.basename(p) for p in working_xlsx_files}
-    xlsx_files = sorted(working_xlsx_files + [p for p in archived_xlsx_files
-                                             if os.path.basename(p) not in _seen])
+    # Look in the working dir + BOTH the run-month and previous-month archive folders,
+    # so previous-month screens are found whether or not this run already archived them.
+    _run_ym = run_date[:7]
+    _ry, _rm = int(_run_ym[:4]), int(_run_ym[5:7])
+    _py, _pm = (_ry - 1, 12) if _rm == 1 else (_ry, _rm - 1)   # previous calendar month
+    _prev_ym = f"{_py:04d}-{_pm:02d}"
+    _globs = [os.path.join(inv_dir, "Growth Stock Analysis*.xlsx")]
+    for _ym in (_run_ym, _prev_ym):
+        _globs.append(os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, _ym, "Growth Stock Analysis*.xlsx"))
+    _all = []
+    _seen = set()
+    for _g in _globs:
+        for _p in sorted(glob.glob(_g)):
+            if os.path.basename(_p) not in _seen:
+                _seen.add(os.path.basename(_p)); _all.append(_p)
+
+    # CYCLE FILTER (Jul-2026, Raj): a month-end run analyses ONLY the PREVIOUS calendar
+    # month's growth screens (e.g. a July run uses the June W-e files; the first July screen
+    # belongs to next cycle and must NOT enter this month's pool). Parse the "W-e DD-Mon-YY"
+    # date from each filename and keep only those whose month == the previous calendar month.
+    _MONABBR = {m: i for i, m in enumerate(
+        ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"], start=1)}
+    def _we_ym(path):
+        m = re.search(r"W-e\s+(\d{2})-([A-Za-z]{3})-(\d{2})", os.path.basename(path))
+        if not m:
+            return None
+        yy = 2000 + int(m.group(3))
+        mm = _MONABBR.get(m.group(2).lower())
+        return (yy, mm) if mm else None
+    xlsx_files = []
+    excluded_wrong_cycle = []
+    for _p in _all:
+        _ym2 = _we_ym(_p)
+        if _ym2 == (_py, _pm):
+            xlsx_files.append(_p)
+        else:
+            excluded_wrong_cycle.append(os.path.basename(_p))
+    xlsx_files = sorted(xlsx_files)
+    # Files eligible for end-of-run archiving = ONLY the cycle files that live in the working
+    # dir. Off-cycle files (e.g. the first July SP500 screen) are excluded above and therefore
+    # left untouched in place, per Raj: the July file must not be moved/archived this cycle.
+    _invabs = os.path.abspath(inv_dir)
+    working_xlsx_files = [p for p in xlsx_files
+                          if os.path.dirname(os.path.abspath(p)) == _invabs]
+    if excluded_wrong_cycle:
+        promotion_log.setdefault("excluded_wrong_cycle", []).extend(excluded_wrong_cycle)
+        print(f"  [update_watchlist] Cycle filter: using {_prev_ym} screens; excluded "
+              f"{len(excluded_wrong_cycle)} off-cycle file(s): {excluded_wrong_cycle}")
 
     # Screen-freshness guard: warn if the newest growth screen is stale (>35 days).
     SCREEN_STALE_DAYS = 35
@@ -526,16 +570,25 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     # Phase 1 & 2 & 3: Read files, classify paths, apply exclusions
     # -----------------------------------------------------------------------
     candidate_pool: dict[str, dict] = {}  # ticker → best row
+    summary_universe: set[str] = set()    # every ticker appearing on ANY current SUMMARY tab
+    files_failed: list[str] = []          # files whose SUMMARY could not be read (stub/unreadable)
 
     for xlsx_path in xlsx_files:
         fname = os.path.basename(xlsx_path)
         print(f"  [update_watchlist] Reading: {fname}")
         promotion_log["xlsx_files_read"].append(fname)
         rows = read_xlsx_summary_tab(xlsx_path)
+        if rows is None:
+            files_failed.append(fname)
+            print(f"  [update_watchlist] WARNING: {fname} unreadable — excluded from screen universe")
+            continue
         promotion_log["rows_parsed"] += len(rows)
 
         for row in rows:
-            ticker = row["ticker"]
+            ticker = (row.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            summary_universe.add(ticker)
 
             # Phase 1: classify path
             path = classify_path(row, fname)
@@ -594,6 +647,15 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     # Phase 4: Existing watchlist score refresh
     # -----------------------------------------------------------------------
     updated_existing: dict[str, dict] = {}
+
+    # PURGE-ON-ABSENCE guard: only purge carried names when EVERY current screen loaded.
+    # If any tab failed to read (e.g. OneDrive cloud stub), we cannot prove a name is truly
+    # absent, so we fall back to carry-forward and flag the run.
+    screens_incomplete = bool(files_failed)
+    if screens_incomplete:
+        promotion_log.setdefault("warnings", []).append(
+            f"SCREENS INCOMPLETE: {len(files_failed)} tab(s) unreadable ({', '.join(files_failed)}); "
+            f"purge-on-absence suspended this run to avoid false removals.")
 
     for ticker, entry in current_watchlist.items():
         override_reason = entry.get("eligibility_override_reason")  # None or string
@@ -677,6 +739,24 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                     "removed":      removal_flag,
                 })
         else:
+            # PURGE-ON-ABSENCE (Jul-2026, Raj): scored universe = CURRENT summary names +
+            # held sleeve only. A watchlist name on NO current tab is REMOVED, not carried
+            # forward -- unless (a) a manual eligibility override pins it, or (b) the screen
+            # read was incomplete (a tab failed to load), in which case we must not purge on
+            # partial data. Held names never reach here (excluded from the watchlist earlier).
+            if (not screens_incomplete) and (ticker not in summary_universe) and (not override_reason):
+                updated_entry = dict(entry)
+                updated_entry["decay_state"]        = "purged_off_screen"
+                updated_entry["reconfirm_required"] = False
+                updated_entry["in_pool"]            = False
+                updated_entry["_removal_flag"]      = True
+                promotion_log.setdefault("removals", []).append({
+                    "ticker": ticker,
+                    "reason": "not on any current summary tab (purge-on-absence)",
+                    "last_normalised": entry.get("normalised_score"),
+                })
+                updated_existing[ticker] = updated_entry
+                continue
             # Not in this month's SUMMARY tabs — carry forward
             updated_entry = dict(entry)
             ns = updated_entry.get("normalised_score")
@@ -982,9 +1062,11 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                 dest = os.path.join(archive_dir, os.path.basename(xlsx_path))
                 if os.path.abspath(xlsx_path) == os.path.abspath(dest):
                     continue
+                # Mount-safe + idempotent: if already archived, skip (the OneDrive mount forbids
+                # delete, so shutil.move would fail on the source unlink and re-copy every run).
                 if os.path.exists(dest):
-                    os.remove(dest)
-                shutil.move(xlsx_path, dest)
+                    continue
+                shutil.copy2(xlsx_path, dest)
                 fname = os.path.basename(xlsx_path)
                 promotion_log["xlsx_files_archived"].append({
                     "file":        fname,
