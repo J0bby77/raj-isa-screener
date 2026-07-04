@@ -305,6 +305,21 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
         log.warning(f"Overlays failed for {ticker_sym}: {e}")
         scored["overlay_status"] = f"error:{e}"
 
+    # Jul-2026: populate the CANONICAL est_rev_direction on the watchlist/held path using the SAME
+    # conservative merge as screener_core._score_ticker (line ~3258) — the watchlist path bypasses
+    # _score_ticker, so the field was left None. run_overlays already set est_rev_direction_raw.
+    # Deteriorating if EITHER source flags it (capital protection); improving only when neither
+    # deteriorates and at least one improves. (NOTE: this is data hygiene — it does NOT change the
+    # disqualifier gate, whose None-fallback dn>up already equals raw's net<0 threshold.)
+    _raw = str(scored.get("est_rev_direction_raw") or "").lower()
+    _scb = scored.get("score_b_est_rev")
+    if _raw == "deteriorating" or _scb == 0:
+        scored["est_rev_direction"] = "deteriorating"
+    elif _raw == "improving" or _scb == 2:
+        scored["est_rev_direction"] = "improving"
+    else:
+        scored["est_rev_direction"] = "neutral"
+
     # Company metadata
     scored["company"]   = info.get("longName", info.get("shortName", ticker_sym))
     scored["sector"]    = info.get("sector", "")
