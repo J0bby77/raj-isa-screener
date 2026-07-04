@@ -2699,10 +2699,20 @@ def overlay_estimate_revisions(ticker_sym, scoring_data, info):
 
     out["est_rev_consensus_trend"] = consensus_trend
     net_revision = up_30 - down_30
-    if net_revision > 0 and consensus_trend == "improving":
-        out["est_rev_direction_raw"] = "improving"
-    elif net_revision < 0 or consensus_trend == "deteriorating":
+    total_rev  = up_30 + down_30
+    down_share = (down_30 / total_rev) if total_rev > 0 else 0.0
+    up_share   = (up_30 / total_rev) if total_rev > 0 else 0.0
+    # Jul-2026 (Raj): SIGNIFICANCE-GATED direction. A single-window net-count is only a signal when
+    # it is distinguishable from noise — a margin (>=3 net) OR a clear breadth (>=65% of >=3 revisions).
+    # A net of -1 on 13 estimates (MU 6/7) is a coin flip (binomial p~1.0) and must NOT force a
+    # 'deteriorating' -> mandatory SELL. Symmetric bar both sides; a genuine consensus-trend cut still
+    # counts. (yfinance only populates the 30d window; 60d/90d come back empty, so multi-window is n/a.)
+    _det_sig = (down_30 >= up_30 + 3) or (total_rev >= 3 and down_share >= 0.65)
+    _imp_sig = (up_30 >= down_30 + 3) or (total_rev >= 3 and up_share >= 0.65)
+    if _det_sig or consensus_trend == "deteriorating":
         out["est_rev_direction_raw"] = "deteriorating"
+    elif _imp_sig or (net_revision > 0 and consensus_trend == "improving"):
+        out["est_rev_direction_raw"] = "improving"
     else:
         out["est_rev_direction_raw"] = "neutral"
 

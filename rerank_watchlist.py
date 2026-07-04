@@ -426,7 +426,11 @@ def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_spa
         _rev = (_rev_raw / 100.0) if _rev_raw is not None else 0.0
         _hns = _norm(td.get("total_score"), td.get("_source_pipeline", "growth_stock"), td.get("total_max"))
         _q = max(0.0, min(1.0, ((_hns or hurdle) - hurdle) / q_span))
-        ss = _ss.compute_source_score(forward_axis=_fwd_axis, revisions=_rev, deployability=0.5,
+        # Jul-2026 (Raj): score held APPLES-TO-APPLES with candidates on real implied upside
+        # (upside-to-fair-value x confidence), not a 0.5 placeholder, so buy-X vs top-up-Y vs
+        # trim/sell-Z all compare on ONE like-for-like Source Score.
+        _hdep, _ = _deployability({"current_price": td.get("current_price"), "entry_level": None}, td)
+        ss = _ss.compute_source_score(forward_axis=_fwd_axis, revisions=_rev, deployability=_hdep,
                                       quality_norm=_q, analyst=_analyst_signal(td))
         _score_missing = (_fr is None and _hns is None)   # M3: no forward AND no quality score = data gap
         uni.append({
