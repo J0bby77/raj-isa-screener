@@ -798,7 +798,9 @@
       "cost_per_share_usd": 236.29,
       "shares": 17,
       "include_in_metrics_pull": true,
-      "note": "Step 8 thesis-break check required"
+      "note": "Step 8 thesis-break check required",
+      "source_pipeline": "growth_stock",
+      "path": "A"
     },
     {
       "ticker": "MU",
@@ -808,7 +810,9 @@
       "cost_per_share_usd": 289.2,
       "shares": 7,
       "include_in_metrics_pull": true,
-      "note": "+65% gain — reassess trim vs hold at June run"
+      "note": "+65% gain — reassess trim vs hold at June run",
+      "source_pipeline": "growth_stock",
+      "path": "A"
     },
     {
       "ticker": "ONT",
@@ -820,7 +824,9 @@
       "shares": 880.0,
       "include_in_metrics_pull": true,
       "note": "Auto-added from broker file 06-Jun-2026 — verify purchase_date / cost basis / thesis-break conditions",
-      "_auto_added": true
+      "_auto_added": true,
+      "source_pipeline": "vci",
+      "path": "B"
     }
   ],
   "in_window_threshold_pct": 10.0,
