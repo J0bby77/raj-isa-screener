@@ -220,7 +220,12 @@ def _resolve_action(name, cfg, ctx=None):
                 aps = round(min(90.0, best - s), 1)
                 return ACTION_TRIM, TIER_R, aps, ("UPGRADE_REPLACE->%s" % (best_tk or "?")), False
             return ACTION_HOLD, TIER_H, None, None, False            # context only
-        return ACTION_TRIM, TIER_R, round(min(90.0, floor - s), 1), None, False
+        # Jul-2026 (Raj): below the HOLD FLOOR = dead money -> SELL (full exit) — it no longer clears
+        # the bar to be owned. A catalyst-protected name (temporary forward lull on a confirmed
+        # long-term thesis) -> SELL-REVIEW (surfaced as a trim tier) rather than an auto-exit.
+        if name.get("catalyst"):
+            return ACTION_TRIM, TIER_R, round(min(90.0, floor - s), 1), "below_floor_catalyst_review", False
+        return ACTION_SELL, TIER_R, round(min(95.0, (floor - s) + 50), 1), "below_hold_floor_dead_money", False
     # not owned
     if disq:
         if diverge:
@@ -471,7 +476,12 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
                                "revisions_score": _td.get("revisions_score")}
         except Exception:
             ind_map = {}
-    held = {s.get("ticker") for s in wt.get("stock_sleeve", [])}
+    # Jul-2026 (Raj): only PATH-A (growth) held positions are scored on the growth Source Score and
+    # enter the action stack. Path-B/VCI holdings (e.g. ONT, asymmetric) are scored on ACS, not the
+    # growth metric, so they are excluded here and handled by the VCI/Path-B review separately.
+    held = {s.get("ticker") for s in wt.get("stock_sleeve", [])
+            if str(s.get("source_pipeline", "growth_stock")).lower() != "vci"
+            and str(s.get("path", "A")).upper() != "B"}
     vci = {e.get("ticker") for e in wt.get("vci_watchlist", [])}
     registry = {}
     for e in wt.get("watchlist", []):
