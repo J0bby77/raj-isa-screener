@@ -1,8 +1,8 @@
 {
-  "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
+  "_description": "ISA Growth Stock Analysis — Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts — they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-06-28",
+  "last_updated": "2026-07-04",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -826,7 +826,7 @@
         "last_run_attempts": 199,
         "last_run_successes": 199,
         "last_run_rate": 1.0,
-        "note": "45 structural N/A from curated list of .SW tickers \u2014 no live SPI constituent feed accessible (Wikipedia 403, FT derivatives, SIX React app). Success rate will improve once authoritative constituent list obtained."
+        "note": "45 structural N/A from curated list of .SW tickers — no live SPI constituent feed accessible (Wikipedia 403, FT derivatives, SIX React app). Success rate will improve once authoritative constituent list obtained."
       },
       "gross_margin": {
         "primary_source": "yfinance",
@@ -1143,7 +1143,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq&download=true",
         "parse_path": "r.json()[\"data\"][\"rows\"]",
         "filter": "marketCap > $2bn applied at sourcing time",
-        "expected_count": "~1,100\u20131,300 post-filter",
+        "expected_count": "~1,100–1,300 post-filter",
         "status": "confirmed_working",
         "confirmed_date": "2026-05-22",
         "notes": "Returns all ~4,141 Nasdaq-listed stocks; $2bn market cap filter applied during fetch reduces to ~1,131. First used as fallback on 2026-05-22 run after ONEQ WAF block; now designated primary."
@@ -1153,7 +1153,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq",
         "parse_path": "r.json()[\"data\"][\"table\"][\"rows\"]",
         "status": "confirmed_working",
-        "notes": "Same endpoint without download=true param \u2014 different JSON parse path."
+        "notes": "Same endpoint without download=true param — different JSON parse path."
       },
       "dead_sources": [
         {
@@ -1189,10 +1189,10 @@
         "name": "stoxx_com_html_scrape",
         "url": "https://stoxx.com/index/sxxp/?components=true",
         "format": "HTML_table",
-        "fields": "Company, Supersector, Country, Weight \u2014 NO ISINs or tickers",
+        "fields": "Company, Supersector, Country, Weight — NO ISINs or tickers",
         "expected_count": "600 rows",
         "status": "confirmed_working_limited",
-        "notes": "Last resort only \u2014 no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
+        "notes": "Last resort only — no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
       },
       "dead_sources": [
         {
@@ -1217,8 +1217,61 @@
       ]
     }
   },
-  "_last_run_notes": "F250-SPI run 2026-06-28 (LOCAL-PRIMARY + constituent-hybrid): 448 constituents, 136 scored, 125 rankable, 0 tech failures. 7 Strong Buys. Top TRN.L/TEMN.SW 46/50. Overlays: 56 complete, 9 partial. Industrials 43.9% Gate4 (above 35% threshold). 87 GATE_DATA_UNRESOLVED.",
+  "_last_run_notes": "SP500 run 2026-07-04 (COMPOSIO-FALLBACK — local VM down): 502 constituents, 236 scored, 135 TECHNICAL_SOURCE_FAILURE from yfinance 401 crumb cascade on Composio. 10 Strong Buys (forward-led). Top by total: NVDA/DXCM 50/50. Gate4 conc flagged. Excel in Composio /mnt/files/isa_screener/. OneDrive not connected.",
   "runs": [
+    {
+      "run_date": "2026-07-04",
+      "group": "SP500",
+      "task_id": "isa-sp500-sat1",
+      "run_mode": "composio_fallback",
+      "run_mode_note": "Local bash VM unavailable (service not running). screener_local.py used on Composio in loop (screener_core.py timed out at 180s).",
+      "constituent_source": "SPY_SSGA_XLSX",
+      "constituents_fetched": 502,
+      "accounted": 502,
+      "gate1_excluded": 55,
+      "gate3_excluded": 1,
+      "gate4_excluded": 59,
+      "gate_data_unresolved": 16,
+      "technical_source_failure": 135,
+      "technical_failure_cause": "yfinance 401 Invalid Crumb cascade — sequential Composio calls without inter-batch sleep; crumb expiry not recovered for ~27% of scoring batches",
+      "scored": 236,
+      "candidate_rankable": 208,
+      "mandatory_minimum_fails": 27,
+      "unresolved_hard_gate": 1,
+      "strong_buys_forward_led": 10,
+      "strong_buys_v27_total": 29,
+      "top_source_score_ticker": "AVGO",
+      "top_source_score": 88,
+      "top_total_score": 50,
+      "top_tickers_total": [
+        "NVDA",
+        "DXCM"
+      ],
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Technology",
+      "gate4_largest_sector_pct": 20.3,
+      "excel_file": "Growth Stock Analysis SP500 W-e 04-Jul-26.xlsx",
+      "excel_location": "Composio /mnt/files/isa_screener/ — OneDrive not connected",
+      "retrospective_file": "20260704_SP500_retrospective.md",
+      "dq_flags": [
+        {
+          "severity": "H",
+          "event": "TECHNICAL_SOURCE_FAILURE_135",
+          "detail": "135 stocks (26.9%) failed with yfinance 401 Invalid Crumb on Composio. Inter-batch sleep needed."
+        },
+        {
+          "severity": "H",
+          "event": "EXCEL_DELIVERY_BLOCKED",
+          "detail": "OneDrive not connected in Composio session. Excel in /mnt/files/isa_screener/."
+        },
+        {
+          "severity": "M",
+          "event": "LOCAL_BASH_VM_DOWN",
+          "detail": "VM service not running — forced Composio fallback for entire run."
+        }
+      ],
+      "notes": "First run with significant tech failure rate (27%). Composio 401 crumb cascade; add inter-batch sleep for future Composio loops. Email sent. Excel delivery pending OneDrive reconnection."
+    },
     {
       "run_date": "2026-05-22",
       "group": "NASDAQ",
@@ -1323,7 +1376,7 @@
         {
           "severity": "H",
           "event": "CONSTITUENT_SOURCE_FAILURE",
-          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward \u2014 Xtrackers XLSX now primary)"
+          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward — Xtrackers XLSX now primary)"
         },
         {
           "severity": "M",
