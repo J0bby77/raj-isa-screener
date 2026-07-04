@@ -63,20 +63,22 @@
       "in_window": false,
       "current_price": "$15.61",
       "_live_rescored": true,
-      "source_score": 85.9,
+      "source_score": 81.5,
       "selection_basis": {
-        "source_score": 85.9,
+        "source_score": 81.5,
         "forward": 1.0,
         "forward_axis_score": 100.0,
         "revisions": 0.667,
         "quality_norm": 0.909,
-        "deployability": 0.7941,
+        "deployability": 0.3576,
         "analyst": 0.338,
-        "upside_to_fv": 0.561,
+        "upside_to_fv": 0.252,
         "entry_window": 0.977,
         "conf_weight": 0.85,
-        "fair_value": 24.36,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "fair_value": 19.549999999999997,
+        "consensus_target": 17.0,
+        "consensus_upside_capped": true,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "part_b_driver": "valuation_led"
     },
@@ -137,7 +139,9 @@
         "entry_window": 0.85,
         "conf_weight": 1.0,
         "fair_value": 21.02,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 19.0,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 2,
       "status": "Watchlist"
@@ -199,7 +203,9 @@
         "entry_window": 0.811,
         "conf_weight": 1.0,
         "fair_value": 168.44,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 175.6875,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 3,
       "status": "Watchlist"
@@ -261,7 +267,9 @@
         "entry_window": 0.5,
         "conf_weight": 1.0,
         "fair_value": 5.58,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 6.61667,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 4,
       "status": "Watchlist"
@@ -336,7 +344,9 @@
         "entry_window": 0.658,
         "conf_weight": 0.85,
         "fair_value": 3.25,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 3.22143,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "part_b_driver": "valuation_improvement"
     },
@@ -397,7 +407,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.85,
         "fair_value": 487.97,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 616.2857,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 6,
       "status": "Watchlist"
@@ -459,7 +471,9 @@
         "entry_window": 0.5,
         "conf_weight": 1.0,
         "fair_value": 278.39,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 485.08698,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 7,
       "status": "Watchlist"
@@ -521,7 +535,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.85,
         "fair_value": 202.13,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 333.54544,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 8,
       "status": "Watchlist"
@@ -596,7 +612,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.85,
         "fair_value": 547.4,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 1000.1429,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "part_b_driver": "valuation_improvement"
     },
@@ -657,7 +675,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.85,
         "fair_value": 26.78,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 39.6,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       },
       "rank": 10,
       "status": "Watchlist"
@@ -889,7 +909,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.6,
         "fair_value": 133.96,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 160.33333,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       }
     },
     {
@@ -949,7 +971,9 @@
         "entry_window": 0.5,
         "conf_weight": 0.85,
         "fair_value": 245.7,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "consensus_target": 350.44443,
+        "consensus_upside_capped": false,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       }
     },
     {
@@ -996,20 +1020,22 @@
       "in_window": false,
       "current_price": 110.81,
       "_live_rescored": true,
-      "source_score": 43.5,
+      "source_score": 39.6,
       "selection_basis": {
-        "source_score": 43.5,
+        "source_score": 39.6,
         "forward": 0.3,
         "forward_axis_score": 30.0,
         "revisions": 0.833,
         "quality_norm": 0.0,
-        "deployability": 0.85,
+        "deployability": 0.4554,
         "analyst": 0.455,
-        "upside_to_fv": 0.677,
+        "upside_to_fv": 0.321,
         "entry_window": 1.0,
         "conf_weight": 0.85,
-        "fair_value": 185.81,
-        "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"
+        "fair_value": 146.43332949999999,
+        "consensus_target": 127.33333,
+        "consensus_upside_capped": true,
+        "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"
       }
     },
     {

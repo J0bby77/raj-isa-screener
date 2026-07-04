@@ -320,6 +320,17 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
     else:
         scored["est_rev_direction"] = "neutral"
 
+    # Jul-2026 (Raj): recent-return capture for the reversal-vs-12-1m review flag (best-effort).
+    try:
+        _h = data.get("history"); _cl = None
+        if _h is not None:
+            _cl = _h["Close"].dropna() if hasattr(_h, "__getitem__") and "Close" in getattr(_h, "columns", []) else None
+        if _cl is not None and len(_cl) > 22:
+            scored["ret_5d_pct"] = round((float(_cl.iloc[-1]) / float(_cl.iloc[-6]) - 1) * 100, 2)
+            scored["ret_1m_pct"] = round((float(_cl.iloc[-1]) / float(_cl.iloc[-22]) - 1) * 100, 2)
+    except Exception:
+        pass
+
     # Company metadata
     scored["company"]   = info.get("longName", info.get("shortName", ticker_sym))
     scored["sector"]    = info.get("sector", "")

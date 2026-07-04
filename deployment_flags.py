@@ -78,6 +78,13 @@ def compute_gate_flags(td: dict, has_catalyst: bool = False) -> dict:
         review.append("price_falls_on_beat")
     if _num(td.get("score_b_fwd_pe")) == 0 and _num(td.get("score_b_ev_ebitda")) == 0:
         review.append("sector_multiple_stretched")
+    # Jul-2026 (Raj): RECENT-REVERSAL vs the 12-1m momentum the forward axis rewards. The 12-1m
+    # window is blind to a sharp recent break, which is often informative for single-name /
+    # idiosyncratic situations (biotech, deal-premium deflation). SURFACED for review — never an
+    # auto-cap (recent moves are noisy on average).
+    _p12 = _num(td.get("price_mom_12_1m_pct")); _r5 = _num(td.get("ret_5d_pct")); _r1m = _num(td.get("ret_1m_pct"))
+    if _p12 is not None and _p12 >= 30 and ((_r5 is not None and _r5 <= -8) or (_r1m is not None and _r1m <= -12)):
+        review.append("recent_reversal_vs_12_1m")
 
     # E4 — AI-disruption (recorded judgement score 0-5, from ai_disruption.py). A confirmed
     # existential score (5) IS a disqualifier (auto-cap); 4 (severe) is surfaced for review.

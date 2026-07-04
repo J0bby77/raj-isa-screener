@@ -94,9 +94,21 @@ def _deployability(e, tk_d):
     el = _to_num(e.get("entry_level"))
     basis = e.get("entry_level_basis") or {}
     fv = _to_num(basis.get("base_fair_value"))
-    if fv is None and tk_d:
+    _tgt = None
+    if tk_d:
         pr = tk_d.get("_prices") or {}
-        fv = _to_num(pr.get("target_mean")) or _to_num(tk_d.get("target_price_mean"))
+        _tgt = _to_num(pr.get("target_mean")) or _to_num(tk_d.get("target_price_mean"))
+    if fv is None:
+        fv = _tgt
+    # Jul-2026 (Raj): CONSENSUS SANITY-CAP on the fair value used for implied upside. A model
+    # base_fair_value cannot exceed the analyst CONSENSUS target by more than CONSENSUS_UPSIDE_CAP_MULT
+    # — stops a single outlier / model FV inflating a name's rank (e.g. AUPH base_fv 24.36 vs consensus
+    # target 17.0 = +56% implied upside on a +9% consensus). No cap when no consensus target exists.
+    _upside_capped = False
+    _capmult = getattr(_cfg, "CONSENSUS_UPSIDE_CAP_MULT", 1.15)
+    if fv is not None and _tgt is not None and _tgt > 0 and fv > _tgt * _capmult:
+        fv = _tgt * _capmult
+        _upside_capped = True
     conf = e.get("entry_level_confidence")
     if not conf:
         conf = "high" if e.get("entry_level_status") == "approved" else "low"
@@ -120,7 +132,8 @@ def _deployability(e, tk_d):
     d = round(up_norm * cw, 4)
     return d, {"upside_to_fv": round(up, 3) if up is not None else None,
               "entry_window": round(ew, 3), "conf_weight": cw, "fair_value": fv,
-              "ranking_note": "deployability = upside x confidence (entry_window excluded from ranking)"}
+              "consensus_target": _tgt, "consensus_upside_capped": _upside_capped,
+              "ranking_note": "deployability = upside x confidence (entry_window excluded; FV consensus-capped)"}
 
 
 def _momentum(mom_d):
