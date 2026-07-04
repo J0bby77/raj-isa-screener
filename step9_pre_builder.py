@@ -687,8 +687,27 @@ def main():
         _gf = (_dflags.compute_gate_flags(ts, _has_catalyst) if _dflags
                else {"disqualifier_flags": [], "review_flags": [], "forward_axis_flags": []})
 
+        # Jul-2026 (Raj) — HARD FLAG so the review can't reflexively reject a name for trading
+        # above consensus fair value. price_ahead_of_consensus = negative implied upside BUT net
+        # revisions positive => the consensus target lags a rising estimate cycle (momentum ahead
+        # of re-rating), a legitimate BUY, not overvaluation. The review MUST NOT block a capital
+        # decision on the consensus gap alone when valuation_review_flag == DO_NOT_BLOCK.
+        _sb = wt_entry.get("selection_basis", {}) or {}
+        _impl_up = _sb.get("upside_to_fv")
+        _rev01   = _sb.get("revisions")
+        _net_rev_pos = (_rev01 is not None and _rev01 >= 0.5)
+        _above_fv    = isinstance(_impl_up, (int, float)) and _impl_up < 0
+        _price_ahead = bool(_above_fv and _net_rev_pos)
+        _val_flag = ("PRICE_AHEAD_OF_CONSENSUS_DO_NOT_BLOCK" if _price_ahead
+                     else "ABOVE_FAIR_VALUE_REVISIONS_NOT_POSITIVE_INVESTIGATE" if _above_fv
+                     else "NORMAL")
+
         base_record = {
             "ticker":             ticker,
+            "implied_upside_to_fv":     _impl_up,
+            "net_revisions_positive":   _net_rev_pos,
+            "price_ahead_of_consensus": _price_ahead,
+            "valuation_review_flag":    _val_flag,
             "rank":               rank,
             "pipeline":           pipeline,
             "path":               path,
@@ -929,6 +948,9 @@ def main():
             "tier":                       entry.get("tier"),
             "source":                     entry.get("_source"),
             "source_score":               entry.get("source_score"),
+            "valuation_review_flag":      entry.get("valuation_review_flag"),
+            "price_ahead_of_consensus":   entry.get("price_ahead_of_consensus"),
+            "implied_upside_to_fv":       entry.get("implied_upside_to_fv"),
             "normalised_score":           entry.get("normalised_score"),
             "strategic_conviction_score": entry.get("strategic_conviction_score"),
             "entry_window_score":         entry.get("entry_window_score"),
