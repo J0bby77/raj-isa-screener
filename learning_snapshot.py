@@ -92,15 +92,38 @@ def record_snapshot(store, ticker, eps_fwd1y, eps_fwd0y, date=None, src="yfinanc
     return True
 
 
-def snapshot_tickers(path, tickers, date=None, preflight=False) -> dict:
+def _chunk(lst, n):
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+
+def snapshot_tickers(path, tickers, date=None, preflight=False, resume_path=None, batch_size=30) -> dict:
     """Fetch current +1y/0y consensus EPS for each ticker and append a weekly point.
-    yfinance-backed; honours the shared local-primary guardrail when preflight=True."""
+    yfinance-backed; honours the shared local-primary guardrail when preflight=True.
+
+    If resume_path is given, this call is BATCHED/RESUMABLE across multiple invocations
+    (needed because a single sandbox call cannot fetch 100+ tickers before the wall-clock
+    limit): progress is tracked in a small JSON stub at resume_path — {"done": [tickers]} —
+    so repeated calls with the same tickers list only fetch what's left. Returns an extra
+    "remaining" count; caller loops until remaining == 0. The main data store (path) is
+    saved incrementally after EVERY batch, so a partial run never loses completed work."""
     if preflight and isa_env_guard is not None:
         isa_env_guard.run_preflight_or_fallback()
     import yfinance as yf
     store = load_store(path)
+
+    done = set()
+    if resume_path and os.path.exists(resume_path):
+        try:
+            with open(resume_path, encoding="utf-8") as fh:
+                done = set(json.load(fh).get("done", []))
+        except Exception:
+            done = set()
+
+    todo = [t for t in tickers if t.upper() not in done] if resume_path else list(tickers)
+    batch = todo[:batch_size] if resume_path else todo
+
     added = skipped = failed = 0
-    for t in tickers:
+    for t in batch:
         try:
             _tk = yf.Ticker(t)
             et = getattr(_tk, "eps_trend", None)
@@ -121,9 +144,28 @@ def snapshot_tickers(path, tickers, date=None, preflight=False) -> dict:
                 skipped += 1
         except Exception:
             failed += 1
+        finally:
+            done.add(t.upper())
+
     save_store(store, path)
+
+    if resume_path:
+        with open(resume_path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({"done": sorted(done)}, fh)
+        os.replace(resume_path + ".tmp", resume_path)
+        remaining = len([t for t in tickers if t.upper() not in done])
+        if remaining == 0 and os.path.exists(resume_path):
+            try:
+                os.remove(resume_path)
+            except Exception:
+                # mount may forbid delete; overwrite with a tiny done-stub instead
+                with open(resume_path, "w", encoding="utf-8") as fh:
+                    json.dump({"status": "done"}, fh)
+    else:
+        remaining = 0
+
     return {"added": added, "skipped_same_week": skipped, "failed": failed,
-            "tickers": len(tickers)}
+            "tickers": len(tickers), "batch": len(batch), "remaining": remaining}
 
 
 def revision_trajectory(path, ticker, lookback_weeks=12) -> dict:
@@ -151,7 +193,8 @@ def revision_trajectory(path, ticker, lookback_weeks=12) -> dict:
 
 
 def _tickers_from_watchlist(path) -> list:
-    """Tolerant extraction: list[str] | list[dict(ticker)] | {tickers:[...]} | {TICKER:{...}}."""
+    """Tolerant extraction: list[str] | list[dict(ticker)] | {tickers:[...]} | {TICKER:{...}}
+    | ISA watchlist_tickers.json shape (sections of list[dict(ticker=...)])."""
     try:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh)
@@ -160,6 +203,23 @@ def _tickers_from_watchlist(path) -> list:
     if isinstance(d, dict) and isinstance(d.get("tickers"), list):
         d = d["tickers"]
     if isinstance(d, dict):
+        # ISA watchlist_tickers.json shape: sections of list[dict(ticker=...)] plus
+        # underscore-prefixed metadata keys. Pull tickers from the known sections
+        # rather than treating top-level dict keys as tickers.
+        sections = ["watchlist", "candidate_pool", "stock_sleeve", "vci_watchlist"]
+        out = []
+        found_section = False
+        for key in sections:
+            v = d.get(key)
+            if isinstance(v, list):
+                found_section = True
+                for x in v:
+                    if isinstance(x, str) and x not in out:
+                        out.append(x)
+                    elif isinstance(x, dict) and x.get("ticker") and x["ticker"] not in out:
+                        out.append(x["ticker"])
+        if found_section:
+            return out
         return [k for k in d.keys()]
     out = []
     for x in (d or []):
@@ -184,6 +244,12 @@ def main():
                     help="run shared local-primary preflight (FALLBACK_TO_COMPOSIO exit 3 on failure)")
     ap.add_argument("--trajectory", default=None,
                     help="print revision trajectory for this TICKER and exit (no fetch)")
+    ap.add_argument("--resume-path", default=None,
+                    help="progress-stub path for batched/resumable runs (one bash call can't "
+                         "fetch 100+ tickers before the wall-clock limit). Call repeatedly with "
+                         "the SAME --tickers/--from-watchlist until output shows remaining: 0.")
+    ap.add_argument("--batch-size", type=int, default=30,
+                    help="tickers fetched per call when --resume-path is set (default 30)")
     a = ap.parse_args()
 
     if a.trajectory:
@@ -195,7 +261,9 @@ def main():
         tickers += [t for t in _tickers_from_watchlist(a.from_watchlist) if t not in tickers]
     if not tickers:
         ap.error("provide --tickers or --from-watchlist")
-    print(json.dumps(snapshot_tickers(a.path, tickers, preflight=a.preflight), indent=2))
+    print(json.dumps(snapshot_tickers(a.path, tickers, preflight=a.preflight,
+                                       resume_path=a.resume_path, batch_size=a.batch_size),
+                      indent=2))
 
 
 if __name__ == "__main__":
