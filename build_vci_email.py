@@ -179,9 +179,13 @@ def build_e2(data):
             'No candidates scored ACS &ge;45 this run.</p></div>\n'
         )
 
-    header_cells = ['Rank', 'Ticker', 'ACS', 'Pt&nbsp;A', 'Pt&nbsp;B',
-                    'NVIDIA&nbsp;Signals', 'Entry&nbsp;Level', 'Action']
-    col_widths = ['5%', '7%', '6%', '6%', '6%', '14%', '26%', '14%']
+    # FORWARD-LED (FWDVCI, Jul-2026): the candidate table is a DEPLOYABILITY ranking. Primary
+    # column is VCI Source Score (recomputed at live price), ACS is the secondary quality floor,
+    # and fv_asymmetry / catalyst-days / deploy-eligible are shown. Entry levels are display-only
+    # and live in the watchlist file — they are NOT a column here (distance from entry never ranks).
+    header_cells = ['Rank', 'Ticker', 'VCI&nbsp;Src', 'ACS', 'fv&nbsp;asym', 'Floor',
+                    'Cat&nbsp;d', 'NVIDIA&nbsp;Sig', 'Deploy', 'Action']
+    col_widths = ['4%', '8%', '9%', '7%', '8%', '7%', '6%', '15%', '16%', '20%']
 
     header_html = ''.join(
         f'<th style="background:#1a1a2e;color:#ffffff;padding:8px 6px;'
@@ -190,46 +194,108 @@ def build_e2(data):
         for i, h in enumerate(header_cells)
     )
 
+    def _fmt_asym(v):
+        try:
+            return f'{float(v):.2f}&times;'
+        except (TypeError, ValueError):
+            return '&mdash;'
+
+    def _fmt_src(v):
+        try:
+            return f'{float(v):.1f}'
+        except (TypeError, ValueError):
+            return '&mdash;'
+
+    def _fmt_floor(c):
+        v = c.get('fv_floor')
+        try:
+            base = f'{float(v):.2f}&times;'
+        except (TypeError, ValueError):
+            return '&mdash;'
+        # superscript 'd' marks a probability-weighted (E1-derived) floor vs the fixed tier
+        return base + ('<sup>d</sup>' if c.get('floor_source') == 'derived' else '')
+
     rows_html = ''
-    for c in sorted(candidates, key=lambda x: -int(x.get('acs', 0))):
+    # rank by VCI Source Score desc (deployability), tiebreak ACS desc — NOT ACS-primary
+    for c in sorted(candidates, key=lambda x: (-(x.get('vci_source_score') or 0), -int(x.get('acs', 0)))):
         acs = int(c.get('acs', 0))
         bg = acs_row_bg(acs)
         acs_colour = acs_label_color(acs)
         action = c.get('action', '')
         action_bold = 'font-weight:bold;' if action in ('ACTIVE BUY', 'WATCHLIST') else ''
         action_color = '#16a34a' if action == 'ACTIVE BUY' else ('#1d4ed8' if action == 'WATCHLIST' else '#374151')
+        elig = c.get('deploy_eligible')
+        elig_txt = 'YES' if elig is True else ('no' if elig is False else '&mdash;')
+        elig_color = '#16a34a' if elig is True else '#9ca3af'
+        # v2 compact deploy flags: FV cross-check warn / liquidity-capped / FV-erosion (E2/E5/E7)
+        _flags = ''
+        if c.get('fv_crosscheck_warn'):
+            _flags += ' &#9888;'
+        if c.get('size_liquidity_capped'):
+            _flags += ' ~'
+        if c.get('asymmetry_compression_cause') == 'fv_down':
+            _flags += ' &darr;FV'
+        cat_d = c.get('days_to_catalyst')
+        cat_txt = se(str(cat_d)) if cat_d not in (None, '') else '&mdash;'
+        # v2 (E2): show the conservative P25 asymmetry when available (the eligibility basis)
+        _asym = c.get('fv_asymmetry_p25') if c.get('fv_asymmetry_p25') is not None else c.get('fv_asymmetry')
 
         td = f'padding:7px 6px;border-bottom:1px solid #e5e7eb;background:{bg};font-family:Arial,sans-serif;font-size:12px;text-align:center;'
         rows_html += (
             f'<tr>'
             f'<td style="{td}">{se(str(c.get("rank", "")))}</td>'
             f'<td style="{td}font-weight:bold;">{se(c.get("ticker", ""))}</td>'
-            f'<td style="{td}font-weight:bold;color:{acs_colour};">{acs}/100</td>'
-            f'<td style="{td}">{se(str(c.get("part_a", "")))}</td>'
-            f'<td style="{td}">{se(str(c.get("part_b", "")))}</td>'
+            f'<td style="{td}font-weight:bold;">{_fmt_src(c.get("vci_source_score"))}</td>'
+            f'<td style="{td}color:{acs_colour};">{acs}/100</td>'
+            f'<td style="{td}">{_fmt_asym(_asym)}</td>'
+            f'<td style="{td}">{_fmt_floor(c)}</td>'
+            f'<td style="{td}">{cat_txt}</td>'
             f'<td style="{td}">{se(str(c.get("nvidia_signals", "")))}</td>'
-            f'<td style="{td}text-align:left;">{se(str(c.get("entry_level", "")))}</td>'
+            f'<td style="{td}font-weight:bold;color:{elig_color};">{elig_txt}{_flags}</td>'
             f'<td style="{td}{action_bold}color:{action_color};">{se(action)}</td>'
             f'</tr>\n'
         )
 
-    # ACS band legend
+    # ACS band legend + forward-led note
     legend = (
         '<p style="font-family:Arial,sans-serif;font-size:10px;color:#6b7280;margin:4px 0 0;">'
-        'Colour: <span style="background:#fff5f5;padding:1px 4px;">&ge;85 NVIDIA-class</span>&nbsp;'
-        '<span style="background:#fffbeb;padding:1px 4px;">75&ndash;84 High conviction</span>&nbsp;'
+        'Ranked by <b>VCI Source Score</b> (deployability, live-price); ACS is the quality floor. '
+        'fv&nbsp;asym = bottleneck FV &divide; price (conservative P25 when available). '
+        'Floor = applied bar (2.0&times; platform / 2.5&times; single-asset; <sup>d</sup> = probability-weighted, E1). '
+        'Deploy flags: &#9888; FV cross-check, ~ liquidity-capped, &darr;FV thesis-erosion. '
+        'Entry levels are display-only (watchlist file). '
+        'ACS colour: <span style="background:#fff5f5;padding:1px 4px;">&ge;85 NVIDIA-class</span>&nbsp;'
+        '<span style="background:#fffbeb;padding:1px 4px;">75&ndash;84 High</span>&nbsp;'
         '<span style="background:#fefce8;padding:1px 4px;">60&ndash;74 Moderate</span>&nbsp;'
-        '<span style="background:#ffffff;padding:1px 4px;border:1px solid #e5e7eb;">45&ndash;59 Early monitoring</span>'
+        '<span style="background:#ffffff;padding:1px 4px;border:1px solid #e5e7eb;">45&ndash;59 Early</span>'
         '</p>\n'
     )
+
+    # §13 calibration-gate status line (advisory until 12 resolved outcomes)
+    cal = data.get('calibration_gate')
+    cal_html = ''
+    if cal:
+        cal_html = (
+            '<p style="font-family:Arial,sans-serif;font-size:10px;color:#6b7280;margin:4px 0 0;">'
+            f'Calibration: {se(str(cal))}. Weights are advisory until the &ge;12-outcome gate passes; '
+            'the top eligible name is human-confirmed.</p>\n'
+        )
+    # v2 (E4): sleeve binary risk-budget headroom line (rendered only when supplied)
+    _rc = data.get('vci_binary_risk_committed'); _rb = data.get('vci_binary_risk_budget')
+    if _rc is not None and _rb:
+        cal_html += (
+            '<p style="font-family:Arial,sans-serif;font-size:10px;color:#6b7280;margin:2px 0 0;">'
+            f'Sleeve binary risk budget: {se(str(round(float(_rc), 2)))}% / {se(str(_rb))}% ISA used '
+            '(&Sigma; size&middot;L&middot;(1&minus;p) across open + proposed binaries).</p>\n'
+        )
 
     return (
         '<div style="margin:16px 0;">'
         '<p style="font-family:Arial,sans-serif;font-size:13px;font-weight:bold;'
-        'color:#1a1a2e;margin:0 0 8px;">Top Candidates This Run</p>'
+        'color:#1a1a2e;margin:0 0 8px;">Top Candidates This Run &mdash; ranked by deployability</p>'
         f'<table style="width:100%;border-collapse:collapse;" cellpadding="0" cellspacing="0" border="0">'
         f'<tr>{header_html}</tr>\n{rows_html}</table>\n'
-        f'{legend}'
+        f'{legend}{cal_html}'
         f'</div>\n'
     )
 

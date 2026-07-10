@@ -514,25 +514,28 @@ def assign_main_tier(source_score: float | None,
     return "T3"
 
 
-def assign_vci_tier(acs_score: int | None, current_price: float | None,
-                     entry_level: float | None) -> tuple[str, bool]:
-    """Returns (tier, nvidia_bypass_eligible)."""
-    acs = acs_score or 0
-    at_or_below_entry = (current_price is not None and entry_level is not None
-                          and current_price <= entry_level)
-    above_20pct = (current_price is not None and entry_level is not None
-                    and current_price > entry_level * 1.20)
+def assign_vci_tier(acs_score: int | None, deploy_eligible: bool | None = None,
+                     current_price: float | None = None,
+                     entry_level: float | None = None) -> tuple[str, bool]:
+    """FORWARD-LED VCI tiering (§4 / §14.6). Returns (tier, nvidia_bypass_eligible).
 
-    # T3-A: ACS < 60 — never bypass eligible
+    The OLD price-vs-entry test ("at or below entry" -> T1-A) is REMOVED — entry levels are
+    display-only and never decide the tier. ACS >= 75 is the QUALITY FLOOR; deployability is
+    decided by `deploy_eligible` (the §4 rule: ACS floor + fv_asymmetry >= tiered floor +
+    catalyst confirmed, recomputed at the live price upstream). Deployment ORDER within a tier
+    is by VCI_Source_Score (applied where the tiers are sorted), not by ACS.
+
+      T3-A : ACS < 60                          -> below VCI threshold
+      T1-A : deploy_eligible (or, if the forward fields are absent, the ACS>=75 quality floor)
+      T2-A : everything else (ACS 60-74, or ACS>=75 but not yet deploy-eligible / asymmetry spent)
+    """
+    acs = acs_score or 0
     if acs < 60:
         return "T3-A", False
-
-    # T1-A: ACS >= 75 AND at or below entry
-    if acs >= 75 and at_or_below_entry:
+    # forward-led: prefer the recomputed §4 eligibility; fall back to the ACS quality floor
+    eligible = deploy_eligible if deploy_eligible is not None else (acs >= 75)
+    if eligible:
         return "T1-A", False  # bypass_eligible set separately based on classification
-
-    # T2-A: everything else (ACS 60-74, or ACS>=75 above entry)
-    # But if >20% above entry: T2-A, no bypass regardless
     return "T2-A", False
 
 
@@ -742,13 +745,44 @@ def main():
         if pipeline == "vci":
             acs_score = wt_entry.get("acs_score") or ts.get("acs_score")
             classification = wt_entry.get("classification", "")
-            tier, _ = assign_vci_tier(acs_score, current_price, entry_level)
+            # Forward-led PASS-THROUGH fields (§14.3) — recomputed upstream at the live price by
+            # monthly_isa_prerun Step 6.5 (vci_deploy_eval). These are a SEPARATE deployability
+            # axis; the ACS->10-dim conviction mapping (Dim4<-ACS8) is UNCHANGED and must both
+            # persist (no double-count). Tier order among eligibles is by vci_source_score.
+            fv_asymmetry     = wt_entry.get("fv_asymmetry")
+            vci_source_score = wt_entry.get("vci_source_score")
+            deploy_eligible  = wt_entry.get("deploy_eligible")
+            tier, _ = assign_vci_tier(acs_score, deploy_eligible, current_price, entry_level)
             bypass = nvidia_bypass_flag(acs_score, classification, tier,
                                          current_price, entry_level)
             vci_record = {
                 **base_record,
                 "tier":                tier,
                 "acs_score":           acs_score,
+                "fv_asymmetry":        fv_asymmetry,
+                "vci_source_score":    vci_source_score,
+                "deploy_eligible":     deploy_eligible,
+                "asset_structure":     wt_entry.get("asset_structure"),
+                "fv_floor":            wt_entry.get("fv_floor"),
+                "bottleneck_fv_per_share": wt_entry.get("bottleneck_fv_per_share"),
+                "fv_source":           wt_entry.get("fv_source"),
+                "size_pct":            wt_entry.get("size_pct"),
+                "days_to_catalyst":    wt_entry.get("days_to_catalyst"),
+                # --- v2 enhancement pass-through fields (E1/E2/E3/E5/E6/E7) ---
+                "acs_ex_acs8":         wt_entry.get("acs_ex_acs8"),
+                "fv_p25":              wt_entry.get("fv_p25"),
+                "fv_asymmetry_p25":    wt_entry.get("fv_asymmetry_p25"),
+                "floor_source":        wt_entry.get("floor_source"),
+                "p_thesis":            wt_entry.get("p_thesis"),
+                "L":                   wt_entry.get("L"),
+                "catalyst_type":       wt_entry.get("catalyst_type"),
+                "catalyst_domain":     wt_entry.get("catalyst_domain"),
+                "revision_velocity":   wt_entry.get("revision_velocity"),
+                "adv_usd":             wt_entry.get("adv_usd"),
+                "size_liquidity_capped": wt_entry.get("size_liquidity_capped"),
+                "expected_loss_pct_isa": wt_entry.get("expected_loss_pct_isa"),
+                "asymmetry_compression_cause": wt_entry.get("asymmetry_compression_cause"),
+                "fv_crosscheck_warn":  wt_entry.get("fv_crosscheck_warn"),
                 "classification":      classification,
                 "nvidia_signals":      wt_entry.get("nvidia_signals", ""),
                 "vci_run_date":        wt_entry.get("vci_run_date", ""),
@@ -906,9 +940,16 @@ def main():
                 }
                 main_t3.append(t3_record)
 
-    # Sort main watchlist and VCI tiers by rank
-    for lst in (main_t1, main_t2, main_t3, vci_t1a, vci_t2a, vci_t3a):
+    # Sort main watchlist by rank
+    for lst in (main_t1, main_t2, main_t3):
         lst.sort(key=lambda e: e.get("rank", 99))
+    # Forward-led (§14.6): VCI tiers order by VCI_Source_Score DESC (deployability), not ACS/rank.
+    # A lower-ACS/higher-forward name therefore ranks ABOVE a higher-ACS name inside the tier.
+    # Deterministic tiebreak: ACS desc, then ticker. Missing score sorts last.
+    for lst in (vci_t1a, vci_t2a, vci_t3a):
+        lst.sort(key=lambda e: (-(e.get("vci_source_score") or 0),
+                                 -(e.get("acs_score") or 0),
+                                 str(e.get("ticker", ""))))
     # Candidate pool sorted by normalised_score descending (no rank assigned)
     for lst in (pool_t1, pool_t2, pool_t3):
         lst.sort(key=lambda e: -(e.get("normalised_score") or 0))

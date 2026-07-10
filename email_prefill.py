@@ -728,14 +728,58 @@ def build_s3_from_scored(scored: dict) -> list:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def build_vci_sleeve_from_step9(step9: dict) -> dict:
+    """FWDVCI §14.8: build the monthly email's dedicated Asymmetric-Sleeve (VCI) table from the
+    step9_pre vci_watchlist pass-through (T1_A -> T2_A -> T3_A, already ranked by VCI Source Score
+    within tier). Returns None when absent so the renderer omits the table (safe no-op)."""
+    if not step9:
+        return None
+    vw = step9.get("vci_watchlist", {}) or {}
+    rows = []
+    for tier in ("T1_A", "T2_A", "T3_A"):
+        rows.extend(vw.get(tier, []) or [])
+    if not rows:
+        return None
+    items = []
+    for i, e in enumerate(rows, 1):
+        items.append({
+            "rank": i,
+            "ticker": e.get("ticker", ""),
+            "name": e.get("company", e.get("name", "")),
+            "vci_source_score": e.get("vci_source_score"),
+            "acs": e.get("acs_score", e.get("acs")),
+            "fv_asymmetry": e.get("fv_asymmetry"),
+            "fv_asymmetry_p25": e.get("fv_asymmetry_p25"),
+            "fv_floor": e.get("fv_floor"),
+            "days_to_catalyst": e.get("days_to_catalyst"),
+            "deploy_eligible": e.get("deploy_eligible"),
+            "status": e.get("decision_bucket", e.get("tier", "Watchlist")),
+            "status_type": "watchlist",
+        })
+    out = {"items": items}
+    meta = step9.get("_meta", {}) or {}
+    if meta.get("calibration_gate"):
+        out["calibration_gate"] = meta["calibration_gate"]
+    if meta.get("vci_binary_risk_committed") is not None:
+        out["risk_committed"] = meta["vci_binary_risk_committed"]
+        out["risk_budget"] = meta.get("vci_binary_risk_budget")
+    return out
+
+
+# ---------------------------------------------------------------------------
 def build_prefilled_email(
     portfolio: dict,
     analytics: dict,
     xray: dict,
     scored: dict,
     run_date: date,
+    step9: dict = None,
 ) -> dict:
     has_scored = bool(scored and scored.get("s5_watchlist_rows"))
+    _s5 = build_s5_from_scored(scored) if has_scored else skeleton_s5()
+    _vci_sleeve = build_vci_sleeve_from_step9(step9)
+    if _vci_sleeve:
+        _s5["vci_sleeve"] = _vci_sleeve
     return {
         "_instructions": (
             "Pre-populated by email_prefill.py v2. "
@@ -749,7 +793,7 @@ def build_prefilled_email(
         "s2_capital_allocation":  skeleton_s2(),
         "s3_investment_cases":    build_s3_from_scored(scored) if has_scored else skeleton_s3(),
         "s4_liquidation_tracker": skeleton_s4(),
-        "s5_watchlist":           build_s5_from_scored(scored) if has_scored else skeleton_s5(),
+        "s5_watchlist":           _s5,
         "s6_portfolio_snapshot":  build_s6(portfolio, analytics, xray),
         "s7_stock_sleeve":        build_s7_from_scored(portfolio, scored) if has_scored else build_s7(portfolio),
         "s8_fund_review":         build_s8(portfolio, analytics, xray),
@@ -768,6 +812,8 @@ def main():
     parser.add_argument("--xray",      required=True)
     parser.add_argument("--scored",    default=None,
                         help="Path to watchlist_scored_mmm_yyyy.json from normalise_adapter.py")
+    parser.add_argument("--step9",     default=None,
+                        help="Path to step9_pre_mmm_yyyy.json (VCI sleeve table); auto-discovered beside if omitted")
     parser.add_argument("--out",       default=None)
     args = parser.parse_args()
 
@@ -784,9 +830,15 @@ def main():
     analytics = load(args.analytics, "analytics JSON")
     xray      = load(args.xray,      "xray JSON")
     scored    = load(args.scored, "watchlist_scored JSON", required=False) if args.scored else {}
+    # FWDVCI §14.8: auto-discover step9_pre for the VCI sleeve table (optional; safe no-op if absent)
+    _ml = (portfolio.get("_meta", {}) or {}).get("month_label")
+    step9 = {}
+    _s9p = args.step9 if args.step9 else (os.path.join(SCRIPT_DIR, f"step9_pre_{_ml}.json") if _ml else None)
+    if _s9p and os.path.exists(_s9p):
+        step9 = load(_s9p, "step9_pre JSON", required=False)
 
     run_date = date.today()
-    data = build_prefilled_email(portfolio, analytics, xray, scored, run_date)
+    data = build_prefilled_email(portfolio, analytics, xray, scored, run_date, step9=step9)
 
     if args.out:
         out_path = args.out

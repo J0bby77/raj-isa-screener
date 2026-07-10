@@ -576,6 +576,56 @@ def build_s5(data):
             ], last=(i == len(items) - 1))
         inner += table_end()
 
+    # --- Asymmetric Sleeve (VCI) — dedicated forward-led table (FWDVCI §14.8: its OWN ranked table,
+    #     NOT interleaved with the growth watchlist). Sourced from step9_pre vci pass-through, filled
+    #     into email_data s5_watchlist.vci_sleeve by the review. Renders only when supplied. ---
+    vci = d.get("vci_sleeve", {}) or {}
+    vci_items = vci.get("items", []) if isinstance(vci, dict) else (vci or [])
+    if vci_items:
+        _pk = {"buy": "buy", "active buy": "buy", "hold": "hold", "watchlist": "grey",
+               "monitor": "mon", "sell": "sell"}
+
+        def _cell(v, mult=False):
+            if v in (None, ""):
+                return "&mdash;"
+            if mult:
+                try:
+                    return f'{round(float(v), 2)}&times;'
+                except (TypeError, ValueError):
+                    return se(str(v))
+            return se(str(v))
+
+        inner += h3("Asymmetric Sleeve (VCI) &mdash; ranked by deployability (VCI Source Score)")
+        inner += table_start(["#", "Ticker", "VCI&nbsp;Src", "ACS", "fv&nbsp;asym", "Floor",
+                              "Cat&nbsp;d", "Deploy", "Status"])
+        for i, it in enumerate(vci_items):
+            elig = it.get("deploy_eligible")
+            elig_txt = "YES" if elig is True else ("no" if elig is False else "&mdash;")
+            elig_col = C["green"] if elig is True else C["text_muted"]
+            asym = it.get("fv_asymmetry_p25", it.get("fv_asymmetry"))
+            inner += table_row([
+                se(str(it.get("rank", i + 1))),
+                f'<strong>{se(it.get("ticker", ""))}</strong>',
+                _cell(it.get("vci_source_score")),
+                _cell(it.get("acs")),
+                _cell(asym, mult=True),
+                _cell(it.get("fv_floor"), mult=True),
+                _cell(it.get("days_to_catalyst")),
+                f'<span style="color:{elig_col}">{elig_txt}</span>',
+                pill(it.get("status", "—"), _pk.get(str(it.get("status_type", "monitor")).lower(), "grey")),
+            ], last=(i == len(vci_items) - 1))
+        inner += table_end()
+        if vci.get("calibration_gate"):
+            inner += para(f'Calibration: {se(str(vci["calibration_gate"]))}. Advisory until the '
+                          f'&ge;12-outcome gate passes; top eligible name human-confirmed.', muted=True, small=True)
+        if vci.get("risk_committed") is not None and vci.get("risk_budget"):
+            inner += para(f'Sleeve binary risk budget: {se(str(round(float(vci["risk_committed"]), 2)))}% / '
+                          f'{se(str(vci["risk_budget"]))}% ISA used (&Sigma; size&middot;L&middot;(1&minus;p)).',
+                          muted=True, small=True)
+        inner += para('Ranked by VCI Source Score (deployability, live-price); ACS is the quality floor; '
+                      'fv&nbsp;asym uses the conservative P25; entry levels are display-only.',
+                      muted=True, small=True)
+
     if d.get("excluded"):
         inner += para(f'<strong>Excluded (ineligible):</strong> {se(d["excluded"])}')
 

@@ -625,13 +625,21 @@ def score_a13(d):
         return MR(0, raw, 'GP growing slower than revenue')
 
 
-def inflection_flag(d):
-    """Pre-inflection GUARDRAIL. Strong sustained price momentum + high 3yr-range position
-    means the bottleneck may already be market-recognised -> the name may have LEFT the
-    pre-inflection window. Returns a warning string or '' (never up-ranks)."""
+def inflection_flag(d, fv_asymmetry=None, floor=None):
+    """Pre-inflection DIAGNOSTIC (never gates, never up-ranks). Under the forward-led framework
+    a price run-up is NOT a stand-down: what decides deploy is whether the FORWARD asymmetry
+    still holds. So on strong momentum we prompt an asymmetry re-test, not a 'do not chase'
+    (§4, §5.2). Returns a diagnostic string or ''."""
     m6 = d.get('mom_6m'); pos = compute_3yr_pos(d)
     if m6 is not None and pos is not None and m6 > 50 and pos > 70:
-        return f"INFLECTION UNDERWAY (6m {m6:+.0f}%, 3yr pos {pos:.0f}%) -- verify still pre-inflection; treat as graduation/late-entry, do not chase"
+        if fv_asymmetry is not None and floor is not None:
+            if fv_asymmetry >= floor:
+                return (f"INFLECTION UNDERWAY (6m {m6:+.0f}%, 3yr pos {pos:.0f}%) -- FV-asymmetry "
+                        f"{fv_asymmetry:.2f} STILL >= floor {floor}: price ahead of a re-rating, deploy-eligible on merit")
+            return (f"INFLECTION UNDERWAY (6m {m6:+.0f}%, 3yr pos {pos:.0f}%) -- FV-asymmetry "
+                    f"{fv_asymmetry:.2f} < floor {floor}: asymmetry spent -> graduate / late-entry, not a chase")
+        return (f"INFLECTION UNDERWAY (6m {m6:+.0f}%, 3yr pos {pos:.0f}%) -- re-test FV-asymmetry vs floor "
+                f"before any decision (do NOT infer stand-down from price alone)")
     return ""
 
 
@@ -667,12 +675,14 @@ def score_acs8(d, bottleneck_fv=None, has_catalyst=False):
         else:                base = 2
         score = min(10, base + prem)
         raw = f'FV-ASYMMETRY: {upside*100:+.0f}% upside to bottleneck FV {bottleneck_fv:.2f} (base {base}, +{prem} catalyst)'
-        return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': 'fair_value'}
+        return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': 'fair_value',
+                'fv_asymmetry': round(bottleneck_fv / price, 4), 'fv_source': 'modeled'}
 
     # FALLBACK — compressed 3yr-range position (no FV available)
     if pos3y is None:
         # no 3yr data at all -> neutral 6 (do not zero; do not reward)
-        return {'score': min(10, 6 + prem), 'raw': '3yr range N/A — neutral base 6', 'pos3y': None, 'method': 'neutral'}
+        return {'score': min(10, 6 + prem), 'raw': '3yr range N/A — neutral base 6', 'pos3y': None, 'method': 'neutral',
+                'fv_asymmetry': None, 'fv_source': 'estimated'}
     if   pos3y <= 20: base = 9
     elif pos3y <= 40: base = 8
     elif pos3y <= 60: base = 7
@@ -680,7 +690,8 @@ def score_acs8(d, bottleneck_fv=None, has_catalyst=False):
     else:             base = 5
     score = min(10, base + prem)
     raw = f'3YR-RANGE FALLBACK (no FV): pos {pos3y:.0f}% (base {base}, +{prem} catalyst)'
-    return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': '3yr_range'}
+    return {'score': score, 'raw': raw, 'pos3y': pos3y, 'method': '3yr_range',
+            'fv_asymmetry': None, 'fv_source': 'estimated'}
 
 
 # ---------------------------------------------------------------------------
@@ -706,14 +717,30 @@ def check_pre_inflection_override(scores, d):
 # Main scoring orchestrator
 # ---------------------------------------------------------------------------
 def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=None,
-                    bottleneck_fv=None, has_catalyst=False):
-    """Pull data and score all 13 Part A metrics. Returns (d, scores_dict, summary)."""
+                    bottleneck_fv=None, has_catalyst=False,
+                    fv_inputs=None, asset_structure=None):
+    """Pull data and score all 13 Part A metrics. Returns (d, scores_dict).
+    If fv_inputs (the §10.2 dict) is supplied, the WIN-case bottleneck_fv is derived from it
+    (reproducible) and used for ACS8 + the deployability fields (§10)."""
     print(f'\n  Fetching data for {sym}...', end='', flush=True)
     d = pull_data(sym)
     print(' done.')
 
     if d.get('error'):
         print(f'  [DATA ERROR] {d["error"]}')
+
+    # --- §10: derive WIN-case FV from stored inputs (reproducible) ---
+    if fv_inputs is not None and bottleneck_fv is None:
+        try:
+            import bottleneck_fv as _bfv
+            _fv = _bfv.compute_bottleneck_fv(fv_inputs, d.get('price'),
+                                             asset_structure=asset_structure)
+            d['_fv'] = _fv.as_dict()
+            if _fv.fv_source == 'modeled':
+                bottleneck_fv = _fv.bottleneck_fv_per_share
+        except Exception as e:
+            d['_fv_error'] = str(e)
+    d['_asset_structure'] = (asset_structure or (fv_inputs or {}).get('asset_structure') or 'single_asset')
 
     scores = {
         'A1':  score_a1(d),
@@ -765,14 +792,15 @@ def compute_totals(scores):
 
 
 def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
-                          has_catalyst=False, cfg=None):
-    """F1-F4 VCI final-layer gates (redesign Part2 §3.5). Applied to the FINAL ACS at the
-    DEPLOYMENT layer only — never folded into Part A / ACS4 (F4). Returns the adjusted ACS,
-    which gates fired, and deployment eligibility.
+                          has_catalyst=False, cfg=None,
+                          fv_asymmetry=None, asset_structure=None, fv_source="modeled"):
+    """F1-F4 VCI final-layer gates + the §4 forward-led asymmetry floor, at the DEPLOYMENT
+    layer only (never folded into Part A / ACS4).
       F1 management instability  -> ACS - VCI_MGMT_PENALTY (capital discipline)
-      F2 catalyst-confirmation   -> VCI thesis needs a confirmed bottleneck catalyst; absent = review
-      F3 price-falls-on-beat     -> hard NO-DEPLOY (the value-trap signal, same as growth)
-    Reusable by the review/deployment step (pass the full ACS); the CLI demos it on ACS4."""
+      F2 catalyst-confirmation   -> no confirmed bottleneck catalyst = NOT deploy-eligible (hard)
+      F3 price-falls-on-beat     -> hard NO-DEPLOY (value-trap signal)
+      §4 asymmetry floor         -> fv_asymmetry >= tiered floor (§9.1) when provided
+    PRICE-VS-ENTRY DISTANCE IS NEVER AN INPUT. fv_source=='estimated' -> manual confirm (§10.5)."""
     cfg = cfg or _cfg
     pen = getattr(cfg, "VCI_MGMT_PENALTY", 5.0)
     thr = getattr(cfg, "VCI_DEPLOY_THRESHOLD", 75)
@@ -786,14 +814,39 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
         blocked = True
         gates.append("price_falls_on_beat:NO_DEPLOY")
     if not has_catalyst:
-        gates.append("catalyst_unconfirmed:review")
+        gates.append("catalyst_unconfirmed")
+
+    # --- §4 asymmetry floor (only when an asymmetry ratio and/or structure is provided) ---
+    floor = None
+    if fv_asymmetry is not None or asset_structure is not None:
+        try:
+            import bottleneck_fv as _bfv
+            floor = _bfv.select_floor(asset_structure)
+        except Exception:
+            floor = (getattr(cfg, "VCI_FV_ASYMMETRY_MIN_PLATFORM", 2.0)
+                     if str(asset_structure).lower() == "platform"
+                     else getattr(cfg, "VCI_FV_ASYMMETRY_MIN_SINGLE", 2.5))
+        if fv_asymmetry is None:
+            blocked = True; gates.append("fv_asymmetry:unavailable")
+        elif fv_asymmetry < floor:
+            blocked = True; gates.append(f"fv_asymmetry {fv_asymmetry:.2f} < floor {floor} ({asset_structure})")
+
+    manual = (fv_source == "estimated")
+    if manual:
+        gates.append("fv_source=estimated:manual_confirm")
+
+    catalyst_ok = bool(has_catalyst)
+    eligible = (not blocked) and catalyst_ok and (adj >= thr) and (not manual)
     return {
         "acs_in": acs_total,
         "adjusted_acs": round(adj, 1),
         "gates_fired": gates,
         "deploy_blocked": blocked,
-        "deploy_eligible": (not blocked) and adj >= thr,
-        "catalyst_confirmed": bool(has_catalyst),
+        "deploy_eligible": eligible,
+        "require_manual_confirm": manual,
+        "catalyst_confirmed": catalyst_ok,
+        "fv_asymmetry": fv_asymmetry,
+        "fv_floor": floor,
     }
 
 
@@ -1023,11 +1076,15 @@ def main():
             _res = build_json_output(sym, d, scores, totals, override_check)
             if _final_gates_on:
                 _sb = sym_up.replace('.L', '')
+                _a8 = d.get('_acs8') or {}
                 _res["vci_final_gates"] = apply_vci_final_gates(
                     totals["acs4"],
                     mgmt_unstable=(sym_up in mgmt_set or _sb in mgmt_set),
                     falls_on_beat=(sym_up in fob_set or _sb in fob_set),
-                    has_catalyst=has_cat, cfg=_cfg)
+                    has_catalyst=has_cat, cfg=_cfg,
+                    fv_asymmetry=_a8.get('fv_asymmetry'),
+                    asset_structure=d.get('_asset_structure'),
+                    fv_source=_a8.get('fv_source', 'modeled'))
             all_results.append(_res)
 
     # Summary table

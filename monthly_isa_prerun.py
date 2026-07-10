@@ -687,6 +687,125 @@ def main():
                 print("  Scored " + str(n_scored) + " tickers | In-window: " + str(in_window))
 
     # ---------------------------------------------------------------------------
+    # Step 6.5: VCI forward-led re-price (§11.3 / §14.2)
+    #   The VCI run scored/ranked on the 2nd-Sunday price; price drifts by the Saturday
+    #   pre-run, so a stale fv_asymmetry is a WRONG deployment gate. Recompute fv_asymmetry
+    #   and VCI_Source_Score for every vci_watchlist name at the CURRENT (Saturday) live price
+    #   via vci_deploy_eval, re-rank by VCI_Source_Score, and write the fields back into
+    #   watchlist_tickers.json so Step 8 (step9_pre_builder) consumes fresh, not stale, values.
+    #   ACS is NOT re-scored here (stickier); only the price-driven terms refresh.
+    # ---------------------------------------------------------------------------
+    print(f"\n[6.5] VCI forward-led re-price (fv_asymmetry / VCI_Source_Score at live price)...")
+    if not os.path.exists(watchlist_config_path):
+        print("  SKIPPED -- watchlist_tickers.json not found.")
+    else:
+        try:
+            if SCRIPT_DIR not in sys.path:
+                sys.path.insert(0, SCRIPT_DIR)
+            import vci_deploy_eval as _vde
+            try:
+                import scoring_config as _sc
+            except Exception:
+                _sc = None
+
+            with open(watchlist_config_path, encoding="utf-8") as f:
+                _wt = json.load(f)
+            _vci = _wt.get("vci_watchlist", []) or []
+
+            # live-price lookup from the Step-6 metrics pull (current_price), with fallbacks
+            _px = {}
+            if os.path.exists(watchlist_metrics_path):
+                try:
+                    with open(watchlist_metrics_path, encoding="utf-8") as f:
+                        _wm = json.load(f)
+                    for _t, _row in (_wm.get("tickers", {}) or {}).items():
+                        _v = (_row or {}).get("current_price")
+                        if _v is None:
+                            _pr = (_row or {}).get("_prices") or {}
+                            _v = _pr.get("current") or _pr.get("last") or _pr.get("close")
+                        if _v is not None:
+                            _px[str(_t).upper()] = float(_v)
+                except Exception as _e:
+                    print(f"  NOTE: could not read live prices from metrics ({_e}); using stored fallbacks.")
+
+            def _base_t(t):
+                t = str(t or "").upper()
+                return t.split(".")[0] if "." in t else t
+
+            def _price_lookup(t):
+                tu = str(t or "").upper()
+                if tu in _px:
+                    return _px[tu]
+                bt = _base_t(tu)
+                for k, v in _px.items():
+                    if _base_t(k) == bt:
+                        return v
+                # last-resort fallback: the entry's own stored price / entry level
+                for e in _vci:
+                    if str(e.get("ticker", "")).upper() == tu:
+                        return e.get("price") or e.get("entry_level")
+                return None
+
+            if _vci:
+                # normalise the acs field vci_deploy_eval expects (entries store acs_score)
+                for e in _vci:
+                    if e.get("acs") is None:
+                        e["acs"] = e.get("acs_score")
+                # v2: portfolio value for E5 liquidity sizing (best-effort; None -> no cap)
+                _pv = None
+                try:
+                    if os.path.exists(portfolio_path):
+                        with open(portfolio_path, encoding="utf-8") as _pf:
+                            _pd = json.load(_pf)
+                        _pv = _pd.get("total_value") or _pd.get("portfolio_value") \
+                              or (_pd.get("summary", {}) or {}).get("total_value")
+                except Exception:
+                    _pv = None
+                _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv)
+                # v2 E4: sleeve binary risk-budget headroom over the deploy-eligible set
+                try:
+                    import vci_risk_budget as _vrb
+                    _open = [e for e in _ranked if e.get("deploy_eligible")]
+                    summary["vci_binary_risk_committed"] = _vrb.committed_risk(_open)
+                    summary["vci_binary_risk_budget"] = getattr(_sc, "VCI_SLEEVE_BINARY_RISK_BUDGET", None) if _sc else None
+                except Exception:
+                    pass
+                # write recomputed deployability fields back, preserve one canonical order
+                for i, e in enumerate(_ranked, 1):
+                    e["vci_rank"] = i
+                _wt["vci_watchlist"] = _ranked
+                if not args.dry_run:
+                    with open(watchlist_config_path, "w", encoding="utf-8") as f:
+                        json.dump(_wt, f, indent=2, default=str)
+                _elig = [e for e in _ranked if e.get("deploy_eligible")]
+                print(f"  Re-priced {len(_ranked)} VCI name(s); {len(_elig)} deploy-eligible. "
+                      f"Top by VCI_Source_Score: "
+                      + ", ".join(f"{e.get('ticker')}({e.get('vci_source_score')})" for e in _ranked[:3]))
+                summary["vci_repriced"] = len(_ranked)
+                summary["vci_deploy_eligible"] = [e.get("ticker") for e in _elig]
+            else:
+                print("  No VCI watchlist names to re-price.")
+
+            # surface calibration state (read-only) if the learning module has produced one
+            _cal_path = getattr(_sc, "VCI_CALIBRATION_STATE_PATH", None) if _sc else None
+            if _cal_path and os.path.exists(_cal_path):
+                try:
+                    with open(_cal_path, encoding="utf-8") as f:
+                        _cal = json.load(f)
+                    summary["vci_calibration_state"] = {
+                        "calibration_gate_passed": _cal.get("calibration_gate_passed", False),
+                        "resolved_outcomes": _cal.get("resolved_outcomes"),
+                        "weights": _cal.get("weights"),
+                    }
+                    print(f"  VCI calibration state: gate_passed="
+                          f"{_cal.get('calibration_gate_passed', False)} (read-only, advisory).")
+                except Exception:
+                    pass
+        except Exception as e:
+            warnings.append(f"Step 6.5 (VCI re-price): {e} -- VCI names carry forward stale deployability fields.")
+            print(f"  WARNING: VCI re-price failed ({e}); carrying forward stored fields.")
+
+    # ---------------------------------------------------------------------------
     # Step 7: Score Part A/B
     # ---------------------------------------------------------------------------
     print(f"\n[7/9] Scoring Part A/B and building email structures...")
