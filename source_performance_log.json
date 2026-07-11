@@ -1,8 +1,8 @@
 {
-  "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
+  "_description": "ISA Growth Stock Analysis — Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts — they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-06-28",
+  "last_updated": "2026-07-11",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -109,102 +109,102 @@
     "Nasdaq 100": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 1607,
-        "successes": 1606,
-        "success_rate": 0.999,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "attempts": 2495,
+        "successes": 2494,
+        "success_rate": 1.0,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 1607,
-        "successes": 1606,
-        "success_rate": 0.999,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "attempts": 2495,
+        "successes": 2494,
+        "success_rate": 1.0,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 1607,
-        "successes": 1607,
+        "attempts": 2495,
+        "successes": 2495,
         "success_rate": 1.0,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 1607,
-        "successes": 1605,
+        "attempts": 2495,
+        "successes": 2493,
         "success_rate": 0.999,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1257,
-        "success_rate": 0.985,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "attempts": 2164,
+        "successes": 2145,
+        "success_rate": 0.991,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "forward_pe": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1276,
+        "attempts": 2164,
+        "successes": 2164,
         "success_rate": 1.0,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "ev_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1271,
-        "success_rate": 0.996,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "attempts": 2164,
+        "successes": 2159,
+        "success_rate": 0.998,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "net_debt_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1270,
-        "success_rate": 0.995,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "attempts": 2164,
+        "successes": 2158,
+        "success_rate": 0.997,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1276,
+        "attempts": 2164,
+        "successes": 2164,
         "success_rate": 1.0,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 1276,
-        "successes": 1276,
+        "attempts": 2164,
+        "successes": 2164,
         "success_rate": 1.0,
-        "last_run": "2026-06-26",
-        "last_run_attempts": 861,
-        "last_run_successes": 861,
+        "last_run": "2026-07-10",
+        "last_run_attempts": 888,
+        "last_run_successes": 888,
         "last_run_rate": 1.0
       }
     },
@@ -425,72 +425,72 @@
     "FTSE 250": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 500,
-        "successes": 493,
-        "success_rate": 0.986,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 250,
-        "last_run_successes": 248,
-        "last_run_rate": 0.992
+        "attempts": 749,
+        "successes": 657,
+        "success_rate": 0.877,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 249,
+        "last_run_successes": 164,
+        "last_run_rate": 0.659
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 500,
-        "successes": 422,
-        "success_rate": 0.844,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 250,
-        "last_run_successes": 212,
-        "last_run_rate": 0.848
+        "attempts": 571,
+        "successes": 493,
+        "success_rate": 0.863,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 71,
+        "last_run_rate": 1.0
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 500,
-        "successes": 420,
-        "success_rate": 0.84,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 250,
-        "last_run_successes": 210,
-        "last_run_rate": 0.84
+        "attempts": 571,
+        "successes": 491,
+        "success_rate": 0.86,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 71,
+        "last_run_rate": 1.0
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 500,
-        "successes": 413,
-        "success_rate": 0.826,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 250,
-        "last_run_successes": 208,
-        "last_run_rate": 0.832
+        "attempts": 571,
+        "successes": 484,
+        "success_rate": 0.848,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 71,
+        "last_run_rate": 1.0
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 39,
-        "successes": 39,
-        "success_rate": 1.0,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 35,
-        "last_run_successes": 35,
-        "last_run_rate": 1.0
+        "attempts": 110,
+        "successes": 108,
+        "success_rate": 0.982,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 69,
+        "last_run_rate": 0.972
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 39,
-        "successes": 39,
+        "attempts": 110,
+        "successes": 110,
         "success_rate": 1.0,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 35,
-        "last_run_successes": 35,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 71,
         "last_run_rate": 1.0
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 39,
-        "successes": 39,
+        "attempts": 110,
+        "successes": 110,
         "success_rate": 1.0,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 35,
-        "last_run_successes": 35,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 71,
+        "last_run_successes": 71,
         "last_run_rate": 1.0
       }
     },
@@ -819,73 +819,73 @@
     "SPI": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 321,
-        "successes": 276,
-        "success_rate": 0.86,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 199,
-        "last_run_successes": 199,
-        "last_run_rate": 1.0,
-        "note": "45 structural N/A from curated list of .SW tickers \u2014 no live SPI constituent feed accessible (Wikipedia 403, FT derivatives, SIX React app). Success rate will improve once authoritative constituent list obtained."
+        "attempts": 521,
+        "successes": 472,
+        "success_rate": 0.906,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 200,
+        "last_run_successes": 196,
+        "last_run_rate": 0.98,
+        "note": "Constituent feed now sourced via iShares CHSPI CSV (live) — success rate has improved steadily since the May-09 curated-list run."
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 276,
-        "successes": 225,
-        "success_rate": 0.815,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 199,
-        "last_run_successes": 160,
-        "last_run_rate": 0.804
+        "attempts": 343,
+        "successes": 292,
+        "success_rate": 0.851,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
+        "last_run_rate": 1.0
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 276,
-        "successes": 223,
-        "success_rate": 0.808,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 199,
-        "last_run_successes": 158,
-        "last_run_rate": 0.794
+        "attempts": 343,
+        "successes": 290,
+        "success_rate": 0.846,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
+        "last_run_rate": 1.0
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 276,
-        "successes": 217,
-        "success_rate": 0.786,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 199,
-        "last_run_successes": 155,
-        "last_run_rate": 0.779
+        "attempts": 343,
+        "successes": 284,
+        "success_rate": 0.828,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
+        "last_run_rate": 1.0
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 41,
-        "successes": 41,
+        "attempts": 108,
+        "successes": 108,
         "success_rate": 1.0,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 32,
-        "last_run_successes": 32,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
         "last_run_rate": 1.0
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 41,
-        "successes": 37,
-        "success_rate": 0.902,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 32,
-        "last_run_successes": 28,
-        "last_run_rate": 0.875
+        "attempts": 108,
+        "successes": 104,
+        "success_rate": 0.963,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
+        "last_run_rate": 1.0
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 41,
-        "successes": 41,
+        "attempts": 108,
+        "successes": 108,
         "success_rate": 1.0,
-        "last_run": "2026-05-09",
-        "last_run_attempts": 32,
-        "last_run_successes": 32,
+        "last_run": "2026-07-11",
+        "last_run_attempts": 67,
+        "last_run_successes": 67,
         "last_run_rate": 1.0
       }
     },
@@ -1143,7 +1143,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq&download=true",
         "parse_path": "r.json()[\"data\"][\"rows\"]",
         "filter": "marketCap > $2bn applied at sourcing time",
-        "expected_count": "~1,100\u20131,300 post-filter",
+        "expected_count": "~1,100–1,300 post-filter",
         "status": "confirmed_working",
         "confirmed_date": "2026-05-22",
         "notes": "Returns all ~4,141 Nasdaq-listed stocks; $2bn market cap filter applied during fetch reduces to ~1,131. First used as fallback on 2026-05-22 run after ONEQ WAF block; now designated primary."
@@ -1153,7 +1153,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq",
         "parse_path": "r.json()[\"data\"][\"table\"][\"rows\"]",
         "status": "confirmed_working",
-        "notes": "Same endpoint without download=true param \u2014 different JSON parse path."
+        "notes": "Same endpoint without download=true param — different JSON parse path."
       },
       "dead_sources": [
         {
@@ -1189,10 +1189,10 @@
         "name": "stoxx_com_html_scrape",
         "url": "https://stoxx.com/index/sxxp/?components=true",
         "format": "HTML_table",
-        "fields": "Company, Supersector, Country, Weight \u2014 NO ISINs or tickers",
+        "fields": "Company, Supersector, Country, Weight — NO ISINs or tickers",
         "expected_count": "600 rows",
         "status": "confirmed_working_limited",
-        "notes": "Last resort only \u2014 no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
+        "notes": "Last resort only — no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
       },
       "dead_sources": [
         {
@@ -1217,7 +1217,7 @@
       ]
     }
   },
-  "_last_run_notes": "SP500 run 2026-07-04 (COMPOSIO-FALLBACK — local VM down): 502 constituents, 236 scored, 0 accounted techfail (135 TECHNICAL_SOURCE_FAILURE from yfinance 401 crumb cascade on Composio). 10 Strong Buys (forward-led). Top by total: NVDA/DXCM 50/50. Gate4 conc flagged. Excel in Composio /mnt/files/isa_screener/. OneDrive not connected.",
+  "_last_run_notes": "F250-SPI run 2026-07-11 (forward-led LOCAL, constituent-hybrid): 449 constituents, 138 scored, 127 rankable, 19 SUMMARY eligible, 0 tech fails. Top total: TRN.L/TEMN.SW 46/50. Top Source Score: KLR.L 85 (100/100 fwd). Gate4 Industrials conc 45.7%. sync_repo_to_github.py aborted on unrelated broken scripts (build_vci_email.py, vci_acs_scorer.py) — GitHub mirror not refreshed this run. Local resume cache reset once mid-run after a tool timeout, forcing a full batch restart (deterministic re-score, no data loss). Excel in Investment Analysis folder.",
   "runs": [
     {
       "run_date": "2026-07-04",
@@ -1243,7 +1243,10 @@
       "top_source_score_ticker": "AVGO",
       "top_source_score": 88,
       "top_total_score": 50,
-      "top_tickers_total": ["NVDA", "DXCM"],
+      "top_tickers_total": [
+        "NVDA",
+        "DXCM"
+      ],
       "gate4_sector_concentration_warning": true,
       "gate4_largest_sector": "Technology",
       "gate4_largest_sector_pct": 20.3,
@@ -1251,9 +1254,21 @@
       "excel_location": "Composio /mnt/files/isa_screener/ — OneDrive not connected",
       "retrospective_file": "20260704_SP500_retrospective.md",
       "dq_flags": [
-        {"severity": "H", "event": "TECHNICAL_SOURCE_FAILURE_135", "detail": "135 stocks (26.9%) failed with yfinance 401 Invalid Crumb on Composio. Inter-batch sleep needed."},
-        {"severity": "H", "event": "EXCEL_DELIVERY_BLOCKED", "detail": "OneDrive not connected in Composio session. Excel in /mnt/files/isa_screener/."},
-        {"severity": "M", "event": "LOCAL_BASH_VM_DOWN", "detail": "VM service not running — forced Composio fallback for entire run."}
+        {
+          "severity": "H",
+          "event": "TECHNICAL_SOURCE_FAILURE_135",
+          "detail": "135 stocks (26.9%) failed with yfinance 401 Invalid Crumb on Composio. Inter-batch sleep needed."
+        },
+        {
+          "severity": "H",
+          "event": "EXCEL_DELIVERY_BLOCKED",
+          "detail": "OneDrive not connected in Composio session. Excel in /mnt/files/isa_screener/."
+        },
+        {
+          "severity": "M",
+          "event": "LOCAL_BASH_VM_DOWN",
+          "detail": "VM service not running — forced Composio fallback for entire run."
+        }
       ],
       "notes": "First run with significant tech failure rate (27%). Composio 401 crumb cascade; add inter-batch sleep for future Composio loops. Email sent. Excel delivery pending OneDrive reconnection."
     },
@@ -1361,7 +1376,7 @@
         {
           "severity": "H",
           "event": "CONSTITUENT_SOURCE_FAILURE",
-          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward \u2014 Xtrackers XLSX now primary)"
+          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward — Xtrackers XLSX now primary)"
         },
         {
           "severity": "M",
@@ -1561,6 +1576,91 @@
       "excel_file": "Growth Stock Analysis F250 & SPI W-e 28-Jun-26.xlsx",
       "retrospective_file": "20260628_F250-SPI_retrospective.md",
       "notes": "v27 scoring; 30 scoring batches + 9 overlay batches; 0 tech failures; constituent-hybrid (Composio dump n=448 via GitHub bridge); 7 strong buys; 87 GATE_DATA_UNRESOLVED (thin yfinance coverage for smaller FTSE250/SPI); quoteSummary 404 for some .L/.SW overlay stocks (known EU issue); Composio .env recreated one-time (persistent /mnt/files/isa_env/.env reset); gate4_conc Industrials 43.9% above 35% threshold (structural FTSE250 feature)"
+    },
+    {
+      "run_date": "2026-07-10",
+      "group": "NASDAQ",
+      "task_id": "isa-nasdaq-fri2",
+      "run_mode": "local",
+      "run_mode_note": "S5 forward-led, all 10 flags ON. SOURCE_WEIGHTS forward:0.60/revisions:0.15/deployability:0.10/quality:0.05/analyst:0.10",
+      "constituent_source": "Nasdaq_Screener_API",
+      "constituents_fetched": 888,
+      "accounted": 888,
+      "gate1_excluded": 214,
+      "gate2_excluded": 14,
+      "gate3_excluded": 60,
+      "gate4_excluded": 110,
+      "gate_data_unresolved": 55,
+      "scored": 435,
+      "technical_failures": 0,
+      "candidate_rankable": 365,
+      "mandatory_minimum_fails": 69,
+      "unresolved_hard_gate": 1,
+      "summary_eligible_s5": 218,
+      "top_score": 50.0,
+      "top_tickers": [
+        "DXCM",
+        "NVDA"
+      ],
+      "top_fwd_axis_tickers": [
+        "NVDA",
+        "APP",
+        "AMAT",
+        "ARM",
+        "AVGO",
+        "AUPH"
+      ],
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Technology",
+      "gate4_largest_sector_pct": 40.0,
+      "excel_file": "Growth Stock Analysis Nasdaq W-e 10-Jul-26.xlsx",
+      "retrospective_file": "20260710_NASDAQ_retrospective.md",
+      "notes": "First S5 forward-led NASDAQ run. 888 constituents (+43 vs Jun-26 run), 435 scored (vs 229 in v27 — 90% pool expansion from gate relaxation). 0% tech fail rate. NVDA/DXCM 50/50 perfect total; APP 48/50 + 100/100 fwd axis. AUPH Igniting stage. Gate4 Technology concentration 40% (structural for Nasdaq)."
+    },
+    {
+      "run_date": "2026-07-11",
+      "group": "F250-SPI",
+      "task_id": "isa-eu-b-sat2",
+      "run_mode": "local_primary_constituent_hybrid",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) — no manual flag flip needed.",
+      "constituent_source": "Composio_constituent_hybrid_dump_via_GitHub",
+      "constituents_fetched": 449,
+      "accounted": 449,
+      "gate1_excluded": 128,
+      "gate2_excluded": 0,
+      "gate3_excluded": 13,
+      "gate4_excluded": 81,
+      "gate_data_unresolved": 89,
+      "scored": 138,
+      "technical_failures": 0,
+      "candidate_rankable": 127,
+      "mandatory_minimum_fails": 9,
+      "unresolved_hard_gate": 2,
+      "summary_eligible_forward_led": 19,
+      "strong_buy_badge_count": 6,
+      "top_score": 46,
+      "top_tickers": [
+        "TRN.L",
+        "TEMN.SW"
+      ],
+      "top_source_score_ticker": "KLR.L",
+      "top_source_score": 85,
+      "index_split_scored": {
+        "FTSE250": 71,
+        "SPI": 67
+      },
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 45.7,
+      "excel_file": "Growth Stock Analysis F250 & SPI W-e 11-Jul-26.xlsx",
+      "retrospective_file": "20260711_F250-SPI_retrospective.md",
+      "issues": [
+        "SYNC_ABORTED_INVALID_PY_UNRELATED_SCRIPTS",
+        "COMPOSIO_ENV_MISSING_RECREATED",
+        "LOCAL_RESUME_CACHE_RESET_ONCE_MIDRUN",
+        "QUOTESUMMARY_404_EU_UK_OVERLAYS"
+      ],
+      "notes": "Forward-led (live framework, no manual flag flip). 449 constituents, 138 scored, 127 rankable, 19 SUMMARY-eligible by Source Score, 0 tech fails. Top total TRN.L/TEMN.SW 46/50; top Source Score KLR.L 85 (100/100 fwd axis). Gate4 Industrials concentration 45.7% (up from 43.9% Jun-28). sync_repo_to_github.py aborted (unrelated VCI script syntax errors: build_vci_email.py, vci_acs_scorer.py) — GitHub fallback mirror not refreshed this run, but all F250-SPI-relevant scripts verified compiling and unaffected. Local resume cache reset once after a tool timeout (~batch 28/30), forcing a full batch restart — re-scored deterministically, no data loss, just extra calls. Composio /mnt/files/isa_env/.env missing again, recreated per protocol (third consecutive EU run to hit this)."
     }
   ]
 }
