@@ -262,4 +262,37 @@ def main():
         # RESUME by default: skip names already scored without error, so re-running the SAME
         # command continues where a timed-out call left off (the ephemeral 45s sandbox wipes
         # /dev/shm between calls but the cache persists on the mount).
-        pen
+        pending = [(tk, tid) for (tk, tid) in targets
+                   if args.rescore or tk not in cache or "error" in cache.get(tk, {})]
+        start = time.time()
+        print(f"Pre-scoring {len(pending)} of {len(targets)} name(s) "
+              f"(resume={'off' if args.rescore else 'on'}, budget={args.budget or 'none'}s)...")
+        complete = True
+        for tk, tid in pending:
+            if args.budget and (time.time() - start) > args.budget:
+                complete = False
+                print(f"  [BUDGET {args.budget}s reached] partial progress saved; "
+                      f"resume by re-running the identical command.")
+                break
+            try:
+                row = pull_raw(tk, tid, theme_opp)
+            except Exception as e:
+                row = {"ticker": tk, "theme": tid, "error": str(e)[:120]}
+            cache[tk] = row
+            save_cache(cache)          # incremental: persist after EVERY ticker (survives a mid-call timeout)
+            if "error" in row:
+                print(f"  [SKIP] {tk}: {row['error'][:60]}")
+        _ok = len([r for r in cache.values() if "error" not in r])
+        print(f"  {'[COMPLETE]' if complete else '[PARTIAL]'} cached_ok={_ok} "
+              f"cached_total={len(cache)} universe={len(targets)}")
+
+    rows = rank_cache(cache)
+    print_table(rows, advance_n=args.advance)
+    if args.json_out:
+        json.dump(rows, open(args.json_out, "w", encoding="utf-8"), indent=2, default=str)
+        print(f"\nRanked JSON written: {args.json_out}")
+    print(f"\nCache: {cache_path()}  ({len([r for r in cache.values() if 'error' not in r])} scored)")
+
+
+if __name__ == "__main__":
+    main()
