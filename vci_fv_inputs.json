@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "purpose": "Structured §10.2 win-case FV inputs per VCI watchlist name — enables E2 (P25 confidence interval + removes the scalar-only manual-confirm gate) when v2 flips. Merged into watchlist_tickers.json vci_watchlist[].fv_inputs by sync_vci_watchlist / the VCI run.",
+    "created": "2026-07-06",
+    "confidence": "ANALYST ESTIMATES for flip-prep / shadow analysis. Win-case (if the bottleneck thesis fully plays out). Reproduce the stored bottleneck FV where one exists (ABCL). REFINE per name during the next VCI run before relying on them for a live deploy.",
+    "fields": "latent_tam_usd_bn x capture_share x steady_margin x exit_multiple / fully_diluted_shares x fx_to_local = bottleneck_fv_per_share",
+    "prices_asof": "2026-07-06 (yfinance)"
+  },
+  "ABCL": {
+    "asset_structure": "platform", "catalyst_type": "phase2_biotech", "catalyst_domain": "biotech_readout",
+    "fv_inputs": {"latent_tam_usd_bn": 22.0, "capture_share": 0.10, "steady_margin": 0.40,
+                  "exit_multiple": 7.0, "fully_diluted_shares": 305400000, "fx_to_local": 1.0},
+    "win_case_fv_usd": 20.17, "price_asof": 7.69, "asymmetry_point": 2.62, "asymmetry_p25": 2.01,
+    "fv_rederived": "2026-07-06",
+    "note": "RE-DERIVED 6-Jul on current fundamentals (up from the stale $14): positive ABCL635 Phase-1 interim (NK3R, once-monthly, no liver tox; Phase-2 topline Q3-2026 = the binary), Jazz T-cell-engager deal Jun-26 ($56M upfront + tiered royalties), ~$655M liquidity (~28% of mkt cap), ~90 partner programs + owned pipeline (ABCL575 Ph1 Q4-26, 688/386 FIH 2027). Win-case ~$20. asset_structure=platform (90+ shots -> p uses platform default 0.50). FWDVCI-eligible (point asym 2.62x). Under v2 the conservative P25 asym = 2.01x -- RIGHT AT the 2.0x floor (knife-edge): treat as manual-confirm / hold pending the Q3 Phase-2 readout, which if positive re-rates it clearly above. The FV is an estimate; refine at the VCI run."
+  },
+  "ALAB": {
+    "asset_structure": "platform", "catalyst_type": "revenue_scaling", "catalyst_domain": "ai_optical",
+    "fv_inputs": {"latent_tam_usd_bn": 30.0, "capture_share": 0.18, "steady_margin": 0.40,
+                  "exit_multiple": 10.0, "fully_diluted_shares": 171400000, "fx_to_local": 1.0},
+    "win_case_fv_usd": 126.0, "price_asof": 382.89, "asymmetry_point": 0.33, "status": "RETIRED",
+    "note": "RETIRED 6-Jul (removed from asymmetric watchlist). GRADUATED — market cap ~$66B >> $50B VCI ceiling. Priced for enormous growth (asym 0.33). RETIRE from the asymmetric sleeve regardless of v2. ACS 65 < 75 also fails the quality floor."
+  },
+  "CRDO": {
+    "asset_structure": "single_asset", "catalyst_type": "revenue_scaling", "catalyst_domain": "ai_optical",
+    "fv_inputs": {"latent_tam_usd_bn": 10.0, "capture_share": 0.20, "steady_margin": 0.40,
+                  "exit_multiple": 10.0, "fully_diluted_shares": 186500000, "fx_to_local": 1.0},
+    "win_case_fv_usd": 42.9, "price_asof": 246.40, "asymmetry_point": 0.17, "status": "GRADUATION-WATCH",
+    "note": "GRADUATION-WATCH 6-Jul. ~GRADUATING — market cap ~$46B, approaching the $50B ceiling; priced for growth (asym 0.17). ACS 63 < 75. Single dominant product (AEC/SerDes). Retire/monitor."
+  },
+  "RXRX": {
+    "asset_structure": "platform", "catalyst_type": "revenue_ramp", "catalyst_domain": "biotech_readout",
+    "fv_inputs": {"latent_tam_usd_bn": 20.0, "capture_share": 0.08, "steady_margin": 0.35,
+                  "exit_multiple": 7.0, "fully_diluted_shares": 524700000, "fx_to_local": 1.0},
+    "win_case_fv_usd": 7.47, "price_asof": 3.84, "asymmetry_point": 1.95,
+    "note": "AI drug-discovery platform; ACS 60 (floor-capped, deteriorating — NVIDIA equity exit Feb-26, Gibson off board Jun-26). Point asymmetry 1.95 ~ at the 2.0 floor; P25 well below. Speculative TAM/capture. Do not deploy until ACS recovers above floor."
+  }
+}

@@ -242,34 +242,24 @@ def main():
     ap.add_argument("--rank-only", action="store_true", help="re-rank existing cache, no fetch")
     ap.add_argument("--advance", type=int, default=None, help="also print Stage-1 advancement set (top N)")
     ap.add_argument("--json-out", default=None, help="write ranked JSON to this path")
+    ap.add_argument("--budget", type=float, default=0.0,
+                    help="Per-call fetch time budget in seconds; stop cleanly when exceeded so the "
+                         "ephemeral 45s sandbox can resume next call. 0 = no limit (default).")
+    ap.add_argument("--rescore", action="store_true",
+                    help="Re-fetch names already cached OK (default behaviour is RESUME: skip "
+                         "names already scored without error, so re-running continues where it left off).")
     args = ap.parse_args()
 
     theme_opp = load_theme_opp()
     cache = load_cache()
 
     if not args.rank_only:
+        import time
         targets = resolve_targets(args)
         if not targets:
             print("No targets. Use theme numbers, 'all', or --tickers.")
             sys.exit(1)
-        print(f"Pre-scoring {len(targets)} name(s)...")
-        for tk, tid in targets:
-            try:
-                row = pull_raw(tk, tid, theme_opp)
-            except Exception as e:
-                row = {"ticker": tk, "theme": tid, "error": str(e)[:120]}
-            cache[tk] = row
-            if "error" in row:
-                print(f"  [SKIP] {tk}: {row['error'][:60]}")
-        save_cache(cache)
-
-    rows = rank_cache(cache)
-    print_table(rows, advance_n=args.advance)
-    if args.json_out:
-        json.dump(rows, open(args.json_out, "w", encoding="utf-8"), indent=2, default=str)
-        print(f"\nRanked JSON written: {args.json_out}")
-    print(f"\nCache: {cache_path()}  ({len([r for r in cache.values() if 'error' not in r])} scored)")
-
-
-if __name__ == "__main__":
-    main()
+        # RESUME by default: skip names already scored without error, so re-running the SAME
+        # command continues where a timed-out call left off (the ephemeral 45s sandbox wipes
+        # /dev/shm between calls but the cache persists on the mount).
+        pen

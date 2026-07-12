@@ -324,6 +324,26 @@ def refresh_part_a(ticker: str, inv_dir: str,
 # ACS recomputation
 # ---------------------------------------------------------------------------
 
+_FV_INPUTS_CACHE = {}
+
+
+def _fv_inputs_lib(inv_dir: str) -> dict:
+    """v2 (E2): load structured §10.2 fv_inputs per ticker from vci_fv_inputs.json (cached).
+    Enables the FV confidence interval + avoids the scalar-only manual-confirm for named candidates."""
+    p = os.path.join(inv_dir, "vci_fv_inputs.json")
+    if p in _FV_INPUTS_CACHE:
+        return _FV_INPUTS_CACHE[p]
+    lib = {}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        lib = {k: v for k, v in d.items() if not k.startswith("_") and isinstance(v, dict)}
+    except Exception:
+        lib = {}
+    _FV_INPUTS_CACHE[p] = lib
+    return lib
+
+
 def recompute_acs(fresh_part_a_data: dict, existing_entry: dict) -> tuple[int, str]:
     """
     Recompute total ACS from fresh Part A (ACS4, ACS8) and stored Part B dimensions.
@@ -528,61 +548,24 @@ def main():
             if fv_key in existing:
                 updated_entry[fv_key] = existing[fv_key]
 
-        updated_entries.append(updated_entry)
-
-    # Sort by rank
-    updated_entries.sort(key=lambda e: e["rank"])
-
-    # 3b. Drop names already held in the portfolio (suffix-insensitive). The md
-    #     still lists them until the next VCI run migrates them to the VCI
-    #     portfolio, so the monthly pre-run excludes them here every time.
-    def _base(t):
-        t = str(t or "").strip().upper()
-        return t.split(".")[0] if "." in t else t
-    held_base = set()
-    if args.portfolio_data and os.path.exists(args.portfolio_data):
-        try:
-            with open(args.portfolio_data, encoding="utf-8") as pf:
-                pdata = json.load(pf)
-            held_base = {_base(s.get("ticker", "")) for s in pdata.get("stocks", []) if s.get("ticker")}
-        except Exception as e:
-            print(f"  WARNING: could not read portfolio_data for held-check: {e}")
-    if held_base:
-        before = len(updated_entries)
-        dropped = [e["ticker"] for e in updated_entries if _base(e.get("ticker", "")) in held_base]
-        updated_entries = [e for e in updated_entries if _base(e.get("ticker", "")) not in held_base]
-        # re-rank contiguously after removal
-        for i, e in enumerate(sorted(updated_entries, key=lambda x: x["rank"]), 1):
-            e["rank"] = i
-        if dropped:
-            print(f"  Dropped {before - len(updated_entries)} held name(s) from VCI watchlist: {dropped}")
-
-    # 4. Write back to watchlist_tickers.json
-    if not args.dry_run:
-        wt["vci_watchlist"] = updated_entries
-        # Update meta
-        if "_meta" in wt:
-            wt["_meta"]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            wt["_meta"]["updated_by_run"] = "sync_vci_watchlist.py"
-        elif "_vci_watchlist_meta" in wt:
-            wt["_vci_watchlist_meta"]["last_sync"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        with open(args.watchlist_json, "w", encoding="utf-8") as f:
-            json.dump(wt, f, indent=2, ensure_ascii=False)
-        print(f"  VCI watchlist written: {len(updated_entries)} entries → {args.watchlist_json}")
-    else:
-        print(f"  [DRY RUN] Would write {len(updated_entries)} VCI entries to {args.watchlist_json}")
-
-    print("  ACS changes:")
-    for line in summary_lines:
-        print(line)
-
-    # Validate: all entries have acs_score
-    missing_acs = [e["ticker"] for e in updated_entries if not e.get("acs_score")]
-    if missing_acs:
-        print(f"  WARNING: acs_score missing for: {missing_acs}")
-    else:
-        print(f"  Validation: all {len(updated_entries)} entries have acs_score populated.")
-
-
-if __name__ == "__main__":
-    main()
+        # --- Forward-led VCI fields (§14.2) ------------------------------------------------
+        # Persist the §10 win-case FV inputs + deployability fields so monthly_isa_prerun.py
+        # Step 5 can RE-PRICE fv_asymmetry / VCI_Source_Score at the Saturday live price and
+        # re-rank (the recompute lives in the pre-run — sync just carries the raw inputs through).
+        # NB: the old ×1.40 stale-entry multiplier is DELETED (never re-add) — a stale entry is
+        # now surfaced as an asymmetry-below-floor flag at re-price time, not a price nudge.
+        # v2 (E2, LIVE): prefer structured §10.2 inputs from vci_fv_inputs.json (by ticker)
+        _fvrec = (_fv_inputs_lib(args.inv_dir).get(ticker)
+                  or _fv_inputs_lib(args.inv_dir).get(str(ticker).split(".")[0]) or {})
+        updated_entry["asset_structure"]         = _fvrec.get("asset_structure") or existing.get("asset_structure", "single_asset")
+        updated_entry["fv_inputs"]               = _fvrec.get("fv_inputs") or existing.get("fv_inputs", {})
+        # bottleneck FV per share in the entry currency == the win-case FV used for asymmetry
+        updated_entry["bottleneck_fv_per_share"] = fv_val if fv_val is not None else existing.get("bottleneck_fv_per_share")
+        updated_entry["fv_source"]               = existing.get("fv_source", "modeled" if fv_val is not None else "estimated")
+        # catalyst / monitoring inputs the re-price consumes (carried forward from the VCI run)
+        updated_entry["has_catalyst"]            = bool(existing.get("has_catalyst", catalyst))
+        updated_entry["days_to_catalyst"]        = existing.get("days_to_catalyst")
+        updated_entry["signal_count"]            = existing.get("signal_count", 0)
+        updated_entry["mgmt_unstable"]           = bool(existing.get("mgmt_unstable", False))
+        updated_entry["falls_on_beat"]           = bool(existing.get("falls_on_beat", False))
+        # last-known deployability (advisory; OVE

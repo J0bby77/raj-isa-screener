@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "purpose": "Seed p_thesis (success probability) and L (loss-on-failure) priors for the VCI probability-weighted floor (E1) and sleeve risk budget (E4). Read fresh each run; NEVER hand-set at decision time. Overridden per (band, structure) by vci_learning's p_by_band / L_by_structure once the calibration gate passes (>=12 resolved outcomes).",
+    "spec": "VCI_Framework_Enhancements_Implementation_Jul2026.md E1/E4",
+    "created": "2026-07-06",
+    "review_cadence": "annual, or when a category's evidence base shifts",
+    "confidence_flags": "sourced = published external data; reasoned = analyst prior pending a fuller sourced pass",
+    "sources": [
+      "Clinical development success rates by phase (2024): Phase 1 ~47%, Phase 2 ~28%, Phase 3 ~55%; Phase 2->3 transition ~34.5%; filed->approval ~92%; Phase 1 LOA ~6.7% (2014-2023). Norstella; Wong/Siah/Lo (Biostatistics 2019); BIO/Biomedtracker-lineage industry data.",
+      "Non-biotech categories: reasoned analyst priors. Web search (6-Jul-2026) confirmed semiconductor design-win->production-revenue CONVERSION rates are proprietary / not publicly quantified (design wins ~25% of industry value; timing risk noted; no public success-probability figure), so these remain first-principles reasoned: already-revenue names (revenue_scaling) get p 0.55-0.60 (past the binary), pre-revenue single-shot lower. Refine via the §13 learning loop once outcomes accrue."
+    ]
+  },
+
+  "p_thesis": {
+    "single_asset/phase2_biotech":     {"p": 0.28, "confidence": "sourced",  "note": "2024 Phase 2 success ~28%; the binary readout the sleeve typically bets on"},
+    "single_asset/phase3_biotech":     {"p": 0.55, "confidence": "sourced",  "note": "2024 Phase 3 success ~55%"},
+    "single_asset/regulatory_binary":  {"p": 0.75, "confidence": "reasoned", "note": "filed->approval ~92%, but pre-filing regulatory bets are riskier; conservative 0.75"},
+    "single_asset/product_launch":     {"p": 0.45, "confidence": "reasoned", "note": "single-product launch/adoption execution; refine with sector launch data"},
+    "single_asset/design_win_revenue": {"p": 0.50, "confidence": "reasoned", "note": "design-win -> production-revenue conversion for a single flagship program"},
+    "single_asset/revenue_scaling":    {"p": 0.55, "confidence": "reasoned", "note": "ALREADY generating revenue, single dominant product: past the binary; risk is growth magnitude not survival"},
+    "single_asset/_default":           {"p": 0.35, "confidence": "reasoned", "note": "generic single-shot binary"},
+
+    "platform/revenue_ramp":           {"p": 0.55, "confidence": "reasoned", "note": "multi-shot platform (>=3 independent programs or a revenue cushion) ramping; diversification lifts thesis-success above a single trial"},
+    "platform/regulatory":             {"p": 0.55, "confidence": "reasoned", "note": "platform with a regulatory catalyst but multiple shots on goal"},
+    "platform/partnership":            {"p": 0.58, "confidence": "reasoned", "note": "partner co-investment de-risks; platform breadth"},
+    "platform/design_win_revenue":     {"p": 0.58, "confidence": "reasoned", "note": "platform with multiple design wins converting"},
+    "platform/revenue_scaling":        {"p": 0.60, "confidence": "reasoned", "note": "ALREADY-revenue multi-product platform scaling (e.g. AI-connectivity semis): past the binary, diversified; risk is TAM-capture magnitude"},
+    "platform/_default":               {"p": 0.50, "confidence": "reasoned", "note": "generic platform / multi-shot"}
+  },
+
+  "L_by_structure": {
+    "single_asset": {"L": 0.60, "confidence": "reasoned", "note": "one-shot: 

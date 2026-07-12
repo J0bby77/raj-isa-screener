@@ -128,6 +128,63 @@ FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-
 # revisions 0.15 / deployability 0.10 / quality 0.05 / analyst 0.10 (higher-end, per Raj's call).
 SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}
 
+# --- VCI forward-led (Jul-2026) — VCI_Forward_Led_Framework_Implementation_Jul2026.md -------
+VCI_FV_ASYMMETRY_MIN_PLATFORM = 2.0     # §9.1 tiered floor — platform / multi-shot names
+VCI_FV_ASYMMETRY_MIN_SINGLE   = 2.5     # §9.1 tiered floor — single-asset / true-cliff names
+VCI_DEPLOY_THRESHOLD          = 75      # ACS quality floor (78 Exception Track handled by caller)
+VCI_MGMT_PENALTY              = 5.0     # F1
+VCI_STARTER_SIZE_PCT          = 1.0     # §9.2 full starter at ACS>=80
+VCI_STARTER_SIZE_PCT_MID      = 0.75    # §9.2 ACS 75-79
+VCI_HIGH_ACS                  = 80      # §9.2 "high" threshold for full 1.0%
+VCI_EXCEPTIONAL_SIZE_PCT      = 1.5     # §9.2 cap
+VCI_SOURCE_WEIGHTS = {"asymmetry": 0.30, "quality": 0.15, "catalyst": 0.25, "signals": 0.15, "revisions": 0.15}  # v2 (E8/E6): quality 0.30->0.15, revisions added; advisory/uncalibrated
+# ============================================================================================
+# VCI v2 ENHANCEMENT PACK (Jul-2026) — VCI_Framework_Enhancements_Implementation_Jul2026.md
+# All default to FWDVCI-equivalent behaviour until each flag is flipped at the P6 calibration step.
+# ============================================================================================
+# E1 — probability-weighted floor (p·L), horizon-aware hurdle
+VCI_FLOOR_MODE             = "derived" # FLIPPED LIVE 6-Jul-2026 (Raj) — probability-weighted floor active; rollback: "fixed"
+VCI_REQUIRED_ANNUAL_RETURN = 0.14      # Raj's stock hurdle (RESOLVED 6-Jul); ADJUST yearly to portfolio needs
+VCI_FLOOR_MAX              = 4.0       # applied_floor = clamp(max(A_min, fixed tier), fixed, 4.0)
+# p_thesis / L priors live in vci_base_rates.json (authoritative, sourced); these are inert fallbacks:
+VCI_P_THESIS_PRIORS        = {"platform/_default": 0.50, "single_asset/_default": 0.35}
+VCI_L_PRIORS               = {"platform": 0.35, "single_asset": 0.60}
+# E2 — bottleneck-FV hardening. FLIPPED LIVE 6-Jul-2026 (Raj). Structured §10.2 fv_inputs flow from
+# vci_fv_inputs.json (loaded by the VCI run + sync); a name WITHOUT structured inputs correctly
+# falls to manual-confirm (intended discipline). Eligibility now uses the conservative P25 asymmetry
+# (quadrature CI, ~23% haircut). Rollback: VCI_FV_REQUIRE_STRUCTURED=False, VCI_ASYM_ELIG_PCTILE="p50".
+VCI_FV_REQUIRE_STRUCTURED  = True     # LIVE (rollback: False)
+VCI_FV_CROSSCHECK_MAXDEV   = 0.40
+VCI_FV_CI_DELTAS           = {"capture_share": 0.30, "exit_multiple": 0.25}   # per-input 1-SIGMA fractional uncertainty
+VCI_FV_CI_Z                = 0.6745   # z-score for the P25/P75 percentile (combined in quadrature; softer than the old both-worst-case rule)
+VCI_ASYM_ELIG_PCTILE       = "p25"    # LIVE — conservative P25 eligibility (rollback: "p50")
+# E4 — sleeve-level binary risk budget (replaces the count cap as primary control)
+VCI_SLEEVE_BINARY_RISK_BUDGET = 1.5   # % ISA expected-loss across open+proposed binaries (None disables)
+VCI_BINARY_CORR_RIDER         = 1.5   # shared catalyst-domain risk inflation
+VCI_BINARY_MAX_CONCURRENT     = 3     # loosened secondary guard; budget is primary
+# E5 — liquidity-aware eligibility & sizing. FLIPPED LIVE 6-Jul-2026 (Raj). Min-ADV gate armed;
+# inert until adv_usd is supplied to evaluate_candidate (None -> gate skipped), so it bites only once
+# ADV data flows. Rollback: 0.
+VCI_MIN_ADV_USD    = 1_000_000         # LIVE — below -> manual (rollback: 0)
+VCI_MAX_PCT_ADV    = 0.10             # position value <= 10% of ADV
+VCI_MAX_SPREAD_BPS = 100
+# E7 — asymmetry-compression cause split
+VCI_FV_EROSION_THRESHOLD = 0.15       # FV revised down >15% run-over-run = thesis erosion (not harvest)
+VCI_RANK_MODE                 = "advisory"          # §11.6
+VCI_BINARY_MAX_CONCURRENT     = 2                    # §9.4
+VCI_BINARY_CORRELATION_RIDER  = True                 # §9.4
+VCI_ENTRY_LEVEL_DISPLAY_ONLY  = True                 # §8 rollback flag
+import os as _os  # stdlib-only; keeps the "no heavy imports" guarantee
+# §13 — the learning module writes vci_calibration_state.json beside the scripts; vci_source_score
+# .load_weights() reads it and switches to calibrated weights ONLY once calibration_gate_passed.
+# Until the file exists the getattr-default (None) path is inert, so this is safe to set now.
+VCI_CALIBRATION_STATE_PATH    = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                              "vci_calibration_state.json")
+VCI_LEARNING_STORE_PATH       = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                              "vci_learning_store.json")
+VCI_CALIBRATION_CHANGELOG_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                              "vci_calibration_changelog.json")
+
 # SUMMARY tab selection (forward-led). Legacy fixed-total v27 rule retired (source_score.summary_eligible
 # & est-rev not deteriorating & Part B>=14). When True: top-N by a forward-led SCREEN Source Score (no
 # deployability/entry data at screen time), multi-door eligibility (viability Part A>=14 + Part B>=14 +
@@ -210,71 +267,4 @@ APS_REALLOC_BONUS      = 10.0   # opportunity-cost bonus added to a TRIM's APS w
 # from the screens AGES OUT after POOL_AGEOUT_MONTHS without re-confirmation (time-based — replaces the
 # old score_history-LENGTH staleness, which could freeze a <3-history name on a stale score forever).
 # Decay (not instant drop) protects Regime-3 reversal names that legitimately skip one month's screen.
-# DEFAULT False = current carry-forward behaviour (4-Jul pre-run byte-for-byte unchanged); flip True
-# (or pass --fluid-pool) to ACTIVATE the fluid pool.
-# ===========================================================================
-FLUID_POOL_DECAY      = True
-POOL_AGEOUT_MONTHS    = 3        # months without re-confirmation in the screens -> drop (~90d age-out)
-POOL_DECAY_PENALTY    = 5.0      # normalised-score penalty per month-since-confirmed (stale ranks below fresh)
-
-# ===========================================================================
-# VCI  (vci_acs_scorer.py — ACS /100). Deployment thresholds
-# Analyst rating buckets treated as a positive ("strong") signal. Centralised here so
-# normalise_adapter (_cfg.STRONG_RATINGS) and fetch_watchlist_metrics share one source of
-# truth — previously only defined locally in those modules, which left _cfg.STRONG_RATINGS
-# undefined and broke the rerank membership-refresh under the activated forward path (S5).
-STRONG_RATINGS = {"strongbuy", "strong buy", "buy"}
-
-# S5 go-live: VCI F1-F4 final-layer gates ON (was getattr-default False)
-VCI_FINAL_LAYER_GATES = True
-
-# ── Forward Axis re-weighting (Jun-26) ─────────────────────────────────────────
-# REVISION_RUNWAY_CAP: cap journey-stage runway at 1 unless est-rev direction is "Improving".
-REVISION_RUNWAY_CAP        = True
-# FORWARD_AXIS_BUCKETED: weight the forward axis by independent dimension (estimates / margin /
-# price) instead of equal-per-signal, so the 4 correlated estimate-revision signals can't swamp
-# price momentum. False => legacy equal-per-signal (kept only for backtest comparison).
-FORWARD_AXIS_BUCKETED      = True
-# Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
-# but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
-FORWARD_AXIS_BUCKET_WEIGHTS = {"margin": 0.30, "price": 0.70}   # Jul-26 Part 2: forward axis = price+margin ONLY;
-#   estimate-revision signals pulled OUT into a separate revisions_score (SOURCE_WEIGHTS["revisions"]=0.15)
-
-# Price-momentum window (Jun-26 backtest): 12-1 month = 252-day window ending ~21 trading days ago.
-# 63-day (one-quarter) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
-PRICE_MOM_LOOKBACK         = 252
-PRICE_MOM_SKIP             = 21
-
-# SUMMARY forward-runway gate (Jul-26): exclude estimate-cycle stages with no forward runway from the
-# SUMMARY candidate pool (the pre-run deployment funnel). Igniting/Accelerating/Sustained/Early-unconfirmed
-# (runway>=1) qualify; Maturing/Rolling over/Flat-Down/Marginal (runway 0/None) are excluded. Stage=None
-# (missing estimate data) is NOT excluded (ranks low via forward axis). Price still RANKS the eligible names.
-SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]
-
-# SUMMARY source-score floor (Jul-26): a SUMMARY/candidate name must clear this Source Score to be a
-# genuine capital opportunity (the count-based top-N won't backfill with weak names). Excludes the
-# low-source tail (e.g. ADBE ~48). Screen-source scale (0.75 fwd / 0.05 quality / 0.20 valuation).
-SUMMARY_SOURCE_FLOOR = 70.0
-
-# ===========================================================================
-# JUL-26 FORWARD-LED CALIBRATION (implementation plan ISA_Forward_Calibration_..._Jul2026.md)
-# Authoritative parameter set (§0.5). SOURCE_WEIGHTS + FORWARD_AXIS_BUCKET_WEIGHTS + SUMMARY_SOURCE_FLOOR
-# are set inline above; the remaining structural constants live here.
-# ===========================================================================
-# Part 4 — relax the SUMMARY/candidate Part B hard gate from 14 -> 10 (balance-sheet risk is still
-# protected by the separate ND/EBITDA MANDATORY_MINIMUM_FAIL gate). Used by source_score.summary_eligible.
-SUMMARY_PART_B_FLOOR      = 10
-
-# Part 3 — deployability entry-weight rework (backtested: penalising a stock for having run is backwards).
-# Gentler, floored decay so extended momentum winners keep deployability.
-DEPLOY_ENTRY_DECAY        = 0.50      # was 0.25 (steeper)
-DEPLOY_ENTRY_FLOOR        = 0.50      # entry-weight floor (was ~0)
-
-# Part 7 — held-stock upgrade / replacement test. A middling HOLD (floor<=source<bar) is reclassified
-# TRIM (sell-to-upgrade) when the best eligible candidate's Source beats it by >= this margin.
-UPGRADE_DELTA             = 15
-
-# Part 8 — sleeve sector / theme concentration caps (netted against fund look-through) + diversification.
-SLEEVE_SECTOR_CAP_ISA     = 0.12      # max one GICS sector across direct stocks (share of ISA)
-SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
-DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by
+# DEFAULT False = current carry-forward behaviour (4
