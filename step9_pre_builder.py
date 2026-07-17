@@ -34,6 +34,18 @@ try:
     import deployment_flags as _dflags
 except Exception:
     _dflags = None
+try:
+    import scoring_config as _cfg      # Fix Pack P2 — gate flags (T1_QUALIFICATION_MODE etc.)
+except Exception:
+    _cfg = None
+try:
+    import t1_gates as _t1             # Fix Pack A2/A3/A4/A5/A15 — THE T1 qualification gate set
+except Exception:
+    _t1 = None
+try:
+    import expected_return as _er      # Fix Pack A2 — E[r] fallback compute (rerank normally stamps it)
+except Exception:
+    _er = None
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +751,47 @@ def main():
             "judgment_gates_pending": list(_dflags.JUDGMENT_GATES) if _dflags else [],
         }
 
+        # ── Fix Pack P2 (A2/A3/A5/A15): first-class gate fields on EVERY record. The
+        # "revision_stage:X" flag-string is retired (deployment_flags); stage/E[r]/persistence
+        # are data columns the review reads directly. rerank stamps them on wt entries; the
+        # scored row is the fallback so candidate-pool names not touched by rerank still carry
+        # the anatomy (shadow-before-blocking, invariant 1).
+        _er_val = wt_entry.get("expected_return_12_24m")
+        _er_conf = wt_entry.get("er_confidence")
+        _er_basis = wt_entry.get("er_basis")
+        if _er_val is None and _er is not None:
+            try:
+                _erd = _er.expected_return_for_row(ts)
+                _er_val, _er_conf, _er_basis = (_erd.get("expected_return_12_24m"),
+                                                _erd.get("er_confidence"), _erd.get("er_basis"))
+            except Exception:
+                pass
+        base_record.update({
+            "revision_stage":         wt_entry.get("revision_stage") or ts.get("revision_stage"),
+            "expected_return_12_24m": _er_val,
+            "er_confidence":          _er_conf,
+            "er_basis":               _er_basis,
+            "first_seen":             wt_entry.get("first_seen"),
+            "cycles_seen":            wt_entry.get("cycles_seen"),
+        })
+        _t1_detail = None
+        if _t1 is not None:
+            _ev_entry = {**wt_entry, **base_record}
+            _t1_detail = wt_entry.get("t1_gate_detail") or _t1.evaluate(_ev_entry, ts)
+            base_record.update({
+                "t1_qualified":    bool(wt_entry.get("t1_qualified")
+                                        if wt_entry.get("t1_qualified") is not None
+                                        else _t1_detail["t1_qualified"]),
+                "stage_gate":      _t1_detail["stage_gate"],
+                "late_cycle_flag": _t1_detail["late_cycle_flag"],
+                # A5 v3 (D18/D19): evidence-based SIZING — 'full' needs Step-10 conviction >= 75
+                # on top; 'starter' caps at STARTER_SIZE_CAP_PCT with a recorded scale-up trigger
+                "evidence_confirmed": _t1_detail.get("evidence_confirmed"),
+                "size_mode":          _t1_detail.get("size_mode"),
+                "screen_sightings":   _t1_detail.get("screen_sightings"),
+                "t1_gate_detail":  _t1_detail,
+            })
+
         # Determine kind from scored data
         scored_kind = ts.get("_kind", "unknown")
 
@@ -808,8 +861,13 @@ def main():
 
         elif scored_kind == "candidate_pool":
             # Candidate pool entry: tier by Source Score rank band (forward-led), 7 dims
-            tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
-                                    normalised_score=wt_entry.get("normalised_score"))
+            # Fix Pack A4 (P2): T1 = QUALIFICATION, not rank band, when the gate flips.
+            # Legacy rank-band tiering is the rollback path (T1_QUALIFICATION_MODE=False).
+            if _t1 is not None and _cfg is not None and getattr(_cfg, "T1_QUALIFICATION_MODE", False):
+                tier = _t1.tier_for({**wt_entry, **base_record}, ts, detail=_t1_detail)
+            else:
+                tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
+                                        normalised_score=wt_entry.get("normalised_score"))
             if tier == "T1":
                 dim_data = compute_7_dimensions(ticker, ts, wt_entry, pct_vs_entry=pct_vs_entry)
                 pool_record = {
@@ -875,8 +933,13 @@ def main():
 
         else:
             # Main watchlist
-            tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
-                                    normalised_score=wt_entry.get("normalised_score"))
+            # Fix Pack A4 (P2): T1 = QUALIFICATION, not rank band, when the gate flips.
+            # Legacy rank-band tiering is the rollback path (T1_QUALIFICATION_MODE=False).
+            if _t1 is not None and _cfg is not None and getattr(_cfg, "T1_QUALIFICATION_MODE", False):
+                tier = _t1.tier_for({**wt_entry, **base_record}, ts, detail=_t1_detail)
+            else:
+                tier = assign_main_tier(wt_entry.get("source_score"), _T1_CUT, _T2_CUT,
+                                        normalised_score=wt_entry.get("normalised_score"))
             if tier == "T1":
                 dim_data = compute_7_dimensions(ticker, ts, wt_entry, pct_vs_entry=pct_vs_entry)
                 t1_record = {
@@ -940,9 +1003,17 @@ def main():
                 }
                 main_t3.append(t3_record)
 
-    # Sort main watchlist by rank
-    for lst in (main_t1, main_t2, main_t3):
-        lst.sort(key=lambda e: e.get("rank", 99))
+    # Sort main watchlist by rank. Fix Pack A4 (P2): in qualification mode the attention order
+    # WITHIN each tier is the unified deploy Source Score desc (the D-tiebreak; Step 10.1 writes
+    # abbreviated cases for ALL T1, capped at 5 in this order). Legacy: watchlist rank.
+    if _cfg is not None and getattr(_cfg, "T1_QUALIFICATION_MODE", False):
+        for lst in (main_t1, main_t2, main_t3):
+            lst.sort(key=lambda e: (-(e.get("source_score") or 0),
+                                     -(e.get("normalised_score") or 0),
+                                     str(e.get("ticker", ""))))
+    else:
+        for lst in (main_t1, main_t2, main_t3):
+            lst.sort(key=lambda e: e.get("rank", 99))
     # Forward-led (§14.6): VCI tiers order by VCI_Source_Score DESC (deployability), not ACS/rank.
     # A lower-ACS/higher-forward name therefore ranks ABOVE a higher-ACS name inside the tier.
     # Deterministic tiebreak: ACS desc, then ticker. Missing score sorts last.

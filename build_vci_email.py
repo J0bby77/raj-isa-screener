@@ -121,7 +121,12 @@ def build_e0(data):
     n_scored = se(str(data.get('n_scored', 0)))
     sleeve_val = data.get('sleeve_value_gbp', 0)
     sleeve_pct = data.get('sleeve_pct', 0.0)
-    sleeve_str = se(f'&pound;{sleeve_val:,.0f} ({sleeve_pct:.1f}% of ISA)') if sleeve_val else se('&pound;0 (no open positions)')
+    if data.get('sleeve_status'):
+        sleeve_str = se(str(data['sleeve_status']))
+    elif sleeve_val:
+        sleeve_str = se(f'&pound;{sleeve_val:,.0f} ({sleeve_pct:.1f}% of ISA)')
+    else:
+        sleeve_str = se('&pound;0 (no open positions)')
 
     return (
         f'<div style="background:#1a1a2e;padding:16px 24px;border-radius:6px 6px 0 0;">'
@@ -235,6 +240,17 @@ def build_e2(data):
             _flags += ' ~'
         if c.get('asymmetry_compression_cause') == 'fv_down':
             _flags += ' &darr;FV'
+        # E6: revision velocity badge (only shown when meaningfully up/down; neutral 0.5 = no badge)
+        _rv = c.get('revision_velocity')
+        if _rv is not None:
+            try:
+                _rvf = float(_rv)
+                if _rvf >= 0.7:
+                    _flags += ' &uarr;Rev'
+                elif _rvf <= 0.3:
+                    _flags += ' &darr;Rev'
+            except (TypeError, ValueError):
+                pass
         cat_d = c.get('days_to_catalyst')
         cat_txt = se(str(cat_d)) if cat_d not in (None, '') else '&mdash;'
         # v2 (E2): show the conservative P25 asymmetry when available (the eligibility basis)
@@ -262,12 +278,18 @@ def build_e2(data):
         'Ranked by <b>VCI Source Score</b> (deployability, live-price); ACS is the quality floor. '
         'fv&nbsp;asym = bottleneck FV &divide; price (conservative P25 when available). '
         'Floor = applied bar (2.0&times; platform / 2.5&times; single-asset; <sup>d</sup> = probability-weighted, E1). '
-        'Deploy flags: &#9888; FV cross-check, ~ liquidity-capped, &darr;FV thesis-erosion. '
+        'Deploy flags: &#9888; FV cross-check, ~ liquidity-capped, &darr;FV thesis-erosion, '
+        '&uarr;Rev/&darr;Rev estimate-revision velocity. '
         'Entry levels are display-only (watchlist file). '
         'ACS colour: <span style="background:#fff5f5;padding:1px 4px;">&ge;85 NVIDIA-class</span>&nbsp;'
         '<span style="background:#fffbeb;padding:1px 4px;">75&ndash;84 High</span>&nbsp;'
         '<span style="background:#fefce8;padding:1px 4px;">60&ndash;74 Moderate</span>&nbsp;'
         '<span style="background:#ffffff;padding:1px 4px;border:1px solid #e5e7eb;">45&ndash;59 Early</span>'
+        '</p>\n'
+        '<p style="font-family:Arial,sans-serif;font-size:10px;color:#9ca3af;margin:2px 0 0;">'
+        'Source Score weights (advisory, 5-term): asymmetry 30% / quality 15% '
+        '(ACS <i>ex-asymmetry</i> &mdash; ACS8 removed &amp; neutral-recentred, so upside-to-FV is not '
+        'double-counted against the asymmetry term) / catalyst 25% / signals 15% / revisions 15%.'
         '</p>\n'
     )
 
@@ -401,8 +423,8 @@ def build_e4(data):
         rows_html += (
             f'<tr>'
             f'<td style="{td}font-weight:bold;">{se(pos.get("ticker", ""))}</td>'
-            f'<td style="{td}">&#163;{se(str(pos.get("entry_price", "")))}</td>'
-            f'<td style="{td}">&#163;{se(str(pos.get("current_price", "")))}</td>'
+            f'<td style="{td}">{se(str(pos.get("entry_price", "")))}</td>'
+            f'<td style="{td}">{se(str(pos.get("current_price", "")))}</td>'
             f'<td style="{td}font-weight:bold;color:{gain_colour};">{gain_str}</td>'
             f'<td style="{td}text-align:left;font-weight:bold;color:{thesis_colour};">{se(thesis)}</td>'
             f'<td style="{td}{milestone_style}text-align:left;">{se(milestone)}</td>'

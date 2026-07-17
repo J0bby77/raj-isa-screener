@@ -38,6 +38,11 @@ from __future__ import annotations
 import argparse, json, sys, os
 from datetime import datetime, date
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fv_composite as _fvc   # Fix Pack A6 (12-Jul-26): FV composite EXTRACTED to the shared
+                              # module — screen + pre-run use ONE implementation. This file
+                              # delegates; the maths lives in fv_composite.py only.
+
 TODAY = date.today().isoformat()
 
 # --- classification ---------------------------------------------------------
@@ -52,46 +57,15 @@ REQUIRED_UPSIDE = {
 # technical volatility buffer by realised-vol profile
 VOL_BUFFER = {"low": 0.04, "normal": 0.07, "high": 0.14, "unknown": 0.07}
 
-SEMI_BUCKETS = {"semiconductor_equipment", "semiconductor_fabless", "semiconductor_hardware"}
-RATIO_LO, RATIO_HI = 0.2, 5.0          # sane own-multiple ratio band (guardrail)
+SEMI_BUCKETS = _fvc.SEMI_BUCKETS                 # moved to fv_composite (A6) — aliases kept
+RATIO_LO, RATIO_HI = _fvc.RATIO_LO, _fvc.RATIO_HI
 REFRESH_AGE_DAYS = 92                    # ~3 months
 
 
-# Sector/industry keyword fallback used ONLY when sector_bucket is missing — so a name is
-# never silently mislabelled as a quality-compounder ("SaaS default", retro item 6).
-_SECTOR_TYPE_KEYWORDS = [
-    ("energy",             ("oil", "gas", " energy", "petroleum", "drilling", "coal", "lng", "midstream")),
-    ("healthcare",         ("health", "biotech", "pharma", "medical", "life science", "drug")),
-    ("cyclical",           ("semiconductor", "chip", "auto", "mining", "metals", "materials", "machinery")),
-    ("quality_compounder", ("software", "saas", "internet content", "application software", "it services")),
-]
-
-
 def classify_stock_type_detail(t: dict) -> dict:
-    """Robust sector_type classification (retro item 6 fix). Prefers the explicit
-    sector_bucket; when that is absent, infers from sector/industry KEYWORDS rather than
-    silently defaulting to a quality compounder. Returns
-    {sector_type, sector_type_inferred, sector_type_basis}."""
-    pipeline = (t.get("_source_pipeline") or t.get("source_pipeline") or "growth_stock")
-    bucket   = (t.get("sector_bucket") or "").strip().lower()
-    sector   = (t.get("sector") or "")
-    industry = (t.get("industry") or "")
-    if pipeline == "energy":
-        return {"sector_type": "energy", "sector_type_inferred": False, "sector_type_basis": "pipeline=energy"}
-    if bucket in SEMI_BUCKETS:
-        return {"sector_type": "cyclical", "sector_type_inferred": False, "sector_type_basis": f"bucket={bucket}"}
-    if bucket == "software_saas":
-        return {"sector_type": "quality_compounder", "sector_type_inferred": False, "sector_type_basis": "bucket=software_saas"}
-    if sector == "Healthcare":
-        return {"sector_type": "healthcare", "sector_type_inferred": False, "sector_type_basis": "sector=Healthcare"}
-    hay = f" {sector} {industry} ".lower()
-    if hay.strip():
-        for stype, kws in _SECTOR_TYPE_KEYWORDS:
-            if any(k in hay for k in kws):
-                return {"sector_type": stype, "sector_type_inferred": True,
-                        "sector_type_basis": f"inferred from '{sector}/{industry}'"}
-    return {"sector_type": "normal_growth", "sector_type_inferred": True,
-            "sector_type_basis": "default normal_growth (no sector signal — NOT SaaS)"}
+    """Robust sector_type classification (retro item 6 fix). SINGLE implementation now lives
+    in fv_composite.classify_stock_type_detail (Fix Pack A6) — this delegates."""
+    return _fvc.classify_stock_type_detail(t)
 
 
 def classify_stock_type(t: dict) -> str:
@@ -115,37 +89,12 @@ def _own_fair_value(t: dict, stock_type: str):
     """
     Reconstruct fair value from the stock's own 3yr-average multiple.
     Returns (fv_own | None, metric_used | None, ratio | None).
-    Metric preference is path-appropriate; misleading metrics are skipped.
+    SINGLE implementation now lives in fv_composite.own_fair_value (Fix Pack A6) — delegates.
     """
-    price = _num(t.get("current_price"))
-    if not price:
-        return None, None, None
-
-    pe_avg, pe_cur   = _num(t.get("val_hist_pe_3yr_avg")),  _num(t.get("val_hist_current_pe"))
-    pf_avg, pf_cur   = _num(t.get("val_hist_pfcf_3yr_avg")), _num(t.get("val_hist_current_pfcf"))
-
-    def ratio_ok(a, c):
-        return a and c and a > 0 and c > 0 and RATIO_LO < (a / c) < RATIO_HI
-
-    # preference order of (label, avg, cur)
-    if stock_type in ("quality_compounder", "energy", "cyclical", "healthcare"):
-        order = [("P/FCF", pf_avg, pf_cur), ("P/E", pe_avg, pe_cur)]
-    else:  # normal_growth / default
-        order = [("P/E", pe_avg, pe_cur), ("P/FCF", pf_avg, pf_cur)]
-    # cyclicals: never trust fwd P/E history as primary -> only P/FCF counts
-    if stock_type == "cyclical":
-        order = [("P/FCF", pf_avg, pf_cur)]
-
-    for label, a, c in order:
-        if ratio_ok(a, c):
-            r = a / c
-            fv = price * r
-            # clamp to a plausible band. 1.7x ceiling = max ~70% upside from the
-            # own-multiple anchor; prevents de-rated / no-analyst names producing
-            # fake 2-3x "upside" once the analyst cap is relaxed.
-            fv = max(price * 0.3, min(price * 1.7, fv))
-            return round(fv, 2), label, round(r, 3)
-    return None, None, None
+    return _fvc.own_fair_value(t.get("current_price"),
+                               pe_avg=t.get("val_hist_pe_3yr_avg"), pe_cur=t.get("val_hist_current_pe"),
+                               pfcf_avg=t.get("val_hist_pfcf_3yr_avg"), pfcf_cur=t.get("val_hist_current_pfcf"),
+                               stock_type=stock_type)
 
 
 def build_entry_for_ticker(t: dict, existing: dict) -> dict:
@@ -189,23 +138,13 @@ def build_entry_for_ticker(t: dict, existing: dict) -> dict:
     analysts_lagging = bool(analyst and price and price > analyst) or _dir == "up" or (_up > _dn)
 
     # base_fv hybrid: own-multiple primary; analyst is a CAP only when analysts are
-    # NOT lagging. When they ARE lagging, the stale target must not suppress upside.
-    if fv_own and analyst:
-        if analysts_lagging:
-            base_fv = fv_own
-            fv_basis = f"own {fv_metric} {fv_own} (analyst cap relaxed -- analysts lagging)"
-        else:
-            base_fv = min(fv_own, analyst)
-            fv_basis = f"min(own {fv_metric} {fv_own}, analyst {round(analyst,2)})"
-    elif fv_own:
-        base_fv = fv_own
-        fv_basis = f"own {fv_metric} {fv_own} (no analyst cap)"
-    elif analyst:
-        base_fv = analyst
-        fv_basis = f"analyst target {round(analyst,2)} (no usable own multiple)"
-    else:
-        base_fv = None
-        fv_basis = "no fair value (own multiple unusable, no analyst coverage)"
+    # NOT lagging. SINGLE implementation in fv_composite.compose_fv (Fix Pack A6) — delegates.
+    # apply_consensus_cap=False preserves this builder's historic base_fv exactly: the
+    # consensus sanity-cap is applied downstream at ranking time (rerank / unified source),
+    # not to the stored entry-level anchor. (P2 A6-prerun may revisit.)
+    _comp = _fvc.compose_fv(price, fv_own=fv_own, fv_metric=fv_metric, analyst_target=analyst,
+                            analysts_lagging=analysts_lagging, apply_consensus_cap=False)
+    base_fv, fv_basis = _comp["fair_value"], _comp["fv_basis"]
 
     return_hurdle = round(base_fv / (1 + req_up), 2) if base_fv else None
     valuation     = fv_own if fv_own else None

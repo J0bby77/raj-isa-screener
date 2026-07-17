@@ -387,6 +387,15 @@ def build_legend():
     for i, (num, cat, defn) in enumerate(cat_rows):
         html += table_row([num, f"<strong>{cat}</strong>", defn], last=(i == len(cat_rows) - 1))
     html += table_end()
+    # Fix Pack P5-T3 (P2): the three scores and what each governs
+    html += (
+        f'<p style="font-size:11px;color:{C["text_muted"]};margin:10px 0 0 0;'
+        f'font-family:Arial,sans-serif"><strong>Ranking is by SOURCE SCORE</strong> '
+        f'(0&ndash;100, unified screen=deploy &mdash; orders the watchlist and the deployment '
+        f'stack). <strong>Conviction</strong> (bands above) = decision readiness, secondary. '
+        f'<strong>ACS</strong> = asymmetric-sleeve (VCI) track &mdash; its own table and rank. '
+        f'Entry levels are display-only (&ldquo;Target buy&rdquo;) and never reorder anything.</p>\n'
+    )
     html += "</div>\n"
     return html
 
@@ -464,6 +473,11 @@ def build_s2(data):
     if d.get("notes"):
         inner += para(se(d["notes"]), muted=True)
 
+    # Fix Pack P2: computed standing lines — B5 trajectory (A19 anchor), B1 drawdown ladder,
+    # A21 paused-S/O policy. Rendered verbatim; email_prefill computes them.
+    for _line in d.get("standing_lines", []):
+        inner += para(f'<strong>&#9656;</strong> {se(_line)}', small=True)
+
     return inner
 
 
@@ -539,7 +553,11 @@ def build_s4(data):
                 f'<span style="color:{gl_colour}">{gl}</span>',
                 pill(item.get("action", "—"), pill_map.get(action_type, "sell")),
                 se(item.get("earliest_sale", "—")),
-                se(item.get("reason", "—")),
+                # P7d: a closed position with a blank/TBC reason renders "reason UNBACKFILLED"
+                # — never "reconciled and closed" (fold the reason from the trades log).
+                (f'<span style="color:{C["red"]};font-weight:600">reason UNBACKFILLED</span>'
+                 if str(item.get("reason") or "").strip() in ("", "—", "-", "TBC", "tbc", "N/A")
+                 else se(item.get("reason"))),
             ], last=(i == len(items) - 1))
         inner += table_end()
     else:
@@ -560,21 +578,34 @@ def build_s5(data):
     if items:
         score_colours = {"high": C["green"], "medium": C["amber"], "low": C["text_muted"]}
         status_pills  = {"buy": "buy", "hold": "hold", "watchlist": "grey", "monitor": "mon", "sell": "sell"}
-        inner += table_start(["#", "Ticker", "Company", "Score", "Sector", "Entry Level", "Status"])
+        # Fix Pack P2 (P5/P7b + A2/A3): PRIMARY column = Src (unified Source Score — the metric
+        # that orders the list, monotonically non-increasing); Conv is secondary; ONE verdict
+        # per row (t1_qualified-driven) — a deploy badge can never contradict the status text.
+        inner += table_start(["#", "Ticker", "Company", "Src", "E[r]", "Stage", "Conv",
+                              "Sector", "Target buy (display)", "Verdict"],
+                             ["3%", "7%", "16%", "6%", "6%", "9%", "5%", "12%", "12%", "24%"])
         for i, item in enumerate(items):
             sc = item.get("score_level", "normal")
             sc_col = score_colours.get(sc, C["text"])
             sk = item.get("status_type", "watchlist")
+            _src = item.get("source_score", "—")
+            _src_txt = (f"{_src:.0f}" if isinstance(_src, (int, float)) else se(str(_src)))
+            _verdict = item.get("deploy_verdict") or item.get("status", "—")
             inner += table_row([
                 se(str(item.get("rank", i + 1))),
                 f'<strong>{se(item.get("ticker",""))}</strong>',
                 se(item.get("name", "—")),
-                f'<span style="color:{sc_col}">{se(item.get("score","—"))}</span>',
+                f'<strong>{_src_txt}</strong>',
+                se(str(item.get("expected_return_12_24m", "—"))),
+                se(str(item.get("revision_stage") or "—")),
+                f'<span style="color:{sc_col}">{se(str(item.get("conviction", item.get("score", "—"))))}</span>',
                 se(item.get("sector", "—")),
                 se(item.get("entry_level", "—")),
-                pill(item.get("status", "—"), status_pills.get(sk, "grey")),
+                pill(_verdict, status_pills.get(sk, "grey")),
             ], last=(i == len(items) - 1))
         inner += table_end()
+        if d.get("legend"):
+            inner += para(se(d["legend"]), muted=True, small=True)
 
     # --- Asymmetric Sleeve (VCI) — dedicated forward-led table (FWDVCI §14.8: its OWN ranked table,
     #     NOT interleaved with the growth watchlist). Sourced from step9_pre vci pass-through, filled
@@ -644,6 +675,13 @@ def build_s6(data):
     """Section 6 — Portfolio Snapshot"""
     d = data.get("s6_portfolio_snapshot", {})
     inner = ""
+    # B3 (P2): AI-complex factor look-through — computed line, coverage-honest
+    if d.get("factor_line"):
+        _fcol = C["red"] if "BREACH" in str(d["factor_line"]) else C["green"]
+        inner += para(f'<strong style="color:{_fcol}">{se(d["factor_line"])}</strong>')
+        if d.get("factor_unclassified"):
+            inner += para(f'B3: unclassified names need a factor_map entry: '
+                          f'{se(str(d["factor_unclassified"]))}', muted=True, small=True)
 
     inner += kpi_row(d.get("kpis", []))
 
@@ -725,6 +763,15 @@ def build_s7(data):
     if d.get("notes"):
         inner += para(se(d["notes"]))
 
+    # Fix Pack A14 (P2): VUAG counterfactual line + D6 probation rule
+    _cf = d.get("vuag_counterfactual") or {}
+    if _cf:
+        _line = _cf.get("line") or f'Sleeve vs VUAG counterfactual: {_cf.get("status", "—")}'
+        _col = C["red"] if (_cf.get("sleeve_vs_vuag_pp") or 0) < 0 else C["green"]
+        inner += para(f'<strong style="color:{_col}">{se(_line)}</strong>')
+    if d.get("probation_rule"):
+        inner += para(se(d["probation_rule"]), muted=True, small=True)
+
     return inner
 
 
@@ -746,7 +793,7 @@ def build_s8(data):
         inner += table_start([
             "Fund", "Value (&pound;)", "Wt %",
             "1yr %", "&#9733; MS",
-            "Bucket", "Target", "Drift", "Band",
+            "Bucket", "Target %<br/>(of ISA)", "Drift", "Band",   # D17/P7e: % of TOTAL ISA
             "Est. Ret.", "Signal", "Status"
         ], [
             "20%", "7%", "6%", "6%", "5%",
@@ -792,12 +839,22 @@ def build_s8(data):
         sc = s8a.get("section_c", {})
 
         if sa:
-            col_a = C["green"] if sa.get("result") == "PASS" else C["red"]
+            # Fix Pack A11/D8 (P2): banded verdict — PASS / INCONCLUSIVE / FAIL (anchor-derived
+            # bands, A19); INCONCLUSIVE needs 2 consecutive months before the Research trigger.
+            _res = str(sa.get("result", ""))
+            col_a = (C["green"] if _res == "PASS"
+                     else C["amber"] if _res.upper().startswith("INCONCL")
+                     else C["red"] if _res == "FAIL" else C["text_muted"])
+            _bands = sa.get("bands_note") or "D8 bands, anchor-derived (A19)"
             inner += para(
                 f'<strong>Section A &mdash; Fund sleeve weighted avg return:</strong> '
-                f'<span style="color:{col_a}">{se(sa.get("result",""))} '
-                f'({se(sa.get("value",""))})</span> vs 12% threshold'
+                f'<span style="color:{col_a}">{se(_res)} '
+                f'({se(sa.get("value",""))})</span> vs {se(_bands)}'
             )
+            if str(sa.get("fund_cache_status", "")).upper() == "DEGRADED":
+                inner += para(f'<strong style="color:{C["red"]}">&#9888; fund_cache_status = '
+                              f'DEGRADED</strong> &mdash; Section A/C are LOW-CONFIDENCE until '
+                              f'fund_returns_cache.json is seeded (quarterly, A11/P6).', small=True)
         if sb:
             st_col = {"on_track": C["green"], "watch": C["amber"], "flag": C["red"]}.get(
                 sb.get("status",""), C["text"])
@@ -812,7 +869,8 @@ def build_s8(data):
             inner += para(
                 f'<strong>Section C &mdash; Total ISA estimated return:</strong> '
                 f'<span style="color:{st_col}">{se(sc.get("result",""))} '
-                f'({se(sc.get("value",""))})</span> vs 14% working target'
+                f'({se(sc.get("value",""))})</span> vs the required-return anchor '
+                f'({se(sc.get("anchor_note", "see target_state.json, A19"))})'
             )
         if s8a.get("overlap_check"):
             inner += para(
@@ -891,8 +949,14 @@ def build_s11(data):
     """
     d = data.get("s11_retrospective", {})
     items = d.get("items", [])
+    _pre = ""
+    # Fix Pack A13/A9 (P2): override P&L one-liner + verified-ledger echo
+    if d.get("override_summary"):
+        _pre += para(f'<strong>Override log (A13):</strong> {se(d["override_summary"])}')
+    if d.get("ledger_echo"):
+        _pre += para(se(d["ledger_echo"]), muted=True, small=True)
     if not items:
-        return para("No retrospective items this month.", muted=True)
+        return _pre + para("No retrospective items this month.", muted=True)
 
     # Impact badge colours
     impact_colours = {
@@ -917,7 +981,7 @@ def build_s11(data):
             f'{se(text)}</span>'
         )
 
-    inner = ""
+    inner = _pre
     for idx, item in enumerate(items, 1):
         title  = se(item.get("title", f"Item {idx}"))
         prob   = item.get("problem", "")
@@ -971,10 +1035,15 @@ def build_header(meta):
         f"Broker: {broker}" if broker else "",
         f"Tax Year: {tax_year} {tax_month}".strip() if tax_year else "",
     ]))
+    _anchor = se(meta.get("anchor_line", ""))
+    _anchor_html = (f'<p style="font-size:12px;color:{C["text_h2"]};margin:-20px 0 28px 0;'
+                    f'font-family:Arial,sans-serif"><strong>Anchor (A19):</strong> '
+                    f'{_anchor}</p>\n' if _anchor else "")
     return (
         h1("Monthly ISA Portfolio Review")
         + f'<p style="font-size:12px;color:{C["text_muted"]};margin-bottom:28px;'
         f'font-family:Arial,sans-serif">{meta_line}</p>\n'
+        + _anchor_html
     )
 
 

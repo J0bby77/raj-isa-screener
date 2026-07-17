@@ -62,6 +62,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = {
     "extract_portfolio":      os.path.join(SCRIPT_DIR, "extract_portfolio.py"),
     "extract_xray":           os.path.join(SCRIPT_DIR, "extract_xray.py"),
+    "derive_required_return": os.path.join(SCRIPT_DIR, "derive_required_return.py"),
     "analytics":              os.path.join(SCRIPT_DIR, "portfolio_analytics.py"),
     "update_watchlist_py":    os.path.join(SCRIPT_DIR, "update_watchlist.py"),
     "sync_vci_watchlist":     os.path.join(SCRIPT_DIR, "sync_vci_watchlist.py"),    # NEW Step 5
@@ -237,6 +238,9 @@ def write_run_context(
             "decision_ledger":      os.path.join(SCRIPT_DIR, "decision_ledger.json"),
             "ai_disruption":        os.path.join(SCRIPT_DIR, "ai_disruption.json"),
             "fund_returns_cache":   os.path.join(SCRIPT_DIR, "fund_returns_cache.json"),
+            "drawdown_state":       os.path.join(SCRIPT_DIR, "drawdown_state.json"),
+            "factor_map":           os.path.join(SCRIPT_DIR, "factor_map.json"),
+            "target_state":         os.path.join(SCRIPT_DIR, "target_state.json"),
             "calibration_report":   os.path.join(SCRIPT_DIR, f"calibration_report_{month_label}.md"),
             "score_panel":          os.path.join(SCRIPT_DIR, "score_panel.csv"),
         },
@@ -430,6 +434,53 @@ def main():
                 _rc = _dl_mod.reconcile_executions(ledger_path, _held, prior_holdings=_prior_h, date=run_date.isoformat())
                 summary["ledger_reconcile"] = _rc
                 print(f"  Reconciled prior recommendations vs broker truth: {_rc}")
+                # ── Fix Pack A13 (P2): OVERRIDE LOG — broker-truth changes NOT matching a ledger
+                # recommendation. Two classes: (a) a recommendation marked not_executed (Raj
+                # declined the framework), (b) a holdings change with NO ledger entry (Raj acted
+                # outside the framework). Each gets 3/6/12-mo counterfactual slots that this
+                # step prices on later runs from live prices (zero new fetch — pre-run prices
+                # everything). Appended to run_context summary.override_log; email §11 renders
+                # the one-line cumulative summary; trades-log section mirrors it (P7d: a closed
+                # position with a blank reason renders "reason UNBACKFILLED", never
+                # "reconciled and closed").
+                try:
+                    _led = _dl_mod.load_ledger(ledger_path)
+                    _ov = []
+                    _stamp = run_date.isoformat()
+                    _recs = {str(e.get("ticker", "")).upper(): e for e in _led.get("entries", [])}
+                    for _e3 in _led.get("entries", []):
+                        if _e3.get("execution_status") == "not_executed" and \
+                           str(_e3.get("executed_confirmed_date") or _stamp)[:7] == _stamp[:7]:
+                            _ov.append({"date": _stamp, "ticker": _e3.get("ticker"),
+                                        "action": f"declined_{_e3.get('decision')}",
+                                        "framework_state": _e3.get("scores_at_decision"),
+                                        "gates": _e3.get("gates_at_decision"),
+                                        "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                        "pnl_vs_framework_gbp": None})
+                    if _prior_h is not None:
+                        for _t4, _q4 in _held.items():
+                            if _t4 not in _prior_h and _t4 not in _recs:
+                                _ov.append({"date": _stamp, "ticker": _t4,
+                                            "action": "bought_outside_framework",
+                                            "framework_state": None, "gates": None,
+                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                            "pnl_vs_framework_gbp": None})
+                        for _t4 in _prior_h:
+                            if _t4 not in _held and not any(
+                                    e.get("decision") == "sell" and
+                                    str(e.get("ticker", "")).upper() == _t4
+                                    for e in _led.get("entries", [])):
+                                _ov.append({"date": _stamp, "ticker": _t4,
+                                            "action": "sold_outside_framework",
+                                            "framework_state": None, "gates": None,
+                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                            "pnl_vs_framework_gbp": None})
+                    if _ov:
+                        summary["override_log"] = _ov
+                        print(f"  A13: {len(_ov)} override(s) logged: "
+                              f"{[o['ticker'] + ':' + o['action'] for o in _ov]}")
+                except Exception as _oex:
+                    warnings.append(f"A13 override log skipped: {_oex}")
             except Exception as _ex:
                 warnings.append(f"Step 1.5 (ledger reconcile) skipped: {_ex}")
                 print(f"  WARNING: {_ex}")
@@ -1045,6 +1096,313 @@ def main():
         warnings.append("Calibration report step: " + str(_ce))
         print("  WARNING: calibration step: " + str(_ce))
     summary["calibration"] = calib_summary
+
+    # ---------------------------------------------------------------------------
+    # Step 9d (Fix Pack Jul-2026 Doc A, P2): mechanical pre-run asserts.
+    # A10 X-Ray schema · P7a MoM baseline · A11/P6 fund-returns cache · A22 allowance
+    # surface · A20 reversal worklist · A19 anchor derivation/coherence · A18 checker.
+    # Failures land in errors[]/warnings[] per the existing ERROR protocol (invariant 3).
+    # ---------------------------------------------------------------------------
+    print("\n[9d] Fix Pack P2 asserts (A10/A11/A18/A19/A20/A22 + P7a)...")
+
+    # — A10: X-Ray country schema assert (parser whitelists; surface its warnings, assert rows) —
+    try:
+        with open(xray_path, encoding="utf-8") as f:
+            _xr = json.load(f)
+        _pw = (_xr.get("_meta") or {}).get("parse_warnings") or []
+        if _pw:
+            warnings.append(f"A10 xray parse_warnings ({len(_pw)}): " + "; ".join(map(str, _pw[:5])))
+
+        def _pct_ok(v, allow_none=True):
+            if v is None:
+                return allow_none
+            return isinstance(v, (int, float)) and 0.0 <= v <= 100.0
+
+        _rows = _xr.get("country_exposure") or []
+        _bad = [r for r in _rows
+                if not _pct_ok(r.get("equity_pct"), allow_none=False)
+                or not _pct_ok(r.get("benchmark_pct"))]
+        if _bad:
+            errors.append(f"A10 xray schema: {len(_bad)} invalid country rows (e.g. {_bad[0]})")
+            print(f"  A10 FAILED: {len(_bad)} invalid country rows")
+        elif _rows:
+            _tot = sum(r["equity_pct"] for r in _rows)
+            if not (60.0 <= _tot <= 130.0):
+                warnings.append(f"A10 xray: country equity_pct total {round(_tot, 1)} implausible (expect ~100)")
+            print(f"  A10 OK: {len(_rows)} country rows, total {round(_tot, 1)}")
+        else:
+            warnings.append("A10 xray: country_exposure EMPTY after whitelist — check PDF layout")
+    except Exception as _e:
+        warnings.append(f"A10 xray assert skipped: {_e}")
+
+    # — P7a: SUSPECT_BASELINE — a near-zero MoM move across a full month means a stale baseline —
+    try:
+        if prior_port_path and os.path.exists(prior_port_path) and os.path.exists(portfolio_path):
+            with open(portfolio_path, encoding="utf-8") as f:
+                _cur = json.load(f)
+            with open(prior_port_path, encoding="utf-8") as f:
+                _pri = json.load(f)
+            _cv = (_cur.get("summary") or {}).get("total_value_gbp")
+            _pv = (_pri.get("summary") or {}).get("total_value_gbp")
+            if _cv is not None and _pv is not None and abs(_cv - _pv) < 5.0:
+                flags.append({"type": "SUSPECT_BASELINE",
+                              "message": (f"|MoM| = £{abs(_cv - _pv):.2f} < £5 across a month (P7a) — "
+                                          f"baseline may be stale/carried; verify prior file "
+                                          f"{os.path.basename(prior_port_path)}")})
+                print(f"  P7a FLAG: SUSPECT_BASELINE (|MoM| £{abs(_cv - _pv):.2f})")
+    except Exception as _e:
+        warnings.append(f"P7a baseline check skipped: {_e}")
+
+    # — A11/P6: fund-returns cache — INVOKE fund_returns (the July failure: path defined, never
+    #   called), write returns back into analytics, DEGRADED status is a hard warning —
+    fund_cache_status = "OK"
+    try:
+        import fund_returns as _fr
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd2 = json.load(f)
+        _funds = _pd2.get("funds", [])
+        _cache_path = os.path.join(SCRIPT_DIR, "fund_returns_cache.json")
+        if _funds:
+            _rets = _fr.source_fund_returns(_funds, cache_path=_cache_path,
+                                            fetch=not args.dry_run)
+            _n_pend = sum(1 for v in _rets.values() if v.get("pending"))
+            _n_stale = sum(1 for v in _rets.values() if v.get("stale"))
+            if not os.path.exists(_cache_path) or _n_pend or _n_stale:
+                fund_cache_status = "DEGRADED"
+                warnings.append(f"A11 fund_cache_status=DEGRADED — pending {_n_pend}, stale {_n_stale}, "
+                                f"cache exists={os.path.exists(_cache_path)}. Section A/C are "
+                                f"LOW-CONFIDENCE until fund_returns_cache.json is seeded "
+                                f"(fund_returns.py set — quarterly, Morningstar/Trustnet 3yr ann.)")
+            # write back into analytics: fund_drift_table.rows + section_a.fund_rows
+            if os.path.exists(analytics_path):
+                with open(analytics_path, encoding="utf-8") as f:
+                    _ana = json.load(f)
+                _touched = 0
+                for _tbl in (( _ana.get("fund_drift_table") or {}).get("rows") or [],
+                             ( _ana.get("section_a") or {}).get("fund_rows") or []):
+                    for _row in _tbl:
+                        _ri = _rets.get(_fr._key(_row))
+                        if not _ri or _ri.get("est_return_pct") is None:
+                            continue
+                        _row["est_return_pct"] = _ri["est_return_pct"]
+                        _row["est_return_source"] = _ri.get("source")
+                        _mr = _row.get("min_return_pct")
+                        if _mr is not None:
+                            _row["below_threshold"] = bool(_ri["est_return_pct"] < _mr)
+                        _touched += 1
+                # Section A verdict per D8 bands (A11): PASS >= bands.pass /
+                # INCONCLUSIVE bands.inconclusive..pass / FAIL < bands.inconclusive.
+                # INCONCLUSIVE needs 2 consecutive months before the Research trigger —
+                # persistence is read by the review from prior analytics verdicts.
+                try:
+                    import scoring_config as _sc_cfg
+                    _bands = getattr(_sc_cfg, "FUND_GATE_BANDS", {"pass": 13.0, "inconclusive": 11.0})
+                except Exception:
+                    _bands = {"pass": 13.0, "inconclusive": 11.0}
+                _gate = _fr.compute_fund_gate(_funds, _rets)
+                _wavg = _gate.get("weighted_avg_return")
+                if _gate.get("result") == "PENDING" or _wavg is None:
+                    _verdict = "PENDING"
+                elif _wavg >= _bands["pass"]:
+                    _verdict = "PASS"
+                elif _wavg >= _bands["inconclusive"]:
+                    _verdict = "INCONCLUSIVE"
+                else:
+                    _verdict = "FAIL"
+                _ana.setdefault("section_a", {}).update({
+                    "weighted_avg_return": _wavg,
+                    "coverage_pct": _gate.get("coverage_pct"),
+                    "pending_funds": _gate.get("pending_funds"),
+                    "verdict": _verdict,
+                    "verdict_bands": _bands,
+                    "verdict_note": ("D8 bands: PASS >= {p}% / INCONCLUSIVE {i}-{p}% / FAIL < {i}%; "
+                                     "INCONCLUSIVE requires 2 consecutive months before the Research "
+                                     "trigger.").format(p=_bands["pass"], i=_bands["inconclusive"]),
+                    "fund_cache_status": fund_cache_status,
+                })
+                _ana["fund_cache_status"] = fund_cache_status
+                with open(analytics_path, "w", encoding="utf-8") as f:
+                    json.dump(_ana, f, indent=2, ensure_ascii=False)
+                summary["fund_cache_status"] = fund_cache_status
+                summary["section_a_verdict"] = _verdict
+                print(f"  A11: fund returns written back ({_touched} rows), Section A verdict "
+                      f"{_verdict}, cache {fund_cache_status}")
+        else:
+            warnings.append("A11: no funds in portfolio_data — fund gate skipped")
+    except Exception as _e:
+        warnings.append(f"A11 fund-returns step FAILED: {_e}")
+        fund_cache_status = "DEGRADED"
+        summary["fund_cache_status"] = fund_cache_status
+
+    # — A22: surface broker-reconciled allowance (extract_portfolio.parse_contributions) —
+    try:
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd3 = json.load(f)
+        _contrib = _pd3.get("contributions") or {}
+        summary["allowance_used_gbp"] = _contrib.get("allowance_used_gbp")
+        summary["allowance_remaining_gbp"] = _contrib.get("allowance_remaining_gbp")
+        summary["allowance_reconciled"] = _contrib.get("allowance_reconciled", False)
+        summary["allowance_note"] = _contrib.get("coverage_note")
+        if not _contrib.get("allowance_reconciled"):
+            warnings.append(f"A22 allowance UNRECONCILED: {_contrib.get('coverage_note')} — "
+                            f"email §10 must not print a confident figure")
+        print(f"  A22: allowance_reconciled={_contrib.get('allowance_reconciled')} "
+              f"used={_contrib.get('allowance_used_gbp')}")
+    except Exception as _e:
+        warnings.append(f"A22 allowance surface skipped: {_e}")
+
+    # — A20: reversal-cause WORKLIST — every top-N name carrying the reversal flag gets a
+    #   targeted Step 9/10 per-ticker pull; staging it here makes a skipped pull DETECTABLE
+    #   (non-empty worklist vs empty pull log -> Checkpoint-D fails) —
+    reversal_worklist = []
+    try:
+        if os.path.exists(step9_pre_path):
+            with open(step9_pre_path, encoding="utf-8") as f:
+                _s9 = json.load(f)
+            for _sect in ("main_watchlist", "candidate_pool"):
+                for _tier, _lst in (_s9.get(_sect) or {}).items():
+                    for _e2 in _lst or []:
+                        if "recent_reversal_vs_12_1m" in (_e2.get("review_flags") or []):
+                            reversal_worklist.append({
+                                "ticker": _e2.get("ticker"), "tier": _tier, "section": _sect,
+                                "flag": "recent_reversal_vs_12_1m",
+                                "required": "targeted per-ticker news+filings pull at Step 9/10 "
+                                            "(NOT Step 3); record cause + thesis-relevance"})
+            summary["reversal_flag_tickers"] = [w["ticker"] for w in reversal_worklist]
+            print(f"  A20: reversal worklist = {[w['ticker'] for w in reversal_worklist] or 'empty'}")
+    except Exception as _e:
+        warnings.append(f"A20 reversal worklist skipped: {_e}")
+
+    # — A19: required-return anchor — coherence check EVERY run; re-derivation on the April
+    #   (tax-year start) run per D1b. Schedule changes (S/O resume) re-derive out-of-cycle. —
+    try:
+        _is_april = (run_date.month == 4)
+        if _is_april and not args.dry_run:
+            ok, stdout, stderr = run_script("derive_required_return", [], dry_run=args.dry_run)
+            if ok:
+                print("  A19: April re-derivation done — " + (stdout or "").strip().splitlines()[-1][:100])
+                summary["anchor_rederived"] = True
+            else:
+                errors.append(f"A19 April anchor re-derivation FAILED: {stderr or stdout}")
+        ok, stdout, stderr = run_script("derive_required_return", ["--check"], dry_run=args.dry_run)
+        if not ok:
+            errors.append(f"A19 anchor check FAILED (stored anchor stale vs portfolio/schedule): "
+                          f"{(stdout or stderr or '').strip()[-200:]}")
+            print("  A19 CHECK FAILED")
+        else:
+            print("  A19: anchor CHECK OK")
+    except Exception as _e:
+        warnings.append(f"A19 anchor step skipped: {_e}")
+
+    # — A18: prose<->config consistency checker — mismatches are ERRORS (blocking-visible) —
+    try:
+        sys.path.insert(0, SCRIPT_DIR)
+        import consistency_check as _cchk
+        _mismatches = _cchk.check_all()
+        if _mismatches:
+            for _m in _mismatches:
+                errors.append(f"A18 consistency: {_m}")
+            print(f"  A18: {len(_mismatches)} MISMATCH(ES) -> errors[]")
+        else:
+            print("  A18: ALL PAIRS GREEN")
+    except Exception as _e:
+        warnings.append(f"A18 consistency check skipped: {_e}")
+
+    if reversal_worklist:
+        summary["reversal_worklist"] = reversal_worklist
+
+    # — B1/B7: drawdown ladder + regime state (drawdown_monitor.py; every scheduled run) —
+    try:
+        import drawdown_monitor as _ddm
+        _cash = (summary.get("cash_effective_gbp") or 0.0)
+        _mmf = 0.0
+        try:
+            import scoring_config as _sc3
+            _ceq = set(getattr(_sc3, "CASH_EQUIVALENT_TICKERS", []) or [])
+            if _ceq and os.path.exists(portfolio_path):
+                with open(portfolio_path, encoding="utf-8") as f:
+                    _pd4 = json.load(f)
+                _mmf = sum((h.get("value_gbp") or 0.0)
+                           for h in _pd4.get("funds", []) + _pd4.get("stocks", [])
+                           if h.get("ticker") in _ceq)
+        except Exception:
+            pass
+        _reserve = _ddm.compute_reserve(_cash, _mmf, 0.0,
+                                        getattr(_sc3, "DRAWDOWN_BUFFER_GBP", 500.0)
+                                        if "_sc3" in dir() else 500.0)
+        import yfinance as _yf
+        _h = _yf.Ticker("VUAG.L").history(period="2y")
+        _closes = list(_h["Close"].dropna()) if _h is not None and len(_h) else []
+        if _closes:
+            _dstate = _ddm.load_state()
+            _dstate, _fired = _ddm.update_ladder(_dstate, _closes)
+            _regime, _rbasis = _ddm.classify_regime(_closes, _dstate["drawdown_pct"])
+            _dstate["regime_state"], _dstate["regime_basis"] = _regime, _rbasis
+            _dstate["reserve_gbp"] = _reserve
+            _ddm.save_state(_dstate)
+            _dblock = _ddm.emit_block(_dstate, _fired, _reserve)
+            summary["drawdown"] = _dblock
+            summary["regime_state"] = _regime
+            if _fired:
+                flags.append({"type": "DRAWDOWN_TRIGGER",
+                              "message": json.dumps(_dblock.get("DRAWDOWN_TRIGGER"))})
+            print(f"  B1: {_dblock['standing_line']}")
+        else:
+            warnings.append("B1 drawdown monitor: no VUAG history this run")
+    except Exception as _e:
+        warnings.append(f"B1 drawdown monitor skipped: {_e}")
+
+    # — B2: MMF cash-yield sweep rule (D14) — mechanical SWEEP/reverse-sweep line —
+    try:
+        import scoring_config as _sc4
+        _ceq = list(getattr(_sc4, "CASH_EQUIVALENT_TICKERS", []) or [])
+        _min = float(getattr(_sc4, "MMF_SWEEP_MIN_GBP", 1500.0))
+        _deployable = summary.get("cash_deployable_gbp") or 0.0
+        if not _ceq:
+            summary["mmf_sweep"] = {"status": "NOT_CONFIGURED",
+                                    "note": ("B2: CASH_EQUIVALENT_TICKERS empty — instrument "
+                                             "selection is Raj's one-off JUDGMENT (GBP MMF UCITS, "
+                                             "OCF<=0.15%, AUM>=£500m, on AJ Bell)")}
+        elif _deployable >= _min:
+            summary["mmf_sweep"] = {"status": "SWEEP",
+                                    "amount_gbp": round(_deployable - _min / 3, 2),
+                                    "instrument": _ceq[0],
+                                    "note": (f"idle cash £{_deployable:,.0f} >= £{_min:,.0f} and no "
+                                             f"committed action within {getattr(_sc4, 'MMF_SWEEP_IDLE_DAYS', 10)} "
+                                             f"trading days -> mechanical sweep (MMF counts as cash "
+                                             f"everywhere; sells settle T+2)")}
+            print(f"  B2: SWEEP line emitted ({summary['mmf_sweep']['amount_gbp']})")
+        else:
+            summary["mmf_sweep"] = {"status": "NO_ACTION", "deployable_gbp": _deployable}
+    except Exception as _e:
+        warnings.append(f"B2 sweep rule skipped: {_e}")
+
+    # — B3: factor look-through concentration (writes into analytics like A11) —
+    try:
+        import factor_lookthrough as _flt
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd5 = json.load(f)
+        _fres = _flt.compute(_pd5, _flt.load_map())
+        summary["factor_lookthrough"] = {k: _fres[k] for k in
+                                         ("ai_complex_effective_weight_pct", "cap_pct", "breach",
+                                          "unclassified", "email_line")}
+        if os.path.exists(analytics_path):
+            with open(analytics_path, encoding="utf-8") as f:
+                _ana2 = json.load(f)
+            _ana2["factor_lookthrough"] = _fres
+            with open(analytics_path, "w", encoding="utf-8") as f:
+                json.dump(_ana2, f, indent=2, ensure_ascii=False)
+        if _fres.get("breach"):
+            flags.append({"type": "FACTOR_CAP_BREACH",
+                          "message": (_fres["email_line"] + " — Step 8 MUST include a Category-6 "
+                                      "de-concentration option; factor-raising BUYs BLOCKED at "
+                                      "Checkpoint-D while in breach (B3)")})
+        if _fres.get("unclassified"):
+            warnings.append(f"B3: unclassified names need a one-line factor_map entry: "
+                            f"{_fres['unclassified']}")
+        print(f"  B3: {_fres['email_line']}")
+    except Exception as _e:
+        warnings.append(f"B3 factor look-through skipped: {_e}")
 
     # Write run_context
     if errors:

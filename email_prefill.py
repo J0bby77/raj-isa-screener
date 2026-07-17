@@ -88,6 +88,94 @@ def calc_allowance_used(portfolio: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Fix Pack P2 helpers — A19 anchor, B5 trajectory, B1 ladder, A14 counterfactual
+# ---------------------------------------------------------------------------
+def _latest_run_context_path():
+    import glob as _g
+    fs = sorted(_g.glob(os.path.join(SCRIPT_DIR, "run_context_*.json")), key=os.path.getmtime)
+    return fs[-1] if fs else None
+
+
+def load_json_optional(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def build_b5_trajectory(target_state: dict, run_date: date) -> str:
+    """B5 — standing §2 line, pure function of target_state.json (A19).
+    'S/O: PAUSED month N | pause cost to date: £X terminal (@required-return) |
+     required return now: Y% floor / Z% stretch | drift since derivation: +W pp'"""
+    if not target_state:
+        return "Trajectory: target_state.json unavailable — anchor line PENDING (A19)"
+    sched = target_state.get("contribution_schedule") or []
+    # pick the entry EFFECTIVE at run_date (from <= today), not a future assumed-resume row
+    cur = {}
+    _today_s = run_date.isoformat()
+    for _e in sorted(sched, key=lambda e: str(e.get("from") or "")):
+        if str(_e.get("from") or "9999")[:10] <= _today_s:
+            cur = _e
+    monthly = float(cur.get("monthly_gbp") or 0)
+    floor = float(target_state.get("required_return_floor_pct") or 0)
+    stretch = float(target_state.get("required_return_stretch_pct") or 0)
+    if monthly > 0:
+        so_part = f"S/O: ACTIVE £{monthly:,.0f}/mo"
+        cost_part = "pause cost: n/a"
+    else:
+        frm = str(cur.get("from") or "")[:10]
+        try:
+            y, m = int(frm[:4]), int(frm[5:7])
+            months_paused = max(0, (run_date.year - y) * 12 + (run_date.month - m) + 1)
+        except Exception:
+            months_paused = 0
+        # terminal cost = FV difference of the missed contributions at required_return_floor
+        so = 1250.0
+        r_m = (1 + floor / 100.0) ** (1 / 12.0) - 1 if floor else 0.0
+        try:
+            td = str(target_state.get("target_date") or "2037-12-31")[:10]
+            months_left = max(0, (int(td[:4]) - run_date.year) * 12 + (int(td[5:7]) - run_date.month))
+        except Exception:
+            months_left = 0
+        cost = sum(so * ((1 + r_m) ** (months_left + i)) for i in range(months_paused))
+        so_part = f"S/O: PAUSED month {months_paused}"
+        cost_part = f"pause cost to date: £{cost:,.0f} terminal (@{floor:.1f}%)"
+    derived_at = str(target_state.get("derived_at") or "?")
+    return (f"{so_part} | {cost_part} | required return now: {floor:.1f}% floor / "
+            f"{stretch:.1f}% stretch | derived {derived_at} "
+            f"(guardrail: {target_state.get('guardrail_state', 'OK')})")
+
+
+def compute_vuag_counterfactual(trades: list, vuag_price_now: float,
+                                sleeve_value_now: float) -> dict:
+    """A14 — cash-flow-matched VUAG counterfactual (U-A14). trades: [{date, amount_gbp,
+    vuag_price}] = actual sleeve buys (+) / sells (-) with the SAME-date VUAG price.
+    Counterfactual = same £, same dates, bought VUAG units instead."""
+    units = 0.0
+    invested = 0.0
+    for t in trades:
+        px = t.get("vuag_price")
+        amt = t.get("amount_gbp")
+        if not px or amt is None:
+            return {"status": "PENDING_BACKFILL",
+                    "note": "trade-date VUAG price missing — backfill from statements/xlsx (A14)"}
+        units += float(amt) / float(px)
+        invested += float(amt)
+    if invested <= 0 or not vuag_price_now:
+        return {"status": "NO_DATA"}
+    cf_value = units * float(vuag_price_now)
+    actual_ret = (float(sleeve_value_now) / invested - 1) * 100.0
+    cf_ret = (cf_value / invested - 1) * 100.0
+    return {"status": "OK", "invested_gbp": round(invested, 2),
+            "sleeve_value_gbp": round(float(sleeve_value_now), 2),
+            "counterfactual_value_gbp": round(cf_value, 2),
+            "sleeve_vs_vuag_pp": round(actual_ret - cf_ret, 1),
+            "line": (f"Sleeve vs VUAG counterfactual since inception: "
+                     f"{actual_ret - cf_ret:+.1f}pp (net of friction)")}
+
+
+# ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
 def build_meta(portfolio: dict, run_date: date) -> dict:
@@ -104,6 +192,9 @@ def build_meta(portfolio: dict, run_date: date) -> dict:
         "run_date_display": run_date.strftime("%A %-d %B %Y"),
         "data_date":        data_date,
         "tax_year":         TAX_YEAR_LABEL,
+        # A19: the email header states the anchor + derivation date (one hurdle, everywhere)
+        "anchor_line":      build_b5_trajectory(load_json_optional(
+                                os.path.join(SCRIPT_DIR, "target_state.json")), run_date),
         "tax_year_month":   tax_month,
         "broker":           "AJ Bell (ACB8G2I)",
         "run_month_label":  run_month,
@@ -231,6 +322,9 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
     )
 
     return {
+        # B3 (P2): factor look-through line — computed by prerun step 9d
+        "factor_line": (analytics.get("factor_lookthrough") or {}).get("email_line"),
+        "factor_unclassified": (analytics.get("factor_lookthrough") or {}).get("unclassified"),
         "kpis":               kpis,
         "holdings":           all_holdings,
         "performance_header": "Portfolio vs MSCI World (Benchmark: Global Large-Cap Blend Equity)",
@@ -343,9 +437,20 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
     # Step 8A summary skeleton — Claude fills after retrieving estimated returns
     step8a_summary = {
         "section_a": {
-            "result": "[Claude fills after retrieving estimated returns — PASS or FAIL]",
-            "value":  "[X.X%] vs 12% threshold",
-            "status": "pending",
+            # A11/D8 (P2): prerun step 9d computes the banded verdict mechanically
+            "result": analytics.get("section_a", {}).get("verdict")
+                      or "[Claude fills — PASS / INCONCLUSIVE / FAIL per D8 bands]",
+            "value":  (f"{analytics['section_a']['weighted_avg_return']:.1f}% weighted avg "
+                       f"(coverage {analytics['section_a'].get('coverage_pct', '?')}%)"
+                       if analytics.get("section_a", {}).get("weighted_avg_return") is not None
+                       else "[X.X%] — PENDING fund returns"),
+            "bands_note": (lambda _b: f"D8 bands: PASS >= {_b.get('pass')}% / INCONCLUSIVE "
+                                      f"{_b.get('inconclusive')}-{_b.get('pass')}% / FAIL < "
+                                      f"{_b.get('inconclusive')}% (anchor-derived, A19)")(
+                          analytics.get("section_a", {}).get("verdict_bands") or {}),
+            "fund_cache_status": analytics.get("section_a", {}).get("fund_cache_status")
+                                 or analytics.get("fund_cache_status"),
+            "status": "computed" if analytics.get("section_a", {}).get("verdict") else "pending",
         },
         "section_b": {
             "result":     analytics["section_b"].get("status_label", "Indicative"),
@@ -354,7 +459,12 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
         },
         "section_c": {
             "result": "[Claude fills after Section A complete — On track / Watch / Flag]",
-            "value":  "[X.X%] vs 14% working target",
+            "value":  "[X.X%] vs required-return anchor (target_state.json, A19)",
+            "anchor_note": build_b5_trajectory(load_json_optional(
+                               os.path.join(SCRIPT_DIR, "target_state.json")),
+                               date.today()).split(" | ")[2]
+                           if load_json_optional(os.path.join(SCRIPT_DIR, "target_state.json"))
+                           else "see target_state.json (A19)",
             "status": "pending",
         },
         "overlap_check": "[Claude fills at Step 8A — checks each stock vs fund top-10 holdings]",
@@ -383,68 +493,67 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
 
 
 def build_s10(portfolio: dict, analytics: dict, run_date: date) -> dict:
-    """Section 10 — Tax Year and ISA Allowance Tracker."""
-    total = portfolio["summary"]["total_value_gbp"]
-    cash_eff = portfolio["summary"]["cash_effective_gbp"]
+    """Section 10 — Tax Year and ISA Allowance Tracker.
+    Fix Pack A22 (P2): allowance comes from BROKER-RECONCILED contributions
+    (extract_portfolio.parse_contributions), NEVER the assumed S/O schedule. If unreconciled,
+    print "UNRECONCILED — verify AJ Bell" — no confident figure. A21: no S/O-resumption
+    gating language anywhere."""
     tax_month = calc_tax_year_month(run_date)
+    contrib = portfolio.get("contributions") or {}
+    reconciled = bool(contrib.get("allowance_reconciled"))
+    used = contrib.get("allowance_used_gbp")
+    remaining = contrib.get("allowance_remaining_gbp")
+    partial = contrib.get("allowance_used_partial_gbp") or 0.0
+    note = contrib.get("coverage_note") or "no contributions data"
 
-    # Allowance used — approximate from total invested
-    # Claude should verify exact figure from AJ Bell account summary
-    # We can compute: months since tax year start × £1,250 S/O + any lump sums
-    months_since_start = max(0,
-        (run_date.year - TAX_YEAR_START.year) * 12
-        + run_date.month - TAX_YEAR_START.month
-    )
-    so_contributions = months_since_start * STANDING_ORDER
-    allowance_used_approx = so_contributions   # approximate — Claude to verify from AJ Bell
+    if reconciled:
+        kpis = [
+            {"label": "Allowance Used", "value": f"£{used:,.0f}",
+             "sub": f"Broker-reconciled from transaction history ({note})", "style": "normal"},
+            {"label": "Allowance Remaining", "value": f"£{remaining:,.0f}",
+             "sub": f"Of £{TAX_YEAR_ANNUAL:,.0f} annual allowance ({TAX_YEAR_LABEL})", "style": "info"},
+            {"label": "Tax Year Month", "value": tax_month,
+             "sub": f"{TAX_YEAR_LABEL} (started 6 Apr 2026)", "style": "normal"},
+        ]
+    else:
+        kpis = [
+            {"label": "Allowance Used", "value": "UNRECONCILED — verify AJ Bell",
+             "sub": (f"{note}. Partial sum from available files: £{partial:,.0f}. Export the "
+                     f"full tax-year 'ISA Transaction History' xlsx to reconcile (A22)."),
+             "style": "warning"},
+            {"label": "Allowance Remaining", "value": "UNRECONCILED",
+             "sub": f"Cannot state confidently without reconciliation ({TAX_YEAR_LABEL})",
+             "style": "warning"},
+            {"label": "Tax Year Month", "value": tax_month,
+             "sub": f"{TAX_YEAR_LABEL} (started 6 Apr 2026)", "style": "normal"},
+        ]
 
-    kpis = [
-        {
-            "label": "Allowance Used",
-            "value": f"~£{allowance_used_approx:,.0f}",
-            "sub":   f"Approx {months_since_start} × £{STANDING_ORDER:,.0f} S/O + any lump sums. Claude to verify from AJ Bell.",
-            "style": "normal",
-        },
-        {
-            "label": "Allowance Remaining",
-            "value": f"~£{TAX_YEAR_ANNUAL - allowance_used_approx:,.0f}",
-            "sub":   f"Of £{TAX_YEAR_ANNUAL:,.0f} annual allowance ({TAX_YEAR_LABEL})",
-            "style": "info",
-        },
-        {
-            "label": "Tax Year Month",
-            "value": tax_month,
-            "sub":   f"{TAX_YEAR_LABEL} (started 6 Apr 2026)",
-            "style": "normal",
-        },
-    ]
-
-    items = [
-        {
-            "component":   f"Monthly standing order × {months_since_start} months",
-            "amount":      f"£{so_contributions:,.0f}",
-            "status":      "Processed",
-            "status_type": "done",
-        },
-        {
-            "component":   "Additional lump sum contributions",
-            "amount":      "[Claude to verify from AJ Bell]",
-            "status":      "Verify",
-            "status_type": "pending",
-        },
-        {
-            "component":   "Remaining monthly S/Os (to 1 Mar 2027)",
-            "amount":      f"£{max(0, (12 - months_since_start)) * STANDING_ORDER:,.0f}",
-            "status":      "Scheduled",
-            "status_type": "scheduled",
-        },
-    ]
+    items = []
+    for d in contrib.get("contributions_detail") or []:
+        if d.get("type") == "PARSE_ERROR":
+            items.append({"component": f"PARSE ERROR: {d.get('transaction')}", "amount": "—",
+                          "status": "Error", "status_type": "pending"})
+            continue
+        items.append({
+            "component": (f"{d.get('date')} — {d.get('transaction')} "
+                          f"({'S/O' if d.get('type') == 'S/O' else 'Lump sum'})"),
+            "amount": f"£{(d.get('amount_gbp') or 0):,.0f}",
+            "status": "Reconciled" if reconciled else "From partial file",
+            "status_type": "done" if reconciled else "pending",
+        })
+    if not items:
+        items.append({"component": "No contribution transactions found in available files",
+                      "amount": "—", "status": "Verify", "status_type": "pending"})
 
     notes = (
-        f"Pace check: £{TAX_YEAR_ANNUAL:,.0f} annual allowance. "
-        f"Remaining: ~£{TAX_YEAR_ANNUAL - allowance_used_approx:,.0f} across {max(0, 12 - months_since_start)} remaining months. "
-        f"[Claude: add running total costs (dealing fees + FX charges) paid in this tax year. "
-        f"Add dividend reinvestment reminders if any dividends received.]"
+        (f"Broker-reconciled: £{used:,.0f} used, £{remaining:,.0f} remaining ({TAX_YEAR_LABEL}). "
+         if reconciled else
+         f"{note}. Do NOT state a confident figure until the transaction export covers the "
+         f"full tax year. ")
+        + "S/O status affects the CONVICTION BAR and position sizing only (A21) — it never "
+          "gates deployment timing. "
+          "[Claude: add running dealing/FX costs this tax year; dividend reinvestment "
+          "reminders if any.]"
     )
 
     return {"kpis": kpis, "items": items, "notes": notes}
@@ -488,7 +597,28 @@ def skeleton_s2() -> dict:
             }
         ],
         "notes": "[Claude fills: explicit statement of capital deployed now vs retained, and why.]",
+        # Doc B standing lines (computed; render verbatim in §2)
+        "standing_lines": _s2_standing_lines(),
     }
+
+
+def _s2_standing_lines() -> list:
+    """B5 trajectory + B1 drawdown-ladder standing lines for §2 (+ A21 policy note)."""
+    lines = []
+    ts = load_json_optional(os.path.join(SCRIPT_DIR, "target_state.json"))
+    lines.append(build_b5_trajectory(ts, date.today()))
+    ds = load_json_optional(os.path.join(SCRIPT_DIR, "drawdown_state.json"))
+    if ds and ds.get("last_check"):
+        lines.append(f"Drawdown ladder: {ds.get('drawdown_pct', 0):+.1f}% from 252d high | "
+                     f"tranches fired {sum(1 for v in (ds.get('tranches_fired') or {}).values() if v)}/3 | "
+                     f"reserve £{(ds.get('reserve_gbp') or 0):,.0f} | regime {ds.get('regime_state') or 'n/a'}")
+    else:
+        lines.append("Drawdown ladder: state not yet seeded — first monitor run populates (B1)")
+    # A21: paused S/O RAISES the bar (+5 conviction, one size notch down); NEVER gates timing.
+    lines.append("Paused-S/O policy (A21): conviction floor +5, starter size one notch down — "
+                 "existing cash deploys whenever a name clears the RAISED bar; deployment "
+                 "timing is NEVER conditioned on S/O resumption.")
+    return lines
 
 
 def skeleton_s3() -> list:
@@ -561,15 +691,28 @@ def skeleton_s5() -> dict:
     }
 
 
-def build_s5_from_scored(scored: dict) -> dict:
+def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
     """
     Build s5 watchlist section from watchlist_scored.json output.
     Items are pre-populated with quantitative fields from normalise_adapter.py.
     Claude fills: detail_items paragraphs (thesis for top 3), excluded notes, conviction scores.
+
+    Fix Pack P2 (P5/P7b + A2/A3/A4/D7): the PRIMARY column is the metric that orders the list —
+    the unified Source Score (deployment_priority_rank). Conviction/part-scores are secondary.
+    Growth rows only here — VCI rows render in their own sleeve table (no interleaved ranks).
+    Each row carries E[r], stage, implied upside (FV) and ONE deploy verdict (t1_qualified).
     """
     raw_items = scored.get("s5_watchlist_rows", [])
     if not raw_items:
         return skeleton_s5()
+
+    # Source-Score / gate-anatomy lookup from step9_pre (deployment_priority_rank + tiers)
+    _s9row = {}
+    for _sect in ("main_watchlist", "candidate_pool"):
+        for _lst in ((step9 or {}).get(_sect) or {}).values():
+            for _e in _lst or []:
+                if _e.get("ticker"):
+                    _s9row[_e["ticker"]] = _e
 
     # Map scored rows to email s5 table format
     items = []
@@ -579,17 +722,39 @@ def build_s5_from_scored(scored: dict) -> dict:
         # Add in-window marker to status
         if in_win:
             status = f"IN RANGE — {status}"
+        _t = row.get("ticker", "—")
+        _s9 = _s9row.get(_t, {})
+        _er = _s9.get("expected_return_12_24m", row.get("expected_return_12_24m"))
+        _t1q = _s9.get("t1_qualified")
         items.append({
             "rank":         row.get("rank", "—"),
-            "ticker":       row.get("ticker", "—"),
+            "ticker":       _t,
             "name":         row.get("name", "—"),
-            "score":        row.get("score", "—"),
+            # P5: PRIMARY column — the ranking metric (unified Source Score, 0-100)
+            "source_score": _s9.get("source_score", "—"),
+            "score":        row.get("score", "—"),          # secondary: raw parts (legacy display)
             "score_level":  row.get("score_level", "normal"),
+            "conviction":   _s9.get("strategic_conviction_score", "—"),   # secondary
+            "tier":         _s9.get("tier", "—"),
+            "revision_stage": _s9.get("revision_stage", row.get("revision_stage", "—")),  # A3
+            "expected_return_12_24m": (f"{_er:.1f}%" if isinstance(_er, (int, float)) else "—"),
+            "implied_upside_fv": row.get("implied_upside_fv", "—"),       # D7 canonical
             "sector":       row.get("sector", "—"),
-            "entry_level":  row.get("entry_level", "—"),
+            "entry_level":  row.get("entry_level", "—"),    # relabelled "Target buy (display)"
             "status":       status,
-            "status_type":  "buy" if in_win else "watchlist",
+            # P7b/P5-T4: ONE verdict field drives the badge — never two contradicting texts.
+            # A5 v3: the verdict carries the size mode (full = evidence-confirmed; starter =
+            # thin evidence, capped, scale-up trigger recorded at entry). Tenure never gates.
+            "deploy_verdict": ((f"DEPLOY-ELIGIBLE ({_s9.get('size_mode') or 'full'})" if _t1q else
+                                ("BLOCKED — see gates" if _t1q is False else "—"))),
+            "size_mode":    _s9.get("size_mode", "—"),
+            "status_type":  ("buy" if _t1q else "watchlist"),
         })
+    # P5-T1: primary column must be monotonically non-increasing down the growth ranking
+    items.sort(key=lambda r: (-(r["source_score"] if isinstance(r["source_score"], (int, float))
+                                else -1), str(r["ticker"])))
+    for _i, _r in enumerate(items, 1):
+        _r["rank"] = _i
 
     # Top 3 detail items — quantitative pre-populated, narrative for Claude
     detail_items = []
@@ -602,7 +767,8 @@ def build_s5_from_scored(scored: dict) -> dict:
                 f"<strong>Entry level:</strong> {row.get('entry_level','—')} | "
                 f"<strong>Current:</strong> {row.get('current_price','—')} | "
                 f"<strong>Gap:</strong> {row.get('gap_pct','—')} | "
-                f"<strong>Target upside:</strong> {row.get('target_upside','—') if 'target_upside' in row else '[Claude: from watchlist_scored]'}",
+                f"<strong>Impl upside (FV):</strong> {row.get('implied_upside_fv','—')} | "
+                f"<strong>Target gap (display):</strong> {row.get('target_upside','—') if 'target_upside' in row else '—'}",
                 "[Claude fills: thesis summary — structural growth driver, moat, why now, key risks, entry and exit triggers]",
             ]
         })
@@ -620,6 +786,15 @@ def build_s5_from_scored(scored: dict) -> dict:
         "items":        items,
         "excluded":     "[Claude: any names removed from watchlist this month and reason]",
         "detail_items": detail_items,
+        # P5-T3 legend: all three scores + what each governs
+        "legend": ("Ranking is by SOURCE SCORE (0-100, unified screen=deploy — deployability "
+                   "order). Conviction (45/60/75 bands) = decision readiness, secondary. "
+                   "ACS = asymmetric-sleeve track (separate VCI table). Entry level is "
+                   "'Target buy (display)' — never a ranking input. E[r] = expected 12-24m "
+                   "return pa (A2); Stage = revision stage (A3); one deploy verdict per row "
+                   "(T1 gate set: ns/stage/E[r]/clean-flags). Size mode (A5v3): full = "
+                   "evidence-confirmed + conviction >= 75; starter = thin evidence, capped 1.5% "
+                   "with a recorded scale-up trigger — tenure never gates or caps."),
         "_conviction_ranking_note": ranking_note,
         "_conviction_ranking":      scored.get("conviction_ranking", []),
     }
@@ -637,7 +812,16 @@ def skeleton_s9() -> dict:
 
 
 def skeleton_s11() -> dict:
+    # A13 (P2): override P&L one-liner — filled from run_context override_log / ledger
+    # reconcile counts; A9: ledger-path echo so the write is auditable from the email.
+    _rc = load_json_optional(_latest_run_context_path()) if _latest_run_context_path() else {}
+    _ov = (_rc.get("summary") or {}).get("override_log") or []
+    _ov_line = (f"Overrides on record: {len(_ov)} — cumulative P&L vs framework: "
+                f"{sum((o.get('pnl_vs_framework_gbp') or 0) for o in _ov):+,.0f} GBP to date"
+                if _ov else "Overrides on record: none (A13 log active from this run)")
     return {
+        "override_summary": _ov_line,
+        "ledger_echo": f"Decision ledger: {os.path.join(SCRIPT_DIR, 'decision_ledger.json')} (A9 verified write)",
         "items": [
             {
                 "title":    "[Claude fills: specific problem identified this run]",
@@ -675,7 +859,7 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
         if s:
             # Override status note with analyst rating and target upside
             analyst = s.get("analyst_rating", "—")
-            upside  = s.get("target_upside", "—")
+            upside  = s.get("display_target_gap", s.get("target_upside", "—"))   # D7 shim
             ne      = s.get("next_earnings", "—")
             score   = s.get("total_score")
             h["status_note"] = (
@@ -776,10 +960,29 @@ def build_prefilled_email(
     step9: dict = None,
 ) -> dict:
     has_scored = bool(scored and scored.get("s5_watchlist_rows"))
-    _s5 = build_s5_from_scored(scored) if has_scored else skeleton_s5()
+    _s5 = build_s5_from_scored(scored, step9) if has_scored else skeleton_s5()
     _vci_sleeve = build_vci_sleeve_from_step9(step9)
     if _vci_sleeve:
         _s5["vci_sleeve"] = _vci_sleeve
+    # A14 (P2): VUAG counterfactual line + probation rule (D6) on §7 — cash-flow-matched;
+    # trade-date VUAG prices live in sleeve_counterfactual.json (backfilled once from
+    # statements/xlsx; updated at each trade). PENDING note until backfilled.
+    _cf_src = load_json_optional(os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"))
+    if _cf_src.get("trades"):
+        _cf = compute_vuag_counterfactual(_cf_src["trades"], _cf_src.get("vuag_price_now"),
+                                          _cf_src.get("sleeve_value_now")
+                                          or portfolio["summary"].get("stock_sleeve_value_gbp"))
+    else:
+        _cf = {"status": "PENDING_BACKFILL",
+               "line": ("Sleeve vs VUAG counterfactual: PENDING backfill — create "
+                        "sleeve_counterfactual.json with {trades:[{date, amount_gbp, "
+                        "vuag_price}], vuag_price_now} from statements/xlsx (A14)")}
+    _s7_out = build_s7_from_scored(portfolio, scored) if has_scored else build_s7(portfolio)
+    _s7_out["vuag_counterfactual"] = _cf
+    _s7_out["probation_rule"] = ("D6: if the sleeve trails the VUAG counterfactual by >5pp "
+                                 "cumulative after 12mo with >=3 positions, Phase-1 target "
+                                 "reverts to the 10% floor and increments route to VUAG (A14)")
+
     return {
         "_instructions": (
             "Pre-populated by email_prefill.py v2. "
@@ -795,7 +998,7 @@ def build_prefilled_email(
         "s4_liquidation_tracker": skeleton_s4(),
         "s5_watchlist":           _s5,
         "s6_portfolio_snapshot":  build_s6(portfolio, analytics, xray),
-        "s7_stock_sleeve":        build_s7_from_scored(portfolio, scored) if has_scored else build_s7(portfolio),
+        "s7_stock_sleeve":        _s7_out,
         "s8_fund_review":         build_s8(portfolio, analytics, xray),
         "s9_macro":               skeleton_s9(),
         "s10_tax_tracker":        build_s10(portfolio, analytics, run_date),

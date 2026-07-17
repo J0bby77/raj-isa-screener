@@ -22,7 +22,18 @@ PANEL_COLS = [
     "forward_axis_score", "revisions_score", "score_f_eps_trend", "score_f_rev_est", "score_b_est_rev",
     "revision_runway", "score_f_margin_traj", "score_f_price_mom", "price_mom_12_1m_pct",
     "est_rev_direction", "source_score", "current_price", "target_price",
+    # Fix Pack A8 (12-Jul-2026): stage + return-side columns so stage-exclusion and upside/E[r]
+    # doctrine become measurable; door reserved for B7 regime doors. Old CSVs simply carry NaN.
+    "revision_stage", "implied_upside", "expected_return_12_24m", "summary_flag", "door",
 ]
+
+
+def _to_float(v):
+    try:
+        f = float(str(v).replace("$", "").replace("£", "").replace(",", "").replace("%", "").strip())
+        return f
+    except (TypeError, ValueError):
+        return None
 
 
 def _src_score(row, paf=28.0, pbf=22.0):
@@ -48,6 +59,17 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
         rec["ticker"] = tk
         if rec.get("source_score") in (None, "") or (isinstance(rec.get("source_score"), float) and pd.isna(rec.get("source_score"))):
             rec["source_score"] = _src_score(r, part_a_max, part_b_max)
+        # A8: derive implied_upside from target/current when not supplied by the row
+        if rec.get("implied_upside") in (None, "") or (isinstance(rec.get("implied_upside"), float) and pd.isna(rec.get("implied_upside"))):
+            cur, tgt = _to_float(rec.get("current_price")), _to_float(rec.get("target_price"))
+            rec["implied_upside"] = round(tgt / cur - 1, 4) if (cur and tgt and cur > 0) else None
+        # A8: summary_flag via the ONE eligibility definition (never a local reimplementation)
+        if rec.get("summary_flag") in (None, ""):
+            try:
+                import source_score as _ss
+                rec["summary_flag"] = bool(_ss.summary_eligible(r))
+            except Exception:
+                rec["summary_flag"] = None
         rows.append(rec)
     new = pd.DataFrame(rows, columns=PANEL_COLS)
     if os.path.exists(store):

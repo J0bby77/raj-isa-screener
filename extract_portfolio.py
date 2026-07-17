@@ -173,6 +173,15 @@ def find_latest_xlsx(folder: str) -> str:
 # Classification helpers
 # ---------------------------------------------------------------------------
 def classify_holding(investment_name: str, ticker) -> str:
+    # Doc B B2 (P2): MMF/ultra-short UCITS tickers are CASH EQUIVALENTS — counted as cash in
+    # deployable-cash, the B1 reserve and drift denominators; excluded from equity buckets.
+    try:
+        import scoring_config as _sc_b2
+        if str(ticker or "").upper() in {str(t).upper() for t in
+                                          getattr(_sc_b2, "CASH_EQUIVALENT_TICKERS", []) or []}:
+            return "cash_equivalent"
+    except Exception:
+        pass
     """
     Returns 'stock', 'fund', or 'cash'.
 
@@ -227,6 +236,97 @@ def classify_holding(investment_name: str, ticker) -> str:
 # ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Fix Pack A22 (P2, from ISA_Monthly_Review_Framework_Fixes P3): allowance from BROKER
+# transaction reconciliation — never assume the S/O schedule. A £5,000 lump sum was invisible
+# in July (used = £8,750 not £3,750). Contributions are summed from actual deposit rows in
+# "ISA Transaction History*.xlsx"; the S/O schedule survives only as a cross-check. When the
+# files do not cover the whole tax year to the data date, allowance_reconciled=False and the
+# email must print "UNRECONCILED — verify AJ Bell", never a confident figure.
+# ---------------------------------------------------------------------------
+ISA_ALLOWANCE_GBP = 20000.0
+_DEPOSIT_TYPES = ("deposit", "subscription", "regular investment", "direct debit",
+                  "cash in", "transfer in", "credit")
+
+
+def _tax_year_start(ref: datetime) -> datetime:
+    yr = ref.year if (ref.month, ref.day) >= (4, 6) else ref.year - 1
+    return datetime(yr, 4, 6)
+
+
+def parse_contributions(folder: str, data_dt: datetime | None) -> dict:
+    """Sum external contributions (S/O + lump sums) for the current tax year from every
+    'ISA Transaction History*.xlsx' in `folder`. Returns {allowance_used_gbp,
+    contributions_detail, allowance_reconciled, coverage_note}."""
+    import glob as _glob
+    ref = data_dt or datetime.now()
+    ty_start = _tax_year_start(ref)
+    files = sorted(_glob.glob(os.path.join(folder, "ISA Transaction History*.xlsx")))
+    detail, seen_refs = [], set()
+    cover_min = cover_max = None
+    for fp in files:
+        try:
+            wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+            for ws in wb.worksheets:
+                headers = None
+                for row in ws.iter_rows(values_only=True):
+                    if headers is None:
+                        headers = [str(c or "").strip().lower() for c in row]
+                        continue
+                    r = dict(zip(headers, row))
+                    dt = r.get("date")
+                    if isinstance(dt, str):
+                        try:
+                            dt = datetime.fromisoformat(dt[:10])
+                        except ValueError:
+                            dt = None
+                    if not isinstance(dt, datetime):
+                        continue
+                    cover_min = dt if (cover_min is None or dt < cover_min) else cover_min
+                    cover_max = dt if (cover_max is None or dt > cover_max) else cover_max
+                    ttype = str(r.get("transaction") or "").strip().lower()
+                    if not any(k in ttype for k in _DEPOSIT_TYPES):
+                        continue
+                    if dt < ty_start:
+                        continue
+                    ref_id = str(r.get("reference") or f"{fp}:{dt}:{r.get('amount (gbp)')}")
+                    if ref_id in seen_refs:
+                        continue        # files may overlap — dedupe on broker reference
+                    seen_refs.add(ref_id)
+                    amt = r.get("amount (gbp)")
+                    try:
+                        amt = abs(float(amt))
+                    except (TypeError, ValueError):
+                        continue
+                    detail.append({"date": dt.strftime("%Y-%m-%d"),
+                                   "type": ("S/O" if "regular" in ttype or "direct debit" in ttype
+                                            else "lump_sum"),
+                                   "transaction": str(r.get("transaction") or ""),
+                                   "amount_gbp": round(amt, 2)})
+        except Exception as e:
+            detail.append({"date": None, "type": "PARSE_ERROR", "transaction": os.path.basename(fp),
+                           "amount_gbp": None, "error": str(e)})
+    used = round(sum(d["amount_gbp"] or 0 for d in detail if d["type"] != "PARSE_ERROR"), 2)
+    # Coverage proxy: earliest row within 30d of the tax-year start (an export from the TY
+    # start may simply have no activity on 6-Apr itself) AND latest row within 7d of the data
+    # date AND no parse errors. Anything less -> UNRECONCILED (never a confident figure).
+    covered = (bool(files) and cover_min is not None
+               and (cover_min - ty_start).days <= 30 and cover_min >= ty_start - __import__("datetime").timedelta(days=3)
+               and cover_max is not None
+               and (ref - cover_max).days <= 7
+               and not any(d["type"] == "PARSE_ERROR" for d in detail))
+    note = ("reconciled from broker transactions" if covered else
+            ("no transaction files found" if not files else
+             f"files cover {cover_min:%d-%b-%y} to {cover_max:%d-%b-%y}" if cover_min else
+             "transaction files unparseable"))
+    return {"allowance_used_gbp": used if covered else None,
+            "allowance_used_partial_gbp": used,
+            "allowance_remaining_gbp": round(ISA_ALLOWANCE_GBP - used, 2) if covered else None,
+            "contributions_detail": sorted(detail, key=lambda d: d["date"] or ""),
+            "allowance_reconciled": covered,
+            "coverage_note": f"UNRECONCILED — verify AJ Bell ({note})" if not covered else note}
+
+
 def parse_portfolio(xlsx_path: str) -> dict:
     """
     Parses the AJ Bell ISA Portfolio xlsx and returns a structured dict.
@@ -270,6 +370,8 @@ def parse_portfolio(xlsx_path: str) -> dict:
     stocks = []
     funds  = []
     cash_value = 0.0
+    mmf_value = 0.0
+    mmf_holdings = []
     data_date = None
 
     for row in rows[data_start:]:
@@ -315,6 +417,14 @@ def parse_portfolio(xlsx_path: str) -> dict:
 
         if kind == "cash":
             cash_value += v
+            continue
+        if kind == "cash_equivalent":
+            # B2: MMF value counts as CASH everywhere (deployable, B1 reserve, drift
+            # denominators); tracked separately in the record list for the sweep line.
+            cash_value += v
+            mmf_value += v
+            mmf_holdings.append({"name": investment, "ticker": _canonical_ticker(ticker),
+                                 "value_gbp": v})
             continue
 
         # Extract clean name (remove exchange/ISIN suffix)
@@ -430,6 +540,8 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "total_cost_gbp":         round(sum(h["cost_gbp"] for h in stocks + funds), 2),
             "total_gain_gbp":         round(sum(h["gain_gbp"] for h in stocks + funds), 2),
             "cash_stated_gbp":        round(cash_value, 2),
+            "mmf_value_gbp":          round(mmf_value, 2),      # B2 — included in cash figures
+            "mmf_holdings":           mmf_holdings,
             "cash_effective_gbp":     effective_cash,
             "cash_deployable_gbp":    deployable_cash,
             "standing_order_applied": so_applied,
@@ -447,6 +559,9 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "vuag_plus_vanguard_us_combined_pct": vuag_combined_pct,
             "vuag_plus_vanguard_us_exceeds_12_5pct": vuag_combined_flag,
         },
+        # Fix Pack A22: broker-reconciled allowance (S/O + lump sums) — feeds email §10 and
+        # the A19 contribution-history cross-check; UNRECONCILED prints as such, never assumed.
+        "contributions": parse_contributions(os.path.dirname(os.path.abspath(xlsx_path)), data_dt),
         "stocks": sorted(stocks, key=lambda h: h["value_gbp"], reverse=True),
         "funds":  sorted(funds,  key=lambda h: h["value_gbp"], reverse=True),
         "cash": {

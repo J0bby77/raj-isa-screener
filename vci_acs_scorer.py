@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 vci_acs_scorer.py — VCI Part A Auto-Scorer + ACS4 Calculator
-Version: 1.1 | June 2026 (ACS8 now computed in-scorer (3yr range + FV-asymmetry); ACS4 uses effective denominator; emits acs8/range_position_score/a10/a11)
+Version: 1.2 | Jul 2026 (v2 emit: fv_p25/p50/p75 + fv_asymmetry_p25 + fv_crosscheck_warn via
+  bottleneck_fv.compute_bottleneck_fv_ci; catalyst_type/catalyst_domain/p_thesis/L pass-through;
+  revision_velocity reduced from the A11 up/down direction + optional analyst-coverage/target-revision
+  deltas; apply_vci_final_gates now calls bottleneck_fv.derive_floor when VCI_FLOOR_MODE=="derived".
+  Supersedes 1.1: ACS8 now computed in-scorer (3yr range + FV-asymmetry); ACS4 uses effective
+  denominator; emits acs8/range_position_score/a10/a11)
 Implements VCI_Asymmetric_Scorecard.md v2.0 (Part A, 13 metrics, max 26 points)
 
 Automatable from yfinance (11 of 13):  A1 A2 A3 A4 A5 A6 A7 A8 A9 A12 A13
@@ -716,12 +721,40 @@ def check_pre_inflection_override(scores, d):
 # ---------------------------------------------------------------------------
 # Main scoring orchestrator
 # ---------------------------------------------------------------------------
+def _reduce_revision_velocity(manual_a11, analysts_delta=None, target_rev_pct=None):
+    """v2 (E6): derive revision_velocity (0-1) from the A11 up/down direction (already sourced via
+    Finnhub per A11's manual input) plus optional analyst-coverage delta / mean-target revision.
+    A11 0=down,1=flat,2=up -> up/down counts fed into vci_source_score.reduce_revision_velocity.
+    Returns None if no A11 override and no baseline deltas supplied (caller/consumer then defaults
+    to the neutral 0.5 — never penalise a pre-coverage archetype)."""
+    up = down = None
+    if manual_a11 == 2:
+        up, down = 1, 0
+    elif manual_a11 == 0:
+        up, down = 0, 1
+    elif manual_a11 == 1:
+        up, down = 1, 1
+    if up is None and analysts_delta is None and target_rev_pct is None:
+        return None
+    try:
+        import vci_source_score as _vss
+        return _vss.reduce_revision_velocity(up=up, down=down, n_analysts_delta=analysts_delta,
+                                             target_rev_pct=target_rev_pct)
+    except Exception:
+        return None
+
+
 def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=None,
                     bottleneck_fv=None, has_catalyst=False,
-                    fv_inputs=None, asset_structure=None):
+                    fv_inputs=None, asset_structure=None,
+                    catalyst_type=None, catalyst_domain=None, p_thesis=None, L=None,
+                    analysts_delta=None, target_rev_pct=None, analyst_fv_per_share=None):
     """Pull data and score all 13 Part A metrics. Returns (d, scores_dict).
-    If fv_inputs (the §10.2 dict) is supplied, the WIN-case bottleneck_fv is derived from it
-    (reproducible) and used for ACS8 + the deployability fields (§10)."""
+    If fv_inputs (the §10.2 dict) is supplied, the WIN-case bottleneck_fv (+ P25/P50/P75 CI, E2) is
+    derived from it (reproducible) and used for ACS8 + the deployability fields (§10).
+    v2 pass-through (emitted in build_json_output, not scored here): catalyst_type/catalyst_domain
+    (E1 prior key / E4 correlation key), p_thesis/L (E1 overrides), revision_velocity (E6, reduced
+    from the A11 direction + optional analyst-coverage/target-revision deltas)."""
     print(f'\n  Fetching data for {sym}...', end='', flush=True)
     d = pull_data(sym)
     print(' done.')
@@ -729,18 +762,24 @@ def score_candidate(sym, manual_a10=None, manual_a11=None, a9_strategic_tickers=
     if d.get('error'):
         print(f'  [DATA ERROR] {d["error"]}')
 
-    # --- §10: derive WIN-case FV from stored inputs (reproducible) ---
+    # --- §10: derive WIN-case FV (+ P25/P50/P75 CI, E2) from stored inputs (reproducible) ---
     if fv_inputs is not None and bottleneck_fv is None:
         try:
             import bottleneck_fv as _bfv
-            _fv = _bfv.compute_bottleneck_fv(fv_inputs, d.get('price'),
-                                             asset_structure=asset_structure)
+            _fv = _bfv.compute_bottleneck_fv_ci(fv_inputs, d.get('price'),
+                                                asset_structure=asset_structure,
+                                                analyst_fv_per_share=analyst_fv_per_share)
             d['_fv'] = _fv.as_dict()
             if _fv.fv_source == 'modeled':
                 bottleneck_fv = _fv.bottleneck_fv_per_share
         except Exception as e:
             d['_fv_error'] = str(e)
     d['_asset_structure'] = (asset_structure or (fv_inputs or {}).get('asset_structure') or 'single_asset')
+    d['_catalyst_type'] = catalyst_type
+    d['_catalyst_domain'] = catalyst_domain
+    d['_p_thesis'] = p_thesis
+    d['_L'] = L
+    d['_revision_velocity'] = _reduce_revision_velocity(manual_a11, analysts_delta, target_rev_pct)
 
     scores = {
         'A1':  score_a1(d),
@@ -793,13 +832,19 @@ def compute_totals(scores):
 
 def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
                           has_catalyst=False, cfg=None,
-                          fv_asymmetry=None, asset_structure=None, fv_source="modeled"):
+                          fv_asymmetry=None, asset_structure=None, fv_source="modeled",
+                          p_thesis=None, L=None, catalyst_type=None, days_to_catalyst=None,
+                          req_annual=None):
     """F1-F4 VCI final-layer gates + the §4 forward-led asymmetry floor, at the DEPLOYMENT
     layer only (never folded into Part A / ACS4).
       F1 management instability  -> ACS - VCI_MGMT_PENALTY (capital discipline)
       F2 catalyst-confirmation   -> no confirmed bottleneck catalyst = NOT deploy-eligible (hard)
       F3 price-falls-on-beat     -> hard NO-DEPLOY (value-trap signal)
-      §4 asymmetry floor         -> fv_asymmetry >= tiered floor (§9.1) when provided
+      §4 asymmetry floor         -> fv_asymmetry >= tiered floor (§9.1) when provided; v2 (E1):
+                                     when p_thesis/L, catalyst_type or days_to_catalyst are supplied
+                                     AND VCI_FLOOR_MODE=="derived", the floor is the probability-
+                                     weighted p·L floor (bottleneck_fv.derive_floor), not the fixed
+                                     tier — this only ever RAISES the bar (max-clamped).
     PRICE-VS-ENTRY DISTANCE IS NEVER AN INPUT. fv_source=='estimated' -> manual confirm (§10.5)."""
     cfg = cfg or _cfg
     pen = getattr(cfg, "VCI_MGMT_PENALTY", 5.0)
@@ -818,10 +863,18 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
 
     # --- §4 asymmetry floor (only when an asymmetry ratio and/or structure is provided) ---
     floor = None
+    floor_source = "fixed"
     if fv_asymmetry is not None or asset_structure is not None:
         try:
             import bottleneck_fv as _bfv
-            floor = _bfv.select_floor(asset_structure)
+            floor_mode = getattr(cfg, "VCI_FLOOR_MODE", "fixed")
+            if floor_mode == "derived" and (p_thesis is not None or L is not None
+                                            or catalyst_type is not None or days_to_catalyst is not None):
+                floor, floor_source = _bfv.derive_floor(asset_structure, catalyst_type, p_thesis, L,
+                                                        days_to_catalyst, mode="derived",
+                                                        req_annual=req_annual)
+            else:
+                floor = _bfv.select_floor(asset_structure)
         except Exception:
             floor = (getattr(cfg, "VCI_FV_ASYMMETRY_MIN_PLATFORM", 2.0)
                      if str(asset_structure).lower() == "platform"
@@ -829,7 +882,7 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
         if fv_asymmetry is None:
             blocked = True; gates.append("fv_asymmetry:unavailable")
         elif fv_asymmetry < floor:
-            blocked = True; gates.append(f"fv_asymmetry {fv_asymmetry:.2f} < floor {floor} ({asset_structure})")
+            blocked = True; gates.append(f"fv_asymmetry {fv_asymmetry:.2f} < floor {floor} ({asset_structure}/{floor_source})")
 
     manual = (fv_source == "estimated")
     if manual:
@@ -847,6 +900,7 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
         "catalyst_confirmed": catalyst_ok,
         "fv_asymmetry": fv_asymmetry,
         "fv_floor": floor,
+        "fv_floor_source": floor_source,
     }
 
 
@@ -975,6 +1029,17 @@ def build_json_output(sym, d, scores, totals, override_check=None):
         'a10_score': scores['A10'].score,
         'a11_score': scores['A11'].score,
         'part_a_str': f'{totals["raw_score"]}/{totals["effective_denom"]}',
+        # --- v2 (Jul-2026) pass-through fields ---
+        'fv_p25': d.get('_fv', {}).get('fv_p25'),
+        'fv_p50': d.get('_fv', {}).get('fv_p50'),
+        'fv_p75': d.get('_fv', {}).get('fv_p75'),
+        'fv_asymmetry_p25': d.get('_fv', {}).get('fv_asymmetry_p25'),
+        'fv_crosscheck_warn': d.get('_fv', {}).get('fv_crosscheck_warn', False),
+        'catalyst_type': d.get('_catalyst_type'),
+        'catalyst_domain': d.get('_catalyst_domain'),
+        'p_thesis': d.get('_p_thesis'),
+        'L': d.get('_L'),
+        'revision_velocity': d.get('_revision_velocity'),
     }
 
 
@@ -1013,6 +1078,20 @@ def parse_fv_arg(arg_str):
     return out
 
 
+def parse_str_kv_arg(arg_str):
+    """Parse 'TICKER:phase2_biotech,ONT.L:revenue_ramp' -> {'TICKER':'phase2_biotech',...} (string values,
+    for catalyst_type / catalyst_domain — free-form E1/E4 keys, not scored, just passed through)."""
+    if not arg_str:
+        return {}
+    out = {}
+    for part in arg_str.split(','):
+        part = part.strip()
+        if ':' in part:
+            k, v = part.split(':', 1)
+            out[k.strip().upper()] = v.strip()
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='VCI Part A Auto-Scorer — applies VCI_Asymmetric_Scorecard.md v2.0 rules'
@@ -1036,6 +1115,18 @@ def main():
                         help='F3 VCI gate: tickers that fell on an earnings beat (hard NO-DEPLOY)')
     parser.add_argument('--final-gates', action='store_true',
                         help='Apply F1-F4 VCI final-layer gates (overrides scoring_config.VCI_FINAL_LAYER_GATES)')
+    parser.add_argument('--catalyst-type', default=None,
+                        help='v2 (E1 prior key): "TICKER:phase2_biotech,ONT.L:revenue_ramp"')
+    parser.add_argument('--catalyst-domain', default=None,
+                        help='v2 (E4 correlation key): "TICKER:biotech_readout,..."')
+    parser.add_argument('--p-thesis', default=None, dest='p_thesis',
+                        help='v2 (E1 override, else base-rate prior used): "TICKER:0.28,..."')
+    parser.add_argument('--L', default=None, dest='L',
+                        help='v2 (E1 loss-given-failure override): "TICKER:0.60,..."')
+    parser.add_argument('--analysts-delta', default=None,
+                        help='v2 (E6 revision_velocity input): analyst-coverage count change vs prior: "TICKER:2,..."')
+    parser.add_argument('--target-rev-pct', default=None,
+                        help='v2 (E6 revision_velocity input): %% change in mean target vs prior: "TICKER:10,..."')
     args = parser.parse_args()
 
     a10_map = parse_kv_arg(args.a10) if args.a10 else {}
@@ -1046,6 +1137,12 @@ def main():
     mgmt_set = {t.upper() for t in args.mgmt_unstable} if args.mgmt_unstable else set()
     fob_set = {t.upper() for t in args.falls_on_beat} if args.falls_on_beat else set()
     _final_gates_on = bool(args.final_gates or getattr(_cfg, "VCI_FINAL_LAYER_GATES", False))
+    ctype_map = parse_str_kv_arg(args.catalyst_type) if args.catalyst_type else {}
+    cdomain_map = parse_str_kv_arg(args.catalyst_domain) if args.catalyst_domain else {}
+    p_thesis_map = parse_fv_arg(args.p_thesis) if args.p_thesis else {}
+    L_map = parse_fv_arg(args.L) if args.L else {}
+    adelta_map = parse_fv_arg(args.analysts_delta) if args.analysts_delta else {}
+    trp_map = parse_fv_arg(args.target_rev_pct) if args.target_rev_pct else {}
 
     print(f'\nVCI Part A Auto-Scorer | {len(args.tickers)} candidate(s)')
     print(f'Scorecard version: VCI_Asymmetric_Scorecard.md v2.0')
@@ -1061,13 +1158,23 @@ def main():
 
     for sym in args.tickers:
         sym_up = sym.upper()
-        a10_override = a10_map.get(sym_up) or a10_map.get(sym_up.replace('.L', ''))
-        a11_override = a11_map.get(sym_up) or a11_map.get(sym_up.replace('.L', ''))
+        sym_base = sym_up.replace('.L', '')
+        a10_override = a10_map.get(sym_up) or a10_map.get(sym_base)
+        a11_override = a11_map.get(sym_up) or a11_map.get(sym_base)
 
-        fv_override = fv_map.get(sym_up) or fv_map.get(sym_up.replace('.L', ''))
-        has_cat = (sym_up in catalyst_set) or (sym_up.replace('.L','') in catalyst_set)
+        fv_override = fv_map.get(sym_up) or fv_map.get(sym_base)
+        has_cat = (sym_up in catalyst_set) or (sym_base in catalyst_set)
+        ctype = ctype_map.get(sym_up) or ctype_map.get(sym_base)
+        cdomain = cdomain_map.get(sym_up) or cdomain_map.get(sym_base)
+        p_thesis_ov = p_thesis_map.get(sym_up) if sym_up in p_thesis_map else p_thesis_map.get(sym_base)
+        L_ov = L_map.get(sym_up) if sym_up in L_map else L_map.get(sym_base)
+        adelta = adelta_map.get(sym_up) if sym_up in adelta_map else adelta_map.get(sym_base)
+        trp = trp_map.get(sym_up) if sym_up in trp_map else trp_map.get(sym_base)
         d, scores = score_candidate(sym, a10_override, a11_override, a9_strategic,
-                                    bottleneck_fv=fv_override, has_catalyst=has_cat)
+                                    bottleneck_fv=fv_override, has_catalyst=has_cat,
+                                    catalyst_type=ctype, catalyst_domain=cdomain,
+                                    p_thesis=p_thesis_ov, L=L_ov,
+                                    analysts_delta=adelta, target_rev_pct=trp)
         totals = compute_totals(scores)
         override_check = check_pre_inflection_override(scores, d)
         print_scorecard(sym, d, scores, totals, override_check)
@@ -1075,16 +1182,17 @@ def main():
         if args.json_out:
             _res = build_json_output(sym, d, scores, totals, override_check)
             if _final_gates_on:
-                _sb = sym_up.replace('.L', '')
                 _a8 = d.get('_acs8') or {}
                 _res["vci_final_gates"] = apply_vci_final_gates(
                     totals["acs4"],
-                    mgmt_unstable=(sym_up in mgmt_set or _sb in mgmt_set),
-                    falls_on_beat=(sym_up in fob_set or _sb in fob_set),
+                    mgmt_unstable=(sym_up in mgmt_set or sym_base in mgmt_set),
+                    falls_on_beat=(sym_up in fob_set or sym_base in fob_set),
                     has_catalyst=has_cat, cfg=_cfg,
                     fv_asymmetry=_a8.get('fv_asymmetry'),
                     asset_structure=d.get('_asset_structure'),
-                    fv_source=_a8.get('fv_source', 'modeled'))
+                    fv_source=_a8.get('fv_source', 'modeled'),
+                    p_thesis=p_thesis_ov, L=L_ov, catalyst_type=ctype,
+                    days_to_catalyst=None)
             all_results.append(_res)
 
     # Summary table

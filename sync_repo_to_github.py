@@ -25,7 +25,9 @@ RUNTIME_JSON = {"energy_watchlist.json", "watchlist_tickers.json", "target_weigh
                 "source_performance_log.json", "yfinance_metric_label_map.json",
                 "update_vci_watchlist_TEMPLATE.json", "vci_email_data_TEMPLATE.json",
                 "theme_opportunity.json",
-                "email_data_monthly_isa_TEMPLATE.json"}
+                "email_data_monthly_isa_TEMPLATE.json",
+                "vci_base_rates.json",     # VCI v2 E1 probability-weighted-floor priors (fallback needs it)
+                "vci_fv_inputs.json"}      # VCI v2 E2 structured §10.2 win-case inputs per watchlist name
 
 def sha(p):
     h = hashlib.sha256()
@@ -70,10 +72,11 @@ def main():
         except SyntaxError as e:
             _broken.append("%s (line %s: %s)" % (_fn, e.lineno, e.msg))
     if _broken:
-        print("SYNC_ABORTED_INVALID_PY: local script(s) fail to compile (likely a "
-              "truncated/half-written save). Run HALTED; nothing pushed. Fix and re-run: "
-              + "; ".join(_broken))
-        sys.exit(3)
+        print("LOCAL_COMPILE_WARN: %d local script(s) did not parse in THIS environment "
+              "(usually a OneDrive->mount hydration/truncation artifact, not a real break): %s. "
+              "They are SKIPPED from the push (their last-good GitHub copy is preserved) and the "
+              "run CONTINUES. Verify in a coherent (non-OneDrive) mount if a genuine break is suspected."
+              % (len(_broken), "; ".join(_broken)))
 
     token = read_token(a.inv_dir)
     if not token and not a.dry_run:
@@ -112,11 +115,15 @@ def main():
             ast.parse(open(src, encoding="utf-8", errors="replace").read(), filename=fn)
         except SyntaxError as e:
             broken.append("%s (line %s: %s)" % (fn, e.lineno, e.msg))
+    broken_names = {b.split(" ", 1)[0] for b in broken}
     if broken:
-        print("SYNC_ABORTED_INVALID_PY: local script(s) fail to compile (likely a "
-              "truncated/half-written save). Run HALTED; nothing pushed. Fix and re-run: "
-              + "; ".join(broken))
-        sys.exit(3)
+        print("SYNC_SKIPPED_BROKEN: %d file(s) did not parse and are EXCLUDED from this push "
+              "(their last-good GitHub copy is kept, so the fallback never runs broken code): %s. "
+              "Cause is almost always OneDrive->mount truncation; the local-primary run reconstructs "
+              "these from a coherent mount. All parseable files STILL sync below." % (len(broken), "; ".join(broken)))
+    # Skip-and-continue (was: abort-all). A non-parsing file is never pushed, but it no longer
+    # blocks syncing every other good file — this is what left the whole mirror stale before.
+    candidates = [c for c in candidates if c not in broken_names]
 
     changed = []
     for fn in candidates:
@@ -137,7 +144,7 @@ def main():
                    check=True, capture_output=True)
     pr = subprocess.run(["git", "-C", work, "push", "origin", a.branch], capture_output=True, text=True)
     if pr.returncode != 0:
-        print("SYNC_FAILED_PUSH:", pr.stderr.strip().replace(token or "", "***")[:200]); sys.exit(2)
+         print("SYNC_FAILED_PUSH:", pr.stderr.strip().replace(token or "", "***")[:200]); sys.exit(2)
     print(f"SYNCED {len(changed)} file(s) -> {a.repo}: {', '.join(changed)}")
 
 if __name__ == "__main__":

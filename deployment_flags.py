@@ -36,9 +36,9 @@ def compute_forward_axis_flags(td: dict) -> list:
     f = _num(td.get("forward_axis_score"))
     if f is not None:
         flags.append("forward_strong" if f >= 67 else "forward_moderate" if f >= 34 else "forward_weak")
-    stage = td.get("revision_stage")
-    if stage:
-        flags.append(f"revision_stage:{stage}")
+    # Fix Pack A3 (P2): the "revision_stage:X" flag-string is RETIRED — revision_stage is a
+    # first-class field on every step9_pre record (stamped by rerank + step9_pre_builder);
+    # the stage GATE lives in t1_gates.stage_gate. Descriptive tags below are unchanged.
     d = (td.get("est_rev_direction") or "").lower()
     if d == "up":
         flags.append("est_rev_up")

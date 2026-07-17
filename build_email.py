@@ -458,6 +458,17 @@ def _summary_eligible(row):
     """SUMMARY viability eligibility — thin wrapper over source_score.summary_eligible (single source)."""
     return _ss.summary_eligible(row, get=lambda r, k: get_field(r, k))
 
+
+def _capital_upside(row):
+    """Fix Pack A6/D7 (12-Jul-26): THE upside capital logic reads is implied_upside_fv
+    (FV-composite basis). Consensus-target gap (upside_pct/target_upside) is DISPLAY-ONLY —
+    kept here solely as a fallback for pre-Fix-Pack CSVs (June-era key shim, regression R3).
+    Returns (value_fraction | None, basis_label)."""
+    v = sf(get_field(row, "implied_upside_fv"))
+    if v is not None:
+        return v, "fv"
+    return sf(get_field(row, "upside_pct")), "target(display)"
+
 def build_kpi_tiles(strong_buys, gate_passers):
     """KPI tiles row using table layout (Rule 3 — no flexbox)."""
     sb_count = len(strong_buys)
@@ -476,9 +487,9 @@ def build_kpi_tiles(strong_buys, gate_passers):
         top_ticker = "N/A"
         top_max = 50
 
-    # Avg upside of top 10
+    # Avg upside of top 10 — Fix Pack D7: FV-composite implied upside (consensus gap is display-only)
     top10 = strong_buys[:10]
-    upsides = [sf(get_field(r, "upside_pct")) for r in top10]
+    upsides = [_capital_upside(r)[0] for r in top10]
     upsides = [u for u in upsides if u is not None]
     avg_upside = f"{sum(upsides) / len(upsides) * 100:.1f}%" if upsides else "N/A"
 
@@ -506,7 +517,7 @@ def build_kpi_tiles(strong_buys, gate_passers):
         f'<td style="width:25%;padding:0 0 0 6px">\n'
         f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#4a1a6b;border-radius:6px;text-align:center">\n'
         f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{safe_entities(avg_upside)}</td></tr>\n'
-        f'  <tr><td style="color:#d4b3e6;font-size:11px">Avg Upside (Top 10)</td></tr>\n'
+        f'  <tr><td style="color:#d4b3e6;font-size:11px">Avg FV Upside (Top 10)</td></tr>\n'
         f'  </table>\n'
         f'</td>\n'
         '</tr>\n'
@@ -516,16 +527,19 @@ def build_kpi_tiles(strong_buys, gate_passers):
 
 
 def build_top10_table(strong_buys):
-    """Section 2 — Top 10 stocks table (exactly 12 columns per Run_Context spec)."""
+    """Section 2 — Top 10 stocks table (exactly 13 columns per Run_Context spec).
+    Fix Pack 12-Jul-26: Src = unified screen_source (A6, screen=deploy); Upside (FV) =
+    implied_upside_fv per D7 (consensus gap display-only, fallback for old CSVs); E[r] =
+    expected_return_12_24m % pa (A2 shadow column — becomes a T1 gate input at P2)."""
     if not strong_buys:
         return '<p style="color:#666;font-style:italic">No SUMMARY candidates identified this run.</p>\n'
 
     header_cols = [
         "Rank", "Ticker", "Company", "Sector",
         "Fwd /100", "Src", "Stage",
-        "Part A", "Part B", "Total", "ROIC", "Upside"
+        "Part A", "Part B", "Total", "ROIC", "Upside (FV)", "E[r]"
     ]
-    widths = ["4%", "6%", "16%", "11%", "6%", "5%", "11%", "5%", "5%", "6%", "7%", "8%"]
+    widths = ["4%", "6%", "15%", "10%", "6%", "5%", "10%", "5%", "5%", "6%", "7%", "8%", "8%"]
 
     # Header row
     header_html = "".join(
@@ -548,16 +562,21 @@ def build_top10_table(strong_buys):
         src = round(_source_score(row) * 100)
         stage = safe_entities(str(get_field(row, "revision_stage") or "—")[:11])
         roic_raw = sf(get_field(row, "roic"))
-        upside_raw = sf(get_field(row, "upside_pct"))
+        upside_raw, _up_basis = _capital_upside(row)   # D7: FV-composite implied upside
         roic_str = pct(roic_raw) if roic_raw is not None else "N/A"
 
-        # Upside with colour
+        # Upside with colour (marked when only the display-only consensus gap was available)
         if upside_raw is not None:
             sign = "+" if upside_raw >= 0 else ""
             upside_colour = "#1a6b2a" if upside_raw >= 0 else "#c0392b"
-            upside_str = f'<span style="color:{upside_colour}">{sign}{upside_raw*100:.1f}%</span>'
+            _mark = "*" if _up_basis != "fv" else ""
+            upside_str = f'<span style="color:{upside_colour}">{sign}{upside_raw*100:.1f}%{_mark}</span>'
         else:
             upside_str = "N/A"
+
+        # E[r] % pa (A2 shadow) — percent-unit value stamped by screener_core
+        _er_raw = sf(get_field(row, "expected_return_12_24m"))
+        er_str = f"{_er_raw:.1f}%" if _er_raw is not None else "—"
 
         cell_style = f'padding:7px 6px;border-bottom:1px solid #e8e8e8;background:{bg};font-size:12px;text-align:center'
 
@@ -575,11 +594,13 @@ def build_top10_table(strong_buys):
             f'<td style="{cell_style};color:#555">{total}</td>'
             f'<td style="{cell_style}">{safe_entities(roic_str)}</td>'
             f'<td style="{cell_style}">{upside_str}</td>'
+            f'<td style="{cell_style};color:#4a1a6b;font-weight:bold">{safe_entities(er_str)}</td>'
             f'</tr>\n'
         )
 
     return (
-        '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 10 Stocks &mdash; By Source Score (forward-led)</h3>\n'
+        '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 10 Stocks &mdash; By screen_source '
+        '(unified screen=deploy)</h3>\n'
         '<table style="width:100%;border-collapse:collapse;margin-bottom:24px" '
         'cellpadding="0" cellspacing="0" border="0">\n'
         f'<tr>{header_html}</tr>\n'
@@ -678,7 +699,8 @@ def build_top3_picks(strong_buys):
             f'<div style="font-size:12px;color:#555;margin-bottom:10px">'
             f'Price: {price_str} &nbsp;|&nbsp; '
             f'Target: {target_str} &nbsp;|&nbsp; '
-            f'Upside: {upside_str} &nbsp;|&nbsp; '
+            f'Target gap (display): {upside_str} &nbsp;|&nbsp; '  # D7: consensus gap is display-only
+
             f'{safe_entities(analyst_count)} analysts &mdash; {safe_entities(analyst_rating)}'
             f'</div>\n'
             # Commentary
@@ -878,11 +900,24 @@ def build_source_section(run_qa_rows, group, gate_data):
                 )
             html += '</table>\n'
 
+    # Fix Pack A1 (12-Jul-26): SUMMARY floor-based count + thin-tape warning (from run_qa)
+    _sq = {str(get_field(r, "metric") or "").lower(): get_field(r, "value") for r in run_qa_rows}
+    if _sq.get("summary_count") not in (None, ""):
+        _thin = str(_sq.get("summary_thin_warning", "")).strip().lower() in ("true", "1", "yes")
+        _warn_html = (' <span style="color:#c0392b;font-weight:bold">&#9888; SUMMARY_THIN_WARNING — '
+                      'thin tape, floor not met by enough names</span>' if _thin else "")
+        html += (f'<p style="font-size:13px;margin:0 0 10px 0"><strong>SUMMARY selection '
+                 f'(floor-based, A1):</strong> {safe_entities(_sq.get("summary_count"))} rows at/above '
+                 f'screen_source floor {safe_entities(_sq.get("summary_floor", ""))}'
+                 f' (eligible {safe_entities(_sq.get("summary_eligible_count", "?"))}, '
+                 f'cap {safe_entities(_sq.get("summary_cap", ""))}).{_warn_html}</p>\n')
+
     # Source performance from run_qa
     source_rows = []
     for row in run_qa_rows:
         metric = get_field(row, "metric") or ""
-        if "source" in metric.lower() or "coverage" in metric.lower() or "rate" in metric.lower():
+        if ("source" in metric.lower() or "coverage" in metric.lower() or "rate" in metric.lower()
+                or "summary" in metric.lower()):
             source_rows.append(row)
 
     if source_rows:
@@ -1015,9 +1050,10 @@ def build_email_body(
     # S5: headline ranking MIRRORS the Excel SUMMARY — count-based, forward-led Source Score.
     _sb_all = [r for r in full_data if is_strong_buy(r)]  # informational Strong-Buy set (badge secondary under S5)
     if _cfg_get("SUMMARY_COUNT_BASED", False):
-        _flr = _cfg_get("SUMMARY_SOURCE_FLOOR", 0.0)
-        strong_buys = sorted([r for r in full_data if _summary_eligible(r) and _source_score(r) * 100 >= _flr],
-                             key=lambda r: -_source_score(r))[:int(_cfg_get("SUMMARY_TARGET_COUNT", 30))]
+        # Fix Pack A1 (12-Jul-26): floor-based selection via THE shared source_score.select_summary
+        # (fixed top-30 retired) — email headline set mirrors the Excel SUMMARY by construction.
+        _sel, _sqa = _ss.select_summary(full_data, get=lambda r, k: get_field(r, k))
+        strong_buys = [r for r, _sc in _sel]
     else:
         strong_buys = sorted(_sb_all, key=lambda r: -(sf(get_field(r, "total_score")) or 0))
     gate_passers = [r for r in full_data if is_gate_passer(r)]

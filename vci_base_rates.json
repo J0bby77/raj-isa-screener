@@ -29,4 +29,13 @@
   },
 
   "L_by_structure": {
-    "single_asset": {"L": 0.60, "confidence": "reasoned", "note": "one-shot: 
+    "single_asset": {"L": 0.60, "confidence": "reasoned", "note": "one-shot: deep drawdown on failure (the trial IS the company)"},
+    "platform":     {"L": 0.35, "confidence": "reasoned", "note": "multi-shot / revenue-cushioned: a single failure is partly absorbed"}
+  },
+
+  "_worked_example": {
+    "note": "Applied floor = max(A_min, fixed tier), A_min = 1 + [(1-p)L + h]/p, h = (1+0.14)^T - 1, T = max(days_to_catalyst/365, 0.5).",
+    "single_asset_phase2_biotech_T1.5y": "p=0.28,L=0.60,h=(1.14)^1.5-1=0.216 -> A_min=1+[(0.72)(0.60)+0.216]/0.28=1+0.648/0.28=3.31 -> floor 3.31x (>2.5 fixed: bar RISES, as accepted)",
+    "platform_revenue_ramp_T1.0y":       "p=0.55,L=0.35,h=0.14 -> A_min=1+[(0.45)(0.35)+0.14]/0.55=1+0.2975/0.55=1.54 -> max(1.54, 2.0)=2.0 (clamp holds the character minimum)"
+  }
+}

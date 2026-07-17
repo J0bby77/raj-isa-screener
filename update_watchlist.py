@@ -335,6 +335,27 @@ def _pool_admit(ns, part_a, path, override) -> bool:
 # Fluid-pool decay helpers (redesign Part3 §4 Layer4 / §13)
 # ---------------------------------------------------------------------------
 
+def _cycles_seen_next(entry: dict, month_label: str, seen_this_cycle: bool):
+    """Fix Pack A5/D3: CONSECUTIVE-cycle sighting counter for the T1 persistence gate
+    (t1_gates: cycles_seen >= PERSISTENCE_MIN_CYCLES or named catalyst <90d).
+    - seen this cycle  -> prior + 1
+    - absent this cycle -> 0 (absence breaks consecutiveness; purge-on-absence UNCHANGED)
+    - no prior counter (first P2 run) -> backfill from first_seen: a CURRENT member whose
+      first_seen predates this month has, by construction, been sighted every month since
+      (purge-on-absence guarantees continuity) -> months_since(first_seen) + 1. No artificial
+      reset (spec A5: July names keep their Jun+Jul sightings).
+    Idempotent per month: a re-run in the same month_label returns the stored value."""
+    if entry.get("cycles_seen_month") == month_label and entry.get("cycles_seen") is not None:
+        return int(entry["cycles_seen"])
+    if not seen_this_cycle:
+        return 0
+    prior = entry.get("cycles_seen")
+    if prior is None:
+        ms = _months_since(entry.get("first_seen") or month_label, month_label)
+        return (ms + 1) if ms is not None else 1
+    return int(prior) + 1
+
+
 def _fluid_on() -> bool:
     return bool(getattr(_cfg, "FLUID_POOL_DECAY", False))
 
@@ -388,6 +409,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     prior_pool = list(wl_data.get("candidate_pool", []))
     # Fluid pool: preserve first_seen across runs (durable-pool memory, CONTRACTS candidate-pool).
     _prior_first_seen = {e.get("ticker"): e.get("first_seen") for e in prior_pool if e.get("ticker")}
+    # Fix Pack A5: carry the persistence counter across the ephemeral pool wipe too.
+    _prior_pool_entry = {e.get("ticker"): e for e in prior_pool if e.get("ticker")}
 
     # Load portfolio_data for duplicate check
     portfolio_tickers = set()
@@ -719,6 +742,9 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             elif "part_b_driver" in updated_entry:
                 del updated_entry["part_b_driver"]
 
+            # Fix Pack A5: consecutive-sighting counter (T1 persistence gate input)
+            updated_entry["cycles_seen"] = _cycles_seen_next(entry, month_label, True)
+            updated_entry["cycles_seen_month"] = month_label
             if _fluid_on():
                 # Confirmed in this cycle's fresh screens -> reset decay. Score-driven removal
                 # (removal_flag above, ns < hard floor) still applies — turnover stays score-driven.
@@ -769,6 +795,10 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                 lc = entry.get("last_confirmed") or month_label
                 updated_entry["first_seen"]     = entry.get("first_seen") or lc
                 updated_entry["last_confirmed"] = lc
+                # Fix Pack A5: absence breaks the consecutive-sighting chain (decay may retain
+                # the NAME, but T1 persistence must restart when it reappears)
+                updated_entry["cycles_seen"] = _cycles_seen_next(entry, month_label, False)
+                updated_entry["cycles_seen_month"] = month_label
                 months_since, age_out = _pool_decay_decision(lc, month_label)
                 protected = bool(override_reason or entry.get("catalyst_protected")
                                  or entry.get("confirmed_catalyst"))
@@ -880,6 +910,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "thesis_break_summary":    "[Claude fills at Step 10 — thesis-break conditions]",
             "probation_flag":          False,
             "eligibility_override_reason": override,
+            "cycles_seen":             1,               # Fix Pack A5 — first sighting
+            "cycles_seen_month":       month_label,
         }
         if _fluid_on():
             new_candidates[ticker].update({
@@ -1012,6 +1044,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "sector":                  row.get("sector", ""),
             "candidate_pool_month":    month_label,
             "eligibility_override_reason": override,
+            "cycles_seen": _cycles_seen_next(_prior_pool_entry.get(ticker) or {}, month_label, True),
+            "cycles_seen_month": month_label,   # Fix Pack A5 — pool names accrue sightings too
             **({"first_seen": _prior_first_seen.get(ticker) or month_label,
                 "last_confirmed": month_label, "decay_state": "active",
                 "in_pool": True, "reconfirm_required": False} if _fluid_on() else {}),

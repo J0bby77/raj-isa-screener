@@ -1615,4 +1615,52 @@
       "gate4_largest_sector_pct": 40.0,
       "excel_file": "Growth Stock Analysis Nasdaq W-e 10-Jul-26.xlsx",
       "retrospective_file": "20260710_NASDAQ_retrospective.md",
-      "notes": "First S5 forward-led NASDAQ run. 888 constituents (+43 vs Jun-26 run), 435 scored 
+      "notes": "First S5 forward-led NASDAQ run. 888 constituents (+43 vs Jun-26 run), 435 scored (vs 229 in v27 \u2014 90% pool expansion from gate relaxation). 0% tech fail rate. NVDA/DXCM 50/50 perfect total; APP 48/50 + 100/100 fwd axis. AUPH Igniting stage. Gate4 Technology concentration 40% (structural for Nasdaq)."
+    },
+    {
+      "run_date": "2026-07-11",
+      "group": "F250-SPI",
+      "task_id": "isa-eu-b-sat2",
+      "run_mode": "local_primary_constituent_hybrid",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) \u2014 no manual flag flip needed.",
+      "constituent_source": "Composio_constituent_hybrid_dump_via_GitHub",
+      "constituents_fetched": 449,
+      "accounted": 449,
+      "gate1_excluded": 128,
+      "gate2_excluded": 0,
+      "gate3_excluded": 13,
+      "gate4_excluded": 81,
+      "gate_data_unresolved": 89,
+      "scored": 138,
+      "technical_failures": 0,
+      "candidate_rankable": 127,
+      "mandatory_minimum_fails": 9,
+      "unresolved_hard_gate": 2,
+      "summary_eligible_forward_led": 19,
+      "strong_buy_badge_count": 6,
+      "top_score": 46,
+      "top_tickers": [
+        "TRN.L",
+        "TEMN.SW"
+      ],
+      "top_source_score_ticker": "KLR.L",
+      "top_source_score": 85,
+      "index_split_scored": {
+        "FTSE250": 71,
+        "SPI": 67
+      },
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 45.7,
+      "excel_file": "Growth Stock Analysis F250 & SPI W-e 11-Jul-26.xlsx",
+      "retrospective_file": "20260711_F250-SPI_retrospective.md",
+      "issues": [
+        "SYNC_ABORTED_INVALID_PY_UNRELATED_SCRIPTS",
+        "COMPOSIO_ENV_MISSING_RECREATED",
+        "LOCAL_RESUME_CACHE_RESET_ONCE_MIDRUN",
+        "QUOTESUMMARY_404_EU_UK_OVERLAYS"
+      ],
+      "notes": "Forward-led (live framework, no manual flag flip). 449 constituents, 138 scored, 127 rankable, 19 SUMMARY-eligible by Source Score, 0 tech fails. Top total TRN.L/TEMN.SW 46/50; top Source Score KLR.L 85 (100/100 fwd axis). Gate4 Industrials concentration 45.7% (up from 43.9% Jun-28). sync_repo_to_github.py aborted (unrelated VCI script syntax errors: build_vci_email.py, vci_acs_scorer.py) \u2014 GitHub fallback mirror not refreshed this run, but all F250-SPI-relevant scripts verified compiling and unaffected. Local resume cache reset once after a tool timeout (~batch 28/30), forcing a full batch restart \u2014 re-scored deterministically, no data loss, just extra calls. Composio /mnt/files/isa_env/.env missing again, recreated per protocol (third consecutive EU run to hit this)."
+    }
+  ]
+}

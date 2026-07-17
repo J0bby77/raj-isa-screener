@@ -335,7 +335,22 @@ SUMMARY_COLS = [
     ("",                           "Part B (/26-30)",    "part_b_score",             score_int,         False),
     ("",                           "Total (/50-54)",     "total_score",              score_int,         False),
     ("",                           "Fwd Axis (/100)",    "forward_axis_score",       score_int,         False),
-    ("",                           "Source Score",       "source_score",             score_int,         False),
+    # Fix Pack A6 (12-Jul-26): "screen_source" — ONE unified Source Score, screen = deploy.
+    # Breakdown cells show "pre-weight raw → weighted contribution" for the five terms (A1 spec:
+    # full anatomy on every SUMMARY row; computed once in source_score, never recomputed here).
+    ("",                           "screen_source",      "source_score",             score_int,         False),
+    ("",                           "Stage",              "revision_stage",           s,                 True),
+    ("",                           "Fwd (raw→wtd)",      "_src_fwd",                 s,                 False),
+    ("",                           "Rev (raw→wtd)",      "_src_rev",                 s,                 False),
+    ("",                           "Deploy (raw→wtd)",   "_src_deploy",              s,                 False),
+    ("",                           "Qual (raw→wtd)",     "_src_qual",                s,                 False),
+    ("",                           "Analyst (raw→wtd)",  "_src_analyst",             s,                 False),
+    # Fix Pack A2 (12-Jul-26): E[r] 12-24m block — shadow columns at P1, T1 gate input at P2.
+    ("Group 2b — E[r] 12-24m",     "E[r] % pa",          "expected_return_12_24m",   lambda v: num(v, 1, "%"), False),
+    ("",                           "E[r] growth",        "er_growth",                lambda v: num(v, 1, "%"), False),
+    ("",                           "E[r] rerate",        "er_rerate",                lambda v: num(v, 1, "%"), False),
+    ("",                           "E[r] yield",         "er_yield",                 lambda v: num(v, 1, "%"), False),
+    ("",                           "E[r] conf",          "er_confidence",            lambda v: num(v, 2, ""),  False),
     # Group 3 — Growth Quality (14 cols)
     ("Group 3 — Growth Quality",   "Rev CAGR 3-5yr",     "rev_cagr",                pct,               False),
     ("",                           "Recent Rev Growth",  "recent_rev_growth",        pct,               False),
@@ -359,7 +374,10 @@ SUMMARY_COLS = [
     ("",                           "Earnings Yield",     "earnings_yield",           pct,               False),
     ("",                           "Div Payout/FCF",     "div_payout_fcf",           pct,               False),
     ("",                           "Fwd EPS Growth",     "fwd_eps_growth",           pct,               False),
-    ("",                           "Target Upside",      "target_upside",            upside_fmt,        False),
+    # Fix Pack A6/D7: implied_upside_fv (FV-composite basis) is THE upside capital logic reads;
+    # the consensus-target gap survives as DISPLAY ONLY (consensus is sentiment data).
+    ("",                           "Impl Upside (FV)",   "implied_upside_fv",        upside_fmt,        False),
+    ("",                           "Target Gap (display)", "target_upside",          upside_fmt,        False),
     ("",                           "Stress ND/EBITDA",   "stress_nd_ebitda",         mult,              False),
     ("",                           "Stress Int Cov",     "stress_int_cov",           mult,              False),
     ("",                           "Book-to-Bill",       "book_to_bill_trailing_2q", lambda v: num(v, 2, "x") if v not in (None, "N/A") else "N/A", False),
@@ -396,11 +414,12 @@ def build_summary(wb, df_full, run_date, group):
         import scoring_config as _cfg0
         _cb0 = getattr(_cfg0, "SUMMARY_COUNT_BASED", False)
         _paf0 = getattr(_cfg0, "FORWARD_ELIG_PART_A_FLOOR", 10)
-        _tc0 = getattr(_cfg0, "SUMMARY_TARGET_COUNT", 30)
+        _fl0 = getattr(_cfg0, "SUMMARY_SOURCE_FLOOR", 70.0)
+        _mx0 = getattr(_cfg0, "SUMMARY_MAX_COUNT", 40)
     except Exception:
         _cb0 = False
     if _cb0:
-        title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (S5 forward-led: top {_tc0} by Source Score · Part A viability floor {_paf0} · est-rev not deteriorating) | Run: {run_date}"
+        title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (Fix Pack A1 floor-based: screen_source ≥ {_fl0:g} · cap {_mx0} · Part A viability floor {_paf0} · est-rev not deteriorating) | Run: {run_date}"
     else:
         title = f"ISA Growth Stock Analysis — {group} | Best Opportunities (Part A ≥22 · Total ≥43/50 · est-rev not deteriorating) | Run: {run_date}"
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
@@ -446,25 +465,42 @@ def build_summary(wb, df_full, run_date, group):
         ws.cell(row=5, column=1, value="No data available for this run.")
         return ws
 
-    # SUMMARY rule (Jul-26 forward-led): ONE unified path. Multi-door VIABILITY eligibility +
-    # top-N by the single Source Score, both from source_score.py (no inline weighted sum, no legacy
-    # legacy fixed-total v27 branch). Part B floor is SUMMARY_PART_B_FLOOR (10). Balance-sheet risk
-    # stays gated by the separate ND/EBITDA MANDATORY_MINIMUM_FAIL (reflected in final_status).
+    # SUMMARY rule (Fix Pack A1/A6, 12-Jul-26): floor-based selection via THE shared
+    # source_score.select_summary (fixed top-30 retired — one quality bar per D4; cap only
+    # truncates; thin-tape warning below SUMMARY_MIN_WARN). Score is the UNIFIED screen=deploy
+    # source (A6). Breakdown + E[r] cells come from the single compute in source_score /
+    # expected_return — deterministic parity with the values screener_core stamps into full_data.
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     import scoring_config as _cfg
     import source_score as _ss
-    _elig = df_full.apply(lambda r: _ss.summary_eligible(r.to_dict()), axis=1)
-    sb = df_full[_elig].copy()
-    if not sb.empty:
-        sb["source_score"] = sb.apply(lambda r: _ss.source_score_for_row(r.to_dict()), axis=1)
-        _floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 0.0)
-        sb = sb[sb["source_score"].fillna(0) >= _floor]
-        sb = sb.sort_values("source_score", ascending=False).head(
-            int(getattr(_cfg, "SUMMARY_TARGET_COUNT", 30))).reset_index(drop=True)
+    import expected_return as _er
+
+    _sel, _sqa = _ss.select_summary(df_full.to_dict("records"))
+    _rows_out = []
+    for _r, _sc in _sel:
+        _comp = _ss.source_score_components_for_row(_r)
+        _erd = _er.expected_return_for_row(_r)
+        _rows_out.append({
+            **_r, **_erd,
+            "source_score": _sc,
+            "implied_upside_fv": _comp.get("implied_upside_fv"),
+            "_src_fwd":     f"{_comp['src_fwd_raw']:g} → {_comp['src_fwd_w']:g}",
+            "_src_rev":     f"{_comp['src_rev_raw']:g} → {_comp['src_rev_w']:g}",
+            "_src_deploy":  f"{_comp['src_deploy_raw']:g} → {_comp['src_deploy_w']:g}",
+            "_src_qual":    f"{_comp['src_qual_raw']:g} → {_comp['src_qual_w']:g}",
+            "_src_analyst": f"{_comp['src_analyst_raw']:g} → {_comp['src_analyst_w']:g}",
+        })
+    sb = pd.DataFrame(_rows_out)
 
     if not sb.empty:
         sb["source_score"] = sb["source_score"].round().astype("Int64")
+
+    if _sqa.get("summary_thin_warning"):
+        _warn = (f"SUMMARY_THIN_WARNING: only {_sqa['summary_count']} rows at/above the "
+                 f"screen_source floor {_sqa['summary_floor']:g} (warn <{getattr(_cfg, 'SUMMARY_MIN_WARN', 10)})")
+        ws.cell(row=2, column=1, value=_warn).font = FONT_BOLD
+        ws.row_dimensions[2].height = 14   # spacer row carries the warning — undo the 6px squeeze
 
     if sb.empty:
         ws.cell(row=5, column=1, value="No summary candidates identified this run.")

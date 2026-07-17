@@ -61,6 +61,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 try:
     import screener_core as sc
+    import fv_composite as _fvc     # Fix Pack A6 (P2) — THE shared FV composite (screen = deploy)
+    import expected_return as _erm  # Fix Pack A2 (P2) — E[r] object on the pre-run path too
 except ImportError as e:
     print(f"ERROR: Cannot import screener_core.py from {SCRIPT_DIR}: {e}")
     sys.exit(1)
@@ -338,6 +340,31 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
     scored["currency"]  = info.get("currency", "")
     scored["market_cap"] = sc.safe_float(info.get("marketCap"))
 
+    # ── Fix Pack A6/D7 (P2): stamp the UNIFIED FV anatomy on every growth row — the same
+    # fv_composite the screen and entry_level_builder use. implied_upside_fv is THE field
+    # capital logic reads; the consensus-target gap survives as display_target_gap ONLY.
+    # (The raw `target_upside` key set inside the shared scoring fns survives one more cycle
+    # for old-file readers — migration note in run_context; removal rides P3 with the proxy path.)
+    try:
+        _fv = _fvc.fv_composite_for_row(scored)
+        scored["implied_upside_fv"]   = _fv["implied_upside_fv"]
+        scored["display_target_gap"]  = _fv["display_target_gap"]
+        scored["fair_value_composite"] = _fv["fair_value"]
+        scored["fv_basis"]            = _fv["fv_basis"]
+        scored["fv_conf"]             = _fv["fv_conf"]
+        scored["consensus_upside_capped"] = _fv["consensus_upside_capped"]
+    except Exception as _e:
+        log.warning(f"fv_composite failed for {ticker_sym}: {_e}")
+    # Fix Pack A2 (P2): E[r] on the pre-run row (same module as the screen; rerank re-stamps
+    # at the live price — this baseline makes the anatomy visible even for un-reranked names).
+    try:
+        _erd = _erm.expected_return_for_row(scored)
+        scored["expected_return_12_24m"] = _erd["expected_return_12_24m"]
+        scored["er_confidence"]          = _erd["er_confidence"]
+        scored["er_basis"]               = _erd["er_basis"]
+    except Exception as _e:
+        log.warning(f"expected_return failed for {ticker_sym}: {_e}")
+
     # Analyst rating (text key — used by normalise_adapter.py analyst summary)
     scored["analyst_rating"] = info.get("recommendationKey", "")
 
@@ -425,6 +452,7 @@ def score_ticker_energy(ticker_sym: str, data: dict) -> dict:
 
     # target_upside alias (energy Part B uses upside_pct — provide standard alias)
     scored["target_upside"] = scored.get("upside_pct")
+    scored["display_target_gap"] = scored.get("upside_pct")   # Fix Pack D7 — display-only name
 
     # Next earnings
     scored["next_earnings"] = data.get("next_earnings", "Unknown")
@@ -470,6 +498,7 @@ def build_vci_entry(ticker_sym: str, data: dict, meta: dict) -> dict:
         "current_price":    prices["current_price"],
         # Not applicable for VCI — leave for analyst display in normalise_adapter.py
         "target_upside":    None,
+        "display_target_gap": None,   # Fix Pack D7
         "analyst_rating":   info.get("recommendationKey", ""),
         "num_analysts":     sc.safe_float(info.get("numberOfAnalystOpinions")),
         "next_earnings":    data.get("next_earnings", "Unknown"),

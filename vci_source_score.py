@@ -185,4 +185,40 @@ def vci_source_score_for_row(row, get=None):
     )
 
 
-# --- inline self-test ----------
+# --- inline self-test -----------------------------------------------------------------------
+if __name__ == "__main__":
+    # R-T2: forward decides. X lower ACS but higher asymmetry+nearer catalyst.
+    X = compute_vci_source_score(fv_asymmetry=3.0, floor=2.0, acs=77, days_to_catalyst=45, signal_count=5)
+    Y = compute_vci_source_score(fv_asymmetry=2.1, floor=2.0, acs=83, days_to_catalyst=400, signal_count=4)
+    print(f"R-T2  X={X}  Y={Y}  -> X>Y? {X > Y}")
+    assert X > Y
+
+    # E8: quality no longer overrides forward. A more forward/less quality beats B.
+    A = compute_vci_source_score(fv_asymmetry=2.6, floor=2.0, acs=76, days_to_catalyst=120, signal_count=5)
+    B = compute_vci_source_score(fv_asymmetry=2.2, floor=2.0, acs=85, days_to_catalyst=120, signal_count=5)
+    print(f"E8    A(fwd)={A}  B(quality)={B}  -> A>B? {A > B}")
+    assert A > B, "at quality 0.15 the forward name must win"
+
+    # E3: quality term invariant to asymmetry when acs_ex_acs8 fixed
+    q1 = compute_vci_source_score(fv_asymmetry=2.2, floor=2.0, acs=99, acs_ex_acs8=80,
+                                  days_to_catalyst=120, signal_count=5, return_components=True)[1]["components"]["quality"]
+    q2 = compute_vci_source_score(fv_asymmetry=3.5, floor=2.0, acs=99, acs_ex_acs8=80,
+                                  days_to_catalyst=120, signal_count=5, return_components=True)[1]["components"]["quality"]
+    print(f"E3    quality invariant to asymmetry: {q1} == {q2}? {q1 == q2}")
+    assert q1 == q2
+
+    # E6: thin coverage -> 0.5; strong upgrades > flat
+    assert norm_revisions(None) == 0.5
+    up = compute_vci_source_score(fv_asymmetry=2.4, floor=2.0, acs=80, days_to_catalyst=120, signal_count=4, revision_velocity=0.9)
+    flat = compute_vci_source_score(fv_asymmetry=2.4, floor=2.0, acs=80, days_to_catalyst=120, signal_count=4, revision_velocity=0.5)
+    print(f"E6    upgrades={up} > flat={flat}? {up > flat}")
+    assert up > flat
+    rv = reduce_revision_velocity(up=4, down=1, n_analysts_delta=2, target_rev_pct=10)
+    print(f"E6    reducer(up4,down1,+2 analysts,+10% tgt) = {rv}")
+    assert rv is not None and rv > 0.5
+
+    # weights: 5 keys sum to 1
+    w = load_weights()
+    print(f"weights: {w}  sum={round(sum(w.values()),4)}")
+    assert abs(sum(w.values()) - 1.0) < 1e-6 and set(w) >= set(_DEFAULT_WEIGHTS)
+    print("vci_source_score v2 self-test PASSED")

@@ -568,4 +568,96 @@ def main():
         updated_entry["signal_count"]            = existing.get("signal_count", 0)
         updated_entry["mgmt_unstable"]           = bool(existing.get("mgmt_unstable", False))
         updated_entry["falls_on_beat"]           = bool(existing.get("falls_on_beat", False))
-        # last-known deployability (advisory; OVE
+        # last-known deployability (advisory; OVERWRITTEN by the pre-run re-price each Saturday)
+        updated_entry["fv_asymmetry"]            = existing.get("fv_asymmetry")
+        updated_entry["vci_source_score"]        = existing.get("vci_source_score")
+        updated_entry["deploy_eligible"]         = existing.get("deploy_eligible")
+        # --- v2 enhancement fields (carried forward; re-priced by the pre-run Step 6.5) ---
+        # E3: quality-ex-ACS8 for the VCI Source Score quality term. ACS8 == upside-to-FV ==
+        # asymmetry-1, so it must NOT feed the rank's quality term (double-count with the asymmetry
+        # term). Freeze ACS8 at a neutral constant: acs_ex_acs8 = ACS - ACS8 + neutral. This keeps
+        # the 0-100 quality scale but makes quality invariant to asymmetry (proven in test E3).
+        _acs8v = (scorer_result.get("acs8") if scorer_result else None)
+        if _acs8v is None:
+            _m8 = re.search(r"ACS8:([0-9]+(?:\.[0-9]+)?)", new_breakdown or "")
+            _acs8v = float(_m8.group(1)) if _m8 else None
+        _acs8_neutral = 5.0   # neutral ACS8 midpoint (0-10 dim); configurable via VCI_ACS8_NEUTRAL
+        updated_entry["acs_ex_acs8"] = (int(round(new_acs - float(_acs8v) + _acs8_neutral))
+                                        if (new_acs is not None and _acs8v is not None)
+                                        else new_acs)
+        updated_entry["catalyst_type"]           = _fvrec.get("catalyst_type") or existing.get("catalyst_type")         # E1 prior key
+        updated_entry["catalyst_domain"]         = _fvrec.get("catalyst_domain") or existing.get("catalyst_domain")     # E4 correlation
+        updated_entry["p_thesis"]                = existing.get("p_thesis")              # E1 (base-rate seeded)
+        updated_entry["L"]                       = existing.get("L")                     # E1
+        updated_entry["floor_source"]            = existing.get("floor_source")
+        updated_entry["fv_p25"]                  = existing.get("fv_p25")                # E2
+        updated_entry["fv_p50"]                  = existing.get("fv_p50")
+        updated_entry["fv_p75"]                  = existing.get("fv_p75")
+        updated_entry["fv_asymmetry_p25"]        = existing.get("fv_asymmetry_p25")
+        updated_entry["fv_crosscheck_warn"]      = existing.get("fv_crosscheck_warn")    # E2
+        updated_entry["revision_velocity"]       = existing.get("revision_velocity")     # E6
+        updated_entry["adv_usd"]                 = existing.get("adv_usd")               # E5
+        updated_entry["size_liquidity_capped"]   = existing.get("size_liquidity_capped")
+        updated_entry["expected_loss_pct_isa"]   = existing.get("expected_loss_pct_isa") # E4
+        updated_entry["bottleneck_fv_per_share_prev"] = existing.get("bottleneck_fv_per_share_prev")  # E7
+        updated_entry["price_prev"]              = existing.get("price_prev")            # E7
+        updated_entry["asymmetry_compression_cause"] = existing.get("asymmetry_compression_cause")
+
+        updated_entries.append(updated_entry)
+
+    # Sort by rank
+    updated_entries.sort(key=lambda e: e["rank"])
+
+    # 3b. Drop names already held in the portfolio (suffix-insensitive). The md
+    #     still lists them until the next VCI run migrates them to the VCI
+    #     portfolio, so the monthly pre-run excludes them here every time.
+    def _base(t):
+        t = str(t or "").strip().upper()
+        return t.split(".")[0] if "." in t else t
+    held_base = set()
+    if args.portfolio_data and os.path.exists(args.portfolio_data):
+        try:
+            with open(args.portfolio_data, encoding="utf-8") as pf:
+                pdata = json.load(pf)
+            held_base = {_base(s.get("ticker", "")) for s in pdata.get("stocks", []) if s.get("ticker")}
+        except Exception as e:
+            print(f"  WARNING: could not read portfolio_data for held-check: {e}")
+    if held_base:
+        before = len(updated_entries)
+        dropped = [e["ticker"] for e in updated_entries if _base(e.get("ticker", "")) in held_base]
+        updated_entries = [e for e in updated_entries if _base(e.get("ticker", "")) not in held_base]
+        # re-rank contiguously after removal
+        for i, e in enumerate(sorted(updated_entries, key=lambda x: x["rank"]), 1):
+            e["rank"] = i
+        if dropped:
+            print(f"  Dropped {before - len(updated_entries)} held name(s) from VCI watchlist: {dropped}")
+
+    # 4. Write back to watchlist_tickers.json
+    if not args.dry_run:
+        wt["vci_watchlist"] = updated_entries
+        # Update meta
+        if "_meta" in wt:
+            wt["_meta"]["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            wt["_meta"]["updated_by_run"] = "sync_vci_watchlist.py"
+        elif "_vci_watchlist_meta" in wt:
+            wt["_vci_watchlist_meta"]["last_sync"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        with open(args.watchlist_json, "w", encoding="utf-8") as f:
+            json.dump(wt, f, indent=2, ensure_ascii=False)
+        print(f"  VCI watchlist written: {len(updated_entries)} entries → {args.watchlist_json}")
+    else:
+        print(f"  [DRY RUN] Would write {len(updated_entries)} VCI entries to {args.watchlist_json}")
+
+    print("  ACS changes:")
+    for line in summary_lines:
+        print(line)
+
+    # Validate: all entries have acs_score
+    missing_acs = [e["ticker"] for e in updated_entries if not e.get("acs_score")]
+    if missing_acs:
+        print(f"  WARNING: acs_score missing for: {missing_acs}")
+    else:
+        print(f"  Validation: all {len(updated_entries)} entries have acs_score populated.")
+
+
+if __name__ == "__main__":
+    main()

@@ -202,4 +202,122 @@ def compute_bottleneck_fv_ci(inputs: dict, current_price: Optional[float],
     z = float(_c("VCI_FV_CI_Z", 0.6745))          # 25th/75th percentile z-score (standard normal)
     fv0 = base.bottleneck_fv_per_share
     base.fv_p50 = fv0
-    base.fv_p25 
+    base.fv_p25 = round(fv0 * math.exp(-z * sigma), 4)
+    base.fv_p75 = round(fv0 * math.exp(z * sigma), 4)
+    base.fv_asymmetry_p50 = base.fv_asymmetry
+    if current_price and current_price > 0:
+        base.fv_asymmetry_p25 = round(base.fv_p25 / float(current_price), 4)
+    if analyst_fv_per_share and base.bottleneck_fv_per_share:
+        dev = abs(base.bottleneck_fv_per_share / float(analyst_fv_per_share) - 1.0)
+        base.fv_crosscheck_warn = dev > float(_c("VCI_FV_CROSSCHECK_MAXDEV", 0.40))
+    return base
+
+
+@dataclass
+class DeployEligibility:
+    deploy_eligible: bool
+    require_manual_confirm: bool
+    reasons: tuple
+    fv_asymmetry: Optional[float]
+    floor: float
+    adjusted_acs: Optional[float]
+
+
+def evaluate_deploy_eligibility(*, acs_total: Optional[float], fv: BottleneckFV,
+                                has_catalyst: bool, mgmt_unstable: bool, falls_on_beat: bool,
+                                mgmt_penalty: Optional[float] = None,
+                                elig_pctile: Optional[str] = None,
+                                require_structured: Optional[bool] = None,
+                                has_structured_inputs: bool = True) -> DeployEligibility:
+    """§4 forward-led eligibility. v2: uses the P25 asymmetry (E2) when available; scalar-only FV or
+    cross-check warning -> manual confirm; floor is whatever `fv.floor` was set to (derive_floor)."""
+    pen = float(mgmt_penalty if mgmt_penalty is not None else _c("VCI_MGMT_PENALTY", 5.0))
+    thr = _deploy_threshold()
+    reasons = []
+    adj = (acs_total if acs_total is not None else 0.0)
+    if mgmt_unstable:
+        adj -= pen; reasons.append(f"F1 mgmt_instability:-{pen:g}")
+
+    # E2: eligibility asymmetry = conservative P25 when present and configured
+    pctile = (elig_pctile or _c("VCI_ASYM_ELIG_PCTILE", "p25"))
+    asym = fv.fv_asymmetry
+    if pctile == "p25" and fv.fv_asymmetry_p25 is not None:
+        asym = fv.fv_asymmetry_p25
+
+    blocked = False
+    if falls_on_beat:
+        blocked = True; reasons.append("F3 price_falls_on_beat:NO_DEPLOY")
+    if not has_catalyst:
+        blocked = True; reasons.append("F2 catalyst_unconfirmed")
+    if adj < thr:
+        blocked = True; reasons.append(f"acs {adj:.1f} < {thr:g} floor")
+    if asym is None:
+        blocked = True; reasons.append("fv_asymmetry unavailable")
+    elif asym < fv.floor:
+        blocked = True; reasons.append(f"fv_asymmetry {asym} < {fv.floor} floor ({fv.asset_structure}/{fv.floor_source})")
+
+    require_structured = (_c("VCI_FV_REQUIRE_STRUCTURED", True) if require_structured is None else require_structured)
+    manual = (fv.fv_source == "estimated")
+    if manual:
+        reasons.append("fv_source=estimated:manual_confirm")
+    if require_structured and not has_structured_inputs:
+        manual = True; reasons.append("fv_scalar_only:manual_confirm")   # E2 structured-input mandate
+    if fv.fv_crosscheck_warn:
+        manual = True; reasons.append("fv_analyst_crosscheck>maxdev:manual_confirm")   # E2
+
+    eligible = (not blocked) and (not manual)
+    if eligible and not reasons:
+        reasons.append("eligible")
+    return DeployEligibility(deploy_eligible=eligible, require_manual_confirm=manual,
+                             reasons=tuple(reasons), fv_asymmetry=asym, floor=fv.floor,
+                             adjusted_acs=round(adj, 1))
+
+
+# --- E7 compression cause -------------------------------------------------------------------
+def compression_cause(fv_now: Optional[float], fv_prev: Optional[float],
+                      price_now: Optional[float], price_prev: Optional[float],
+                      erosion_threshold: Optional[float] = None) -> str:
+    """Classify why asymmetry compressed: 'price_up' (harvest/success), 'fv_down' (thesis erosion),
+    'both', or 'none'. FV-down and price-up are opposite signals despite the same symptom."""
+    thr = float(erosion_threshold if erosion_threshold is not None else _c("VCI_FV_EROSION_THRESHOLD", 0.15))
+    fv_down = (fv_prev is not None and fv_now is not None and fv_prev > 0 and fv_now < fv_prev * (1.0 - thr))
+    price_up = (price_prev is not None and price_now is not None and price_prev > 0 and price_now > price_prev * 1.05)
+    if fv_down and price_up:
+        return "both"
+    if fv_down:
+        return "fv_down"
+    if price_up:
+        return "price_up"
+    return "none"
+
+
+# --- inline self-test -----------------------------------------------------------------------
+if __name__ == "__main__":
+    abcl = dict(latent_tam_usd_bn=20.0, capture_share=0.12, steady_margin=0.35,
+                exit_multiple=7.0, fully_diluted_shares=300e6, fx_to_local=1.0, asset_structure="platform")
+    fv = compute_bottleneck_fv_ci(abcl, 8.11, asset_structure="platform")
+    print("F-T5 ABCL:", fv.raw, "| P25", fv.fv_asymmetry_p25, "P50", fv.fv_asymmetry_p50)
+    assert fv.fv_source == "modeled" and fv.fv_asymmetry_p25 < fv.fv_asymmetry_p50   # CI monotone
+
+    # E1 derived floor: single-asset phase-2 (low p) rises above 2.5; platform clamps to 2.0
+    fs, src = derive_floor("single_asset", "phase2_biotech", p_thesis=0.28, L=0.60, days_to_catalyst=550, mode="derived")
+    fp, _ = derive_floor("platform", "revenue_ramp", p_thesis=0.55, L=0.35, days_to_catalyst=365, mode="derived")
+    print(f"E1 floors: single_asset={fs} ({src})  platform={fp}")
+    assert fs > 2.5 and fp == 2.0, (fs, fp)
+    # fixed mode = FWDVCI
+    assert derive_floor("single_asset", mode="fixed")[0] == 2.5
+
+    # E2 eligibility uses P25; scalar-only -> manual
+    fv.floor, fv.floor_source = 2.0, "fixed"
+    e = evaluate_deploy_eligibility(acs_total=78, fv=fv, has_catalyst=True, mgmt_unstable=False, falls_on_beat=False)
+    print("E2 ABCL@8.11 P25:", e.deploy_eligible, e.reasons)
+    scal = BottleneckFV(bottleneck_fv_per_share=14.0, fv_asymmetry=1.73, fv_source="modeled",
+                        asset_structure="platform", floor=2.0)
+    e2 = evaluate_deploy_eligibility(acs_total=80, fv=scal, has_catalyst=True, mgmt_unstable=False,
+                                     falls_on_beat=False, has_structured_inputs=False)
+    assert e2.require_manual_confirm and not e2.deploy_eligible
+
+    # E7 cause
+    assert compression_cause(14.0, 14.0, 8.11, 5.25) == "price_up"      # price rose, FV flat
+    assert compression_cause(11.0, 14.0, 8.0, 8.0) == "fv_down"          # FV revised down 21%
+    print("bottleneck_fv v2 self-test PASSED")

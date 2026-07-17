@@ -105,6 +105,14 @@ SCORE_TO_PRELIM_CONVICTION_VCI = [
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+def _tgap(s):
+    """Fix Pack A6/D7 (P2) read-shim: consensus-target gap is DISPLAY-ONLY and now named
+    display_target_gap; June-era files still carry target_upside — tolerate both. Capital
+    logic must read implied_upside_fv, never this."""
+    v = s.get("display_target_gap")
+    return v if v is not None else s.get("target_upside")
+
+
 def fmt_pct(v, decimals=1) -> str:
     if v is None:
         return "—"
@@ -387,8 +395,8 @@ def build_part_b_table(s: dict) -> list[dict]:
                     s.get("score_b_fwd_eps", 0), is_resolved(feg),
                     "Strong >12% | Acceptable >=5% | Weak <5%"))
 
-    tu = s.get("target_upside")
-    rows.append(row("Consensus Target Upside", fmt_pct(tu),
+    tu = _tgap(s)
+    rows.append(row("Consensus Target Upside (display)", fmt_pct(tu),
                     s.get("score_b_target_upside", 0), is_resolved(tu),
                     "Strong >20% | Acceptable >=10% | Weak <10%"))
 
@@ -586,7 +594,7 @@ def build_energy_part_b_table(s: dict) -> list[dict]:
     ))
 
     # 4. Price vs Consensus Target (upside)
-    upside = s.get("upside_pct") or s.get("target_upside")
+    upside = s.get("upside_pct") or _tgap(s)
     rows.append(row(
         "Price vs Consensus Target", fmt_pct(upside),
         s.get("score_upside", 0), is_resolved(upside),
@@ -952,7 +960,7 @@ def build_s7_row(ticker: str, s: dict) -> dict:
         "status_note":   "[Claude: update thesis status at Step 8]",
         "next_earnings": s.get("next_earnings", "—"),
         "analyst_rating": s.get("analyst_rating", "—"),
-        "target_upside": fmt_pct(s.get("target_upside")),
+        "target_upside": fmt_pct(_tgap(s)),   # D7: display gap (shim reads old key too)
         "score_summary": score_summary,
         "total_score":   s.get("total_score"),
         "total_max":     s.get("total_max"),
@@ -991,7 +999,7 @@ def _build_s3_skeleton_growth(ticker: str, s: dict) -> dict:
         {"label": "Conviction Score",   "value": conv["conviction_score"],            "assessment": conv["note"],                "signal": "amber"},
         {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency","USD")), "assessment": "", "signal": ""},
         {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency","USD")), "assessment": "In range ✓" if s.get("_in_window") else "Above entry", "signal": "green" if s.get("_in_window") else "amber"},
-        {"label": "Target Upside",      "value": fmt_pct(s.get("target_upside")),    "assessment": analyst["analyst_rating_clean"], "signal": "green" if (s.get("target_upside") or 0) > 0.20 else "amber"},
+        {"label": "Target Gap (display)", "value": fmt_pct(_tgap(s)),    "assessment": analyst["analyst_rating_clean"], "signal": "green" if (_tgap(s) or 0) > 0.20 else "amber"},
         {"label": "Analyst Count",      "value": str(analyst.get("num_analysts","—")), "assessment": "", "signal": ""},
         {"label": "Next Earnings",      "value": s.get("next_earnings","—"),          "assessment": "", "signal": ""},
         {"label": "ROIC vs WACC",       "value": overlays.get("roic_vs_wacc",{}).get("spread","—"),
@@ -1062,9 +1070,9 @@ def _build_s3_skeleton_energy(ticker: str, s: dict) -> dict:
         {"label": "Entry Level",       "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency", "USD")),
          "assessment": "In range ✓" if s.get("_in_window") else "Above entry",
          "signal": "green" if s.get("_in_window") else "amber"},
-        {"label": "Consensus Upside",  "value": fmt_pct(s.get("target_upside")),
+        {"label": "Target Gap (display)", "value": fmt_pct(_tgap(s)),
          "assessment": analyst.get("analyst_rating_clean", "—"),
-         "signal": "green" if (s.get("target_upside") or 0) > 0.20 else "amber"},
+         "signal": "green" if (_tgap(s) or 0) > 0.20 else "amber"},
         {"label": "Next Earnings",     "value": s.get("next_earnings", "—"),
          "assessment": "", "signal": ""},
         {"label": "EBITDA Margin",     "value": fmt_pct(s.get("ebitda_margin")),
@@ -1287,7 +1295,10 @@ def run(metrics_path: str, out_path: str) -> dict:
                 "part_b_score":   s.get("part_b_score"),
                 "score_display":  f"{s.get('total_score', '?')}/36",
                 "conviction_score": "[Claude fills /100 at Step 9]",
-                "target_upside":  fmt_pct(s.get("target_upside")),
+                "target_upside":  fmt_pct(_tgap(s)),   # D7 display gap
+                "implied_upside_fv": fmt_pct(s.get("implied_upside_fv")),  # D7 canonical
+                "expected_return_12_24m": s.get("expected_return_12_24m"), # A2 (% pa)
+                "revision_stage": s.get("revision_stage"),                 # A3 first-class
                 "action": (
                     "In range — score at Step 9" if s.get("_in_window")
                     else "Monitor entry level"
@@ -1315,7 +1326,10 @@ def run(metrics_path: str, out_path: str) -> dict:
                 "part_b_score":   s.get("part_b_score"),
                 "score_display":  f"{s.get('total_score', '?')}/{s.get('total_max',50)}",
                 "conviction_score": "[Claude fills /100 at Step 9]",
-                "target_upside":  fmt_pct(s.get("target_upside")),
+                "target_upside":  fmt_pct(_tgap(s)),   # D7 display gap
+                "implied_upside_fv": fmt_pct(s.get("implied_upside_fv")),  # D7 canonical
+                "expected_return_12_24m": s.get("expected_return_12_24m"), # A2 (% pa)
+                "revision_stage": s.get("revision_stage"),                 # A3 first-class
                 "action": (
                     "In range — score at Step 9" if s.get("_in_window")
                     else "Monitor entry level"

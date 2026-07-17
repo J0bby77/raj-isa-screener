@@ -155,4 +155,48 @@ def refresh_at_live_price(entries, price_lookup, weights=None, portfolio_value=N
     """Monthly pre-run recompute: re-price fv_asymmetry, re-derive floor, re-score + re-rank at the
     CURRENT price. Rolls fv_prev/price_prev in for E7. `price_lookup(ticker)->price`."""
     out = []
-    fo
+    for e in entries:
+        px = price_lookup(e.get("ticker"))
+        v = evaluate_candidate(
+            ticker=e.get("ticker"), acs=e.get("acs"), price=px,
+            fv_inputs=e.get("fv_inputs"),
+            bottleneck_fv_per_share=(None if e.get("fv_inputs") else e.get("bottleneck_fv_per_share")),
+            asset_structure=e.get("asset_structure"),
+            has_catalyst=bool(e.get("has_catalyst", e.get("catalyst_type"))),
+            days_to_catalyst=e.get("days_to_catalyst"), signal_count=e.get("signal_count", 0),
+            mgmt_unstable=e.get("mgmt_unstable", False), falls_on_beat=e.get("falls_on_beat", False),
+            analyst_fv_per_share=e.get("analyst_fv_per_share"),
+            catalyst_type=e.get("catalyst_type"), catalyst_domain=e.get("catalyst_domain"),
+            p_thesis=e.get("p_thesis"), L=e.get("L"),
+            acs_ex_acs8=e.get("acs_ex_acs8"), revision_velocity=e.get("revision_velocity"),
+            adv_usd=e.get("adv_usd"), portfolio_value=portfolio_value,
+            fv_prev=e.get("bottleneck_fv_per_share_prev", e.get("fv_prev")),
+            price_prev=e.get("price_prev"), weights=weights)
+        merged = dict(e); merged.update(v)
+        # roll snapshots for next run's E7 comparison
+        merged["bottleneck_fv_per_share_prev"] = v.get("bottleneck_fv_per_share")
+        merged["price_prev"] = px
+        out.append(merged)
+    elig, inelig = rank_eligible(out)
+    return elig + inelig
+
+
+if __name__ == "__main__":
+    ABCL = dict(latent_tam_usd_bn=20.0, capture_share=0.12, steady_margin=0.35,
+                exit_multiple=7.0, fully_diluted_shares=300e6, fx_to_local=1.0, asset_structure="platform")
+    v = evaluate_candidate(ticker="ABCL", acs=78, acs_ex_acs8=74, price=8.11, fv_inputs=ABCL,
+                           asset_structure="platform", has_catalyst=True, days_to_catalyst=80,
+                           signal_count=6, catalyst_type="phase2_biotech", catalyst_domain="biotech_readout",
+                           revision_velocity=0.6)
+    print("ABCL:", "asymP50", v["fv_asymmetry"], "asymP25", v["fv_asymmetry_p25"],
+          "floor", v["fv_floor"], v["floor_source"], "elig", v["deploy_eligible"],
+          "src", v["vci_source_score"], "size", v["size_pct"], "EL", v["expected_loss_pct_isa"])
+    assert v["fv_asymmetry_p25"] < v["fv_asymmetry"]         # P25 conservative
+    # E5 liquidity cap: ADV $10k vs £150k book -> 10% of ADV = $1k ~ 0.67% cap; also < min ADV -> manual
+    v2 = evaluate_candidate(ticker="THIN", acs=82, price=10, bottleneck_fv_per_share=30,
+                            asset_structure="platform", has_catalyst=True, days_to_catalyst=120,
+                            signal_count=5, adv_usd=10_000, portfolio_value=150_000)
+    print("THIN:", "elig", v2["deploy_eligible"], "size", v2["size_pct"], "capped",
+          v2["size_liquidity_capped"], "manual", v2["require_manual_confirm"])
+    assert v2["require_manual_confirm"]   # ADV 10k < VCI_MIN_ADV_USD 1e6 -> illiquid manual
+    print("vci_deploy_eval v2 self-test PASSED")

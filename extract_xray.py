@@ -152,27 +152,58 @@ def parse_asset_allocation(text: str) -> dict:
     return result
 
 
+# Fix Pack A10 (P2): STATIC country whitelist — the old catch-all [A-Z][a-z]+ arm ingested
+# header/label rows as data ("June" 2026.0, "Benchmark" rows). Whitelist + 0-100 pct-range
+# validation; rejected rows land in PARSE_WARNINGS (surfaced via _meta.parse_warnings and the
+# pre-run schema assert). "Other"/"Others" is a legitimate residual row and is included.
+COUNTRY_WHITELIST = frozenset([
+    "United States", "United Kingdom", "Japan", "China", "France", "Taiwan",
+    "Republic of Korea", "South Korea", "Spain", "Italy", "Germany", "Canada",
+    "Australia", "Netherlands", "Switzerland", "Sweden", "Denmark", "Norway",
+    "Finland", "India", "Brazil", "Hong Kong", "Singapore", "Mexico", "Belgium",
+    "Austria", "Ireland", "Portugal", "Israel", "New Zealand", "South Africa",
+    "Indonesia", "Malaysia", "Thailand", "Philippines", "Vietnam", "Poland",
+    "Turkey", "Greece", "Chile", "Colombia", "Peru", "Argentina", "Saudi Arabia",
+    "United Arab Emirates", "Qatar", "Kuwait", "Egypt", "Luxembourg", "Iceland",
+    "Other", "Others",
+])
+
+PARSE_WARNINGS: list = []   # A10 — reset per extract run; copied into _meta.parse_warnings
+
+
+def _valid_pct(v):
+    return v is None or (isinstance(v, (int, float)) and 0.0 <= v <= 100.0)
+
+
 def parse_country_exposure(text: str) -> list:
     """
     Extract country exposure table. Returns list of
     {country, equity_pct, benchmark_pct}.
+    A10: whitelist countries; reject pct outside 0-100; rejected rows -> PARSE_WARNINGS.
     """
     countries = []
-    # Lines like: "United States 40.03 65.85"
-    # The table has two columns of countries side by side in PDF text
+    # Lines like: "United States 40.03 65.85" (two side-by-side columns in PDF text)
     pattern = re.compile(
-        r"(United States|United Kingdom|Japan|China|France|Taiwan|"
-        r"Republic of Korea|Spain|Italy|Germany|Canada|Australia|"
-        r"Netherlands|Switzerland|Sweden|Denmark|India|Brazil|"
-        r"Hong Kong|Singapore|South Korea|Mexico|"
-        r"[A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})"
+        r"([A-Z][A-Za-z]+(?:\s[A-Za-z][A-Za-z]+){0,3})"
         r"\s+([\d.]+)\s+([\d.]+)"
     )
     for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        eq, bench = safe_float(m.group(2)), safe_float(m.group(3))
+        if name not in COUNTRY_WHITELIST:
+            # header/label/date rows are EXPECTED matches of the loose pattern — only warn on
+            # rows that look plausibly geographic (both pcts in range) so the warning list
+            # stays signal, not noise
+            if _valid_pct(eq) and _valid_pct(bench) and eq is not None:
+                PARSE_WARNINGS.append(f"country row rejected (not whitelisted): {name!r} {eq}/{bench}")
+            continue
+        if not (_valid_pct(eq) and _valid_pct(bench)):
+            PARSE_WARNINGS.append(f"country row rejected (pct out of 0-100): {name!r} {eq}/{bench}")
+            continue
         countries.append({
-            "country":       m.group(1),
-            "equity_pct":    safe_float(m.group(2)),
-            "benchmark_pct": safe_float(m.group(3)),
+            "country":       name,
+            "equity_pct":    eq,
+            "benchmark_pct": bench,
         })
     # Deduplicate (PDF may repeat entries)
     seen = set()
@@ -392,6 +423,7 @@ def parse_xray(pdf_path: str) -> dict:
     except ValueError:
         pass
 
+    PARSE_WARNINGS.clear()   # A10 — per-run warning capture (parsers below append)
     result = {
         "_meta": {
             "source_file":    os.path.basename(pdf_path),
@@ -408,6 +440,7 @@ def parse_xray(pdf_path: str) -> dict:
         "risk_statistics":   parse_rstat(text),
         "fund_holdings":     parse_fund_holdings(text),
     }
+    result["_meta"]["parse_warnings"] = list(PARSE_WARNINGS)   # Fix Pack A10
 
     # Validation
     warnings = []

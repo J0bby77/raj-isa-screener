@@ -126,6 +126,16 @@ FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-
 # Jul-26 Part 1: THE single Source-Score weight dict (used by source_score.compute_source_score,
 # inherited by build_excel / build_email / rerank_watchlist / screener_core overlay). forward 0.60 /
 # revisions 0.15 / deployability 0.10 / quality 0.05 / analyst 0.10 (higher-end, per Raj's call).
+# FROZEN 12-Jul-2026 (Fix Pack A8 / decision D5, Raj-approved) - SOURCE_WEIGHTS and
+# FORWARD_AXIS_BUCKET_WEIGHTS may change ONLY via the pre-registered calibration rule below.
+# No judgment recalibrations. These weights are UNVALIDATED PRIORS until score_panel matures.
+# PRE-REGISTERED RULE (evaluate quarterly once >= 200 matured 3m observations exist in
+# score_panel.csv, via calibration_report.py):
+#   (1) if IC_3m(forward_axis_score) < 0.03 -> forward 0.60->0.40; +0.10 revisions,
+#       +0.05 quality, +0.05 deployability.
+#   (2) if IC_3m(revisions_score) >= 2x IC_3m(score_f_price_mom) -> FORWARD_AXIS_BUCKET_WEIGHTS
+#       price 0.70->0.40, margin 0.30->0.60 (estimate signals already live in revisions_score).
+#   (3) any change: calibration changelog entry + one shadow cycle before live.
 SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}
 
 # --- VCI forward-led (Jul-2026) — VCI_Forward_Led_Framework_Implementation_Jul2026.md -------
@@ -186,11 +196,106 @@ VCI_CALIBRATION_CHANGELOG_PATH = _os.path.join(_os.path.dirname(_os.path.abspath
                                               "vci_calibration_changelog.json")
 
 # SUMMARY tab selection (forward-led). Legacy fixed-total v27 rule retired (source_score.summary_eligible
-# & est-rev not deteriorating & Part B>=14). When True: top-N by a forward-led SCREEN Source Score (no
-# deployability/entry data at screen time), multi-door eligibility (viability Part A>=14 + Part B>=14 +
-# not deteriorating). Activate together with the gate relaxations + two-pass fetch.
+# & est-rev not deteriorating & Part B>=14). When True: floor-based selection via
+# source_score.select_summary (Fix Pack A1 — fixed top-30 RETIRED 12-Jul-26; count-backfill admitted
+# weak names in thin tapes and certified different quality per universe).
 SUMMARY_COUNT_BASED    = True
-SUMMARY_TARGET_COUNT   = 30
+
+# ============================================================================================
+# FIX PACK Jul-2026 (Doc A: ISA_ChangeSpec_FixPack_Implementation_Jul2026.md) — D1-D8 approved
+# 12-Jul-2026. P2 gate flags ship False (shadow-before-blocking, invariant 1) — flip at 1-Aug.
+# ============================================================================================
+SUMMARY_MAX_COUNT   = 40      # A1/D4 (replaces the retired fixed-30 count — floor selects, cap only truncates)
+SUMMARY_MIN_WARN    = 10      # A1/D4 — SUMMARY_THIN_WARNING to RUN_QA/retro/email below this
+UNIFIED_SOURCE      = True    # A6 — ONE Source Score, screen = deploy (False restores the
+                              #      legacy screen-time Part-B/22 deployability proxy; delete P3)
+SOURCE_UPSIDE_CAP   = 0.60    # A6 — upside normalisation cap in the deployability term
+                              #      (was rerank_watchlist.UPSIDE_CAP; one home now)
+CONSENSUS_UPSIDE_CAP_MULT = 1.15  # A6 — composite FV <= consensus target x this (was getattr-only)
+ER_RERATE_CAP       = 0.10    # A2 — per-year multiple-drift clamp in expected_return.py
+ER_GATE_ACTIVE      = True    # A2 — E[r] T1-deploy gate; FLIPPED LIVE 13-Jul-26 (P2) — consumed 1-Aug pre-run
+STAGE_GATE_ACTIVE   = True    # A3 — stage gate; FLIPPED LIVE 13-Jul-26 (P2)
+T1_QUALIFICATION_MODE = True  # A4 — T1 = QUALIFICATION; FLIPPED LIVE 13-Jul-26 (P2); False = legacy rank-band rollback
+# ── A5 v3 (Raj 15-Jul-26, D18/D19 APPROVED): TENURE GATE REMOVED — sizing by conviction ×
+# evidence. Tenure/discovery-date carries no information about the company; the evidence is the
+# underlying data (both-window revisions = confirmation-over-time that already happened). Sizing
+# NEVER blocks a deploy; it caps it. Full size additionally requires Step-10 conviction >= 75.
+EVIDENCE_ER_CONF_MIN = 0.75   # D18 — er_confidence floor for the fundamentals evidence route
+EVIDENCE_SIGHTING_MIN = 2     # A5v3 — alternative route: distinct screen sightings...
+EVIDENCE_SIGHTING_GAP_DAYS = 7      # D19 — ...spaced at least this far apart...
+EVIDENCE_SIGHTING_WINDOW_DAYS = 45  # ...within this lookback (source: score_panel.csv, A8)
+STARTER_SIZE_CAP_PCT = 1.5    # D19 — cap for thin-evidence entries; scale-up trigger recorded
+                              #      at entry. PRE-REGISTERED calibration rule (A8 pattern):
+                              #      if first-sighting FULL entries underperform confirmed
+                              #      entries at 3m over >=2 quarters of ledger data, raise
+                              #      EVIDENCE_ER_CONF_MIN — never judgment-recalibrated.
+PERSISTENCE_MIN_CYCLES = 2    # A5 — RETIRED AS A GATE (v3, 15-Jul-26); cycles_seen is still
+                              #      STAMPED by update_watchlist as ledger/calibration data
+LATE_CYCLE_MULT_PCTILE = 90   # A15 — extended-multiple buy-guard percentile (spec basis)
+LATE_CYCLE_PREMIUM_PCT = 35.0 # A15 — OPERATIVE proxy: val_hist premium-vs-own-3yr-avg (%) that
+                              #      stands in for the 90th-pct multiple until a percentile
+                              #      series exists (t1_gates.late_cycle_flag documents the basis)
+CATALYST_MAX_DAYS   = 90      # A2/A5/D3 — named-catalyst override window (days)
+# A11/D8 + A19: Section-A verdict bands are ANCHOR OFFSETS, not hardcodes (invariant 6).
+# At the current 13.9 derivation these evaluate to pass=13.0 / inconclusive=11.0 (D8's numbers);
+# they move when the anchor moves. Mapping (A12): fund gate = required return minus the margin
+# the stock sleeve is expected to contribute (documented in project_isa_target_weights.md §1).
+FUND_GATE_PASS_OFFSET_PP        = -0.9
+FUND_GATE_INCONCLUSIVE_OFFSET_PP = -2.9
+SLEEVE_PROBATION_PP = 5.0     # A14/D6 — sleeve-vs-VUAG probation threshold
+# ── A19 central required-return anchor (Raj 12-Jul: "everything needs to start being anchored
+# to this"). ONE derived hurdle in target_state.json (derive_required_return.py; re-derived each
+# April pre-run + on any contribution-schedule change). Loaded at import with a HARD FALLBACK +
+# loud warning — a missing/corrupt anchor file must never stop a screen, but must never be silent.
+def _load_target_state():
+    import json as _json
+    _p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "target_state.json")
+    try:
+        with open(_p, encoding="utf-8") as _f:
+            return _json.load(_f)
+    except Exception as _e:
+        import sys as _sys
+        print(f"WARNING scoring_config: target_state.json unreadable ({_e}) — using FROZEN "
+              f"12-Jul-2026 fallback anchor 13.9/18.7 (A19). Fix the anchor file.", file=_sys.stderr)
+        return {"required_return_floor_pct": 13.9, "required_return_stretch_pct": 18.7,
+                "required_return_operative_pct": 13.9, "guardrail_state": "FALLBACK"}
+
+TARGET_STATE        = _load_target_state()
+REQUIRED_RETURN_MID = float(TARGET_STATE["required_return_operative_pct"])   # 13.9 at current derivation
+ER_FRICTION_BUFFER  = 2.0     # A2/D1 — pp over the A19 anchor (friction + FX + estimation)
+ER_DEPLOY_FLOOR     = REQUIRED_RETURN_MID + ER_FRICTION_BUFFER   # A2/D1 DERIVED (≈15.9 today) —
+                              # consumed only when ER_GATE_ACTIVE flips True at P2; never hardcode.
+FUND_GATE_BANDS     = {"pass": round(REQUIRED_RETURN_MID + FUND_GATE_PASS_OFFSET_PP, 1),
+                       "inconclusive": round(REQUIRED_RETURN_MID + FUND_GATE_INCONCLUSIVE_OFFSET_PP, 1)}
+                              # A11/D8/A19 — DERIVED bands (13.0/11.0 at today's anchor)
+FUND_GATE_PCT       = round(REQUIRED_RETURN_MID - 1.9, 1)   # legacy 12.0 line, now anchor-derived
+                              # (fund_returns.compute_fund_gate default; D8 bands govern the verdict)
+
+# ── Doc B (New Capabilities) P2 constants — B1/B2/B3/B4/B7 ─────────────────────────────────
+DRAWDOWN_PROTOCOL_ACTIVE = True          # B1 — rollback: False (state file retained)
+DRAWDOWN_TRANCHES   = [10, 20, 30]       # B1/D10 — % below 252d high; 1/(remaining) of reserve each
+DRAWDOWN_LOOKBACK   = 252                # B1/D9 — trailing-high window (VUAG GBP daily close)
+DRAWDOWN_BUFFER_GBP = 500.0              # B1/D11 — cash buffer excluded from the reserve
+MMF_SWEEP_MIN_GBP   = 1500.0             # B2/D14 — idle cash >= this AND no committed action
+MMF_SWEEP_IDLE_DAYS = 10                 #          within 10 trading days -> mechanical SWEEP line
+CASH_EQUIVALENT_TICKERS = []             # B2 — MMF/ultra-short UCITS ETF ticker(s) once Raj selects
+                                         #      (spec: GBP MMF, OCF<=0.15%, AUM>=£500m, on AJ Bell).
+                                         #      Rollback: empty list. Counts as CASH everywhere.
+FACTOR_AI_SOFT_CAP_PCT = 30.0            # B3/D15 — AI-complex effective look-through soft cap
+FACTOR_CAP_ENFORCE  = True               # B3 — breach blocks factor-raising BUYs (Checkpoint-D);
+                                         #      rollback: False = report-only
+ETF_TACTICAL_MAX_POS_PCT   = 5.0         # B4/D16 — per-ETF cap (% ISA)
+ETF_TACTICAL_MAX_TOTAL_PCT = 10.0        # B4/D16 — total tactical cap (% ISA)
+ETF_TACTICAL_MIN_HOLD_MONTHS = 3         # B4/D16 — anti-churn
+REGIME_DOORS_ACTIVE = False              # B7 — doors admit for real at P3 (Sep screens); shadow first
+REGIME_RULES = {                         # B7(1) — pure decision table: (vs-200dma, dd-band, 63d slope)
+    ("above", 0, "+"): "RISK_ON",    ("above", 0, "-"): "LATE_CYCLE",
+    ("above", 1, "+"): "RECOVERY",   ("above", 1, "-"): "LATE_CYCLE",
+    ("above", 2, "+"): "RECOVERY",   ("above", 2, "-"): "RISK_OFF",
+    ("below", 0, "+"): "LATE_CYCLE", ("below", 0, "-"): "RISK_OFF",
+    ("below", 1, "+"): "RECOVERY",   ("below", 1, "-"): "RISK_OFF",
+    ("below", 2, "+"): "RECOVERY",   ("below", 2, "-"): "RISK_OFF",
+}                                        # dd bands: 0 = >-5%, 1 = -5..-15%, 2 = <=-15%
 
 # ===========================================================================
 # ENERGY  (energy_screener.py — Part A /20 + Part B /16 = Total /36)
@@ -267,4 +372,80 @@ APS_REALLOC_BONUS      = 10.0   # opportunity-cost bonus added to a TRIM's APS w
 # from the screens AGES OUT after POOL_AGEOUT_MONTHS without re-confirmation (time-based — replaces the
 # old score_history-LENGTH staleness, which could freeze a <3-history name on a stale score forever).
 # Decay (not instant drop) protects Regime-3 reversal names that legitimately skip one month's screen.
-# DEFAULT False = current carry-forward behaviour (4
+# DEFAULT False = current carry-forward behaviour (4-Jul pre-run byte-for-byte unchanged); flip True
+# (or pass --fluid-pool) to ACTIVATE the fluid pool.
+# ===========================================================================
+# COMMENT CORRECTION 12-Jul-2026 (Fix Pack A7a; BEHAVIOUR UNCHANGED): the decay/age-out
+# semantics in the block comment above are OBSOLETE - superseded by the 04-Jul-2026
+# purge-on-absence doctrine (membership = current cycle screens + held ONLY; absent names
+# PURGED, never decayed). FLUID_POOL_DECAY=True now does ONE thing (update_watchlist.py
+# Phase 7 ~L1029-1034): carries each name's first_seen forward across months. That memory
+# is the substrate for the A5 persistence rule (cycles_seen >= 2 for T1-deploy). DO NOT set
+# False - it would erase first_seen continuity. POOL_AGEOUT_MONTHS / POOL_DECAY_PENALTY are
+# RETIRED (no live code path uses them for membership or ranking); retained only so legacy
+# getattr callers never see a missing attribute. Do not consume in new code.
+FLUID_POOL_DECAY      = True     # LIVE - first_seen carry ONLY (see correction above)
+POOL_AGEOUT_MONTHS    = 3        # RETIRED 12-Jul-26 - do not consume
+POOL_DECAY_PENALTY    = 5.0      # RETIRED 12-Jul-26 - do not consume
+
+# ===========================================================================
+# VCI  (vci_acs_scorer.py — ACS /100). Deployment thresholds
+# Analyst rating buckets treated as a positive ("strong") signal. Centralised here so
+# normalise_adapter (_cfg.STRONG_RATINGS) and fetch_watchlist_metrics share one source of
+# truth — previously only defined locally in those modules, which left _cfg.STRONG_RATINGS
+# undefined and broke the rerank membership-refresh under the activated forward path (S5).
+STRONG_RATINGS = {"strongbuy", "strong buy", "buy"}
+
+# S5 go-live: VCI F1-F4 final-layer gates ON (was getattr-default False)
+VCI_FINAL_LAYER_GATES = True
+
+# ── Forward Axis re-weighting (Jun-26) ─────────────────────────────────────────
+# REVISION_RUNWAY_CAP: cap journey-stage runway at 1 unless est-rev direction is "Improving".
+REVISION_RUNWAY_CAP        = True
+# FORWARD_AXIS_BUCKETED: weight the forward axis by independent dimension (estimates / margin /
+# price) instead of equal-per-signal, so the 4 correlated estimate-revision signals can't swamp
+# price momentum. False => legacy equal-per-signal (kept only for backtest comparison).
+FORWARD_AXIS_BUCKETED      = True
+# Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
+# but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
+FORWARD_AXIS_BUCKET_WEIGHTS = {"margin": 0.30, "price": 0.70}   # Jul-26 Part 2: forward axis = price+margin ONLY;
+#   estimate-revision signals pulled OUT into a separate revisions_score (SOURCE_WEIGHTS["revisions"]=0.15)
+
+# Price-momentum window (Jun-26 backtest): 12-1 month = 252-day window ending ~21 trading days ago.
+# 63-day (one-quarter) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
+PRICE_MOM_LOOKBACK         = 252
+PRICE_MOM_SKIP             = 21
+
+# SUMMARY forward-runway gate (Jul-26): exclude estimate-cycle stages with no forward runway from the
+# SUMMARY candidate pool (the pre-run deployment funnel). Igniting/Accelerating/Sustained/Early-unconfirmed
+# (runway>=1) qualify; Maturing/Rolling over/Flat-Down/Marginal (runway 0/None) are excluded. Stage=None
+# (missing estimate data) is NOT excluded (ranks low via forward axis). Price still RANKS the eligible names.
+SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]
+
+# SUMMARY source-score floor (Jul-26): a SUMMARY/candidate name must clear this Source Score to be a
+# genuine capital opportunity (the count-based top-N won't backfill with weak names). Excludes the
+# low-source tail (e.g. ADBE ~48). Screen-source scale (0.75 fwd / 0.05 quality / 0.20 valuation).
+SUMMARY_SOURCE_FLOOR = 70.0
+
+# ===========================================================================
+# JUL-26 FORWARD-LED CALIBRATION (implementation plan ISA_Forward_Calibration_..._Jul2026.md)
+# Authoritative parameter set (§0.5). SOURCE_WEIGHTS + FORWARD_AXIS_BUCKET_WEIGHTS + SUMMARY_SOURCE_FLOOR
+# are set inline above; the remaining structural constants live here.
+# ===========================================================================
+# Part 4 — relax the SUMMARY/candidate Part B hard gate from 14 -> 10 (balance-sheet risk is still
+# protected by the separate ND/EBITDA MANDATORY_MINIMUM_FAIL gate). Used by source_score.summary_eligible.
+SUMMARY_PART_B_FLOOR      = 10
+
+# Part 3 — deployability entry-weight rework (backtested: penalising a stock for having run is backwards).
+# Gentler, floored decay so extended momentum winners keep deployability.
+DEPLOY_ENTRY_DECAY        = 0.50      # was 0.25 (steeper)
+DEPLOY_ENTRY_FLOOR        = 0.50      # entry-weight floor (was ~0)
+
+# Part 7 — held-stock upgrade / replacement test. A middling HOLD (floor<=source<bar) is reclassified
+# TRIM (sell-to-upgrade) when the best eligible candidate's Source beats it by >= this margin.
+UPGRADE_DELTA             = 15
+
+# Part 8 — sleeve sector / theme concentration caps (netted against fund look-through) + diversification.
+SLEEVE_SECTOR_CAP_ISA     = 0.12      # max one GICS sector across direct stocks (share of ISA)
+SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
+DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by

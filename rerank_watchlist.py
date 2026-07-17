@@ -20,6 +20,9 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scoring_config as _cfg  # Source Score weights / forward-axis flag (single source of truth)
 import source_score as _ss     # Jul-26 Part 1: THE single Source Score
+import expected_return as _er  # Fix Pack A2: E[r] object at rerank (same module as the screen)
+import t1_gates as _t1         # Fix Pack A2/A3/A4/A5/A15: THE T1 qualification gate set
+import fv_composite as _fvc    # Fix Pack A6: THE shared FV composite (screen = deploy)
 try:
     import deployment_flags as _dflags  # shared deployment-gate pre-flags (action-stack caps)
 except Exception:
@@ -90,6 +93,37 @@ def _analyst_signal(tk_d):
 
 
 def _deployability(e, tk_d):
+    """Fix Pack A6 (P2): when a fresh metrics/scored row exists, deployability comes from THE
+    shared fv_composite (identical inputs/outputs to the screen — U-A6-1 parity); the stored
+    entry_level_basis FV survives ONLY as the fallback for names with no fresh row this cycle.
+    Canonical D7 field implied_upside_fv is stamped on the entry; consensus gap is display-only."""
+    if tk_d and (tk_d.get("val_hist_pe_3yr_avg") is not None
+                 or tk_d.get("target_price_mean") is not None):
+        _row = tk_d
+        _cp2 = _to_num(e.get("current_price")) or _to_num(tk_d.get("current_price"))
+        if tk_d.get("current_price") is None and _cp2 is not None:
+            _row = {**tk_d, "current_price": _cp2}
+        _fv = _fvc.fv_composite_for_row(_row)
+        up = _fv["implied_upside_fv"]
+        e["implied_upside_fv"] = up
+        e["display_target_gap"] = _fv["display_target_gap"]
+        el = _to_num(e.get("entry_level"))
+        if el and _cp2 and el > 0:
+            _pa = max(0.0, (_cp2 - el) / el)
+            ew = max(getattr(_cfg, "DEPLOY_ENTRY_FLOOR", 0.0),
+                     1.0 / (1.0 + _pa / getattr(_cfg, "DEPLOY_ENTRY_DECAY", 0.25)))
+        else:
+            ew = 0.0
+        return _fv["deployability"], {
+            "upside_to_fv": round(up, 3) if up is not None else None,
+            "entry_window": round(ew, 3), "conf_weight": _fv["fv_conf"],
+            "fair_value": _fv["fair_value"],
+            "consensus_target": _to_num(_row.get("target_price_mean")),
+            "consensus_upside_capped": _fv["consensus_upside_capped"],
+            "fv_basis": _fv["fv_basis"],
+            "ranking_note": "A6 unified fv_composite: deployability = upside x conf "
+                            "(entry_window display-only; FV consensus-capped)"}
+    # ── legacy fallback (no fresh metrics row): stored entry-level FV + local consensus cap ──
     cp = _to_num(e.get("current_price")) or _to_num((tk_d or {}).get("current_price"))
     el = _to_num(e.get("entry_level"))
     basis = e.get("entry_level_basis") or {}
@@ -601,6 +635,39 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
                                 "quality_norm": round(q_norm, 3),
                                 "deployability": d, "analyst": round(a, 3), **dbasis}
         e["_composite"] = comp
+    # ── Fix Pack P2 (A2/A3/A4/A5/A15): stamp the T1 qualification gate set on EVERY eligible
+    # name. Always computed (shadow, invariant 1); step9_pre_builder only lets it decide the
+    # tier when cfg.T1_QUALIFICATION_MODE is True. E[r] comes from expected_return.py (the ONE
+    # implementation the screen uses) on the fresh pre-run scored row; stage was re-derived by
+    # fetch_watchlist_metrics via screener_core.compute_forward_axis (A3 — same classifier).
+    for e in eligible:
+        td = tk.get(e["ticker"]) or {}
+        try:
+            _erd = _er.expected_return_for_row(td) if td else None
+        except Exception:
+            _erd = None
+        if _erd:
+            e["expected_return_12_24m"] = _erd.get("expected_return_12_24m")
+            e["er_confidence"] = _erd.get("er_confidence")
+            e["er_basis"] = _erd.get("er_basis")
+        if td.get("revision_stage") is not None:
+            e["revision_stage"] = td.get("revision_stage")   # first-class field (A3; flag-string retired)
+        # A5 v3: sightings from the A8 score panel — the alternative evidence route
+        try:
+            e["screen_sightings"] = _t1.screen_sightings_from_panel(e["ticker"])
+        except Exception:
+            e["screen_sightings"] = None
+        _gf = (_dflags.compute_gate_flags(td, bool(e.get("confirmed_catalyst") or e.get("catalyst_protected")))
+               if (_dflags and td) else {"disqualifier_flags": [], "review_flags": []})
+        _detail = _t1.evaluate({**e, "disqualifier_flags": _gf["disqualifier_flags"],
+                                "review_flags": _gf["review_flags"]}, td)
+        e["t1_qualified"] = _detail["t1_qualified"]
+        e["stage_gate"] = _detail["stage_gate"]
+        e["late_cycle_flag"] = _detail["late_cycle_flag"]
+        # A5 v3 (D18/D19): evidence-based SIZING — never blocks, caps thin-evidence entries
+        e["evidence_confirmed"] = _detail["evidence_confirmed"]
+        e["size_mode"] = _detail["size_mode"]
+        e["t1_gate_detail"] = _detail
     eligible.sort(key=lambda e: (-e.get("_composite", 0.0),
                                  -(e.get("normalised_score") or 0),
                                  str(e.get("ticker", ""))))

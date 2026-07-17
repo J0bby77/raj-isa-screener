@@ -2927,6 +2927,14 @@ FIELD_MAP = [
     "wacc_pct", "roic_vs_wacc_spread",
     "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
     "trailing_pe", "val_hist_pe_status", "overlay_status",
+    # ── Fix Pack Jul-26 (A1/A2/A6) — raw val-hist anchors (FV-composite inputs, previously
+    # dropped here), unified Source-Score anatomy, and the E[r] block. Stamped post-overlay
+    # by the run flow via source_score.source_score_components_for_row + expected_return.
+    "val_hist_pe_3yr_avg", "val_hist_current_pe", "val_hist_pfcf_3yr_avg", "val_hist_current_pfcf",
+    "screen_source", "src_fwd_raw", "src_fwd_w", "src_rev_raw", "src_rev_w",
+    "src_deploy_raw", "src_deploy_w", "src_qual_raw", "src_qual_w", "src_analyst_raw", "src_analyst_w",
+    "implied_upside_fv", "display_target_gap", "fv_basis", "fv_conf", "source_input_missing",
+    "expected_return_12_24m", "er_growth", "er_rerate", "er_yield", "er_confidence", "er_basis",
     "qualitative_commentary", "gate_code", "gate_reason",
 ]
 
@@ -3490,7 +3498,11 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     # ── OVERLAYS (Jul-26 Part 5: SUMMARY-eligible AND Source Score >= floor, 8-min cap) ──
     # Overlays are only shown for SUMMARY names, so gate on the SUMMARY-eligibility set + the single
     # Source Score (>= SUMMARY_SOURCE_FLOOR) instead of the old fixed total-score cut, which missed
-    # high-forward / low-total names (e.g. MU: total 32 / source ~80). Source is final before overlays.
+    # high-forward / low-total names (e.g. MU: total 32 / source ~80).
+    # Fix Pack A6 (12-Jul-26): the score here is the UNIFIED source (deployability = FV-composite
+    # upside x conf; analyst real). At this pre-overlay point the FV composite runs on the
+    # analyst-target basis (val_hist arrives WITH the overlay fetch); the FINAL screen_source is
+    # re-stamped post-overlay below — "Source final before overlays" no longer holds by design.
     import source_score as _ss
     _ov_floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 70.0)
     high_score_tickers = [
@@ -3529,6 +3541,31 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 row["overlay_status"] = f"error:{e}"
 
     run_qa["phases_completed"].append("overlays")
+
+    # ── Fix Pack Jul-26 (A1/A2/A6): stamp unified Source anatomy + E[r] on EVERY scored row ──
+    # AFTER overlays so the FV-composite inputs (val_hist_*) are present for the gated set. ONE
+    # compute — source_score.source_score_components_for_row — build_excel / build_email /
+    # score_panel read the stamped fields (or recompute via the same function: deterministic
+    # parity). summary_count / SUMMARY_THIN_WARNING via THE shared select_summary (A1/D4).
+    try:
+        import expected_return as _er
+        for _srow in scored_rows:
+            try:
+                _srow.update(_ss.source_score_components_for_row(_srow))
+                _srow.update(_er.expected_return_for_row(_srow))
+            except Exception as _se:
+                _srow.setdefault("source_input_missing", f"stamp_error:{_se}")
+        _sel, _sqa = _ss.select_summary(scored_rows)
+        run_qa.update(_sqa)
+        if _sqa.get("summary_thin_warning"):
+            log.warning(f"SUMMARY_THIN_WARNING: only {_sqa['summary_count']} SUMMARY rows "
+                        f"(floor {_sqa['summary_floor']})")
+        log.info(f"SUMMARY (floor-based, A1): {_sqa['summary_count']} rows "
+                 f"(eligible {_sqa['summary_eligible_count']}, cap {_sqa['summary_cap']})")
+        run_qa["phases_completed"].append("fixpack_stamp")
+    except Exception as _e:
+        log.warning(f"Fix-Pack stamping failed (non-fatal, rows keep pre-stamp fields): {_e}")
+
     run_qa["end_time"]  = datetime.utcnow().isoformat()
     run_qa["elapsed_s"] = round(time.time() - start_time, 1)
 

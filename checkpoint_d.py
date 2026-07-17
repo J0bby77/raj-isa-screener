@@ -47,12 +47,18 @@ def _norm_set(xs):
     return {str(x).strip().upper() for x in (xs or []) if str(x).strip()}
 
 
-def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N):
+def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
+                          step9_records=None, factor_state=None):
     """Return {passed, blocks, chosen, top5}.
-      top5              : ordered list of the top-5 T1 tickers
+      top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
+                          cases capped at 5 by the deploy-Source tiebreak — this is that list)
       decision          : {chosen_ticker, chosen_action, pairwise:{other_ticker: justification}}
       comparative_cases : {ticker: case_text} — must cover all top-5
       logged_tickers    : tickers logged to the decision ledger this run (incl passes)
+      step9_records     : optional {ticker: step9_pre record} — enables tick (4): a chosen BUY
+                          whose stage_gate is BLOCKED_PENDING_CASE or late_cycle_flag is True
+                          (A3/A15) must carry a documented cause (t1_gate_overrides recorded via
+                          decision["documented_causes"][ticker] or the step9 record itself).
     Any non-empty `blocks` list means the decision is BLOCKED."""
     blocks = []
     top5 = [str(t).strip().upper() for t in (top5 or []) if str(t).strip()][:REQUIRED_TOP]
@@ -99,6 +105,33 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         if _total > _funds:
             blocks.append(f"chosen actions cost {_total} > available funds {_funds}")
 
+    # (4) Fix Pack A3/A15 (P2): stage/late-cycle gate — a chosen name flagged
+    #     BLOCKED_PENDING_CASE (stage in SUMMARY_STAGE_EXCLUDE) or late_cycle cannot be
+    #     finalised without a DOCUMENTED cause (mirror of the reversal-gate mechanism).
+    #     The machine verifies PRESENCE of the cause; its content is the review's judgment.
+    _s9 = {str(k).strip().upper(): v for k, v in (step9_records or {}).items()}
+    _causes = {str(k).strip().upper(): v for k, v in (decision.get("documented_causes") or {}).items()}
+    for c in chosen_set:
+        rec = _s9.get(c) or {}
+        _ov = rec.get("t1_gate_overrides") or {}
+        if rec.get("stage_gate") == "BLOCKED_PENDING_CASE":
+            if not str(_causes.get(c) or _ov.get("stage") or "").strip():
+                blocks.append(f"{c} stage_gate=BLOCKED_PENDING_CASE (A3/D2): document remaining "
+                              f"runway in the Step-10 case (documented_causes[{c}]) before BUY")
+        if rec.get("late_cycle_flag"):
+            if not str(_causes.get(c) or _ov.get("late_cycle") or "").strip():
+                blocks.append(f"{c} late_cycle_flag (A15): extended multiple + late stage — "
+                              f"document the cause (documented_causes[{c}]) before BUY")
+
+    # (5) Doc B B3: while the AI-complex factor cap is in BREACH, a chosen BUY that raises the
+    #     factor weight is BLOCKED (factor_state = {"breach": bool, "classes": {ticker: 0/0.5/1}}).
+    if factor_state and factor_state.get("breach"):
+        _fc = {str(k).upper(): v for k, v in (factor_state.get("classes") or {}).items()}
+        for c in chosen_set:
+            if (_fc.get(c) or 0) > 0:
+                blocks.append(f"{c} raises AI-complex weight while cap is in BREACH (B3/D15) — "
+                              f"de-concentrate first or choose a non-factor name")
+
     # (3) log all N (incl passes) — at minimum every top-5 name must be logged
     not_logged = [t for t in top5 if t not in logged]
     if not_logged:
@@ -116,12 +149,36 @@ def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG
     if _dl is None:
         raise RuntimeError("decision_ledger not importable — cannot log top-10")
     decisions = {str(k).upper(): v for k, v in (decisions or {}).items()}
+    # Fix Pack A9 (P2): Checkpoint-D tick 3 is MACHINE-VERIFIED — capture the pre-write count,
+    # then assert (a) file exists, (b) entry count increased or dedupe matched, (c) this month's
+    # stamp is present. Failure raises -> Checkpoint-D BLOCKED (hard, per its charter). July's
+    # silent-miss (prose-mandated write, never wired) cannot recur.
+    from datetime import date as _date
+    _pre = 0
+    if os.path.exists(ledger_path):
+        try:
+            _pre = len(_dl.load_ledger(ledger_path).get("entries", []))
+        except Exception:
+            _pre = 0
     logged = []
     for t in (ranked or [])[:log_all_n]:
         d = decisions.get(str(t).upper(), "PASS")
         d = _to_ledger_decision(d)   # P2-3: map canonical/stack action -> ledger vocabulary (never raise)
         _dl.log_decision(ledger_path, t, route, d, **ledger_kw)
         logged.append(str(t).upper())
+    if logged:
+        if not os.path.exists(ledger_path):
+            raise RuntimeError(f"A9 VERIFY FAILED: {ledger_path} does not exist after log_top10 — "
+                               f"Checkpoint-D tick 3 BLOCKED")
+        led = _dl.load_ledger(ledger_path)
+        _post = len(led.get("entries", []))
+        _stamp = (str(ledger_kw.get("date"))[:7] if ledger_kw.get("date")
+                  else _date.today().strftime("%Y-%m"))   # honour an explicit run date
+        _has_month = any(str(e.get("date", "")).startswith(_stamp) for e in led.get("entries", []))
+        if _post < _pre or not _has_month:
+            raise RuntimeError(f"A9 VERIFY FAILED: ledger count {_pre}->{_post}, month stamp "
+                               f"{_stamp} present={_has_month} — Checkpoint-D tick 3 BLOCKED")
+        print(f"LEDGER_VERIFIED entries={_post} (+{_post - _pre}) month={_stamp} path={ledger_path}")
     return logged
 
 
