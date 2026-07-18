@@ -157,3 +157,43 @@ def select_summary(rows, get=None):
           "summary_floor": floor, "summary_cap": cap,
           "summary_thin_warning": len(selected) < warn_below}
     return selected, qa
+
+
+def door_flags_for_row(row, regime_state=None, get=None):
+    """B7(2) SHADOW (18-Jul-26) — evaluate every admission door's criteria for one row (Doc B B7).
+    Missing data FAILS a door criterion: a door ADMITS, so unseen data cannot admit (inverse of
+    T1's NO_DATA-pass, which exists to avoid BLOCKING on unseen data). Shadow-only while
+    cfg.REGIME_DOORS_ACTIVE is False — tags flow to full_data / score_panel / SUMMARY so each
+    door's forward performance is measurable from day 1; selection is UNCHANGED."""
+    g = get or (lambda r, k: r.get(k))
+    pa = _num(g(row, "part_a_score"))
+    sc = source_score_for_row(row, get=get)
+    floor = float(getattr(cfg, "SUMMARY_SOURCE_FLOOR", 70.0))
+    momentum = bool(summary_eligible(row, get=get) and sc is not None and sc >= floor)
+    nd = _num(g(row, "net_debt_ebitda"))
+    fcfy = _num(g(row, "fcf_pos_years"))
+    if fcfy is None:
+        fcfy = _num(g(row, "fcf_positive_years"))
+    omt = str(g(row, "op_margin_trend") or "").lower()
+    payout = _num(g(row, "div_payout_fcf"))
+    quality = bool(
+        pa is not None and pa >= getattr(cfg, "DOOR_QUALITY_PART_A_MIN", 20)
+        and nd is not None and nd < getattr(cfg, "DOOR_QUALITY_ND_EBITDA_MAX", 1.5)
+        and fcfy is not None and fcfy >= getattr(cfg, "DOOR_QUALITY_FCF_YEARS_MIN", 5)
+        and omt in ("improving", "flat", "stable")
+        and (payout is None or payout < getattr(cfg, "DOOR_QUALITY_DIV_PAYOUT_FCF_MAX", 0.8)))
+    price = _num(g(row, "current_price"))
+    hi = _num(g(row, "high_52wk"))
+    off_high = (1.0 - price / hi) * 100.0 if (price and hi and hi > 0) else None
+    below = off_high is not None and off_high >= getattr(cfg, "DOOR_INFLECTION_OFF_HIGH_MIN_PCT", 25.0)
+    improving = str(g(row, "est_rev_direction") or "").lower() == "improving"
+    inflection = bool(pa is not None and pa >= getattr(cfg, "DOOR_INFLECTION_PART_A_MIN", 16)
+                      and below and improving)
+    doors = [d for d, ok in (("momentum", momentum), ("quality", quality),
+                             ("inflection", inflection)) if ok]
+    regime = (str(regime_state).upper() if regime_state else None)
+    open_doors = getattr(cfg, "REGIME_OPEN_DOORS", {}).get(regime, ["momentum"])
+    return {"door_momentum": momentum, "door_quality": quality, "door_inflection": inflection,
+            "door": ",".join(doors),
+            "door_admit_shadow": ",".join(d for d in doors if d in open_doors),
+            "regime_at_screen": regime or "UNKNOWN"}

@@ -106,12 +106,14 @@ FIELD_MAP = {
     "current_price_corrected": "current_price",
     "Price": "current_price",
     "TargetMean": "target_mean",
+    "target_price_mean": "target_mean",   # P2.1 (18-Jul-26): actual full_data column name
     "target_mean_price": "target_mean",
     "Target (mean)": "target_mean",
     "AnalystRating": "analyst_rating",
     "analyst_rating": "analyst_rating",
     "recommendationKey": "analyst_rating",
     "AnalystCount": "analyst_count",
+    "num_analysts": "analyst_count",      # P2.1 (18-Jul-26): actual full_data column name
     "analyst_count": "analyst_count",
     "numberOfAnalystOpinions": "analyst_count",
     "EpsCAGR": "eps_cagr",
@@ -341,7 +343,7 @@ def is_gate_passer(row):
     return True
 
 
-def get_coverage_counts(full_data, gate_data):
+def get_coverage_counts(full_data, gate_data, unresolved_rows=None):
     """Compute coverage statistics from full data + gate results."""
     counts = {
         "total_constituents": 0,
@@ -393,6 +395,14 @@ def get_coverage_counts(full_data, gate_data):
                 elif a >= _a_accept:
                     counts["acceptable"] += 1
 
+    # Review item 9 (18-Jul-26): GATE_DATA_UNRESOLVED rows live in the separate unresolved
+    # CSV, not full_data — the funnel printed "0 Insufficient Data" while the retro logged 17.
+    full_tickers_pre = {get_field(r, "ticker") for r in full_data}
+    for row in (unresolved_rows or []):
+        t = get_field(row, "ticker")
+        if t and t not in full_tickers_pre:
+            counts["insufficient_data"] += 1
+
     # Count gate exclusions from gate data not already in full_data
     full_tickers = {get_field(r, "ticker") for r in full_data}
     for row in gate_data:
@@ -423,7 +433,7 @@ def build_coverage_line(counts, group, run_date):
     ns = counts["not_screened"]
 
     text = (
-        f"<strong style=\"color:#1a6b2a\">{sb} Strong Buy{'s' if sb != 1 else ''}</strong> | "
+        f"<strong style=\"color:#1a6b2a\">{sb} SUMMARY Candidate{'s' if sb != 1 else ''}</strong> | "
         f"{analysed} of {total} total constituents analysed ({pct_analysed}) | "
         f"{fm} Fair/Mixed | {acc} Acceptable | "
         f"{excl} Pre-Screen Excluded | {hgf} Hard Gate Fails | "
@@ -435,8 +445,8 @@ def build_coverage_line(counts, group, run_date):
     )
     # Replace the strong tag we built manually (it's safe ASCII)
     html = html.replace(
-        safe_entities(f"<strong style=\"color:#1a6b2a\">{sb} Strong Buy{'s' if sb != 1 else ''}</strong>"),
-        f'<strong style="color:#1a6b2a">{sb} Strong Buy{"s" if sb != 1 else ""}</strong>'
+        safe_entities(f"<strong style=\"color:#1a6b2a\">{sb} SUMMARY Candidate{'s' if sb != 1 else ''}</strong>"),
+        f'<strong style="color:#1a6b2a">{sb} SUMMARY Candidate{"s" if sb != 1 else ""}</strong>'
     )
     return html
 
@@ -467,7 +477,39 @@ def _capital_upside(row):
     v = sf(get_field(row, "implied_upside_fv"))
     if v is not None:
         return v, "fv"
+    # P2.1 (18-Jul-26): recompute via THE shared FV composite when the stamped column is blank
+    # (e.g. a local-path run that missed the fixpack stamp) — the SAME recipe build_excel uses,
+    # so email and Excel cannot desync. Only if the composite also has no answer do we fall
+    # back to the display-only consensus gap (D7: kept solely for pre-Fix-Pack CSVs).
+    try:
+        import fv_composite as _fvc
+        v = sf(_fvc.fv_composite_for_row(row, get=lambda r, k: get_field(r, k)).get("implied_upside_fv"))
+        if v is not None:
+            return v, "fv"
+    except Exception:
+        pass
     return sf(get_field(row, "upside_pct")), "target(display)"
+
+def build_drawdown_line():
+    """Review item 9 (18-Jul-26): B1 drawdown-ladder standing line, rendered MECHANICALLY from
+    drawdown_state.json so every weekly email carries it (agent-prose insertion desynced:
+    present in the 17-Jul MIDCAP email, missing from the 18-Jul SP500 email). Mirrors
+    email_prefill's monthly Section-2 line; B7 regime shown once classifier has run."""
+    try:
+        import json as _j, os as _o
+        _p = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "drawdown_state.json")
+        ds = _j.load(open(_p)) or {}
+    except Exception:
+        ds = {}
+    if ds.get("last_check"):
+        txt = (f"Drawdown ladder (B1): {ds.get('drawdown_pct', 0):+.1f}% from 252d high | "
+               f"tranches fired: {ds.get('tranches_fired', 0)} | "
+               f"regime: {ds.get('regime_state') or 'n/a'} | as of {ds.get('last_check')}")
+    else:
+        txt = "Drawdown ladder (B1): state not yet seeded — first monitor run populates"
+    return (f'<p style="background:#faf6ef;padding:8px 14px;border-left:4px solid #b8860b;'
+            f'font-size:12px;margin-bottom:16px">{safe_entities(txt)}</p>\n')
+
 
 def build_kpi_tiles(strong_buys, gate_passers):
     """KPI tiles row using table layout (Rule 3 — no flexbox)."""
@@ -526,6 +568,34 @@ def build_kpi_tiles(strong_buys, gate_passers):
     return html
 
 
+_HELD_CACHE = None
+
+
+def _held_tickers():
+    """Review item 4 (18-Jul-26): current stock-sleeve holdings from the latest
+    portfolio_data_*.json next to this script — flags top-10 names Raj already owns."""
+    global _HELD_CACHE
+    if _HELD_CACHE is not None:
+        return _HELD_CACHE
+    _HELD_CACHE = set()
+    try:
+        import glob as _g, json as _j, os as _o
+        _d = _o.path.dirname(_o.path.abspath(__file__))
+        _files = sorted(_g.glob(_o.path.join(_d, "portfolio_data_*.json")),
+                        key=_o.path.getmtime, reverse=True)
+        if _files:
+            _pd = _j.load(open(_files[0]))
+            _st = _pd.get("stocks")
+            if isinstance(_st, dict):
+                _HELD_CACHE = {str(k).upper() for k in _st}
+            elif isinstance(_st, list):
+                _HELD_CACHE = {str(x.get("ticker") if isinstance(x, dict) else x).upper()
+                               for x in _st}
+    except Exception:
+        _HELD_CACHE = set()
+    return _HELD_CACHE
+
+
 def build_top10_table(strong_buys):
     """Section 2 — Top 10 stocks table (exactly 13 columns per Run_Context spec).
     Fix Pack 12-Jul-26: Src = unified screen_source (A6, screen=deploy); Upside (FV) =
@@ -537,9 +607,9 @@ def build_top10_table(strong_buys):
     header_cols = [
         "Rank", "Ticker", "Company", "Sector",
         "Fwd /100", "Src", "Stage",
-        "Part A", "Part B", "Total", "ROIC", "Upside (FV)", "E[r]"
-    ]
-    widths = ["4%", "6%", "15%", "10%", "6%", "5%", "10%", "5%", "5%", "6%", "7%", "8%", "8%"]
+        "Part A", "Part B", "Total", "ROIC", "Upside (FV)", "E[r]", "Actionable?"
+    ]  # review item 4 (18-Jul-26): 14th col = T1 gate status (contract updated in Run_Context)
+    widths = ["4%", "5%", "13%", "9%", "5%", "5%", "9%", "4%", "4%", "5%", "6%", "7%", "7%", "17%"]
 
     # Header row
     header_html = "".join(
@@ -560,7 +630,7 @@ def build_top10_table(strong_buys):
         total = score_int(get_field(row, "total_score"))
         fwd = score_int(get_field(row, "forward_axis_score"))
         src = round(_source_score(row) * 100)
-        stage = safe_entities(str(get_field(row, "revision_stage") or "—")[:11])
+        stage = safe_entities(str(get_field(row, "revision_stage") or "—"))  # item 9: no [:11] truncation
         roic_raw = sf(get_field(row, "roic"))
         upside_raw, _up_basis = _capital_upside(row)   # D7: FV-composite implied upside
         roic_str = pct(roic_raw) if roic_raw is not None else "N/A"
@@ -574,8 +644,26 @@ def build_top10_table(strong_buys):
         else:
             upside_str = "N/A"
 
-        # E[r] % pa (A2 shadow) — percent-unit value stamped by screener_core
+        # E[r] % pa (A2 shadow) — percent-unit value stamped by screener_core.
+        # P2.1 (18-Jul-26): when the stamped column is blank (local-path run that missed the
+        # fixpack stamp), recompute via THE shared implementation — parity with build_excel.
+        # Review item 4 (18-Jul-26): T1 gate status per row (screen-row variant) + HELD flag
+        _gate_label = "n/a"
+        try:
+            import t1_gates as _t1
+            _gate_label, _ = _t1.gate_status_for_screen_row(row, get=lambda r, k: get_field(r, k))
+        except Exception:
+            pass
+        if ticker in _held_tickers():
+            _gate_label = "HELD | " + _gate_label
         _er_raw = sf(get_field(row, "expected_return_12_24m"))
+        if _er_raw is None:
+            try:
+                import expected_return as _erm
+                _er_raw = sf(_erm.expected_return_for_row(
+                    row, get=lambda r, k: get_field(r, k)).get("expected_return_12_24m"))
+            except Exception:
+                _er_raw = None
         er_str = f"{_er_raw:.1f}%" if _er_raw is not None else "—"
 
         cell_style = f'padding:7px 6px;border-bottom:1px solid #e8e8e8;background:{bg};font-size:12px;text-align:center'
@@ -595,6 +683,9 @@ def build_top10_table(strong_buys):
             f'<td style="{cell_style}">{safe_entities(roic_str)}</td>'
             f'<td style="{cell_style}">{upside_str}</td>'
             f'<td style="{cell_style};color:#4a1a6b;font-weight:bold">{safe_entities(er_str)}</td>'
+            f'<td style="{cell_style};text-align:left;font-size:11px;'
+            f'color:{"#1a6b2a" if _gate_label.startswith("PASS") else "#c0392b"};font-weight:bold">'
+            f'{safe_entities(_gate_label)}</td>'
             f'</tr>\n'
         )
 
@@ -757,9 +848,12 @@ def build_key_observations(strong_buys, full_data, group):
             f"(A:{score_int(get_field(r, 'part_a_score'))}/B:{score_int(get_field(r, 'part_b_score'))})"
             for r in near_misses[:5]
         )
+        _floor = _cfg_get("SUMMARY_SOURCE_FLOOR", 70)
         observations.append(
-            f"<strong>Near-misses (&ge;38 total, not Strong Buy):</strong> {nm_list}. "
-            f"These stocks passed all gates but fell short on Part A &ge;22 or Part B &ge;19."
+            f"<strong>Near-misses (&ge;38 total, not in SUMMARY):</strong> {nm_list}. "
+            f"High combined score but below the forward-led bar (SUMMARY-eligible + "
+            f"unified Source &ge; {_floor:g}) &mdash; review item 9: legacy Part-A/Part-B "
+            f"threshold text retired 18-Jul-26."
         )
 
     html = '<h3 style="color:#1a3a6b;margin-bottom:8px">Key Observations</h3>\n'
@@ -987,10 +1081,22 @@ def build_retrospective_section(retro_path, group, run_date):
             for title, body in item_matches[:5]:
                 items.append((title.strip(), body.strip()))
 
-        # Fallback: extract any issues section
+        # P2.1 (18-Jul-26): accept the scheduled-task retro format — "## Retrospective Items"
+        # with "### N. TITLE" sub-items (e.g. 17-Jul-26 MIDCAP400 retro). Writer/parser heading
+        # drift previously reduced Section 7 to a bare file pointer.
+        if not items:
+            ri_match = re.search(r'^## Retrospective Items(.*?)(?=^## |\Z)',
+                                 content, re.DOTALL | re.MULTILINE)
+            if ri_match:
+                for title, body in re.findall(r'^###\s*\d+\.\s*(.*?)\n(.*?)(?=^###\s|\Z)',
+                                              ri_match.group(1), re.DOTALL | re.MULTILINE)[:5]:
+                    items.append((title.strip().rstrip(':'),
+                                  re.sub(r'\s+', ' ', re.sub(r'[*_#|-]{2,}', '', body)).strip()[:300]))
+
+        # Fallback: extract any issues section ("## Issues", "## Issues / notes", etc.)
         if not items:
             issues_match = re.search(
-                r'## (?:Issues|Data Quality Issues|Execution Notes)(.*?)(?=^##|\Z)',
+                r'## (?:Issues(?:\s*/\s*notes)?|Data Quality Issues|Execution Notes)(.*?)(?=^##|\Z)',
                 content, re.DOTALL | re.MULTILINE
             )
             if issues_match:
@@ -1001,6 +1107,10 @@ def build_retrospective_section(retro_path, group, run_date):
                 )
                 for title, body in issue_matches[:5]:
                     items.append((title.strip(), body.strip()[:200]))
+                # P2.1: plain "- bullet" notes (e.g. "## Issues / notes\n- None. Clean run...")
+                if not items:
+                    for m in re.findall(r'^[-*]\s+(.*)$', issues_text, re.MULTILINE)[:5]:
+                        items.append(("Run note", m.strip()[:300]))
 
     if items:
         for i, (title, body) in enumerate(items, 1):
@@ -1057,7 +1167,7 @@ def build_email_body(
     else:
         strong_buys = sorted(_sb_all, key=lambda r: -(sf(get_field(r, "total_score")) or 0))
     gate_passers = [r for r in full_data if is_gate_passer(r)]
-    counts = get_coverage_counts(full_data, gate_data)
+    counts = get_coverage_counts(full_data, gate_data, unresolved_rows=unresolved_rows)
 
     # Outer container
     html_parts = [
@@ -1069,6 +1179,8 @@ def build_email_body(
         f'</h2>\n',
         # Section 1 — Coverage stats (FIRST in body)
         build_coverage_line(counts, group, run_date),
+        # B1 standing line (review item 9, 18-Jul-26 — mechanical, all groups)
+        build_drawdown_line(),
         # KPI tiles (immediately after coverage stats)
         build_kpi_tiles(strong_buys, gate_passers),
         # Section 2 — Top 10

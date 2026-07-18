@@ -323,3 +323,33 @@ if __name__ == "__main__":
     os.unlink(pth)
     assert screen_sightings_from_panel("XXX", "/nonexistent.csv") is None
     print("t1_gates SELF-TEST OK (A5 v3 — evidence sizing, tenure gate removed)")
+
+
+def gate_status_for_screen_row(row, get=None):
+    """Review item 4 (18-Jul-26) — email 'Actionable?' column: the T1 gates computable from a
+    full_data SCREEN row alone (stage / E[r]-vs-floor / late-cycle / clean final_status).
+    ns_floor, reversal history and catalyst dates live on WATCHLIST entries, not screen rows —
+    excluded by design (the full evaluate() runs at rerank/step9). Returns (label, reasons):
+    'PASS' or 'BLOCKED(reason,..)', with ' !conflict' appended when capital_signal_conflict."""
+    g = get or (lambda r, k: r.get(k))
+    stage = g(row, "revision_stage")
+    _st_state, st_blocked = stage_gate(stage)
+    er = _num(g(row, "expected_return_12_24m"))
+    er_floor = float(_c("ER_DEPLOY_FLOOR", 15.9))
+    late = late_cycle_flag(_num(g(row, "val_hist_pe_premium_disc")), stage)
+    reasons = []
+    if st_blocked:
+        reasons.append("stage")
+    if er is not None and er < er_floor:
+        reasons.append(f"E[r]<{er_floor:g}")
+    if late:
+        reasons.append("late-cycle")
+    st_final = str(g(row, "final_status") or "").upper()
+    if st_final in ("HARD_GATE_FAIL", "MANDATORY_MINIMUM_FAIL",
+                    "UNRESOLVED_HARD_GATE_NOT_RANKABLE"):
+        reasons.append("gate-fail")
+    label = "PASS" if not reasons else "BLOCKED(" + ",".join(reasons) + ")"
+    conflict = str(g(row, "capital_signal_conflict") or "").lower() in ("true", "1", "yes")
+    if conflict:
+        label += " !conflict"
+    return label, reasons

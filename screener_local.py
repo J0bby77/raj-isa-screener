@@ -318,6 +318,37 @@ def main():
         save_state(state, partial)
 
     scored = [{k: native(v) for k, v in r.items()} for r in state["scored"]]
+    # ── Fix Pack P2.1 (18-Jul-26): stamp unified Source anatomy + E[r] on EVERY scored row ──
+    # Parity with screener_core's post-overlay stamp (core run flow, "fixpack_stamp" phase).
+    # The local batching path previously skipped it, leaving screen_source / implied_upside_fv /
+    # expected_return_12_24m EMPTY in full_data.csv — root cause of the 17/18-Jul-26 emails
+    # showing E[r] "—" and the display-only consensus gap in the "Upside (FV)" column (D7).
+    try:
+        import source_score as _ss_fin
+        import expected_return as _er_fin
+        _regime_fin = None   # B7 shadow (18-Jul-26): parity with screener_core's stamp
+        try:
+            import json as _dj_fin
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "drawdown_state.json")) as _df_fin:
+                _regime_fin = (_dj_fin.load(_df_fin) or {}).get("regime_state")
+        except Exception:
+            pass
+        for _srow in scored:
+            try:
+                _srow.update(_ss_fin.source_score_components_for_row(_srow))
+                _srow.update(_er_fin.expected_return_for_row(_srow))
+                _er_fin.apply_capital_signal_conflict(_srow)              # review item 8
+                _srow.update(_ss_fin.door_flags_for_row(_srow, _regime_fin))  # B7 shadow
+            except Exception as _se:
+                _srow.setdefault("source_input_missing", f"stamp_error:{_se}")
+        _sel_fin, _sqa_fin = _ss_fin.select_summary(scored)
+        print(f"FIXPACK_STAMP rows={len(scored)} summary_count={_sqa_fin['summary_count']} "
+              f"(eligible {_sqa_fin['summary_eligible_count']}, floor {_sqa_fin['summary_floor']:g}, "
+              f"cap {_sqa_fin['summary_cap']})"
+              + (" SUMMARY_THIN_WARNING" if _sqa_fin.get("summary_thin_warning") else ""))
+    except Exception as _e:
+        print(f"WARN fixpack stamping failed (non-fatal, rows keep pre-stamp fields): {_e}")
     passers_df = pd.DataFrame(state["passers"]) if state["passers"] else pd.DataFrame()
     excl_df = pd.DataFrame(state["excluded"]) if state["excluded"] else pd.DataFrame()
     core.save_full_data(scored, a.outputs, run_date, group)

@@ -129,3 +129,32 @@ if __name__ == "__main__":
     assert d["er_growth"] == 14.0 and d["er_yield"] == 1.5, d
     assert d["er_basis"].startswith("growth=fwd_eps") and "rerate=own_5y_median" in d["er_basis"], d
     print("SELF-TEST OK")
+
+
+def apply_capital_signal_conflict(row):
+    """Review item 8 (18-Jul-26): E[r] is growth-anchored, implied_upside_fv is multiple-anchored;
+    they can disagree violently with no flag (MU +58.5%pa vs FV -42.9%). Compare E[r] %pa against
+    the ANNUALISED FV-implied return over the 12-24m window (18m midpoint: ((1+u)^(12/18)-1)*100).
+    Gap > cfg.CAPITAL_SIGNAL_CONFLICT_PP -> capital_signal_conflict=True + er_confidence capped at
+    cfg.CONFLICT_ER_CONF_CAP (below the A5 v3 0.75 full-size bar: conflicted signals size as
+    starter, never full). Mutates + returns row; no-op when either input missing."""
+    try:
+        import scoring_config as _cfg
+    except Exception:
+        _cfg = None
+    thr = float(getattr(_cfg, "CAPITAL_SIGNAL_CONFLICT_PP", 25.0))
+    cap = float(getattr(_cfg, "CONFLICT_ER_CONF_CAP", 0.5))
+    er = _num(row.get("expected_return_12_24m"))
+    u = _num(row.get("implied_upside_fv"))
+    row.setdefault("capital_signal_conflict", False)
+    if er is None or u is None or u <= -1.0:
+        return row
+    fv_ann = ((1.0 + u) ** (12.0 / 18.0) - 1.0) * 100.0
+    row["fv_annualised_pct"] = round(fv_ann, 1)
+    if abs(er - fv_ann) > thr:
+        row["capital_signal_conflict"] = True
+        ec = _num(row.get("er_confidence"))
+        if ec is None or ec > cap:
+            row["er_confidence"] = cap
+            row["er_basis"] = (str(row.get("er_basis") or "") + "|conflict_capped").lstrip("|")
+    return row

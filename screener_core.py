@@ -184,6 +184,16 @@ OVERLAY_TIME_CAP_SECS     = 480  # 8 minutes
 # ── Revenue anomaly multiple ──────────────────────────────────────────────────
 REV_ANOMALY_MULTIPLE = 3.0
 
+
+def b2b_effective_max(b2b_applicable, btb_status, backlog_status):
+    """Review item 7 (18-Jul-26): the /26 extended Part-B max only applies when at least one
+    conditional metric actually SCORED. Unresolved (no data) -> N/A -> denominator stays /22,
+    so applicable-bucket semis are not structurally penalised vs software."""
+    import scoring_config as _c2
+    if b2b_applicable and ("scored" in (btb_status, backlog_status)):
+        return _c2.GROWTH_PART_B_MAX_EXTENDED
+    return _c2.GROWTH_PART_B_MAX
+
 # ── Alpha Vantage daily cap ───────────────────────────────────────────────────
 AV_DAILY_CAP = 25
 AV_PER_TASK_CAP = 10
@@ -2532,7 +2542,8 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     # Per-stock Part B / Total max: 22/50 base; 26/54 for semi-hardware/equipment with the
     # book-to-bill + backlog/EV conditional metrics. Read by the pre-run adapter for max-aware
     # /50-vs-/54 display + conviction brackets (single source of truth = scoring_config).
-    out["part_b_max"] = _cfg.GROWTH_PART_B_MAX_EXTENDED if out["b2b_applicable"] else _cfg.GROWTH_PART_B_MAX
+    out["part_b_max"] = b2b_effective_max(
+        out["b2b_applicable"], out.get("book_to_bill_status"), out.get("backlog_ev_status"))
     out["total_max"]  = _cfg.GROWTH_PART_A_MAX + out["part_b_max"]
 
     # Metric 12: Book-to-Bill Trailing 2 Quarters
@@ -2544,7 +2555,10 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["score_b_book_to_bill"] = None   # not applicable — excluded from scoring
         out["book_to_bill_status"]  = "not_applicable"
     elif btb_val is None:
-        out["score_b_book_to_bill"] = 0
+        # Review item 7 (18-Jul-26): unresolved scores N/A (None), NOT 0 — semis were
+        # structurally penalised for a field no automated source populates. Capture moves
+        # to the Step-12/intramonth deep-dive (Data_Sourcing_Policy 39-46).
+        out["score_b_book_to_bill"] = None
         out["book_to_bill_status"]  = "unresolved"
     elif btb_val >= BOOK_TO_BILL_SCORE_THRESHOLDS[0]:    # strong >= 1.20
         out["score_b_book_to_bill"] = 2
@@ -2568,7 +2582,7 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["score_b_backlog_ev"] = None   # not applicable — excluded from scoring
         out["backlog_ev_status"]  = "not_applicable"
     elif backlog_ev is None:
-        out["score_b_backlog_ev"] = 0
+        out["score_b_backlog_ev"] = None   # review item 7: N/A, not 0 (see book_to_bill)
         out["backlog_ev_status"]  = "unresolved"
     elif backlog_ev >= BACKLOG_EV_SCORE_THRESHOLDS[0]:    # strong >= 2.00
         out["score_b_backlog_ev"] = 2
@@ -2935,6 +2949,9 @@ FIELD_MAP = [
     "src_deploy_raw", "src_deploy_w", "src_qual_raw", "src_qual_w", "src_analyst_raw", "src_analyst_w",
     "implied_upside_fv", "display_target_gap", "fv_basis", "fv_conf", "source_input_missing",
     "expected_return_12_24m", "er_growth", "er_rerate", "er_yield", "er_confidence", "er_basis",
+    "capital_signal_conflict", "fv_annualised_pct",
+    "door", "door_admit_shadow", "regime_at_screen",
+    "door_momentum", "door_quality", "door_inflection",
     "qualitative_commentary", "gate_code", "gate_reason",
 ]
 
@@ -3549,10 +3566,20 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     # parity). summary_count / SUMMARY_THIN_WARNING via THE shared select_summary (A1/D4).
     try:
         import expected_return as _er
+        _regime = None   # B7 shadow (18-Jul-26): regime read once from drawdown_state.json
+        try:
+            import json as _dj
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "drawdown_state.json")) as _df_:
+                _regime = (_dj.load(_df_) or {}).get("regime_state")
+        except Exception:
+            pass
         for _srow in scored_rows:
             try:
                 _srow.update(_ss.source_score_components_for_row(_srow))
                 _srow.update(_er.expected_return_for_row(_srow))
+                _er.apply_capital_signal_conflict(_srow)          # review item 8
+                _srow.update(_ss.door_flags_for_row(_srow, _regime))  # B7 shadow tags
             except Exception as _se:
                 _srow.setdefault("source_input_missing", f"stamp_error:{_se}")
         _sel, _sqa = _ss.select_summary(scored_rows)

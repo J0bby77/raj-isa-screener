@@ -332,7 +332,7 @@ SUMMARY_COLS = [
     ("",                           "Final Status",       "final_status",             s,                 True),
     # Group 2 — Scores (3 cols)
     ("Group 2 — Scores",           "Part A (/28)",       "part_a_score",             score_int,         False),
-    ("",                           "Part B (/26-30)",    "part_b_score",             score_int,         False),
+    ("",                           "Part B (/22-26)",    "part_b_score",             score_int,         False),  # item 9 (18-Jul-26): label matched to config
     ("",                           "Total (/50-54)",     "total_score",              score_int,         False),
     ("",                           "Fwd Axis (/100)",    "forward_axis_score",       score_int,         False),
     # Fix Pack A6 (12-Jul-26): "screen_source" — ONE unified Source Score, screen = deploy.
@@ -340,6 +340,12 @@ SUMMARY_COLS = [
     # full anatomy on every SUMMARY row; computed once in source_score, never recomputed here).
     ("",                           "screen_source",      "source_score",             score_int,         False),
     ("",                           "Stage",              "revision_stage",           s,                 True),
+    # B7 SHADOW (18-Jul-26): doors tagged, never admitted while REGIME_DOORS_ACTIVE=False
+    ("",                           "Door (B7 shadow)",   "door",                     s,                 True),
+    ("",                           "Door admit (shadow)","door_admit_shadow",        s,                 True),
+    ("",                           "Regime@screen",      "regime_at_screen",         s,                 True),
+    # Review item 8 (18-Jul-26): E[r]-vs-FV divergence flag (er_confidence capped when True)
+    ("",                           "Sig Conflict",       "capital_signal_conflict",  s,                 True),
     ("",                           "Fwd (raw→wtd)",      "_src_fwd",                 s,                 False),
     ("",                           "Rev (raw→wtd)",      "_src_rev",                 s,                 False),
     ("",                           "Deploy (raw→wtd)",   "_src_deploy",              s,                 False),
@@ -594,7 +600,7 @@ CAND_COLS = [
     ("Index",           "index",                s),
     ("Final Status",    "final_status",         s),
     ("Part A (/28)",    "part_a_score",         score_int),
-    ("Part B (/26-30)", "part_b_score",         score_int),
+    ("Part B (/22-26)", "part_b_score",         score_int),  # item 9 (18-Jul-26)
     ("Total (/50-54)",  "total_score",          score_int),
     ("Rev CAGR",        "rev_cagr",             pct),
     ("Gross Margin",    "gross_margin",         pct),
@@ -754,7 +760,7 @@ def build_scores(wb, df_full, group, run_date):
 
     ws.merge_cells(start_row=2, start_column=b_start, end_row=2, end_column=b_end)
     c = ws.cell(row=2, column=b_start,
-                value="Part B — Strong Buy Assessment (13 base metrics max 26; +2 conditional for equipment/hardware = max 30 | * = N/A for non-equipment)")
+                value="Part B — Strong Buy Assessment (11 base metrics max 22; +2 conditional for equipment/hardware = max 26 | * or unresolved = N/A, max stays 22)")  # item 9 (18-Jul-26)
     c.fill = FILL_GRP4; c.font = FONT_BOLD_WHITE; c.alignment = ALIGN_CTR
 
     if all_f:
@@ -1075,6 +1081,58 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def build_glossary(wb, group, run_date):
+    """Review item 6 (18-Jul-26): self-documenting GLOSSARY tab. Rows are parsed LIVE from
+    Metric_Label_Formula_Reference.md (every markdown table, keyed by its section heading) so
+    the workbook cannot drift from the canonical reference; a curated block then documents the
+    Fix-Pack SUMMARY columns (source anatomy, E[r] components, gates, doors) with
+    interpretation + gate relevance. One-time build, near-zero run cost."""
+    ws = wb.create_sheet("GLOSSARY")
+    ws.append([f"GLOSSARY — {group} {run_date} | generated from Metric_Label_Formula_Reference.md"])
+    ws.cell(row=1, column=1).font = FONT_BOLD_WHITE
+    ws.cell(row=1, column=1).fill = FILL_GRP1
+    ws.append(["Section", "Field / Label", "Formula / Method / Source", "Interpretation", "Gate relevance"])
+    for c in ws[2]:
+        c.font = FONT_BOLD_WHITE; c.fill = FILL_GRP2
+    import os as _o, re as _re
+    ref = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)),
+                       "Metric_Label_Formula_Reference.md")
+    try:
+        section = ""
+        for line in open(ref, encoding="utf-8"):
+            line = line.rstrip()
+            m = _re.match(r"^#{2,3}\s+(.*)", line)
+            if m:
+                section = m.group(1).strip()
+                continue
+            if line.startswith("|") and not _re.match(r"^\|[\s:-]+\|", line):
+                cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
+                if cells and cells[0].lower() not in ("metric", "field", "label", ""):
+                    ws.append([section, cells[0],
+                               " | ".join(cells[1:3])[:300],
+                               " | ".join(cells[3:])[:300], ""])
+    except Exception as _e:
+        ws.append(["PARSE_ERROR", str(_e), "", "", ""])
+    # Curated Fix-Pack column rows (18-Jul-26) — the post-Fix-Pack columns the reference predates
+    fixpack_rows = [
+        ("Fix Pack — Source", "screen_source", "ONE unified Source Score (A6, screen=deploy): weighted forward/revisions/deployability/quality/analyst", "Higher = stronger sourcing signal; SUMMARY floor = SUMMARY_SOURCE_FLOOR", "SUMMARY admission"),
+        ("Fix Pack — Source", "src_*_raw / src_*_w", "Per-term anatomy: pre-weight raw -> weighted contribution", "Shows WHICH term drives the score", "diagnostic"),
+        ("Fix Pack — Return", "Impl Upside (FV)", "fv_composite implied upside vs current price (D7); * = display-only consensus gap fallback", "FV-anchored capital upside, 12-24m", "E[r] cross-check (item 8)"),
+        ("Fix Pack — Return", "E[r] %pa", "expected_return_12_24m = growth + rerate (capped +/-10/yr) + yield; er_confidence discounts missing terms", ">= ER_DEPLOY_FLOOR (anchor+2pp) to deploy", "T1 er gate"),
+        ("Fix Pack — Return", "Sig Conflict", "|E[r] - annualised FV-implied| > CAPITAL_SIGNAL_CONFLICT_PP", "True = growth and multiple anchors violently disagree; er_confidence capped at 0.5 -> starter size only", "A5 v3 sizing"),
+        ("Fix Pack — Stage", "Stage", "revision_stage classifier (Igniting/Accelerating/Sustained/Maturing/Rolling-over)", "SUMMARY_STAGE_EXCLUDE stages -> BLOCKED_PENDING_CASE", "T1 stage gate"),
+        ("B7 shadow", "Door (B7 shadow)", "Doors whose criteria the row meets: momentum / quality / inflection", "SHADOW: tags only, momentum is the only admitting door until P3", "future admission"),
+        ("B7 shadow", "Door admit (shadow)", "Doors that WOULD admit given regime_state (REGIME_OPEN_DOORS)", "Calibration data for the Sep door go-live", "future admission"),
+        ("B7 shadow", "Regime@screen", "drawdown_monitor regime_state at stamp time (RISK_ON/LATE_CYCLE/RISK_OFF/RECOVERY)", "UNKNOWN until first monitor run of the day", "B4 menu / doors"),
+        ("Part B conditional", "Book-to-Bill / Backlog-EV", "Deep-dive-injected (Data_Sourcing_Policy 39-46); unresolved = N/A not 0 (item 7, 18-Jul-26)", "N/A keeps Part-B max at /22 - semis not structurally penalised", "Part B denominator"),
+    ]
+    for r in fixpack_rows:
+        ws.append(list(r))
+    for col, w in zip("ABCDE", (28, 30, 70, 60, 24)):
+        ws.column_dimensions[col].width = w
+    return ws
+
+
 def main():
     parser = argparse.ArgumentParser(description="ISA Growth Stock Analysis — Excel builder")
     parser.add_argument("--group",       required=True, help="GROUP label e.g. NASDAQ, SP500")
@@ -1124,6 +1182,7 @@ def main():
     build_exclusions(wb, df_gates, args.group, args.run_date)
     build_data_quality(wb, df_full, df_unresolved, args.group, args.run_date)
     build_diagnostics(wb, df_full, df_const, df_run_qa, df_tech_fails, args.group, args.run_date)
+    build_glossary(wb, args.group, args.run_date)   # review item 6 (18-Jul-26)
 
     wb.save(args.output)
     print(f"[build_excel] Saved: {args.output}", flush=True)

@@ -287,6 +287,21 @@ FACTOR_CAP_ENFORCE  = True               # B3 — breach blocks factor-raising B
 ETF_TACTICAL_MAX_POS_PCT   = 5.0         # B4/D16 — per-ETF cap (% ISA)
 ETF_TACTICAL_MAX_TOTAL_PCT = 10.0        # B4/D16 — total tactical cap (% ISA)
 ETF_TACTICAL_MIN_HOLD_MONTHS = 3         # B4/D16 — anti-churn
+# — Review Pack 18-Jul-26 (Fable5_Email_Excel_Review_18Jul2026.md items 4/7/8 + B7 shadow) —
+CAPITAL_SIGNAL_CONFLICT_PP = 25.0  # item 8: |E[r] %pa - annualised FV-implied %pa| above -> conflict
+CONFLICT_ER_CONF_CAP = 0.5         # conflict caps er_confidence (below A5 v3's 0.75 full-size bar)
+REGIME_OPEN_DOORS = {              # B7(2): doors open per regime (momentum never closes)
+    "RISK_ON": ["momentum"], "LATE_CYCLE": ["momentum"],
+    "RISK_OFF": ["momentum", "quality"], "RECOVERY": ["momentum", "inflection"],
+}
+DOOR_QUALITY_PART_A_MIN = 20       # B7 quality-stability door (Doc B spec)
+DOOR_QUALITY_ND_EBITDA_MAX = 1.5
+DOOR_QUALITY_FCF_YEARS_MIN = 5
+DOOR_QUALITY_DIV_PAYOUT_FCF_MAX = 0.8  # dividend covered; no dividend (None) = covered
+DOOR_INFLECTION_PART_A_MIN = 16    # B7 inflection door
+DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
+# B7 shadow proxies (documented): beta<1 criterion WAIVED (beta not in full_data);
+# inflection revisions second-derivative proxied by est_rev_direction == improving.
 REGIME_DOORS_ACTIVE = False              # B7 — doors admit for real at P3 (Sep screens); shadow first
 REGIME_RULES = {                         # B7(1) — pure decision table: (vs-200dma, dd-band, 63d slope)
     ("above", 0, "+"): "RISK_ON",    ("above", 0, "-"): "LATE_CYCLE",
