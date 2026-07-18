@@ -278,7 +278,11 @@ DRAWDOWN_LOOKBACK   = 252                # B1/D9 — trailing-high window (VUAG 
 DRAWDOWN_BUFFER_GBP = 500.0              # B1/D11 — cash buffer excluded from the reserve
 MMF_SWEEP_MIN_GBP   = 1500.0             # B2/D14 — idle cash >= this AND no committed action
 MMF_SWEEP_IDLE_DAYS = 10                 #          within 10 trading days -> mechanical SWEEP line
-CASH_EQUIVALENT_TICKERS = []             # B2 — MMF/ultra-short UCITS ETF ticker(s) once Raj selects
+CASH_EQUIVALENT_TICKERS = ["CSH2.L", "ROYAL LONDON SHORT TERM MONEY MARKET"]  # B2 RESOLVED (Raj 18-Jul-26: money-market fund).
+# CSH2.L = Amundi Smart Overnight Return GBP UCITS ETF (LSE ticker -> classify_holding matches
+# mechanically; OCF ~0.07%, AUM >>500m, on AJ Bell, intraday, preclearance-exempt UCITS).
+# Name entry covers the OEIC alternative (Royal London STMM Y Acc) if ever held/exported by name.
+# Swap = edit this list only; sweep rule (D14) reads _ceq[0] as the instrument.
                                          #      (spec: GBP MMF, OCF<=0.15%, AUM>=£500m, on AJ Bell).
                                          #      Rollback: empty list. Counts as CASH everywhere.
 FACTOR_AI_SOFT_CAP_PCT = 30.0            # B3/D15 — AI-complex effective look-through soft cap
