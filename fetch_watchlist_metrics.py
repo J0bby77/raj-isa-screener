@@ -450,8 +450,8 @@ def score_ticker_energy(ticker_sym: str, data: dict) -> dict:
     # Analyst rating text (for consistency with analyst_summary in normalise_adapter.py)
     scored["analyst_rating"] = info.get("recommendationKey", "")
 
-    # target_upside alias (energy Part B uses upside_pct — provide standard alias)
-    scored["target_upside"] = scored.get("upside_pct")
+    # P3 (18-Jul-26): raw target_upside alias DELETED (A6 shim retired) — consumers read
+    # display_target_gap / implied_upside_fv; energy Part B keeps upside_pct natively.
     scored["display_target_gap"] = scored.get("upside_pct")   # Fix Pack D7 — display-only name
 
     # Next earnings
@@ -497,8 +497,7 @@ def build_vci_entry(ticker_sym: str, data: dict, meta: dict) -> dict:
         # Price data (for in-window check and display)
         "current_price":    prices["current_price"],
         # Not applicable for VCI — leave for analyst display in normalise_adapter.py
-        "target_upside":    None,
-        "display_target_gap": None,   # Fix Pack D7
+        "display_target_gap": None,   # Fix Pack D7 (P3: raw target_upside key deleted)
         "analyst_rating":   info.get("recommendationKey", ""),
         "num_analysts":     sc.safe_float(info.get("numberOfAnalystOpinions")),
         "next_earnings":    data.get("next_earnings", "Unknown"),

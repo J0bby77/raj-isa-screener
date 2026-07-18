@@ -859,7 +859,7 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
         if s:
             # Override status note with analyst rating and target upside
             analyst = s.get("analyst_rating", "—")
-            upside  = s.get("display_target_gap", s.get("target_upside", "—"))   # D7 shim
+            upside  = s.get("display_target_gap") or "—"   # D7; P3: target_upside fallback deleted
             ne      = s.get("next_earnings", "—")
             score   = s.get("total_score")
             h["status_note"] = (

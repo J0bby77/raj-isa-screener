@@ -154,7 +154,7 @@ VCI_SOURCE_WEIGHTS = {"asymmetry": 0.30, "quality": 0.15, "catalyst": 0.25, "sig
 # ============================================================================================
 # E1 — probability-weighted floor (p·L), horizon-aware hurdle
 VCI_FLOOR_MODE             = "derived" # FLIPPED LIVE 6-Jul-2026 (Raj) — probability-weighted floor active; rollback: "fixed"
-VCI_REQUIRED_ANNUAL_RETURN = 0.14      # Raj's stock hurdle (RESOLVED 6-Jul); ADJUST yearly to portfolio needs
+# VCI_REQUIRED_ANNUAL_RETURN: P3 (18-Jul-26) — now DERIVED from the A19 anchor below (was 0.14 hardcoded)
 VCI_FLOOR_MAX              = 4.0       # applied_floor = clamp(max(A_min, fixed tier), fixed, 4.0)
 # p_thesis / L priors live in vci_base_rates.json (authoritative, sourced); these are inert fallbacks:
 VCI_P_THESIS_PRIORS        = {"platform/_default": 0.50, "single_asset/_default": 0.35}
@@ -207,8 +207,8 @@ SUMMARY_COUNT_BASED    = True
 # ============================================================================================
 SUMMARY_MAX_COUNT   = 40      # A1/D4 (replaces the retired fixed-30 count — floor selects, cap only truncates)
 SUMMARY_MIN_WARN    = 10      # A1/D4 — SUMMARY_THIN_WARNING to RUN_QA/retro/email below this
-UNIFIED_SOURCE      = True    # A6 — ONE Source Score, screen = deploy (False restores the
-                              #      legacy screen-time Part-B/22 deployability proxy; delete P3)
+UNIFIED_SOURCE      = True    # A6 — ONE Source Score, screen = deploy. P3 (18-Jul-26): the
+                              #      legacy proxy path is DELETED; flag is INERT (P1 assert only)
 SOURCE_UPSIDE_CAP   = 0.60    # A6 — upside normalisation cap in the deployability term
                               #      (was rerank_watchlist.UPSIDE_CAP; one home now)
 CONSENSUS_UPSIDE_CAP_MULT = 1.15  # A6 — composite FV <= consensus target x this (was getattr-only)
@@ -262,6 +262,8 @@ def _load_target_state():
 
 TARGET_STATE        = _load_target_state()
 REQUIRED_RETURN_MID = float(TARGET_STATE["required_return_operative_pct"])   # 13.9 at current derivation
+VCI_REQUIRED_ANNUAL_RETURN = round(REQUIRED_RETURN_MID / 100.0, 4)  # P3/A19 (18-Jul-26): E1 hurdle h
+                              # reads THE anchor — VCI/PathA symmetric (invariant 6; was 0.14 hardcoded)
 ER_FRICTION_BUFFER  = 2.0     # A2/D1 — pp over the A19 anchor (friction + FX + estimation)
 ER_DEPLOY_FLOOR     = REQUIRED_RETURN_MID + ER_FRICTION_BUFFER   # A2/D1 DERIVED (≈15.9 today) —
                               # consumed only when ER_GATE_ACTIVE flips True at P2; never hardcode.
@@ -306,6 +308,16 @@ DOOR_INFLECTION_PART_A_MIN = 16    # B7 inflection door
 DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
 # B7 shadow proxies (documented): beta<1 criterion WAIVED (beta not in full_data);
 # inflection revisions second-derivative proxied by est_rev_direction == improving.
+# — B4 Category-8 tactical UCITS-ETF layer (P3 hook 18-Jul-26; Doc B §B4, D16 caps) —
+ETF_TACTICAL_MAX_POSITION_PCT = 5.0   # per position, % of TOTAL ISA (D17)
+ETF_TACTICAL_MAX_TOTAL_PCT    = 10.0  # all Category-8 positions combined
+ETF_TACTICAL_MIN_HOLD_MONTHS  = 3     # anti-churn
+REGIME_B4_MENU = {                    # B7(3): regime -> permitted tactical tilts (selection=JUDGMENT;
+    "RISK_ON": [],                    #   RISK_ON: none without documented cause)
+    "LATE_CYCLE": ["min_vol", "quality"],
+    "RISK_OFF": ["hold_existing"],
+    "RECOVERY": ["equal_weight", "value"],
+}
 # — B6 glidepath trigger constants (18-Jul-26; design note: glidepath_design.md) —
 GLIDEPATH_AGE_TRIGGER = 56
 GLIDEPATH_VALUE_TRIGGER_GBP = 700_000

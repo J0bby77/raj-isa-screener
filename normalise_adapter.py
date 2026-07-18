@@ -109,8 +109,8 @@ def _tgap(s):
     """Fix Pack A6/D7 (P2) read-shim: consensus-target gap is DISPLAY-ONLY and now named
     display_target_gap; June-era files still carry target_upside — tolerate both. Capital
     logic must read implied_upside_fv, never this."""
-    v = s.get("display_target_gap")
-    return v if v is not None else s.get("target_upside")
+    # P3 (18-Jul-26): old-key fallback DELETED — display gap reads display_target_gap ONLY
+    return s.get("display_target_gap")
 
 
 def fmt_pct(v, decimals=1) -> str:

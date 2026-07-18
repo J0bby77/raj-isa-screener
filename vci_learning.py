@@ -233,3 +233,42 @@ if __name__ == "__main__":
     # L-T5 safety rail: floors never appear in applied weights
     assert set(r["applied"].keys()) == set(DEFAULT_WEIGHTS.keys())
     print("vci_learning self-test PASSED")
+
+
+# ── A17 (P3, 18-Jul-26): write-verify — same silent-write risk class as A9 ──
+def verify_stores(store_path=None, state_path=None, base_rates_path=None):
+    """Assert the learning artefacts EXIST and are readable; return the facts for §13.
+    The VCI run calls this AFTER capture/estimate and puts store_rows in the email §13
+    block ('verify, don't assume'). status=FAIL never blocks the run — it becomes a
+    mandatory Retrospective item instead."""
+    import os as _o
+    d = _o.path.dirname(_o.path.abspath(__file__))
+    sp = store_path or _o.path.join(d, "vci_learning_store.json")
+    cp = state_path or _o.path.join(d, "vci_calibration_state.json")
+    bp = base_rates_path or _o.path.join(d, "vci_base_rates.json")
+    out = {"store_exists": _o.path.exists(sp), "state_exists": _o.path.exists(cp),
+           "store_rows": 0, "base_rates_stamped": False, "status": "OK", "notes": []}
+    try:
+        rows = (_load(sp, {}) or {}).get("rows", [])
+        out["store_rows"] = len(rows)
+    except Exception as e:
+        out["notes"].append(f"store unreadable: {e}")
+    try:
+        meta = (_load(bp, {}) or {}).get("_meta", {})
+        out["base_rates_stamped"] = all(k in meta for k in ("vintage", "source", "review_due"))
+        if not out["base_rates_stamped"]:
+            out["notes"].append("vci_base_rates._meta missing vintage/source/review_due (A17)")
+    except Exception as e:
+        out["notes"].append(f"base_rates unreadable: {e}")
+    if not out["store_exists"]:
+        out["notes"].append("vci_learning_store.json MISSING — capture() never ran or write failed")
+    if not out["state_exists"]:
+        out["notes"].append("vci_calibration_state.json missing — estimate() not yet run (OK pre-gate "
+                            "if store_rows < gate)")
+    out["status"] = "OK" if (out["store_exists"] and out["base_rates_stamped"]) else "FAIL"
+    return out
+
+
+if __name__ == "__main__" and "--verify" in __import__("sys").argv:
+    import json as _j
+    print(_j.dumps(verify_stores(), indent=2))

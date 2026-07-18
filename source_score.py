@@ -56,10 +56,8 @@ def compute_source_score(*, forward_axis, revisions=0.0, deployability=None,
     w = cfg.SOURCE_WEIGHTS
     f = (forward_axis or 0) / 100.0
     q = quality_norm if quality_norm is not None else ((part_a or 0) / 28.0)
-    if deployability is None:
-        dep = 0.0 if getattr(cfg, "UNIFIED_SOURCE", True) else ((part_b or 0) / 22.0)
-    else:
-        dep = deployability
+    # P3 (18-Jul-26): legacy part_b/22 proxy DELETED — missing deployability scores 0 (A6)
+    dep = deployability if deployability is not None else 0.0
     return round(100 * (w["forward"] * f + w["revisions"] * (revisions or 0) + w["deployability"] * dep
                         + w["quality"] * q + w["analyst"] * (analyst or 0)), 1)
 
@@ -71,22 +69,15 @@ def source_score_components_for_row(row, get=None):
     SUMMARY breakdown columns and screener_core's stamping consume THIS (never recompute)."""
     g = get or (lambda r, k: r.get(k))
     w = cfg.SOURCE_WEIGHTS
-    unified = getattr(cfg, "UNIFIED_SOURCE", True)
     fwd = _num(g(row, "forward_axis_score")) or 0.0
     rev01 = (_num(g(row, "revisions_score")) or 0.0) / 100.0
     pa = _num(g(row, "part_a_score"))
     qual01 = (pa or 0.0) / 28.0
-    if unified:
-        anat = _fv.fv_composite_for_row(row, get=g)
-        dep01 = anat["deployability"]
-        an01 = anat["analyst"]
-    else:  # legacy proxy path (rollback only)
-        pb = _num(g(row, "part_b_score"))
-        anat = {"implied_upside_fv": None, "display_target_gap": None,
-                "fv_basis": "LEGACY_PROXY part_b/22", "fv_conf": None,
-                "consensus_upside_capped": False, "input_missing": ""}
-        dep01 = (pb or 0.0) / 22.0
-        an01 = 0.0
+    # P3 (18-Jul-26): legacy proxy branch DELETED (UNIFIED_SOURCE flag now inert, kept for
+    # the P1 liveness assert only) — ONE recipe, real deployability/analyst, always.
+    anat = _fv.fv_composite_for_row(row, get=g)
+    dep01 = anat["deployability"]
+    an01 = anat["analyst"]
     score = compute_source_score(forward_axis=fwd, revisions=rev01, deployability=dep01,
                                  quality_norm=qual01, analyst=an01)
     return {"source_score": score, "screen_source": score,

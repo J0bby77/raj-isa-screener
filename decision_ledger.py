@@ -133,7 +133,7 @@ def append_mtm(path, ticker, price, return_pct=None, thesis_status=None,
     return entry
 
 
-BUY_LIKE = {"buy", "top_up"}
+BUY_LIKE = {"buy", "top_up", "etf_tactical"}   # B4/P3 (18-Jul-26): Category-8 action vocab
 SELL_LIKE = {"sell", "trim"}
 
 
