@@ -309,7 +309,7 @@ DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
 # — B6 glidepath trigger constants (18-Jul-26; design note: glidepath_design.md) —
 GLIDEPATH_AGE_TRIGGER = 56
 GLIDEPATH_VALUE_TRIGGER_GBP = 700_000
-RAJ_BIRTH_YEAR_ASSUMED = 1978   # from profile "48 in Jul-2026" — Raj to CONFIRM (one-line edit)
+RAJ_DOB_YM = (1977, 12)         # CONFIRMED by Raj 18-Jul-26 (born Dec-1977) — month-precise age for B6
 REGIME_DOORS_ACTIVE = False              # B7 — doors admit for real at P3 (Sep screens); shadow first
 REGIME_RULES = {                         # B7(1) — pure decision table: (vs-200dma, dd-band, 63d slope)
     ("above", 0, "+"): "RISK_ON",    ("above", 0, "-"): "LATE_CYCLE",

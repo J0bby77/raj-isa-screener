@@ -94,7 +94,7 @@ def glidepath_check(portfolio_value_gbp, as_of=None):
     derivation. Fires (-> guardrail_state GLIDEPATH_REVIEW) when age >= GLIDEPATH_AGE_TRIGGER AND
     portfolio >= GLIDEPATH_VALUE_TRIGGER_GBP (the LATER-of rule); also flags if age >= 60 with the
     bridge underfunded (< value trigger) — human review, never mechanical migration. D1c: a low
-    derived anchor is NOT a trigger. Birth year 1978 ASSUMED from profile — Raj to confirm."""
+    derived anchor is NOT a trigger. DOB Dec-1977 CONFIRMED (Raj 18-Jul-26); month-precise age."""
     import datetime as _dt
     try:
         import scoring_config as _c
@@ -102,9 +102,9 @@ def glidepath_check(portfolio_value_gbp, as_of=None):
         _c = None
     age_trig = int(getattr(_c, "GLIDEPATH_AGE_TRIGGER", 56))
     val_trig = float(getattr(_c, "GLIDEPATH_VALUE_TRIGGER_GBP", 700_000))
-    birth_year = int(getattr(_c, "RAJ_BIRTH_YEAR_ASSUMED", 1978))
+    by, bm = getattr(_c, "RAJ_DOB_YM", (1977, 12))   # CONFIRMED Raj 18-Jul-26
     now = as_of or _dt.date.today()
-    age = now.year - birth_year
+    age = now.year - int(by) - (1 if now.month < int(bm) else 0)   # month-precise
     pv = float(portfolio_value_gbp or 0)
     if age >= age_trig and pv >= val_trig:
         return True, f"GLIDEPATH_REVIEW: age {age} >= {age_trig} and portfolio £{pv:,.0f} >= £{val_trig:,.0f}"
