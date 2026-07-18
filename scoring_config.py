@@ -306,6 +306,10 @@ DOOR_INFLECTION_PART_A_MIN = 16    # B7 inflection door
 DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
 # B7 shadow proxies (documented): beta<1 criterion WAIVED (beta not in full_data);
 # inflection revisions second-derivative proxied by est_rev_direction == improving.
+# — B6 glidepath trigger constants (18-Jul-26; design note: glidepath_design.md) —
+GLIDEPATH_AGE_TRIGGER = 56
+GLIDEPATH_VALUE_TRIGGER_GBP = 700_000
+RAJ_BIRTH_YEAR_ASSUMED = 1978   # from profile "48 in Jul-2026" — Raj to CONFIRM (one-line edit)
 REGIME_DOORS_ACTIVE = False              # B7 — doors admit for real at P3 (Sep screens); shadow first
 REGIME_RULES = {                         # B7(1) — pure decision table: (vs-200dma, dd-band, 63d slope)
     ("above", 0, "+"): "RISK_ON",    ("above", 0, "-"): "LATE_CYCLE",

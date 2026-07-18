@@ -89,6 +89,30 @@ def apply_guardrails(derived_floor_pct: float):
     return derived_floor_pct, "OK"
 
 
+def glidepath_check(portfolio_value_gbp, as_of=None):
+    """B6 (18-Jul-26, design note: glidepath_design.md) — mechanical trigger, checked at every
+    derivation. Fires (-> guardrail_state GLIDEPATH_REVIEW) when age >= GLIDEPATH_AGE_TRIGGER AND
+    portfolio >= GLIDEPATH_VALUE_TRIGGER_GBP (the LATER-of rule); also flags if age >= 60 with the
+    bridge underfunded (< value trigger) — human review, never mechanical migration. D1c: a low
+    derived anchor is NOT a trigger. Birth year 1978 ASSUMED from profile — Raj to confirm."""
+    import datetime as _dt
+    try:
+        import scoring_config as _c
+    except Exception:
+        _c = None
+    age_trig = int(getattr(_c, "GLIDEPATH_AGE_TRIGGER", 56))
+    val_trig = float(getattr(_c, "GLIDEPATH_VALUE_TRIGGER_GBP", 700_000))
+    birth_year = int(getattr(_c, "RAJ_BIRTH_YEAR_ASSUMED", 1978))
+    now = as_of or _dt.date.today()
+    age = now.year - birth_year
+    pv = float(portfolio_value_gbp or 0)
+    if age >= age_trig and pv >= val_trig:
+        return True, f"GLIDEPATH_REVIEW: age {age} >= {age_trig} and portfolio £{pv:,.0f} >= £{val_trig:,.0f}"
+    if age >= 60 and pv < val_trig:
+        return True, f"GLIDEPATH_REVIEW: age {age} >= 60 with bridge underfunded (£{pv:,.0f} < £{val_trig:,.0f})"
+    return False, ""
+
+
 def derive(state: dict, portfolio_value=None, value_date=None) -> dict:
     pv = float(portfolio_value if portfolio_value is not None else state["portfolio_value_gbp"])
     vd = date.fromisoformat(value_date or state["portfolio_value_date"])
@@ -100,6 +124,10 @@ def derive(state: dict, portfolio_value=None, value_date=None) -> dict:
     return {"portfolio_value_gbp": pv, "portfolio_value_date": vd.isoformat(),
             "required_return_floor_pct": floor, "required_return_stretch_pct": stretch,
             "required_return_operative_pct": operative, "guardrail_state": gstate}
+    _gfired, _gnote = glidepath_check(pv)
+    if _gfired:   # B6: age/value trigger overrides OK/attainability states for visibility
+        out["guardrail_state"] = "GLIDEPATH_REVIEW"
+        out["glidepath_note"] = _gnote
 
 
 def _selftest():
