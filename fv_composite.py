@@ -160,7 +160,7 @@ def deployability_term(implied_upside, conf):
 def analyst_signal(rating, num_analysts):
     """0-1 analyst signal = rating_score * coverage_reliability (extraction of
     rerank_watchlist._analyst_signal — identical maths; rerank imports this at P2)."""
-    rating = (rating or "").lower()
+    rating = rating.lower() if isinstance(rating, str) else ""
     if "strong buy" in rating:
         rs = 1.0
     elif "buy" in rating or "outperform" in rating:
