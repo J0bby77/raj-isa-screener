@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-07-24",
+  "last_updated": "2026-07-25",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -599,14 +599,14 @@
     "STOXX Europe 600": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 598,
-        "successes": 596,
-        "success_rate": 0.997,
-        "last_run": "2026-06-27",
+        "attempts": 1196,
+        "successes": 1181,
+        "success_rate": 0.9875,
+        "last_run": "2026-07-25",
         "last_run_attempts": 598,
-        "last_run_successes": 596,
-        "last_run_rate": 0.997,
-        "note": "Gate 1 sector classification; 146 excluded as low-growth sectors (Utilities/Energy/Materials/etc)"
+        "last_run_successes": 585,
+        "last_run_rate": 0.9783,
+        "note": "Gate 1 sector classification; 598 constituents this run, 13 unresolved to 'unknown' sector; 144 excluded as low-growth/excluded sectors"
       },
       "gross_margin": {
         "primary_source": "yfinance",
@@ -704,14 +704,14 @@
       },
       "overlay_quotesummary": {
         "primary_source": "yfinance.quoteSummary",
-        "attempts": 127,
-        "successes": 44,
-        "success_rate": 0.346,
-        "last_run": "2026-06-27",
-        "last_run_attempts": 127,
-        "last_run_successes": 44,
-        "last_run_rate": 0.346,
-        "note": "CRITICAL: quoteSummary endpoint returning HTTP 404 for ~65% of European high-score tickers. Affects WACC, est_revisions, val_hist overlays. Known yfinance behaviour on EU exchanges. 122 overlays complete, 5 partial."
+        "attempts": 146,
+        "successes": 52,
+        "success_rate": 0.3562,
+        "last_run": "2026-07-25",
+        "last_run_attempts": 19,
+        "last_run_successes": 8,
+        "last_run_rate": 0.4211,
+        "note": "CRITICAL: quoteSummary endpoint returning HTTP 404 for the majority of European high-score tickers (11/19 this run, consistent with prior ~65% failure rate). Known yfinance behaviour on EU exchanges."
       }
     },
     "SMI 20": {
@@ -1217,7 +1217,7 @@
       ]
     }
   },
-  "_last_run_notes": "F250-SPI run 2026-07-11 (forward-led LOCAL, constituent-hybrid): 449 constituents, 138 scored, 127 rankable, 19 SUMMARY eligible, 0 tech fails. Top total: TRN.L/TEMN.SW 46/50. Top Source Score: KLR.L 85 (100/100 fwd). Gate4 Industrials conc 45.7%. sync_repo_to_github.py aborted on unrelated broken scripts (build_vci_email.py, vci_acs_scorer.py) \u2014 GitHub mirror not refreshed this run. Local resume cache reset once mid-run after a tool timeout, forcing a full batch restart (deterministic re-score, no data loss). Excel in Investment Analysis folder.",
+  "_last_run_notes": "STOXX600 run 2026-07-25 (isa-eu-a-sat4, forward-led LOCAL, constituent-hybrid via Composio dump + GitHub bridge): 598 constituents, 271 scored, 0 tech fails, 19 SUMMARY eligible (floor 70, cap 40, of 65 viability-eligible). Top Source Score IFX.DE 92 (Fwd 100/100). Top Total: KCR.HE/FTK.DE 45/50. Gate4 sector-concentration flag fired (structurally always True per a pre-existing calc bug in build_gate4_sector_summary \u2014 not fixed this run, see retrospective). GH_PAT was missing from the persistent Composio /mnt/files/isa_env/.env and had to be added mid-run before the constituent-hybrid GitHub bridge push would authenticate. Excel + retrospective + CSVs delivered to Investment Analysis folder; score panel logged (store_total=1246); drawdown/regime check RISK_ON, no tranche trigger.",
   "runs": [
     {
       "run_date": "2026-07-04",
@@ -1776,6 +1776,57 @@
         "FV_COMPOSITE_ANALYST_SIGNAL_NAN_BUG_FIXED"
       ],
       "notes": "863 constituents (post-$2bn filter), 100% accounted. 423 scored across 58 local score batches + 2 overlay batches, 0 technical failures. DXCM/NVDA top total 50/50. Top Source Score NVDA 89.6 (100/100 fwd axis). SUMMARY: 56 eligible pre-cap, 15 selected (floor 70, cap 40). Gate4 Technology concentration 37.8% (structural, consistent with prior Nasdaq runs ~40%). Bug found+fixed this run: fv_composite.py analyst_signal() crashed on NaN analyst_rating (float NaN is truthy, so 'rating or \\\"\\\"' didn't catch it) \u2014 fixed to isinstance-check, verified fix, pushed to GitHub via sync_repo_to_github.py. score_panel_logger store_total=975. drawdown_monitor: -1.9% from 252d high, 0/3 tranches, regime RISK_ON, no trigger."
+    },
+    {
+      "run_date": "2026-07-25",
+      "group": "STOXX600",
+      "task_id": "isa-eu-a-sat4",
+      "run_mode": "local_primary_constituent_hybrid",
+      "constituent_source": "xtrackers_stoxx600_xlsx_via_composio_dump",
+      "constituents_fetched": 598,
+      "accounted": 598,
+      "gate1_excluded": 144,
+      "gate2_excluded": 2,
+      "gate3_excluded": 3,
+      "gate4_excluded": 150,
+      "gate_data_unresolved": 28,
+      "technical_source_failure": 0,
+      "scored": 271,
+      "summary_eligible_count_based": 19,
+      "summary_viability_eligible": 65,
+      "summary_floor": 70,
+      "summary_cap": 40,
+      "top_source_score_ticker": "IFX.DE",
+      "top_source_score": 92,
+      "top_total_score": 45,
+      "top_tickers_total": [
+        "KCR.HE",
+        "FTK.DE"
+      ],
+      "gate4_sector_concentration_warning": true,
+      "gate4_sector_concentration_note": "Flag fires unconditionally due to a pre-existing bug in build_gate4_sector_summary (max() includes the _total key). True top sector share: Industrials 31/150 = 20.7%.",
+      "gate4_largest_sector": "Industrials",
+      "gate4_largest_sector_pct": 20.7,
+      "excel_file": "Growth Stock Analysis Stoxx 600 W-e 25-Jul-26.xlsx",
+      "retrospective_file": "20260725_STOXX600_retrospective.md",
+      "dq_flags": [
+        {
+          "severity": "M",
+          "event": "GH_PAT_MISSING_FROM_PERSISTENT_COMPOSIO_ENV",
+          "detail": "/mnt/files/isa_env/.env lacked GH_PAT; constituent-hybrid GitHub bridge push failed until GH_PAT was appended mid-run. Recommend making this permanent."
+        },
+        {
+          "severity": "L",
+          "event": "GATE4_CONCENTRATION_FLAG_ALWAYS_TRUE",
+          "detail": "build_gate4_sector_summary() computes max() over a dict that already includes its own _total key, so the 35% warning fires every run regardless of real distribution. Not fixed this run (out of scope)."
+        },
+        {
+          "severity": "M",
+          "event": "OVERLAY_QUOTESUMMARY_404S",
+          "detail": "11 of 19 SUMMARY-eligible tickers hit quoteSummary 404 during overlay retrieval, consistent with prior EU coverage gap."
+        }
+      ],
+      "notes": "First STOXX600 run to fully exercise the constituent-hybrid GitHub bridge without prior seeding; loop of 3-5 screener_local.py calls per bash invocation used to reduce call count."
     }
   ]
 }
