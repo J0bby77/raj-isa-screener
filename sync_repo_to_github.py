@@ -98,15 +98,16 @@ def main():
     # (%TEMP% on Windows) automatically — same speed characteristics, both platforms.
     work = tempfile.mkdtemp(prefix="isa_sync_")
     auth_url = f"https://x-access-token:{token}@github.com/{a.repo}.git" if token else f"https://github.com/{a.repo}.git"
-    r = subprocess.run(["git", "clone", "--depth", "1", "-b", a.branch, auth_url, work],
-                       capture_output=True, text=True)
+    # core.autocrlf=false must apply DURING the clone's own checkout, via -c on the clone
+    # command itself (26-Jul-26, H-4 finding, corrected) — Windows git commonly defaults
+    # core.autocrlf=true; setting the config only AFTER cloning doesn't retroactively
+    # re-normalise the already-checked-out files, leaving them stale relative to the new
+    # setting and making `git status` report spurious "modified" files that were never
+    # touched. Doing it at clone time keeps bytes-on-disk == bytes-in-repo from the start.
+    r = subprocess.run(["git", "-c", "core.autocrlf=false", "clone", "--depth", "1", "-b", a.branch,
+                        auth_url, work], capture_output=True, text=True)
     if r.returncode != 0:
         print("SYNC_FAILED_CLONE:", r.stderr.strip().replace(token or "", "***")[:200]); sys.exit(2)
-    # Disable line-ending rewriting for THIS clone (26-Jul-26, H-4 finding): Windows git
-    # commonly defaults core.autocrlf=true, which silently converts every checked-out
-    # LF blob to CRLF, making the raw sha256 diff below see nearly the whole repo as
-    # "changed" and can leave `git commit` with nothing real left to stage. Forcing this
-    # off keeps bytes-on-disk == bytes-in-repo on every host OS.
     subprocess.run(["git", "-C", work, "config", "core.autocrlf", "false"], check=False)
     tracked = subprocess.run(["git", "-C", work, "ls-files"], capture_output=True, text=True).stdout.split()
     # AUTO-DISCOVER brand-new runtime scripts: every top-level *.py on OneDrive except scratch (_*/test_*).
