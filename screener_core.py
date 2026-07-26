@@ -3045,8 +3045,11 @@ def build_gate4_sector_summary(exclusions_df):
         return {}
     counts = gate4["sector"].value_counts().to_dict()
     total  = sum(counts.values())
+    # Fix 26-Jul-26 (STOXX600 retro item 3): max over SECTOR counts only, BEFORE _total is
+    # inserted - previously _total entered its own max() so the warning fired unconditionally.
+    max_sector = max(counts.values()) if counts else 0
     counts["_total"]                  = total
-    counts["_concentration_warning"]  = (max(counts.values()) / total > 0.35) if total > 0 else False
+    counts["_concentration_warning"]  = (max_sector / total > 0.35) if total > 0 else False
     return counts
 
 

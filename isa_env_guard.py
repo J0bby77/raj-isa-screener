@@ -11,6 +11,75 @@ Imported defensively (try/except) by callers so a missing copy never breaks a ru
 """
 import os, sys, tempfile
 
+def assert_environment(requirements_path=None, _print=print):
+    """H-3 (audit item #7, 26-Jul-26) - warn-loud version check vs requirements.txt;
+    NEVER blocks (fail-safe: drift must not kill a scheduled run - it becomes visible
+    in the run log). Called from guard(). Returns list of warning strings."""
+    import importlib.metadata as _md
+    import re as _re
+    rp = requirements_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "requirements.txt")
+    warnings = []
+    try:
+        with open(rp, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = _re.match(r"([A-Za-z0-9_.\-]+)==(\S+)", line)
+                if not m:
+                    continue
+                pkg, want = m.group(1), m.group(2)
+                try:
+                    have = _md.version(pkg)
+                except Exception:
+                    warnings.append("WARNING env: %s pinned %s but NOT INSTALLED" % (pkg, want))
+                    continue
+                if have != want:
+                    warnings.append("WARNING env: %s pinned %s, installed %s" % (pkg, want, have))
+    except OSError:
+        return []
+    for w in warnings:
+        _print(w)
+    return warnings
+
+
+def load_secrets(script_dir=None, _print=print, _environ=None):
+    """H-4 (audit item #7, 26-Jul-26) - shared secrets loader. Search order: $ISA_ENV_PATH
+    -> local non-synced (LOCALAPPDATA\\ISA\\.env on Windows, ~/.isa/.env portable) ->
+    legacy Investment Analysis/.env with a DEPRECATED warning (kept so sandbox/Composio
+    runs still work; that copy must hold ONLY API keys once the PAT is rotated).
+    NEVER logs secret values - warnings name paths and key names only."""
+    import re as _re
+    env = _environ if _environ is not None else os.environ
+    sd = script_dir or os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if env.get("ISA_ENV_PATH"):
+        candidates.append((env["ISA_ENV_PATH"], False))
+    if env.get("LOCALAPPDATA"):
+        candidates.append((os.path.join(env["LOCALAPPDATA"], "ISA", ".env"), False))
+    candidates.append((os.path.expanduser("~/.isa/.env"), False))
+    candidates.append((os.path.join(sd, ".env"), True))
+    for path, deprecated in candidates:
+        if not (path and os.path.isfile(path)):
+            continue
+        secrets = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    m = _re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$", line)
+                    if m and not line.lstrip().startswith("#"):
+                        secrets[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+        except OSError:
+            continue
+        if deprecated:
+            _print("WARNING secrets: DEPRECATED legacy .env in synced folder - move to the "
+                   "local non-synced path (H-4); keys loaded: %s"
+                   % (",".join(sorted(secrets)) or "none"))
+        return {"path": path, "deprecated": deprecated, "secrets": secrets}
+    return {"path": None, "deprecated": False, "secrets": {}}
+
+
 def guard():
     if not os.path.isdir("/dev/shm"):
         return
@@ -27,6 +96,10 @@ def guard():
     try:
         import yfinance as _yf
         _yf.set_tz_cache_location("/dev/shm/yf_cache")
+    except Exception:
+        pass
+    try:
+        assert_environment()   # H-3: warn-loud only, never blocks (fail-safe)
     except Exception:
         pass
 

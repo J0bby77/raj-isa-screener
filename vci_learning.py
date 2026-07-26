@@ -272,3 +272,25 @@ def verify_stores(store_path=None, state_path=None, base_rates_path=None):
 if __name__ == "__main__" and "--verify" in __import__("sys").argv:
     import json as _j
     print(_j.dumps(verify_stores(), indent=2))
+
+
+def orphan_check(directory=None, patterns=None):
+    """H-6 (audit item #7, 26-Jul-26) - report-only: any *.json in Investment Analysis
+    matching no KNOWN_STORE_PATTERNS entry (scoring_config manifest) is ORPHAN-SUSPECT.
+    Never blocks; wired into the monthly prerun verify step as report lines."""
+    import glob as _gl
+    import os as _o
+    import re as _re
+    if patterns is None:
+        try:
+            import scoring_config as _sc
+            patterns = getattr(_sc, "KNOWN_STORE_PATTERNS", ())
+        except Exception:
+            patterns = ()
+    if not patterns:
+        return {"orphans": [], "count": 0, "status": "SKIPPED_NO_MANIFEST"}
+    d = directory or _o.path.dirname(_o.path.abspath(__file__))
+    orphans = [_o.path.basename(p) for p in sorted(_gl.glob(_o.path.join(d, "*.json")))
+               if not any(_re.fullmatch(rx, _o.path.basename(p)) for rx in patterns)]
+    return {"orphans": orphans, "count": len(orphans),
+            "status": "ORPHAN-SUSPECT" if orphans else "OK"}

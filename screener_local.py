@@ -12,7 +12,11 @@ runs --constituents PATH (so metrics+scoring stay local even when the constituen
 source is IP-blocked e.g. iShares MidCap400/SPI or slow e.g. STOXX600/FTSE250).
 Call repeatedly until ALL_DONE.
 """
-import argparse, json, os, sys, math, time, importlib.util, datetime, urllib.request
+import argparse
+try:
+    import fetch_guard as _fg   # H-5 (26-Jul-26)
+except Exception:
+    _fg = None, json, os, sys, math, time, importlib.util, datetime, urllib.request
 
 
 def preflight(shm, min_shm_mb=80):
@@ -231,14 +235,14 @@ def main():
         if nxt is not None:
             batch = plan[nxt]; bset = set(batch)
             cdf = pd.DataFrame([r for r in state["const"] if r["ticker"] in bset])
-            info_map, info_err = core.fetch_phase1_info(batch, pg)
-            stmt_map, stmt_err = core.fetch_phase2_statements(batch, pg)
+            info_map, info_err = (_fg.with_backoff(core.fetch_phase1_info, batch, pg) if _fg else core.fetch_phase1_info(batch, pg))  # H-5
+            stmt_map, stmt_err = (_fg.with_backoff(core.fetch_phase2_statements, batch, pg) if _fg else core.fetch_phase2_statements(batch, pg))  # H-5
             if pg == "NASDAQ":
                 passers_df, exclusions_df = screen_batch_nasdaq(core, cdf, info_map, stmt_map)
             else:
                 passers_df, exclusions_df, _gd = core.screen_group_standard(cdf, info_map, stmt_map)
             passers = passers_df["ticker"].tolist() if not passers_df.empty else []
-            ph3, _e = core.fetch_phase3_scoring(passers, pg)
+            ph3, _e = (_fg.with_backoff(core.fetch_phase3_scoring, passers, pg) if _fg else core.fetch_phase3_scoring(passers, pg))  # H-5
             scored, techfail = [], []
             for t in passers:
                 d = ph3.get(t)

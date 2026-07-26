@@ -175,6 +175,115 @@ def compute_vuag_counterfactual(trades: list, vuag_price_now: float,
                      f"{actual_ret - cf_ret:+.1f}pp (net of friction)")}
 
 
+def compute_challenger_counterfactuals(trades, vuag_price_now, iwmo_price_now,
+                                       sleeve_value_now, mu_value_now=None):
+    """WP-1 (audit #1, 26-Jul-26) - dual-challenger cash-flow-matched counterfactual
+    (VUAG.L + IWMO.L, all-trades + ex-MU). Missing iwmo_price on any trade -> IWMO legs
+    INCOMPLETE(n), line degrades to VUAG-only; never raises. Ticker from the backfilled
+    field, falling back to first word of note."""
+    trades = trades or []
+    n_missing = sum(1 for t in trades if not t.get("iwmo_price"))
+
+    def _tk(t):
+        v = t.get("ticker")
+        return str(v).strip().upper() if v else str(t.get("note", "")).strip().split(" ")[0].upper()
+
+    def _leg(pk, pnow, exmu):
+        units = invested = 0.0
+        for t in trades:
+            if exmu and _tk(t) == "MU":
+                continue
+            px, amt = t.get(pk), t.get("amount_gbp")
+            if not px or amt is None:
+                return None, None
+            units += float(amt) / float(px)
+            invested += float(amt)
+        if invested <= 0 or not pnow:
+            return None, None
+        return (units * float(pnow) / invested - 1.0) * 100.0, invested
+
+    def _slv(inv, exmu):
+        if inv is None or not sleeve_value_now:
+            return None
+        sv = float(sleeve_value_now)
+        if exmu:
+            if mu_value_now is None:
+                return None
+            sv -= float(mu_value_now)
+        return (sv / inv - 1.0) * 100.0
+
+    out = {"status": "OK", "iwmo_missing": n_missing}
+    for key, pk, pnow, exmu in (("vs_vuag_pp", "vuag_price", vuag_price_now, False),
+                                ("vs_iwmo_pp", "iwmo_price", iwmo_price_now, False),
+                                ("vs_vuag_exmu_pp", "vuag_price", vuag_price_now, True),
+                                ("vs_iwmo_exmu_pp", "iwmo_price", iwmo_price_now, True)):
+        if "iwmo" in key and n_missing:
+            out[key] = None
+            continue
+        cf, inv = _leg(pk, pnow, exmu)
+        sr = _slv(inv, exmu)
+        out[key] = round(sr - cf, 1) if (cf is not None and sr is not None) else None
+
+    def _f(v):
+        return ("%+.1fpp" % v) if v is not None else "n/a"
+    if n_missing:
+        ip, iep = "IWMO: INCOMPLETE (%d missing)" % n_missing, "vs IWMO n/a"
+    else:
+        ip, iep = "vs IWMO " + _f(out["vs_iwmo_pp"]), "vs IWMO " + _f(out["vs_iwmo_exmu_pp"])
+    out["line"] = ("Sleeve counterfactual: vs VUAG %s | %s | ex-MU: vs VUAG %s, %s"
+                   % (_f(out["vs_vuag_pp"]), ip, _f(out["vs_vuag_exmu_pp"]), iep))
+    return out
+
+
+def compute_freeze_status(freeze_history):
+    """WP-4 (audit #4; Raj 22-Jul-26: 4-month window, override at 3). Trailing consecutive
+    months beating BOTH challengers ex-MU. Reports only - unfreeze is Raj's A13 decision."""
+    n = 0
+    for e in reversed(freeze_history or []):
+        if e.get("beats_vuag_exmu") is True and e.get("beats_iwmo_exmu") is True:
+            n += 1
+        else:
+            break
+    status = "CLEARED-eligible" if n >= 4 else ("CLEARING (3/4)" if n == 3 else "ACTIVE")
+    return {"status": status, "consecutive": n,
+            "note": "mechanical unfreeze at 4 consecutive; A13 override permitted at 3"}
+
+
+def append_freeze_history_entry(store, month_str, challenger_out):
+    """WP-4 - idempotent monthly append to sleeve_counterfactual.json['freeze_history']."""
+    hist = store.setdefault("freeze_history", [])
+    if any(h.get("month") == month_str for h in hist):
+        return hist
+    v, i = challenger_out.get("vs_vuag_exmu_pp"), challenger_out.get("vs_iwmo_exmu_pp")
+    hist.append({"month": month_str, "beats_vuag_exmu": (v is not None and v > 0),
+                 "beats_iwmo_exmu": (i is not None and i > 0)})
+    return hist
+
+
+def compute_pilot_line(pilots, price_now_map):
+    """WP-5 (audit #5) - gold-pilot counterfactual vs funding source; None when no pilots."""
+    if not pilots:
+        return None
+    p = pilots[0]
+    ut = us = inv = 0.0
+    first = src = None
+    for tr in p.get("trades", []):
+        amt = float(tr["amount_gbp"])
+        ut += amt / float(tr["sgln_price"])
+        us += amt / float(tr["funded_from_price"])
+        inv += amt
+        first = first or tr["date"]
+        src = tr["funded_from"]
+    if inv <= 0:
+        return None
+    tn, sn = (price_now_map or {}).get("SGLN.L"), (price_now_map or {}).get(src)
+    if not tn or not sn:
+        return {"status": "INCOMPLETE", "line": "Gold pilot: price refresh missing - no verdict"}
+    pp = round((ut * float(tn) / inv - 1.0) * 100.0 - (us * float(sn) / inv - 1.0) * 100.0, 1)
+    return {"status": "OK", "pp_vs_funding": pp, "since": first,
+            "line": "Gold pilot: %+.1fpp vs funding source since %s" % (pp, first)}
+
+
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
@@ -325,6 +434,7 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         # B3 (P2): factor look-through line — computed by prerun step 9d
         "factor_line": (analytics.get("factor_lookthrough") or {}).get("email_line"),
         "factor_unclassified": (analytics.get("factor_lookthrough") or {}).get("unclassified"),
+        "semis_line": ((analytics.get("factor_lookthrough") or {}).get("semis") or {}).get("line"),
         "kpis":               kpis,
         "holdings":           all_holdings,
         "performance_header": "Portfolio vs MSCI World (Benchmark: Global Large-Cap Blend Equity)",
@@ -964,21 +1074,31 @@ def build_prefilled_email(
     _vci_sleeve = build_vci_sleeve_from_step9(step9)
     if _vci_sleeve:
         _s5["vci_sleeve"] = _vci_sleeve
-    # A14 (P2): VUAG counterfactual line + probation rule (D6) on §7 — cash-flow-matched;
-    # trade-date VUAG prices live in sleeve_counterfactual.json (backfilled once from
-    # statements/xlsx; updated at each trade). PENDING note until backfilled.
+    # A14 (WP-1/WP-4, 26-Jul-26): dual-challenger counterfactual + scaling-freeze status;
+    # code authoritative (email_prefill), prices live in sleeve_counterfactual.json.
     _cf_src = load_json_optional(os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"))
+    _sleeve_now = (_cf_src.get("sleeve_value_now")
+                   or portfolio["summary"].get("stock_sleeve_value_gbp"))
+    _mu_now = next((x.get("value_gbp") for x in (portfolio.get("stocks") or [])
+                    if str(x.get("ticker", "")).upper() == "MU"), 0.0)
     if _cf_src.get("trades"):
-        _cf = compute_vuag_counterfactual(_cf_src["trades"], _cf_src.get("vuag_price_now"),
-                                          _cf_src.get("sleeve_value_now")
-                                          or portfolio["summary"].get("stock_sleeve_value_gbp"))
+        _ch = compute_challenger_counterfactuals(
+            _cf_src["trades"], _cf_src.get("vuag_price_now"),
+            _cf_src.get("iwmo_price_now"), _sleeve_now, _mu_now)
+        _frz = compute_freeze_status(_cf_src.get("freeze_history"))
+        _ch["line"] += " - scaling freeze: %s (WP-4)" % _frz["status"]
+        _cf = {"status": "OK", "sleeve_vs_vuag_pp": _ch.get("vs_vuag_pp"),
+               "line": _ch["line"], "challengers": _ch, "freeze": _frz}
     else:
         _cf = {"status": "PENDING_BACKFILL",
-               "line": ("Sleeve vs VUAG counterfactual: PENDING backfill — create "
+               "line": ("Sleeve vs VUAG counterfactual: PENDING backfill - create "
                         "sleeve_counterfactual.json with {trades:[{date, amount_gbp, "
                         "vuag_price}], vuag_price_now} from statements/xlsx (A14)")}
+    _pilot = compute_pilot_line(_cf_src.get("pilots"), _cf_src.get("pilot_prices_now") or {})
     _s7_out = build_s7_from_scored(portfolio, scored) if has_scored else build_s7(portfolio)
     _s7_out["vuag_counterfactual"] = _cf
+    if _pilot:
+        _s7_out["gold_pilot_line"] = _pilot.get("line")
     _s7_out["probation_rule"] = ("D6: if the sleeve trails the VUAG counterfactual by >5pp "
                                  "cumulative after 12mo with >=3 positions, Phase-1 target "
                                  "reverts to the 10% floor and increments route to VUAG (A14)")

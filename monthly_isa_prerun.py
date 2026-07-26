@@ -283,6 +283,46 @@ def write_run_context(
 
 
 # ---------------------------------------------------------------------------
+def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
+                                  challenger_fn=None, sleeve_value_now=None,
+                                  mu_value_now=None, _print=print):
+    """WP-1/WP-4 (26-Jul-26) - refresh vuag_price_now + iwmo_price_now in ONE yfinance
+    batch (closes the gap: no code refresh site existed - was prose-only), then append
+    the month's freeze_history entry (idempotent). Fail-safe: fetch failure -> store
+    untouched, WARNING printed, returns None (A14 email line degrades gracefully)."""
+    import json as _json
+    try:
+        store = _json.load(open(store_path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _print("WARNING A14 refresh: store unreadable (%s)" % type(e).__name__)
+        return None
+    if fetch_fn is None:
+        def fetch_fn(tickers):
+            import yfinance as yf
+            out = {}
+            for t in tickers:
+                h = yf.Ticker(t).history(period="5d")["Close"]
+                out[t] = (float(h.iloc[-1]) / 100.0, h.index[-1].date().isoformat())
+            return out
+    try:
+        px = fetch_fn(("VUAG.L", "IWMO.L"))
+        store["vuag_price_now"], store["vuag_price_now_date"] = px["VUAG.L"]
+        store["iwmo_price_now"], store["iwmo_price_now_date"] = px["IWMO.L"]
+    except Exception as e:
+        _print("WARNING A14 refresh: fetch failed (%s) - store untouched" % type(e).__name__)
+        return None
+    if challenger_fn and month_str:
+        ch = challenger_fn(store.get("trades"), store.get("vuag_price_now"),
+                           store.get("iwmo_price_now"), sleeve_value_now, mu_value_now)
+        hist = store.setdefault("freeze_history", [])
+        if not any(h.get("month") == month_str for h in hist):
+            v, i = ch.get("vs_vuag_exmu_pp"), ch.get("vs_iwmo_exmu_pp")
+            hist.append({"month": month_str, "beats_vuag_exmu": (v is not None and v > 0),
+                         "beats_iwmo_exmu": (i is not None and i > 0)})
+    _json.dump(store, open(store_path, "w", encoding="utf-8"), indent=2)
+    return store
+
+
 # Main pipeline
 # ---------------------------------------------------------------------------
 def main():
@@ -1161,6 +1201,14 @@ def main():
         with open(portfolio_path, encoding="utf-8") as f:
             _pd2 = json.load(f)
         _funds = _pd2.get("funds", [])
+        # WP-5 (26-Jul-26): hedge-bucket exclusion from the Section-A gate set
+        try:
+            _tw5 = json.load(open(os.path.join(SCRIPT_DIR, "target_weights.json"),
+                                  encoding="utf-8")).get("funds", {})
+            _funds = [f for f in _funds
+                      if (_tw5.get(f.get("ticker"), {}) or {}).get("bucket") != "hedge"]
+        except Exception:
+            pass
         _cache_path = os.path.join(SCRIPT_DIR, "fund_returns_cache.json")
         if _funds:
             _rets = _fr.source_fund_returns(_funds, cache_path=_cache_path,
@@ -1250,6 +1298,33 @@ def main():
               f"used={_contrib.get('allowance_used_gbp')}")
     except Exception as _e:
         warnings.append(f"A22 allowance surface skipped: {_e}")
+
+    # — WP-1/WP-4 (26-Jul-26): A14 challenger-price refresh + freeze history; H-6 orphan scan —
+    try:
+        from email_prefill import compute_challenger_counterfactuals as _ccf
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd4 = json.load(f)
+        _slv = (_pd4.get("summary") or {}).get("stock_sleeve_value_gbp")
+        _muv = next((x.get("value_gbp") for x in (_pd4.get("stocks") or [])
+                     if str(x.get("ticker", "")).upper() == "MU"), 0.0)
+        import datetime as _dt4
+        _st4 = refresh_counterfactual_prices(
+            os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"),
+            month_str=_dt4.datetime.now().strftime("%Y-%m"), challenger_fn=_ccf,
+            sleeve_value_now=_slv, mu_value_now=_muv)
+        print(f"  A14: challenger prices refreshed ({'ok' if _st4 else 'SKIPPED - fetch failed'})")
+    except Exception as _e:
+        warnings.append(f"A14 refresh skipped: {_e}")
+    try:
+        from vci_learning import orphan_check as _ocf
+        _oc = _ocf()
+        if _oc["count"]:
+            warnings.append("H-6 ORPHAN-SUSPECT: " + ", ".join(_oc["orphans"]))
+            print("  H-6 ORPHAN-SUSPECT: " + ", ".join(_oc["orphans"]))
+        else:
+            print("  H-6 orphan scan: OK")
+    except Exception as _e:
+        warnings.append(f"H-6 orphan scan skipped: {_e}")
 
     # — A20: reversal-cause WORKLIST — every top-N name carrying the reversal flag gets a
     #   targeted Step 9/10 per-ticker pull; staging it here makes a skipped pull DETECTABLE
@@ -1386,6 +1461,8 @@ def main():
         summary["factor_lookthrough"] = {k: _fres[k] for k in
                                          ("ai_complex_effective_weight_pct", "cap_pct", "breach",
                                           "unclassified", "email_line")}
+        if _fres.get("semis"):
+            summary["factor_lookthrough"]["semis"] = _fres["semis"]
         if os.path.exists(analytics_path):
             with open(analytics_path, encoding="utf-8") as f:
                 _ana2 = json.load(f)

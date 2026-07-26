@@ -484,3 +484,31 @@ UPGRADE_DELTA             = 15
 SLEEVE_SECTOR_CAP_ISA     = 0.12      # max one GICS sector across direct stocks (share of ISA)
 SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
 DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by
+
+
+# --- C-1 fix (audit item #3, WP-3, 26-Jul-26): entry-time stability + minimum-hold ---
+# Additive config, NOT a scoring-weight change - H-1 freeze untouched.
+ENTRY_STABILITY_LOOKBACK_DAYS = 182
+ENTRY_STABILITY_FLOOR = 50.0     # reuse exit-floor level: check mirrors the rule policing the position
+ENTRY_STABILITY_MIN_SIGHTINGS = 2
+ENTRY_STABILITY_MIN_SPAN_DAYS = 60
+MIN_HOLD_DAYS = 182
+MIN_HOLD_EXEMPT = ("hard_thesis_break", "drawdown_mandate", "preclearance")
+
+# --- H-6 (audit item #7, 26-Jul-26): known-store manifest - one authoritative list,
+#     versioned with the code that creates stores; consumed by vci_learning.orphan_check ---
+KNOWN_STORE_PATTERNS = (
+    r"(action_stack|analytics_data|email_data|portfolio_data|run_context|scores|step9_pre"
+    r"|watchlist_metrics|watchlist_scored|xray_data|vci_email_data|vci_prescore_cache"
+    r"|vci_prescore|entry_level_audit)_[a-z]{3}_\d{4}\.json",
+    r"[A-Za-z0-9_]+_TEMPLATE\.json",
+    r"(decision_ledger|drawdown_state|energy_watchlist|eps_snapshot_resume"
+    r"|eps_trend_snapshots|factor_map|fund_returns_cache|sleeve_counterfactual"
+    r"|source_performance_log|target_state|target_weights|theme_opportunity"
+    r"|vci_base_rates|vci_fv_inputs|vci_learning_store|vci_calibration_state"
+    r"|watchlist_tickers)\.json",
+)
+
+# --- H-8 (audit item #8, 26-Jul-26): semis-complex look-through ---
+SEMIS_TICKERS = ("MU", "AVGO", "NVDA", "AMD", "TSM", "ASML", "SMCI", "ANET", "MRVL")
+SEMIS_WATCH_PCT = 18.0   # report-only WATCH marker; hard cap is a Raj decision (Oct run)

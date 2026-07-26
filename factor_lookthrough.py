@@ -75,10 +75,53 @@ def compute(portfolio, fmap):
         "unclassified": sorted(set(unclassified)),
         "coverage_note": ("fund shares are FLOOR estimates from top-10 holdings (~40-60% of "
                           "assets) + seeded judgment — see factor_map.json _meta"),
+        "semis": compute_semis_lookthrough(portfolio, fmap),
         "email_line": (f"AI-complex effective weight: {pct}% vs {cap:.0f}% cap — "
                        f"{'BREACH' if (pct is not None and pct > cap) else 'OK'}"
                        if pct is not None else "AI-complex weight: n/a (no portfolio total)"),
     }
+
+
+
+def compute_semis_lookthrough(portfolio, fmap):
+    """H-8 (audit item #8, 26-Jul-26) - semis-complex look-through: funds' semi exposure
+    (factor_map funds[t].fund_semis_share - JUDGMENT SEEDS, parsed xray sector data is
+    portfolio-level only; refine like fund_ai_share) + direct holdings in
+    scoring_config.SEMIS_TICKERS. Report-only; WATCH marker at >= SEMIS_WATCH_PCT.
+    Missing share -> fund excluded + '(partial)' marker; never raises."""
+    try:
+        import scoring_config as _sc
+        semis = tuple(getattr(_sc, "SEMIS_TICKERS",
+                              ("MU", "AVGO", "NVDA", "AMD", "TSM", "ASML", "SMCI", "ANET", "MRVL")))
+        watch = float(getattr(_sc, "SEMIS_WATCH_PCT", 18.0))
+    except Exception:
+        semis, watch = ("MU", "AVGO", "NVDA", "AMD", "TSM", "ASML", "SMCI", "ANET", "MRVL"), 18.0
+    total = ((portfolio.get("summary") or {}).get("total_value_gbp")) or 0.0
+    funds_map = (fmap or {}).get("funds", {})
+    funds_eff = direct_eff = 0.0
+    partial = []
+    for h in portfolio.get("stocks", []):
+        if str(h.get("ticker", "")).upper() in semis:
+            direct_eff += h.get("value_gbp") or 0.0
+    for h in portfolio.get("funds", []):
+        share = (funds_map.get(h.get("ticker")) or {}).get("fund_semis_share")
+        if share is None:
+            partial.append(h.get("ticker"))
+            continue
+        funds_eff += (h.get("value_gbp") or 0.0) * float(share)
+    if total <= 0:
+        return {"semis_complex_pct": None,
+                "line": "Semis-complex look-through: n/a (no portfolio total)"}
+    f_pct = round(funds_eff / total * 100.0, 1)
+    d_pct = round(direct_eff / total * 100.0, 1)
+    t_pct = round((funds_eff + direct_eff) / total * 100.0, 1)
+    marker = (" - ** WATCH (>=%g%%) ** report-only" % watch) if t_pct >= watch else (
+        " - WATCH >=%g%%, report-only" % watch)
+    suffix = (" (partial: %s unclassified)" % ",".join(sorted(set(partial)))) if partial else ""
+    return {"semis_complex_pct": t_pct, "funds_pct": f_pct, "direct_pct": d_pct,
+            "watch": t_pct >= watch, "partial": sorted(set(partial)),
+            "line": ("Semis-complex look-through: %.1f%% (funds %.1f%% + direct %.1f%%)%s%s"
+                     % (t_pct, f_pct, d_pct, marker, suffix))}
 
 
 def _selftest():

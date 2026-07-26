@@ -40,6 +40,14 @@ def read_token(inv_dir):
     t = os.environ.get("GH_PAT")
     if t:
         return t.strip()
+    # H-4 (26-Jul-26): shared loader - ISA_ENV_PATH -> local non-synced -> legacy (deprecated)
+    try:
+        import isa_env_guard as _ieg
+        tok = (_ieg.load_secrets(script_dir=inv_dir).get("secrets") or {}).get("GH_PAT")
+        if tok:
+            return tok.strip()
+    except Exception:
+        pass
     envp = os.path.join(inv_dir, ".env")
     if os.path.exists(envp):
         for line in open(envp, encoding="utf-8", errors="replace"):

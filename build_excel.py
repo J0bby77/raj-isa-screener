@@ -179,12 +179,42 @@ def load_csv(path):
 # FORMATTING HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# H-2 (audit item #7, 26-Jul-26): narrow excepts + fallback collector. Behavioural
+# invariant: every input that previously returned "N/A"/default returns the SAME value;
+# unexpected exception classes now PROPAGATE (fail-loud). Collector surfaces via the
+# run-log summary + a DATA QUALITY note cell on SUMMARY (only when N>0, so a clean run
+# is byte-identical); get_fmt_errors() is exposed for same-process consumers.
+_FMT_EXC = (TypeError, ValueError, KeyError, AttributeError, ZeroDivisionError)
+_fmt_errors = []
+
+
+def _fmt_guard(func_name, value, exc):
+    _fmt_errors.append((func_name, repr(value)[:80], type(exc).__name__))
+
+
+def get_fmt_errors():
+    return list(_fmt_errors)
+
+
+def reset_fmt_errors():
+    del _fmt_errors[:]
+
+
+def data_quality_note():
+    if not _fmt_errors:
+        return None
+    first5 = "; ".join("%s(%s):%s" % e for e in _fmt_errors[:5])
+    return "DATA QUALITY: %d formatting fallbacks - first 5: %s" % (len(_fmt_errors), first5)
+
+
 def pct(v, dec=1):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{f*100:.{dec}f}%"
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("pct", v, e); return "N/A"
 
 def pct_already(v, dec=1):
     """For values ALREADY stored as a percentage number (e.g. -78.8 -> '-78.8%').
@@ -194,34 +224,39 @@ def pct_already(v, dec=1):
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{f:.{dec}f}%"
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("pct_already", v, e); return "N/A"
 
 def mult(v, dec=1):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{f:.{dec}f}x"
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("mult", v, e); return "N/A"
 
 def num(v, dec=1, suffix=""):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{f:.{dec}f}{suffix}"
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("num", v, e); return "N/A"
 
 def s(v, default="N/A"):
     try:
         if v is None or (isinstance(v, float) and pd.isna(v)): return default
         return str(v).strip() or default
-    except: return default
+    except _FMT_EXC as e:
+        _fmt_guard("s", v, e); return default
 
 def score_int(v):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return int(round(f))
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("score_int", v, e); return "N/A"
 
 def upside_fmt(v):
     """Format upside with + or - prefix."""
@@ -230,14 +265,16 @@ def upside_fmt(v):
         if pd.isna(f): return "N/A"
         sign = "+" if f >= 0 else ""
         return f"{sign}{f:.1f}%"
-    except: return "N/A"
+    except _FMT_EXC as e:
+        _fmt_guard("upside_fmt", v, e); return "N/A"
 
 def fmt_price(v, currency_sym=""):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{currency_sym}{f:.2f}"
-    except: return s(v)
+    except _FMT_EXC as e:
+        _fmt_guard("fmt_price", v, e); return s(v)
 
 def fcf_years_fmt(v):
     """e.g. 4.0 → '4/5', 'NET_CASH_NO_MATERIAL_INTEREST_BURDEN' → label"""
@@ -245,7 +282,8 @@ def fcf_years_fmt(v):
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{int(round(f))}/5"
-    except: return s(v)
+    except _FMT_EXC as e:
+        _fmt_guard("fcf_years_fmt", v, e); return s(v)
 
 def pp_fmt(v):
     """Format percentage-point change e.g. 0.023 → '+2.3pp'"""
@@ -254,14 +292,16 @@ def pp_fmt(v):
         if pd.isna(f): return "N/A"
         sign = "+" if f >= 0 else ""
         return f"{sign}{f:.1f}pp"
-    except: return s(v)
+    except _FMT_EXC as e:
+        _fmt_guard("pp_fmt", v, e); return s(v)
 
 def trailing_pe_fmt(v):
     try:
         f = float(v)
         if pd.isna(f): return "N/A"
         return f"{f:.1f}x"
-    except: return s(v)
+    except _FMT_EXC as e:
+        _fmt_guard("trailing_pe_fmt", v, e); return s(v)
 
 
 def get_currency_sym(row):
@@ -487,7 +527,7 @@ def build_summary(wb, df_full, run_date, group):
     for _r, _sc in _sel:
         _comp = _ss.source_score_components_for_row(_r)
         _erd = _er.expected_return_for_row(_r)
-        _rows_out.append({
+        _merged_f4 = ({
             **_r, **_erd,
             "source_score": _sc,
             "implied_upside_fv": _comp.get("implied_upside_fv"),
@@ -497,6 +537,11 @@ def build_summary(wb, df_full, run_date, group):
             "_src_qual":    f"{_comp['src_qual_raw']:g} → {_comp['src_qual_w']:g}",
             "_src_analyst": f"{_comp['src_analyst_raw']:g} → {_comp['src_analyst_w']:g}",
         })
+        # F-4 fix (26-Jul-26, build log): the E[r] recompute above overwrote the stamped
+        # conflict-capped er_confidence - re-apply THE shared cap (expected_return.
+        # apply_capital_signal_conflict) so the displayed conf == the stored sizing truth.
+        _er.apply_capital_signal_conflict(_merged_f4)
+        _rows_out.append(_merged_f4)
     sb = pd.DataFrame(_rows_out)
 
     if not sb.empty:
@@ -1128,6 +1173,23 @@ def build_glossary(wb, group, run_date):
     ]
     for r in fixpack_rows:
         ws.append(list(r))
+    # F-2 (26-Jul-26, build log): decision glossary - plain-language meaning, why it
+    # matters vs the 1.0-1.5M/2038 objective, and how to read each reader-facing metric.
+    # Additive rows only - SUMMARY/SCORES cells untouched (H-2 byte-parity preserved).
+    wtm_rows = [
+        ("WHAT THESE MEAN", "Source Score (Src)", "The framework's single ranking signal (0-100)", "WHY: forward-led framework buys strengthening forward signals, not cheapness. HOW TO READ: >=80 exceptional, 70-80 SUMMARY-grade (floor 70), <70 not surfaced. It answers 'how strong is the forward evidence NOW'", "ranking + SUMMARY admission"),
+        ("WHAT THESE MEAN", "Fwd /100 (Forward Axis)", "Forward momentum of estimates + price (0-100)", "WHY: the engine of the momentum-harvest thesis - names with accelerating forward estimates historically continue short-term. HOW: 100 = all forward components maxed; the exit floor polices THIS number later, so WP-3 entry-stability checks it held >=50 for 6 months before Path A entry", "entry-stability + exit floor"),
+        ("WHAT THESE MEAN", "E[r] % pa", "Modelled 12-24m expected annual return: growth + rerate + yield", "WHY: the DEPLOY gate - a buy needs E[r] >= anchor+2pp (~15.9%). HOW: treat 20-50% as normal for screen winners; check E[r] conf (1.0 = all terms measured) and Sig Conflict before trusting; growth/rerate terms are capped (+/-50, +/-10 per yr) so rail values (exactly +/-50 or +/-10) mean the cap bound, not a measured estimate", "T1 deploy gate"),
+        ("WHAT THESE MEAN", "Impl Upside (FV)", "Gap between fair-value composite and current price", "WHY: the cross-check, NOT the decision metric - forward-led buys often show NEGATIVE FV upside (price ran ahead). HOW: deeply negative + strong E[r] = Sig Conflict fires -> starter size. Positive upside + strong E[r] = rare and attractive", "sizing cross-check"),
+        ("WHAT THESE MEAN", "Stage", "Where the estimate-revision cycle sits (Igniting -> Accelerating -> Sustained -> Maturing -> Rolling over)", "WHY: momentum harvesting exits before decay - Maturing/Rolling-over are SUMMARY-excluded regardless of score (that is why a 50/50 name can be absent). HOW: Igniting = earliest/riskiest, Accelerating/Sustained = core buy zone", "SUMMARY + T1 stage gate"),
+        ("WHAT THESE MEAN", "Part A / Part B", "Fundamentals viability (A /28: growth quality, ROIC, FCF) + analyst signal (B /22-26)", "WHY: NOT a ranking axis any more (forward-led). Part A >= 10 is the only viability floor - it keeps un-investable names out while letting high-Source thin-fundamental names surface BY DESIGN. HOW: low A/B + high Source = momentum candidate, size accordingly", "viability floor only"),
+        ("WHAT THESE MEAN", "ROIC", "Return on invested capital (operating profit vs capital employed)", "WHY: quality tiebreak + Part A input; capital compounds fastest where ROIC is high and durable. HOW: >20% excellent, 10-20% good, <8% needs a reason (turnaround/cyclical trough)", "Part A input"),
+        ("WHAT THESE MEAN", "Sig Conflict / E[r] conf", "Do the growth-anchored and multiple-anchored views violently disagree (>25pp)?", "WHY: when True, one anchor is wrong - the framework prices that uncertainty by capping er_confidence at 0.5 -> STARTER SIZE ONLY (1.5%), never full. HOW: conflict is common in momentum tape (price ran ahead of FV) - it does not block, it sizes", "A5 v3 sizing"),
+        ("WHAT THESE MEAN", "Actionable? (email)", "The T1 gates computable from the screen row: PASS / BLOCKED(reason) / HELD", "WHY: separates 'strong signal' from 'deployable TODAY' - a BLOCKED name stays visible because the screen is the evidence LEDGER feeding entry-stability history; it re-enters the deploy pool when its block clears. HOW: only PASS names compete for Step-10 capital", "monthly Step 8-10 pool"),
+        ("WHAT THESE MEAN", "Door (B7 shadow)", "Which admission door the row satisfies (momentum/quality/inflection) under the current regime", "WHY: shadow calibration for regime-gated admission (Sep go-live decision) - tags only, momentum is the sole live door. HOW: ignore for decisions; the tags build the evidence base", "Sep door review"),
+    ]
+    for r in wtm_rows:
+        ws.append(list(r))
     for col, w in zip("ABCDE", (28, 30, 70, 60, 24)):
         ws.column_dimensions[col].width = w
     return ws
@@ -1184,6 +1246,12 @@ def main():
     build_diagnostics(wb, df_full, df_const, df_run_qa, df_tech_fails, args.group, args.run_date)
     build_glossary(wb, args.group, args.run_date)   # review item 6 (18-Jul-26)
 
+    _dq = data_quality_note()
+    if _dq:
+        _ws_dq = wb["SUMMARY"]
+        _ws_dq.append([])
+        _ws_dq.append([_dq])
+        print("[build_excel] " + _dq)
     wb.save(args.output)
     print(f"[build_excel] Saved: {args.output}", flush=True)
 

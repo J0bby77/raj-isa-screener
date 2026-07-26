@@ -65,6 +65,16 @@ MIN_ECONOMIC_TRADE = 500.0
 # ---------------------------------------------------------------------------
 # Signal classification
 # ---------------------------------------------------------------------------
+
+def _gate_eligible_funds(funds_list, target_weights):
+    """WP-5 (26-Jul-26): exclude hedge-bucket entries (SGLN) from the Section-A return
+    gate set - a null-E[r] hedge must not enter the weighted-average or coverage
+    denominators (fixture-tested: Section-A verdict identical with/without SGLN held)."""
+    tw = ((target_weights or {}).get("funds") or {})
+    return [f for f in funds_list
+            if (tw.get(f.get("ticker"), {}) or {}).get("bucket") != "hedge"]
+
+
 def classify_signal(
     actual_pct: float,
     target_pct: float,
@@ -415,7 +425,10 @@ def run_analytics(
     # ---------------------------------------------------------------------------
     fund_drift_rows = []
     rebalancing_candidates = []
-    bucket_actuals = {"B1": 0.0, "B2": 0.0, "B3": 0.0, "unknown": 0.0}
+    # WP-5 (26-Jul-26): hedge bucket tracked for display but EXCLUDED from B-bucket
+    # totals (loop below iterates B1/B2/B3 only) and from the Section-A gate (filter at
+    # the fund_returns call sites) - a 0%-E[r] hedge must never enter return math.
+    bucket_actuals = {"B1": 0.0, "B2": 0.0, "B3": 0.0, "hedge": 0.0, "unknown": 0.0}
 
     for fund in funds_list:
         ticker = fund["ticker"]
@@ -430,6 +443,7 @@ def run_analytics(
             min_return  = fw["min_expected_return"]
             fund_name   = fw["name"]
             pending_sale = fw.get("pending_sale", False)
+            _fstatus    = str(fw.get("status", "ACTIVE")).upper()
         else:
             # Unknown fund — not in target weights
             target_pct  = None
@@ -444,7 +458,11 @@ def run_analytics(
 
         drift_pp = round((actual_pct - (target_pct or 0)) * 100, 2)
 
-        if target_pct is not None and band_low is not None:
+        if ticker in tw and _fstatus != "ACTIVE":
+            # WP-5/6 (26-Jul-26): wired-but-not-yet-activated entries (PILOT_PENDING_
+            # PRECLEARANCE / PENDING_AUG_DECISION) never classify as drift breaches.
+            signal = f"PENDING ({_fstatus}) - drift suppressed until ACTIVE"
+        elif target_pct is not None and band_low is not None:
             signal = classify_signal(
                 actual_pct, target_pct, band_low, band_high,
                 below_threshold=False,  # estimated return unknown until Claude looks up
@@ -583,7 +601,8 @@ def run_analytics(
     if _fr is not None and getattr(_cfg, "FUND_RETURN_SOURCING", False):
         try:
             _cache = _fr.default_cache_path(SCRIPT_DIR)
-            _returns = _fr.source_fund_returns(funds_list, cache_path=_cache, fetch=True)
+            _gfunds = _gate_eligible_funds(funds_list, target_weights)   # WP-5 hedge exclusion
+            _returns = _fr.source_fund_returns(_gfunds, cache_path=_cache, fetch=True)
             for _row in fund_drift_rows:
                 _k = (_row.get("ticker") or _row.get("name") or "").upper()
                 _ri = _returns.get(_k, {})
@@ -595,7 +614,7 @@ def run_analytics(
                 _fa = _fr.classify_fund_action(_row, _ri)
                 if _fa:
                     fund_actions.append(_fa)
-            _gate = _fr.compute_fund_gate(funds_list, _returns)
+            _gate = _fr.compute_fund_gate(_gfunds, _returns)   # WP-5 hedge exclusion
             section_a["weighted_avg_return"] = _gate["weighted_avg_return"]
             section_a["result"]              = _gate["result"]
             section_a["status"]              = _gate["status"]

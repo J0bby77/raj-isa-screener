@@ -679,6 +679,9 @@ def build_s6(data):
     if d.get("factor_line"):
         _fcol = C["red"] if "BREACH" in str(d["factor_line"]) else C["green"]
         inner += para(f'<strong style="color:{_fcol}">{se(d["factor_line"])}</strong>')
+    if d.get("semis_line"):
+        _scol = C["red"] if "WATCH (" in str(d["semis_line"]) else C["green"]
+        inner += para(f'<strong style="color:{_scol}">{se(d["semis_line"])}</strong>')
         if d.get("factor_unclassified"):
             inner += para(f'B3: unclassified names need a factor_map entry: '
                           f'{se(str(d["factor_unclassified"]))}', muted=True, small=True)
@@ -769,6 +772,8 @@ def build_s7(data):
         _line = _cf.get("line") or f'Sleeve vs VUAG counterfactual: {_cf.get("status", "—")}'
         _col = C["red"] if (_cf.get("sleeve_vs_vuag_pp") or 0) < 0 else C["green"]
         inner += para(f'<strong style="color:{_col}">{se(_line)}</strong>')
+    if d.get("gold_pilot_line"):
+        inner += para(f'<strong>{se(d["gold_pilot_line"])}</strong>')
     if d.get("probation_rule"):
         inner += para(se(d["probation_rule"]), muted=True, small=True)
 

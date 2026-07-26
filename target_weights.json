@@ -1,41 +1,39 @@
 {
   "_meta": {
-    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes — they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
+    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes \u2014 they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
     "version": "1.0",
     "last_updated": "2026-05-31",
     "source_memory": "project_isa_target_weights.md",
-    "current_phase": 1
+    "current_phase": 1,
+    "changelog": " | 26-Jul-26: WP-4 scaling_freeze added; WP-5 SGLN hedge entry (PILOT_PENDING_PRECLEARANCE); WP-6 IWMO B2 5% entry (PENDING_AUG_DECISION); hedge bucket defined (excluded from return math). Audit BuildSpec Jul-2026."
   },
-
   "return_objective": {
-    "isa_target_low":    1000000,
-    "isa_target_high":   1500000,
-    "horizon_years":     12,
+    "isa_target_low": 1000000,
+    "isa_target_high": 1500000,
+    "horizon_years": 12,
     "annual_contribution": 20000,
     "starting_value_may2026": 138000,
-    "required_return_low":  0.12,
+    "required_return_low": 0.12,
     "required_return_high": 0.16,
-    "working_target":       0.14,
+    "working_target": 0.14,
     "fund_sleeve_weighted_avg_threshold": 0.12,
-    "stock_sleeve_return_assumption":     0.18,
-    "total_isa_working_target":           0.14
+    "stock_sleeve_return_assumption": 0.18,
+    "total_isa_working_target": 0.14
   },
-
   "thresholds": {
     "fund_sleeve_weighted_avg_min": 0.12,
-    "stock_sleeve_on_track":        0.18,
-    "stock_sleeve_watch_low":       0.15,
-    "total_isa_on_track":           0.14,
-    "total_isa_watch_low":          0.13,
-    "phase_transition_pct":         0.15,
-    "max_single_fund_pct":          0.125,
-    "max_stock_position_pct":       0.05,
-    "typical_stock_position_low":   0.015,
-    "typical_stock_position_high":  0.035,
-    "cash_buffer_min":              150,
-    "cash_buffer_max":              200
+    "stock_sleeve_on_track": 0.18,
+    "stock_sleeve_watch_low": 0.15,
+    "total_isa_on_track": 0.14,
+    "total_isa_watch_low": 0.13,
+    "phase_transition_pct": 0.15,
+    "max_single_fund_pct": 0.125,
+    "max_stock_position_pct": 0.05,
+    "typical_stock_position_low": 0.015,
+    "typical_stock_position_high": 0.035,
+    "cash_buffer_min": 150,
+    "cash_buffer_max": 200
   },
-
   "buckets": {
     "B1": {
       "name": "Core Global Equity",
@@ -54,9 +52,14 @@
       "role": "Highest expected return, highest vol. Structural tailwinds.",
       "min_expected_return": 0.13,
       "max_weight_pct": 0.25
+    },
+    "hedge": {
+      "name": "Tail Hedge",
+      "role": "Risk reduction only (gold). NO expected-return claim under the 14% formula - excluded from ALL return-bucket math and the Section-A gate.",
+      "min_expected_return": null,
+      "max_weight_pct": 0.12
     }
   },
-
   "funds": {
     "BF93W97": {
       "name": "Royal London Global Equity Select M Acc",
@@ -64,7 +67,7 @@
       "bucket": "B1",
       "target_pct": 0.08,
       "band_low": 0.06,
-      "band_high": 0.10,
+      "band_high": 0.1,
       "min_expected_return": 0.09,
       "phase2_target_pct": 0.07,
       "notes": ""
@@ -75,7 +78,7 @@
       "bucket": "B1",
       "target_pct": 0.08,
       "band_low": 0.06,
-      "band_high": 0.10,
+      "band_high": 0.1,
       "min_expected_return": 0.09,
       "phase2_target_pct": 0.07,
       "notes": ""
@@ -84,12 +87,12 @@
       "name": "Vanguard S&P 500 ETF USD Acc GBP",
       "ticker": "VUAG",
       "bucket": "B1",
-      "target_pct": 0.10,
+      "target_pct": 0.1,
       "band_low": 0.08,
       "band_high": 0.125,
       "min_expected_return": 0.09,
       "phase2_target_pct": 0.09,
-      "notes": "UCITS ETF — no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
+      "notes": "UCITS ETF \u2014 no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
     },
     "B50MZ94": {
       "name": "Vanguard Japan Stock Index GBP Acc",
@@ -100,7 +103,7 @@
       "band_high": 0.06,
       "min_expected_return": 0.08,
       "phase2_target_pct": 0.03,
-      "notes": "Passive Japan index — 8% minimum (not 9%) as demanding for this mandate."
+      "notes": "Passive Japan index \u2014 8% minimum (not 9%) as demanding for this mandate."
     },
     "B2PLJM6": {
       "name": "Artemis SmartGARP UK Eq I Acc GBP",
@@ -152,10 +155,10 @@
       "bucket": "B2",
       "target_pct": 0.08,
       "band_low": 0.06,
-      "band_high": 0.10,
+      "band_high": 0.1,
       "min_expected_return": 0.13,
       "phase2_target_pct": 0.07,
-      "notes": "Higher minimum return (13%) due to tech-focused mandate — B2 but with B3 return expectations."
+      "notes": "Higher minimum return (13%) due to tech-focused mandate \u2014 B2 but with B3 return expectations."
     },
     "B6SQYF4": {
       "name": "M&G Asian GBP I Acc",
@@ -163,7 +166,7 @@
       "bucket": "B3",
       "target_pct": 0.08,
       "band_low": 0.06,
-      "band_high": 0.10,
+      "band_high": 0.1,
       "min_expected_return": 0.13,
       "phase2_target_pct": 0.07,
       "notes": ""
@@ -174,7 +177,7 @@
       "bucket": "B3",
       "target_pct": 0.08,
       "band_low": 0.06,
-      "band_high": 0.10,
+      "band_high": 0.1,
       "min_expected_return": 0.13,
       "phase2_target_pct": 0.07,
       "notes": ""
@@ -183,12 +186,12 @@
       "name": "Vanguard U.S. Equity Index GBP Acc",
       "ticker": "B5B71Q7",
       "bucket": "B1",
-      "target_pct": 0.00,
-      "band_low": 0.00,
-      "band_high": 0.00,
+      "target_pct": 0.0,
+      "band_low": 0.0,
+      "band_high": 0.0,
       "min_expected_return": 0.09,
-      "phase2_target_pct": 0.00,
-      "notes": "CONSOLIDATION PENDING — target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
+      "phase2_target_pct": 0.0,
+      "notes": "CONSOLIDATION PENDING \u2014 target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
       "consolidation_target": "VUAG",
       "pending_sale": true
     },
@@ -201,40 +204,102 @@
       "band_high": 0.07,
       "min_expected_return": 0.13,
       "phase2_target_pct": 0.04,
-      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes — not counted in stock sleeve %. SpaceX ~19% of NAV — below 25% threshold so BROAD-BASED. No preclearance required."
+      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes \u2014 not counted in stock sleeve %. SpaceX ~19% of NAV \u2014 below 25% threshold so BROAD-BASED. No preclearance required."
+    },
+    "SGLN": {
+      "name": "iShares Physical Gold ETC",
+      "ticker": "SGLN.L",
+      "bucket": "hedge",
+      "target_pct": 0.1,
+      "band_low": 0.08,
+      "band_high": 0.12,
+      "min_expected_return": null,
+      "phase2_target_pct": 0.1,
+      "notes": "audit item 5 - 2 tranches (T1 ~7.2k at Aug run, T2 Sep or -5% gold entry); hedge bucket = excluded from return math; freeze-EXEMPT (risk reduction)",
+      "status": "PILOT_PENDING_PRECLEARANCE"
+    },
+    "IWMO": {
+      "name": "iShares Edge MSCI World Momentum Factor UCITS ETF",
+      "ticker": "IWMO.L",
+      "bucket": "B2",
+      "target_pct": 0.05,
+      "band_low": 0.04,
+      "band_high": 0.06,
+      "min_expected_return": 0.12,
+      "phase2_target_pct": 0.05,
+      "notes": "audit item 6 - B2 satellite; E[r] >=12% per MSCI World Momentum long-run excess (audit Part 3); funded from weakest B2 holding named at Aug run (6.6 comparison); live twin of the A14 IWMO challenger",
+      "status": "PENDING_AUG_DECISION"
     }
   },
-
   "bucket_totals": {
-    "B1": {"phase1_target_pct": 0.30, "phase1_band_low": 0.28, "phase1_band_high": 0.35},
-    "B2": {"phase1_target_pct": 0.37, "phase1_band_low": 0.33, "phase1_band_high": 0.42},
-    "B3": {"phase1_target_pct": 0.16, "phase1_band_low": 0.13, "phase1_band_high": 0.19}
+    "B1": {
+      "phase1_target_pct": 0.3,
+      "phase1_band_low": 0.28,
+      "phase1_band_high": 0.35
+    },
+    "B2": {
+      "phase1_target_pct": 0.37,
+      "phase1_band_low": 0.33,
+      "phase1_band_high": 0.42
+    },
+    "B3": {
+      "phase1_target_pct": 0.16,
+      "phase1_band_low": 0.13,
+      "phase1_band_high": 0.19
+    },
+    "hedge": {
+      "phase1_target_pct": 0.0,
+      "phase1_band_low": 0.0,
+      "phase1_band_high": 0.12,
+      "note": "0 until SGLN ACTIVE post-trade; then 0.10 target. Excluded from B1/B2/B3 return sums."
+    }
   },
-
   "macro_tilt_rules": {
-    "Expansion":   {"B1": "allow_drift_lower", "B2": "allow_drift_upper", "B3": "allow_drift_upper"},
-    "Slowdown":    {"B1": "move_toward_upper", "B2": "hold_mid_band",     "B3": "move_toward_lower"},
-    "Contraction": {"B1": "hold_at_upper",     "B2": "hold_at_lower",     "B3": "hold_at_lower_no_new_capital"},
-    "Recovery":    {"B1": "allow_drift_lower", "B2": "move_toward_upper", "B3": "move_toward_upper"}
+    "Expansion": {
+      "B1": "allow_drift_lower",
+      "B2": "allow_drift_upper",
+      "B3": "allow_drift_upper"
+    },
+    "Slowdown": {
+      "B1": "move_toward_upper",
+      "B2": "hold_mid_band",
+      "B3": "move_toward_lower"
+    },
+    "Contraction": {
+      "B1": "hold_at_upper",
+      "B2": "hold_at_lower",
+      "B3": "hold_at_lower_no_new_capital"
+    },
+    "Recovery": {
+      "B1": "allow_drift_lower",
+      "B2": "move_toward_upper",
+      "B3": "move_toward_upper"
+    }
   },
-
   "stock_sleeve": {
-    "phase1_target_low": 0.10,
+    "phase1_target_low": 0.1,
     "phase1_target_high": 0.15,
     "phase2_target_low": 0.15,
-    "phase2_target_high": 0.30,
+    "phase2_target_high": 0.3,
     "return_assumption": 0.18,
     "transition_trigger_pct": 0.15,
     "transition_requires_consecutive_months": 2
   },
-
   "signal_logic": {
-    "hold":                  "Within band AND estimated return >= bucket minimum",
-    "watch_return":          "Within band BUT estimated return below bucket minimum (first time)",
-    "research_trigger":      "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
-    "watch_drift":           "Outside band by <= 2%",
-    "rebalancing_candidate": "Outside band by > 2% — escalate to Step 10 Category 7",
+    "hold": "Within band AND estimated return >= bucket minimum",
+    "watch_return": "Within band BUT estimated return below bucket minimum (first time)",
+    "research_trigger": "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
+    "watch_drift": "Outside band by <= 2%",
+    "rebalancing_candidate": "Outside band by > 2% \u2014 escalate to Step 10 Category 7",
     "drift_watch_threshold": 0.02,
     "drift_rebalance_threshold": 0.02
+  },
+  "scaling_freeze": {
+    "active": true,
+    "rule": "sleeve must beat VUAG AND IWMO ex-MU over 4 consecutive months (A14 log); override unfreeze permitted at 3 via A13 entry",
+    "clock_start": "2026-08-02",
+    "earliest_unfreeze_override": "2026-11-01",
+    "earliest_unfreeze_mechanical": "2026-12-01",
+    "set_by": "Institutional audit Jul-2026 item 4; window reduced 6->3-4 months by Raj 22-Jul-26"
   }
 }

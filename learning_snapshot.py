@@ -126,7 +126,11 @@ def snapshot_tickers(path, tickers, date=None, preflight=False, resume_path=None
     for t in batch:
         try:
             _tk = yf.Ticker(t)
-            et = getattr(_tk, "eps_trend", None)
+            try:
+                import fetch_guard as _fg   # H-5 (26-Jul-26)
+                et = _fg.with_backoff(lambda: getattr(_tk, "eps_trend", None))
+            except ImportError:
+                et = getattr(_tk, "eps_trend", None)
             f1, f0 = _extract_fwd_eps(et)
             tgt = None
             try:

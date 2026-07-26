@@ -257,6 +257,10 @@ if __name__ == '__main__':
         sys.exit(1)
     for sym in tickers:
         try:
-            pull(sym)
+            try:
+                import fetch_guard as _fg   # H-5 (26-Jul-26)
+                _fg.with_backoff(pull, sym)
+            except ImportError:
+                pull(sym)
         except Exception as e:
             print(f'\n[FATAL ERROR for {sym}]: {e}')

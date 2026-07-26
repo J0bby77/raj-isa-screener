@@ -150,6 +150,67 @@ def screen_sightings_from_panel(ticker, panel_path=None, ref_date=None):
         return None
 
 
+def entry_stability(ticker, panel_path=None, ref_date=None):
+    """C-1 fix (WP-3, audit #3, 26-Jul-26) - entry-time Forward-Axis stability check for
+    Path A. Reads score_panel.csv sightings within ENTRY_STABILITY_LOOKBACK_DAYS.
+    PASS = >= ENTRY_STABILITY_MIN_SIGHTINGS sightings spanning >= MIN_SPAN days, ALL with
+    forward_axis_score AND source_score >= ENTRY_STABILITY_FLOOR. FAIL = any sighting in
+    window below floor on either leg. UNVERIFIED = insufficient sightings/span (contract:
+    starter size 1.5%, existing A5v3 mechanics). Malformed rows skipped; unreadable panel
+    -> UNVERIFIED. Never raises, never blocks - sizing/blocking is Step 10's call."""
+    panel_path = panel_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            "score_panel.csv")
+    floor = float(_c("ENTRY_STABILITY_FLOOR", 50.0))
+    lookback = int(_c("ENTRY_STABILITY_LOOKBACK_DAYS", 182))
+    min_n = int(_c("ENTRY_STABILITY_MIN_SIGHTINGS", 2))
+    min_span = int(_c("ENTRY_STABILITY_MIN_SPAN_DAYS", 60))
+    ref = ref_date or date.today()
+    t = str(ticker).strip().upper()
+    sightings = []
+    try:
+        with open(panel_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                if str(row.get("ticker", "")).strip().upper() != t:
+                    continue
+                try:
+                    dt = datetime.strptime(str(row.get("run_date", ""))[:10], "%Y-%m-%d").date()
+                    fa = float(row.get("forward_axis_score"))
+                    src = float(row.get("source_score"))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= (ref - dt).days <= lookback:
+                    sightings.append((dt, min(fa, src)))
+    except OSError:
+        return {"verdict": "UNVERIFIED", "sightings": 0, "min_score": None,
+                "detail": "score_panel.csv unreadable - starter size per A5v3"}
+    if not sightings:
+        return {"verdict": "UNVERIFIED", "sightings": 0, "min_score": None,
+                "detail": "no sightings in last %dd - starter size per A5v3" % lookback}
+    min_score = min(x for _, x in sightings)
+    n = len(set(d for d, _ in sightings))
+    span = (max(d for d, _ in sightings) - min(d for d, _ in sightings)).days
+    if min_score < floor:
+        return {"verdict": "FAIL", "sightings": n, "min_score": min_score,
+                "detail": ("sighting below floor %g in window (min %g) - Path A full "
+                           "deployment BLOCKED; override only via A13 with reason"
+                           % (floor, min_score))}
+    if n >= min_n and span >= min_span:
+        return {"verdict": "PASS", "sightings": n, "min_score": min_score,
+                "detail": "%d sightings over %dd, all >= %g on both legs" % (n, span, floor)}
+    return {"verdict": "UNVERIFIED", "sightings": n, "min_score": min_score,
+            "detail": ("insufficient history (%d sightings, span %dd; need >= %d over >= %dd)"
+                       " - starter size per A5v3" % (n, span, min_n, min_span))}
+
+
+def min_hold_until(entry_date):
+    """WP-3 rule B (26-Jul-26) - Path A minimum-hold stamp: entry + MIN_HOLD_DAYS. Early
+    exit only on MIN_HOLD_EXEMPT grounds (hard_thesis_break/drawdown_mandate/preclearance)."""
+    from datetime import timedelta
+    if isinstance(entry_date, str):
+        entry_date = datetime.strptime(entry_date[:10], "%Y-%m-%d").date()
+    return entry_date + timedelta(days=int(_c("MIN_HOLD_DAYS", 182)))
+
+
 def evidence(entry, scored_row=None, ref_date=None):
     """A5 v3 — evidence-based sizing (D18/D19). MECHANICAL, computable at first sighting;
     NEVER blocks (sizing only). Returns:

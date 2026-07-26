@@ -186,7 +186,12 @@ def fetch_all_tickers(tickers: list[str]) -> tuple[dict, dict]:
     results, errors = {}, {}
     log.info(f"Fetching data for {len(tickers)} tickers...")
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
-        futures = {ex.submit(_fetch_all_for_ticker, t): t for t in tickers}
+        try:
+            import fetch_guard as _fg   # H-5 (26-Jul-26)
+            _submit = lambda t: _fg.with_backoff(_fetch_all_for_ticker, t)
+        except Exception:
+            _submit = _fetch_all_for_ticker
+        futures = {ex.submit(_submit, t): t for t in tickers}
         for fut in as_completed(futures):
             sym, data, err = fut.result()
             if err or not data:
