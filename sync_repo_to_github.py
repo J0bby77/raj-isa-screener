@@ -16,7 +16,7 @@ Mechanism (local authenticated git push — the clean way to sync large files):
   * NEVER touches secrets / non-code: only top-level tracked files; .env and *.partial.json excluded.
   * Commits + pushes only what changed; else prints NOTHING_TO_SYNC. Works entirely in /dev/shm (never /).
 """
-import argparse, os, sys, hashlib, subprocess, shutil, datetime, re, ast
+import argparse, os, sys, hashlib, subprocess, shutil, datetime, re, ast, tempfile
 
 NEW_FILES = ["screener_local.py", "sync_repo_to_github.py"]   # may not be tracked yet
 NEVER = {".env", ".env.local"}
@@ -91,13 +91,23 @@ def main():
         print("SYNC_SKIPPED_NO_TOKEN: add GH_PAT=<fine-grained PAT, contents:write> to Investment Analysis/.env "
               "to enable OneDrive->GitHub auto-sync (fallback would otherwise run stale code).")
         return
-    work = "/dev/shm/_sync_repo"
-    shutil.rmtree(work, ignore_errors=True)
+    # Cross-platform temp dir (26-Jul-26, H-4 real-env gate finding): the previous
+    # hardcoded /dev/shm/_sync_repo only exists on Linux sandboxes; on Windows (Raj's
+    # real env) it resolved unpredictably. tempfile.mkdtemp() honours TMPDIR when
+    # isa_env_guard has set it (fast tmpfs on Linux) and falls back to the OS default
+    # (%TEMP% on Windows) automatically — same speed characteristics, both platforms.
+    work = tempfile.mkdtemp(prefix="isa_sync_")
     auth_url = f"https://x-access-token:{token}@github.com/{a.repo}.git" if token else f"https://github.com/{a.repo}.git"
     r = subprocess.run(["git", "clone", "--depth", "1", "-b", a.branch, auth_url, work],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print("SYNC_FAILED_CLONE:", r.stderr.strip().replace(token or "", "***")[:200]); sys.exit(2)
+    # Disable line-ending rewriting for THIS clone (26-Jul-26, H-4 finding): Windows git
+    # commonly defaults core.autocrlf=true, which silently converts every checked-out
+    # LF blob to CRLF, making the raw sha256 diff below see nearly the whole repo as
+    # "changed" and can leave `git commit` with nothing real left to stage. Forcing this
+    # off keeps bytes-on-disk == bytes-in-repo on every host OS.
+    subprocess.run(["git", "-C", work, "config", "core.autocrlf", "false"], check=False)
     tracked = subprocess.run(["git", "-C", work, "ls-files"], capture_output=True, text=True).stdout.split()
     # AUTO-DISCOVER brand-new runtime scripts: every top-level *.py on OneDrive except scratch (_*/test_*).
     local_py = [f for f in os.listdir(a.inv_dir)
@@ -146,14 +156,25 @@ def main():
         print("NOTHING_TO_SYNC (GitHub already mirrors OneDrive)"); return
     if a.dry_run:
         print("DRY_RUN would sync:", ", ".join(changed)); return
-    subprocess.run(["git", "-C", work, "add"] + changed, check=True)
-    subprocess.run(["git", "-C", work, "-c", "user.email=isa@local", "-c", "user.name=ISA AutoSync",
-                    "commit", "-m", f"auto-sync from OneDrive {datetime.date.today().isoformat()}: {', '.join(changed)}"],
-                   check=True, capture_output=True)
+    ar = subprocess.run(["git", "-C", work, "add"] + changed, capture_output=True, text=True)
+    if ar.returncode != 0:
+        print("SYNC_FAILED_ADD:", (ar.stderr or ar.stdout).strip()[:400]); sys.exit(2)
+    cr = subprocess.run(["git", "-C", work, "-c", "user.email=isa@local", "-c", "user.name=ISA AutoSync",
+                         "commit", "-m", f"auto-sync from OneDrive {datetime.date.today().isoformat()}: {', '.join(changed)}"],
+                        capture_output=True, text=True)
+    if cr.returncode != 0:
+        # 26-Jul-26 (H-4 finding): surface the real git error instead of an opaque
+        # traceback; a genuine no-op commit (post line-ending normalisation) is treated
+        # as success rather than a crash.
+        if "nothing to commit" in (cr.stdout + cr.stderr).lower():
+            print("NOTHING_TO_SYNC (GitHub already mirrors OneDrive after line-ending normalisation)")
+            return
+        print("SYNC_FAILED_COMMIT:", (cr.stderr or cr.stdout).strip()[:400]); sys.exit(2)
     pr = subprocess.run(["git", "-C", work, "push", "origin", a.branch], capture_output=True, text=True)
     if pr.returncode != 0:
          print("SYNC_FAILED_PUSH:", pr.stderr.strip().replace(token or "", "***")[:200]); sys.exit(2)
     print(f"SYNCED {len(changed)} file(s) -> {a.repo}: {', '.join(changed)}")
+    shutil.rmtree(work, ignore_errors=True)
 
 if __name__ == "__main__":
     main()
