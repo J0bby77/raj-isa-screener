@@ -162,7 +162,11 @@ TRACKED_SCRIPTS = (
     "build_monthly_isa_email.py", "entry_level_builder.py", "sync_vci_watchlist.py",
     "decision_ledger.py", "checkpoint_d.py", "compliance.py", "etf_tactical.py",
     "position_alerts.py", "calibration_report.py", "fund_returns.py", "drawdown_monitor.py",
+    "consistency_check.py", "scoring_config.py",
 )
+# Kept identical (by design, checked at self-test time is not automated — see the pre-run
+# task's MAINTENANCE RULE list) to the set of scripts whose edits must be pushed to GitHub.
+# If you add a script to one list, add it to the other.
 
 
 def pair_monthly_action_categories(ctx_text):
