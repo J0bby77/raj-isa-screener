@@ -66,7 +66,7 @@ def derive_sector_type(ticker_entry_wt: dict) -> tuple[str, str]:
     """
     Returns (sector_type, sector_type_source).
     sector_type is one of: quality_compounder_saas | cyclical |
-                            healthcare_tech | energy_adjacent
+                            healthcare_tech
     """
     # 1. Explicit field
     macro_sector = ticker_entry_wt.get("macro_sector")
@@ -77,9 +77,6 @@ def derive_sector_type(ticker_entry_wt: dict) -> tuple[str, str]:
     industry = (ticker_entry_wt.get("industry") or "").lower()
 
     # 2. Pipeline inference
-    if pipeline == "energy":
-        return "energy_adjacent", "inferred"
-
     if pipeline == "vci":
         for kw in HEALTHCARE_KEYWORDS:
             if kw in industry:
@@ -121,10 +118,6 @@ def score_dim1_valuation(ticker_data: dict, pipeline: str, acs_breakdown: str) -
                  f"price_fcf={_get(td,'score_b_price_fcf')}, fcf_yield={_get(td,'score_b_fcf_yield')}, "
                  f"target_upside={_get(td,'score_b_target_upside')}")
         return min(s, 10), basis
-    elif pipeline == "energy":
-        raw = _get(td, "score_ev_ebitda") + _get(td, "score_upside") + _get(td, "score_fwd_pe")
-        s = min(round(raw * 10 / 6), 10)
-        return s, f"ev_ebitda+upside+fwd_pe scaled to 10"
     elif pipeline == "vci":
         acs4 = _parse_acs_dim(acs_breakdown, "ACS4")
         s = min(round(acs4 / 15 * 10), 10)
@@ -142,11 +135,6 @@ def score_dim2_growth(ticker_data: dict, pipeline: str, acs_breakdown: str) -> t
         basis = (f"rev_cagr={_get(td,'score_rev_cagr')}, recent_rev={_get(td,'score_recent_rev')}, "
                  f"eps_cagr={_get(td,'score_eps_cagr')}, fwd_eps={_get(td,'score_b_fwd_eps')} → scaled 8")
         return s, basis
-    elif pipeline == "energy":
-        raw = (_get(td, "score_rev_growth_ttm") + _get(td, "score_rev_cagr") +
-               _get(td, "score_ebitda_growth") + _get(td, "score_fwd_growth"))
-        s = min(round(raw * 10 / 8), 10)
-        return s, "energy growth metrics scaled /8×10"
     elif pipeline == "vci":
         acs5 = _parse_acs_dim(acs_breakdown, "ACS5")
         s = min(round(acs5 / 10 * 10), 10)
@@ -165,11 +153,6 @@ def score_dim3_profitability(ticker_data: dict, pipeline: str, acs_breakdown: st
                  f"gross_margin={_get(td,'score_gross_margin')}, op_margin={_get(td,'score_op_margin')}, "
                  f"op_trend={_get(td,'score_op_margin_trend')}")
         return min(s, 10), basis
-    elif pipeline == "energy":
-        raw = (_get(td, "score_ebitda_margin") + _get(td, "score_roe") +
-               _get(td, "score_fcf") + _get(td, "score_gross_margin"))
-        s = min(round(raw * 10 / 8), 10)
-        return s, "energy profitability scaled /8×10"
     elif pipeline == "vci":
         acs4 = _parse_acs_dim(acs_breakdown, "ACS4")
         acs6 = _parse_acs_dim(acs_breakdown, "ACS6")
@@ -191,9 +174,6 @@ def score_dim4_balance_sheet(ticker_data: dict, pipeline: str, acs_breakdown: st
         if td.get("_nd_mand_fail"):
             basis += " [nd_mand_fail cap applied]"
         return s, basis
-    elif pipeline == "energy":
-        s = min(_get(td, "score_nd_ebitda") * 5, 10)
-        return s, f"nd_ebitda={_get(td,'score_nd_ebitda')} × 5"
     elif pipeline == "vci":
         acs8 = _parse_acs_dim(acs_breakdown, "ACS8")
         acs4 = _parse_acs_dim(acs_breakdown, "ACS4")
@@ -240,10 +220,6 @@ def score_dim6_moat(ticker_data: dict, pipeline: str, acs_breakdown: str) -> tup
         pb = _get(td, "part_b_score")
         s = min(round(pb / 26 * 10), 10)
         return s, f"part_b_score={pb}/26 → scaled"
-    elif pipeline == "energy":
-        pb = _get(td, "part_b_score")
-        s = min(round(pb / 16 * 10), 10)
-        return s, f"part_b_score={pb}/16 → scaled"
     elif pipeline == "vci":
         acs1 = _parse_acs_dim(acs_breakdown, "ACS1")
         acs2 = _parse_acs_dim(acs_breakdown, "ACS2")
@@ -263,10 +239,6 @@ def score_dim7_risk_reward(ticker_data: dict, pipeline: str, acs_breakdown: str)
         basis = (f"target_upside={_get(td,'score_b_target_upside')}, "
                  f"52wk={_get(td,'score_b_52wk')}, stress={_get(td,'score_b_stress')} → scaled /6")
         return s, basis
-    elif pipeline == "energy":
-        raw = _get(td, "score_upside") + _get(td, "score_52wk")
-        s = min(round(raw * 10 / 4), 10)
-        return s, f"upside={_get(td,'score_upside')}+52wk={_get(td,'score_52wk')} scaled /4"
     elif pipeline == "vci":
         acs8 = _parse_acs_dim(acs_breakdown, "ACS8")
         acs9 = _parse_acs_dim(acs_breakdown, "ACS9")

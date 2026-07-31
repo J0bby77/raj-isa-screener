@@ -9,7 +9,6 @@ Supports three source pipelines — routing is driven by each entry's "_source_p
   "growth_stock"  — standard 14-metric Part A (max 28) + 11-metric Part B (max 22) = /50
                     Conviction: 10-dimension framework /100 at Step 9.
                     Disparity flag: analyst rating != buy when total >= 40.
-  "energy"        — 10-metric Part A (max 20) + 8-metric Part B (max 16) = /36
                     Different thresholds: CapEx intensity positive, 52wk position inverted,
                     no FCF hard gate, no gross margin hard gate.
                     Disparity flag: analyst rating != buy when total >= 28.
@@ -66,22 +65,8 @@ SCORE_TO_PRELIM_CONVICTION = [
 ]
 
 # ---------------------------------------------------------------------------
-# ENERGY thresholds (must match energy_screener.py constants exactly)
-# ---------------------------------------------------------------------------
-ENERGY_PART_A_STRONG      = 14    # /20
-ENERGY_PART_A_ACCEPTABLE  = 8
-ENERGY_PART_B_STRONG      = 11    # /16
-ENERGY_PART_B_WATCH       = 6
-ENERGY_HIGH_SCORE         = 28    # /36 (~78%, proportional to growth 37/50) — disparity trigger
-
-# Energy conviction brackets (/36 → preliminary bracket)
-# Calibrated to energy_screener's ENERGY_STRONG_BUY / ENERGY_WATCH logic.
-SCORE_TO_PRELIM_CONVICTION_ENERGY = [
-    (30, "High Conviction",   "high",   "[Claude: refine to /100 at Step 9]"),
-    (25, "Medium Conviction", "medium", "[Claude: refine to /100 at Step 9]"),
-    (18, "Watch but Wait",    "low",    "[Claude: refine to /100 at Step 9]"),
-    (0,  "No Action",         "low",    "[Claude: refine to /100 at Step 9]"),
-]
+# ENERGY thresholds — REMOVED 26-Jul-2026 with Path C. (These literals were in any case dead:
+# they were shadowed by the _cfg re-assignments at the foot of this module.)
 
 # ---------------------------------------------------------------------------
 # VCI thresholds (must match vci_acs_scorer.py / VCI run spec)
@@ -411,234 +396,6 @@ def build_part_b_table(s: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# ENERGY Part A — 10 metric row builders (max 20 pts)
-# ---------------------------------------------------------------------------
-def build_energy_part_a_table(s: dict) -> list[dict]:
-    """
-    Build Energy Part A metrics table (10 rows, max 20 pts) for email s3.
-    Thresholds must match energy_screener.py constants.
-    Key differences from growth stock Part A:
-      - EBITDA margin replaces ROIC as the primary profitability signal
-      - CapEx intensity is a POSITIVE signal (heavy investment = growth)
-      - Revenue scale is an absolute size check
-      - No hard gate rows — energy gates are applied before scoring
-    """
-    rows = []
-
-    def row(label, value_fmt, score, resolved, threshold_note=""):
-        ass = assessment_text(score, resolved)
-        sig = score_signal(score) if resolved else "amber"
-        return {
-            "label":          label,
-            "value":          value_fmt if resolved else "Unresolved",
-            "assessment":     ass,
-            "signal":         sig,
-            "score":          score,
-            "max_score":      2,
-            "threshold_note": threshold_note,
-        }
-
-    # 1. Revenue Growth TTM
-    rg = s.get("rev_growth_ttm")
-    rows.append(row(
-        "Revenue Growth TTM", fmt_pct(rg),
-        s.get("score_rev_growth_ttm", 0), is_resolved(rg),
-        "Strong >=20% | Acceptable >=8% | Weak <8%"
-    ))
-
-    # 2. Revenue CAGR 3yr
-    rc = s.get("rev_cagr")
-    rows.append(row(
-        "Revenue CAGR 3yr", fmt_pct(rc),
-        s.get("score_rev_cagr", 0), is_resolved(rc),
-        "Strong >=12% | Acceptable >=5% | Weak <5%"
-    ))
-
-    # 3. EBITDA Margin (replaces gross margin as primary profitability signal)
-    em = s.get("ebitda_margin")
-    rows.append(row(
-        "EBITDA Margin", fmt_pct(em),
-        s.get("score_ebitda_margin", 0), is_resolved(em),
-        "Strong >=20% | Acceptable >=5% | Weak <5% — no gross margin gate for energy"
-    ))
-
-    # 4. Gross Margin (scoring signal only — NOT a gate for energy)
-    gm = s.get("gross_margin")
-    rows.append(row(
-        "Gross Margin (scoring only — not a gate)", fmt_pct(gm),
-        s.get("score_gross_margin", 0), is_resolved(gm),
-        "Strong >=25% | Acceptable >=12% | Weak <12% — informational; does not exclude"
-    ))
-
-    # 5. EBITDA Growth YoY
-    eg = s.get("ebitda_growth")
-    rows.append(row(
-        "EBITDA Growth YoY", fmt_pct(eg),
-        s.get("score_ebitda_growth", 0), is_resolved(eg),
-        "Strong >=20% | Acceptable >=5% | Weak <5%"
-    ))
-
-    # 6. FCF Status (energy-specific: positive/near-breakeven/negative)
-    fcf        = s.get("fcf")
-    fcf_margin = s.get("fcf_margin")
-    if is_resolved(fcf):
-        if fcf > 0:
-            fcf_fmt = f"Positive ({fmt_pct(fcf_margin)} margin)"
-        elif is_resolved(fcf_margin) and fcf_margin > -0.10:
-            fcf_fmt = f"Near breakeven ({fmt_pct(fcf_margin)} margin)"
-        else:
-            fcf_fmt = f"Negative ({fmt_pct(fcf_margin)} margin)"
-    else:
-        fcf_fmt = "—"
-    rows.append(row(
-        "FCF Status", fcf_fmt,
-        s.get("score_fcf", 0), is_resolved(fcf),
-        "Positive = 2pts | Near breakeven (>-10% margin, capex cycle) = 1pt | Deeply negative = 0pts"
-    ))
-
-    # 7. Return on Equity (ROE)
-    roe = s.get("roe")
-    rows.append(row(
-        "Return on Equity (ROE)", fmt_pct(roe),
-        s.get("score_roe", 0), is_resolved(roe),
-        "Strong >=15% | Acceptable >=5% | Weak <5%"
-    ))
-
-    # 8. CapEx Intensity — INVERTED vs standard (high capex = growth investment signal)
-    capex = s.get("capex_intensity")
-    rows.append(row(
-        "CapEx Intensity (growth investment signal)", fmt_pct(capex),
-        s.get("score_capex", 0), is_resolved(capex),
-        "Strong >=8% of revenue | Acceptable >=3% | Weak <3% — HIGH capex signals capacity expansion"
-    ))
-
-    # 9. Revenue Scale
-    rev_scale = s.get("rev_scale")
-    if is_resolved(rev_scale):
-        if rev_scale >= 1e9:
-            scale_fmt = f"${rev_scale / 1e9:.1f}B"
-        elif rev_scale >= 1e6:
-            scale_fmt = f"${rev_scale / 1e6:.0f}M"
-        else:
-            scale_fmt = f"${rev_scale:,.0f}"
-    else:
-        scale_fmt = "—"
-    rows.append(row(
-        "Revenue Scale (TTM)", scale_fmt,
-        s.get("score_rev_scale", 0), is_resolved(rev_scale),
-        "Strong >$1B | Acceptable $200M–$1B | Weak <$200M"
-    ))
-
-    # 10. Forward Growth (best of revenue growth / EPS growth)
-    fg = s.get("fwd_growth")
-    rows.append(row(
-        "Forward Growth (rev / EPS — best)", fmt_pct(fg),
-        s.get("score_fwd_growth", 0), is_resolved(fg),
-        "Strong >=25% | Acceptable >=10% | Weak <10%"
-    ))
-
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# ENERGY Part B — 8 metric row builders (max 16 pts)
-# ---------------------------------------------------------------------------
-def build_energy_part_b_table(s: dict) -> list[dict]:
-    """
-    Build Energy Part B metrics table (8 rows, max 16 pts) for email s3.
-    Key differences from growth stock Part B:
-      - 52-week position scoring is INVERTED (high position = momentum positive)
-      - Net Debt / EBITDA tolerance is higher (<=5x vs <=3x) — capex-cycle leverage
-      - Analyst recommendation uses numeric mean (1-5 scale) not text key
-      - No stress test row, no dividend payout row, no FCF yield row
-    """
-    rows = []
-
-    def row(label, value_fmt, score, resolved, threshold_note=""):
-        ass = assessment_text(score, resolved)
-        sig = score_signal(score) if resolved else "amber"
-        return {
-            "label":          label,
-            "value":          value_fmt if resolved else "Unresolved",
-            "assessment":     ass,
-            "signal":         sig,
-            "score":          score,
-            "max_score":      2,
-            "threshold_note": threshold_note,
-        }
-
-    # 1. EV / EBITDA
-    ev_eb = s.get("ev_ebitda")
-    rows.append(row(
-        "EV / EBITDA", fmt_x(ev_eb),
-        s.get("score_ev_ebitda", 0), is_resolved(ev_eb),
-        "Strong <=15x | Acceptable <=35x | Weak >35x"
-    ))
-
-    # 2. Net Debt / EBITDA (higher tolerance for energy capex cycle)
-    nd = s.get("nd_ebitda")
-    nd_fmt = "Net Cash" if (is_resolved(nd) and nd < 0) else fmt_x(nd)
-    rows.append(row(
-        "Net Debt / EBITDA", nd_fmt,
-        s.get("score_nd_ebitda", 0), is_resolved(nd),
-        "Strong <=2x | Acceptable <=5x | Weak >5x — higher tolerance vs standard (capex-cycle leverage)"
-    ))
-
-    # 3. Analyst Recommendation (mean 1-5 scale: 1=Strong Buy, 5=Strong Sell)
-    rec_mean = s.get("recommendation_mean")
-    rec_fmt = f"{rec_mean:.2f} / 5.0 (lower = stronger buy)" if is_resolved(rec_mean) else "—"
-    rows.append(row(
-        "Analyst Recommendation (mean)", rec_fmt,
-        s.get("score_analyst_rec", 0), is_resolved(rec_mean),
-        "Strong <=2.5 (Buy/Strong Buy) | Acceptable <=3.2 (Hold/Mild Buy) | Weak >3.2"
-    ))
-
-    # 4. Price vs Consensus Target (upside)
-    upside = s.get("upside_pct") or _tgap(s)
-    rows.append(row(
-        "Price vs Consensus Target", fmt_pct(upside),
-        s.get("score_upside", 0), is_resolved(upside),
-        "Strong >=20% upside | Acceptable >=5% | Weak <5%"
-    ))
-
-    # 5. 52-Week Position — MOMENTUM signal (INVERTED vs standard growth stock)
-    pos52 = s.get("pos_52wk")
-    pos52_fmt = f"{pos52 * 100:.0f}% of 52wk range" if is_resolved(pos52) else "—"
-    rows.append(row(
-        "52-Week Position (momentum — INVERTED)", pos52_fmt,
-        s.get("score_52wk", 0), is_resolved(pos52),
-        "Strong >=80% of range | Acceptable >=50% | Weak <50% — HIGH position = momentum POSITIVE (inverse of standard)"
-    ))
-
-    # 6. Forward P/E
-    fwd_pe = s.get("fwd_pe")
-    rows.append(row(
-        "Forward P/E", fmt_x(fwd_pe),
-        s.get("score_fwd_pe", 0), is_resolved(fwd_pe),
-        "Strong <=20x | Acceptable <=40x | Weak >40x"
-    ))
-
-    # 7. Forward EPS Growth
-    eps_g = s.get("eps_growth")
-    rows.append(row(
-        "Forward EPS Growth", fmt_pct(eps_g),
-        s.get("score_eps_growth", 0), is_resolved(eps_g),
-        "Strong >=20% | Acceptable >=8% | Weak <8%"
-    ))
-
-    # 8. Analyst Coverage Count (depth of coverage = quality of price discovery)
-    ac = s.get("analyst_count")
-    ac_fmt = str(int(ac)) + " analysts" if is_resolved(ac) else "—"
-    rows.append(row(
-        "Analyst Coverage (count)", ac_fmt,
-        s.get("score_analyst_count", 0), is_resolved(ac),
-        "Strong >=10 analysts | Acceptable >=5 | Weak <5"
-    ))
-
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # VCI summary section (no Part A/B tables — ACS scorecard format)
 # ---------------------------------------------------------------------------
 def build_vci_summary_section(s: dict) -> dict:
@@ -808,22 +565,6 @@ def prelim_conviction_bracket(total_score, total_max=None) -> dict:
             "conviction_score": "[Claude fills /100 at Step 9]"}
 
 
-def prelim_conviction_bracket_energy(total_score: int | None) -> dict:
-    """Energy preliminary conviction bracket (/36)."""
-    ts = total_score or 0
-    for threshold, label, level, note in SCORE_TO_PRELIM_CONVICTION_ENERGY:
-        if ts >= threshold:
-            return {
-                "total_score_36":   ts,
-                "bracket":          label,
-                "level":            level,
-                "note":             note,
-                "conviction_score": "[Claude fills /100 at Step 9]",
-            }
-    return {"total_score_36": ts, "bracket": "No Action", "level": "low",
-            "conviction_score": "[Claude fills /100 at Step 9]"}
-
-
 def prelim_conviction_bracket_vci(acs_score: int | None) -> dict:
     """VCI conviction bracket (ACS /100). Returns deployment status and tier."""
     acs = acs_score or 0
@@ -852,9 +593,7 @@ def prelim_conviction_bracket_vci(acs_score: int | None) -> dict:
 def get_conviction_bracket(s: dict) -> dict:
     """Dispatcher: return the correct conviction bracket dict for any pipeline."""
     pipeline = s.get("_source_pipeline", "growth_stock")
-    if pipeline == "energy":
-        return prelim_conviction_bracket_energy(s.get("total_score"))
-    elif pipeline == "vci":
+    if pipeline == "vci":
         acs = s.get("acs_score") or s.get("_acs_score")
         return prelim_conviction_bracket_vci(acs)
     else:
@@ -878,12 +617,7 @@ def build_s5_row(ticker: str, s: dict, wl_entry: dict | None) -> dict:
 
     conv = get_conviction_bracket(s)
 
-    if pipeline == "energy":
-        score_display = (
-            f"{s.get('part_a_score', '?')}/20 + {s.get('part_b_score', '?')}/16 "
-            f"({s.get('total_score', '?')}/36) | {conv['bracket']}"
-        )
-    elif pipeline == "vci":
+    if pipeline == "vci":
         acs = s.get("acs_score") or s.get("_acs_score")
         score_display = (
             f"ACS {acs}/100 | {conv['bracket']}"
@@ -935,10 +669,7 @@ def build_s7_row(ticker: str, s: dict) -> dict:
     conv     = get_conviction_bracket(s)
 
     # Score display adapts to pipeline
-    if pipeline == "energy":
-        score_summary = (f"{s.get('part_a_score','?')}/20 + {s.get('part_b_score','?')}/16 "
-                         f"= {s.get('total_score','?')}/36")
-    elif pipeline == "vci":
+    if pipeline == "vci":
         acs = s.get("acs_score") or s.get("_acs_score")
         score_summary = f"ACS {acs}/100"
     else:
@@ -975,9 +706,7 @@ def build_s7_row(ticker: str, s: dict) -> dict:
 def build_s3_skeleton(ticker: str, s: dict) -> dict:
     """Route to the appropriate s3 skeleton builder based on source_pipeline."""
     pipeline = s.get("_source_pipeline", "growth_stock")
-    if pipeline == "energy":
-        return _build_s3_skeleton_energy(ticker, s)
-    elif pipeline == "vci":
+    if pipeline == "vci":
         return _build_s3_skeleton_vci(ticker, s)
     else:
         return _build_s3_skeleton_growth(ticker, s)
@@ -1034,82 +763,6 @@ def _build_s3_skeleton_growth(ticker: str, s: dict) -> dict:
             f"<strong>Analyst disparity:</strong> {analyst['disparity_note']}"
         ] if analyst["disparity_flag"] else []),
         "separator_after": False,
-    }
-
-
-def _build_s3_skeleton_energy(ticker: str, s: dict) -> dict:
-    """Energy stock s3 investment case skeleton (/36 scorecard)."""
-    part_a_table = build_energy_part_a_table(s)
-    part_b_table = build_energy_part_b_table(s)
-    analyst      = build_analyst_summary(s)
-    conv         = prelim_conviction_bracket_energy(s.get("total_score"))
-
-    # Gate status for header
-    gate_pass   = s.get("gate_pass")
-    gate_code   = s.get("gate_code", "")
-    gate_reason = s.get("gate_reason", "")
-    gate_signal = "green" if gate_pass else ("amber" if gate_pass is None else "red")
-
-    header_metrics = [
-        {"label": "Energy Gate",       "value": gate_code or ("PASS" if gate_pass else "FAIL"),
-         "assessment": gate_reason or ("All gates passed" if gate_pass else "Gate failed"),
-         "signal": gate_signal},
-        {"label": "Part A Score",      "value": f"{s.get('part_a_score', '?')}/20",
-         "assessment": s.get("part_a_status", ""),
-         "signal": "green" if (s.get("part_a_score") or 0) >= ENERGY_PART_A_STRONG else "amber"},
-        {"label": "Part B Score",      "value": f"{s.get('part_b_score', '?')}/16",
-         "assessment": s.get("part_b_status", ""),
-         "signal": "green" if (s.get("part_b_score") or 0) >= ENERGY_PART_B_STRONG else "amber"},
-        {"label": "Combined Score",    "value": f"{s.get('total_score', '?')}/36",
-         "assessment": conv["bracket"],
-         "signal": conv["level"] if conv["level"] != "low" else "amber"},
-        {"label": "Conviction Score",  "value": conv["conviction_score"],
-         "assessment": conv["note"], "signal": "amber"},
-        {"label": "Current Price",     "value": fmt_price(s.get("current_price"), s.get("currency", "USD")),
-         "assessment": "", "signal": ""},
-        {"label": "Entry Level",       "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency", "USD")),
-         "assessment": "In range ✓" if s.get("_in_window") else "Above entry",
-         "signal": "green" if s.get("_in_window") else "amber"},
-        {"label": "Target Gap (display)", "value": fmt_pct(_tgap(s)),
-         "assessment": analyst.get("analyst_rating_clean", "—"),
-         "signal": "green" if (_tgap(s) or 0) > 0.20 else "amber"},
-        {"label": "Next Earnings",     "value": s.get("next_earnings", "—"),
-         "assessment": "", "signal": ""},
-        {"label": "EBITDA Margin",     "value": fmt_pct(s.get("ebitda_margin")),
-         "assessment": "", "signal": "green" if (s.get("ebitda_margin") or 0) >= 0.20 else "amber"},
-        {"label": "EV/EBITDA",         "value": fmt_x(s.get("ev_ebitda")),
-         "assessment": "", "signal": "green" if is_resolved(s.get("ev_ebitda")) and s.get("ev_ebitda") <= 15 else "amber"},
-    ]
-
-    return {
-        "action":           "BUY",
-        "ticker":           ticker,
-        "name":             s.get("company", ticker),
-        "pipeline":         "energy",
-        "conviction":       conv["conviction_score"],
-        "part_a_score":     s.get("part_a_score"),
-        "part_b_score":     s.get("part_b_score"),
-        "total_score":      s.get("total_score"),
-        "score_max":        36,
-        "part_a_status":    s.get("part_a_status", ""),
-        "part_b_status":    s.get("part_b_status", ""),
-        "gate_pass":        gate_pass,
-        "gate_code":        gate_code,
-        "gate_reason":      gate_reason,
-        "metrics_table":    header_metrics,
-        "part_a_table":     part_a_table,
-        "part_b_table":     part_b_table,
-        "analyst":          analyst,
-        "overlays":         {"note": "Overlays (ROIC vs WACC, valuation history) not applicable for energy pipeline"},
-        "paragraphs": [
-            "<strong>Investment thesis:</strong> [Claude fills — energy transition angle, contracted revenue vs merchant exposure, data centre / AI demand catalyst, capacity growth plan]",
-            "<strong>Valuation framing:</strong> [Claude fills — EV/EBITDA vs sector peers, regulated vs merchant premium/discount, capex cycle stage, base/bull/bear cases]",
-            "<strong>Portfolio fit:</strong> [Claude fills — energy sleeve allocation, currency, sector diversification vs existing holdings, Citigroup overlap check]",
-            "<strong>Execution:</strong> [Claude fills — trade timing, limit price, shares to buy, dealing cost, FX cost, cash remaining, preclearance reminder, 30-day hold]",
-        ] + ([
-            f"<strong>Analyst disparity:</strong> {analyst['disparity_note']}"
-        ] if analyst.get("disparity_flag") else []),
-        "separator_after":  False,
     }
 
 
@@ -1180,12 +833,6 @@ PART_B_STRONG_THRESHOLD   = _cfg.GROWTH_PART_B_STRONG
 PART_B_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_B_ACCEPTABLE
 HIGH_SCORE_THRESHOLD      = _cfg.GROWTH_HIGH_SCORE
 SCORE_TO_PRELIM_CONVICTION = _cfg.GROWTH_CONVICTION_BRACKETS
-ENERGY_PART_A_STRONG      = _cfg.ENERGY_PART_A_STRONG
-ENERGY_PART_A_ACCEPTABLE  = _cfg.ENERGY_PART_A_ACCEPTABLE
-ENERGY_PART_B_STRONG      = _cfg.ENERGY_PART_B_STRONG
-ENERGY_PART_B_WATCH       = _cfg.ENERGY_PART_B_WATCH
-ENERGY_HIGH_SCORE         = _cfg.ENERGY_HIGH_SCORE
-SCORE_TO_PRELIM_CONVICTION_ENERGY = _cfg.ENERGY_CONVICTION_BRACKETS
 STRONG_RATINGS            = _cfg.STRONG_RATINGS
 
 def run(metrics_path: str, out_path: str) -> dict:
@@ -1216,13 +863,7 @@ def run(metrics_path: str, out_path: str) -> dict:
         analyst = build_analyst_summary(s)
         rating  = (s.get("analyst_rating") or "").lower().strip()
 
-        if pipeline == "energy":
-            # Energy: disparity triggers at >=28/36 (~78%, proportional to growth 37/50)
-            analyst["disparity_flag"] = (
-                rating not in STRONG_RATINGS
-                and (s.get("total_score") or 0) >= ENERGY_HIGH_SCORE
-            )
-        elif pipeline == "vci":
+        if pipeline == "vci":
             # VCI: analyst disparity not applicable — VCI uses ACS, not analyst consensus
             analyst["disparity_flag"] = False
         # else: growth_stock — disparity already computed correctly by build_analyst_summary
@@ -1288,23 +929,7 @@ def run(metrics_path: str, out_path: str) -> dict:
             "analyst_disparity": s.get("_analyst_disparity_flag", False),
         }
 
-        if pipeline == "energy":
-            base.update({
-                "total_score_36": s.get("total_score"),
-                "part_a_score":   s.get("part_a_score"),
-                "part_b_score":   s.get("part_b_score"),
-                "score_display":  f"{s.get('total_score', '?')}/36",
-                "conviction_score": "[Claude fills /100 at Step 9]",
-                "target_upside":  fmt_pct(_tgap(s)),   # D7 display gap
-                "implied_upside_fv": fmt_pct(s.get("implied_upside_fv")),  # D7 canonical
-                "expected_return_12_24m": s.get("expected_return_12_24m"), # A2 (% pa)
-                "revision_stage": s.get("revision_stage"),                 # A3 first-class
-                "action": (
-                    "In range — score at Step 9" if s.get("_in_window")
-                    else "Monitor entry level"
-                ),
-            })
-        elif pipeline == "vci":
+        if pipeline == "vci":
             acs = s.get("acs_score") or s.get("_acs_score")
             base.update({
                 "acs_score":        acs,

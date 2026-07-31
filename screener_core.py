@@ -125,11 +125,41 @@ BATCH_PARAMS = {
 # ── Gross margin gate thresholds — sector-segmented (Enhancement 2B) ─────────
 # Replaces GATE2_GM_STANDARD and GATE2_GM_NASDAQ. Threshold driven by sector
 # classification (classify_sector_bucket), not by exchange or nasdaq_mode flag.
+# ── Power equipment / power EPC anchors (26-Jul-26, Path C absorption) ────────
+# These sit under Industrials with generic industry strings ("Electrical Equipment & Parts",
+# "Engineering & Construction", "Specialty Industrial Machinery") that also cover non-power
+# businesses, so they are pinned explicitly rather than matched by keyword. Same pattern as
+# IDM_ANCHORS / FABLESS_ANCHORS. Add a ticker here to give it the energy_utilities treatment.
+ENERGY_UTIL_ANCHORS = {
+    # Only the names whose yfinance industry string is ambiguous or idiosyncratic. The sector and
+    # industry rules in classify_sector_bucket do the heavy lifting; keep this list SHORT.
+    # "Electrical Equipment & Parts" is handled by keyword (zero over-captures across 694 live
+    # tickers), so ETN/HUBB/NVT/ATKR/LR.PA/PRY.MI/NEX.PA/SU.PA do NOT need pinning.
+    # "Engineering & Construction" is NOT keyword-matched (it over-captured 4 general contractors:
+    # ROAD, FER, LGN, TTEK), so the POWER-EPC names are pinned here instead.
+    "GEV",      # GE Vernova — industry string is generic Specialty Industrial Machinery
+    "ENR.DE",   # Siemens Energy — same
+    "PWR",      # Quanta Services — Engineering & Construction, but electric power infrastructure
+    "AGX",      # Argan — Engineering & Construction, power plant EPC
+    "MYRG",     # MYR Group — Engineering & Construction, electrical T&D
+    "PRIM",     # Primoris Services — Engineering & Construction, utility/energy infrastructure
+    "IESC",     # IES Holdings — Engineering & Construction, electrical infrastructure
+    "AKSO.OL",  # Aker Solutions — Engineering & Construction, energy EPC
+}
+
 GATE2_GM_THRESHOLD = {
     "software_saas":           0.40,   # SaaS/platform — retains existing Nasdaq gate
     "semiconductor_fabless":   0.50,   # Fabless designers (NVDA, AMD, QCOM) have structurally high margins
     "semiconductor_hardware":  0.25,   # IDMs (MU, TXN) + optical hardware (LITE, AAOI, STM)
     "semiconductor_equipment": 0.20,   # Fluid delivery, probe cards, test systems (ICHR, AEHR, UCTT, FORM)
+    "energy_utilities":        0.12,   # 26-Jul-26 CALIBRATED (Path C absorption). Utilities, IPPs, grid
+                                       # equipment, energy EPC: low gross margin is a business-model
+                                       # artefact, not a quality signal. The 20% default cost ~5pp of
+                                       # median forward-return spread on 459 point-in-time energy
+                                       # observations and wrongly excluded ENR.DE (GM 13.1%, +54.8%),
+                                       # GEV (17.4%, +88.3%) and PWR (14.8%, +45.5%). 0.12 sits inside
+                                       # the stable 10-15% plateau. Evidence:
+                                       # ISA_PathC_Energy_Calibration_Study_Jul2026.md
     "default":                 0.20,   # All other sectors — matches former GATE2_GM_STANDARD exactly
 }
 
@@ -140,6 +170,12 @@ GROSS_MARGIN_SCORE_THRESHOLDS = {
     "semiconductor_fabless":   (0.60, 0.50),   # Fabless: NVDA/AVGO-type margins
     "semiconductor_hardware":  (0.40, 0.25),   # IDMs: MU at 39.8% → 1pt (correct)
     "semiconductor_equipment": (0.30, 0.20),   # Equipment: ICHR/UCTT at 15–20% → 1pt
+    "energy_utilities":        (0.25, 0.12),   # 26-Jul-26: scaled to the same population the Gate 2
+                                               # floor was calibrated on, so a utility is not scored
+                                               # against SaaS-shaped margins. NOTE the study found
+                                               # gross margin NEGATIVELY related to forward return in
+                                               # energy (IC -0.143), so this metric is deliberately
+                                               # not rewarded further than parity.
     "default":                 (0.30, 0.20),   # All others — aligns existing non-Nasdaq scoring
 }
 
@@ -147,6 +183,11 @@ GROSS_MARGIN_SCORE_THRESHOLDS = {
 # "invert": high capex = capacity investment signal (hardware)
 # "standard": low capex = asset-light quality signal (SaaS/default)
 CAPEX_SCORE_MODE = {
+    # 26-Jul-26: energy_utilities is explicitly STANDARD, never "invert". Path C scored high capex
+    # as a positive (2pts at >=8% of revenue); the calibration study contradicted that at every cut
+    # (IC -0.237, CI [-0.32,-0.15], 5/5 stability criteria, same sign in all 3 cohorts, US, non-US
+    # and the independent breadth population). Low capex predicts HIGHER forward returns in energy.
+    "energy_utilities":        "standard",
     "semiconductor_hardware":  "invert",
     "semiconductor_equipment": "invert",
     "software_saas":           "standard",
@@ -293,6 +334,37 @@ def classify_sector_bucket(sector: str, industry: str, gross_margin: float = Non
         # No capex available and not anchored → conservative default of hardware
         # (lower 25% Gate 2 bar) so cyclical IDMs are never gated out on a down-cycle margin.
         return "semiconductor_hardware"
+
+    # ── Energy / utilities / power infrastructure (26-Jul-26, Path C absorption) ──
+    # Placed AFTER the semiconductor branches so a semi is never captured here.
+    #
+    # Scope is deliberately NARROW: the 0.12 Gate 2 floor was calibrated on 459 point-in-time
+    # observations of electric utilities, IPPs, renewables, and power equipment/EPC. Applying it
+    # to populations outside that calibration would repeat the error the study's stability
+    # criteria exist to prevent, so:
+    #   - REGULATED WATER is excluded (no water utility was in the calibration universe)
+    #   - GENERAL CONTRACTORS are excluded — the calibrated E&C names were all POWER EPC, so the
+    #     equipment/EPC names are captured by an explicit anchor list (the same pattern the module
+    #     already uses for IDM_ANCHORS / FABLESS_ANCHORS) rather than by a broad keyword
+    #   - OIL & GAS E&P / refining / midstream keep "default": the study found the gate set does
+    #     NOT improve outcomes in that population (median spread -5.1%)
+    # Evidence: ISA_PathC_Energy_Calibration_Study_Jul2026.md
+    if "utilities" in s and "water" not in i:
+        return "energy_utilities"
+    if any(kw in si for kw in [
+            "renewable", "solar", "wind", "hydrogen", "fuel cell", "nuclear",
+            "electrical equipment"]) \
+            and "semiconductor" not in si:
+        return "energy_utilities"
+    if (ticker or "").upper() in ENERGY_UTIL_ANCHORS:
+        return "energy_utilities"
+    # NOTE hydrocarbons (Energy sector: E&P, oilfield services, midstream, refining, coal) fall
+    # through to "default" DELIBERATELY. Tested 26-Jul-26: in that population the gate set is
+    # counterproductive at every gross-margin floor (pass-vs-fail median spread -3.8% at 12%,
+    # -5.1% at 20%) and gross margin carries no reliable signal (IC -0.092, CI [-0.22,+0.04]).
+    # Loosening their Gate 2 floor would admit ~17 more names into a population where passing the
+    # gates is a NEGATIVE signal. Dispersion there is commodity/sub-sector driven (midstream
+    # +12.2%, refining +15.8% vs oil_gas_ep -12.1%), not fundamental-quality driven.
 
     # ── Default — all other sectors ───────────────────────────────────────────
     return "default"
@@ -1072,10 +1144,46 @@ def fetch_ipc35():
         return pd.DataFrame(columns=["ticker", "index"]), "CONSTITUENT_SOURCE_FAILURE:IPC35"
 
 
+SUPPLEMENTARY_FILE = "supplementary_constituents.json"
+
+
+def _load_supplementary(group):
+    """WP-A2: return (DataFrame|None, warning|None) of supplementary constituents for `group`.
+
+    Never raises. Returns (None, None) when the feature is absent or switched off, so a screen
+    with no supplementary file behaves byte-identically to the pre-WP-A2 code.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SUPPLEMENTARY_FILE)
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as e:
+        return None, f"SUPPLEMENTARY_CONSTITUENTS_UNREADABLE:{type(e).__name__}"
+    if not doc.get("_active", False):
+        return None, None
+    rows = (doc.get("groups") or {}).get(group) or []
+    clean = []
+    for r in rows:
+        t = (r.get("ticker") or "").strip()
+        if not t:
+            continue
+        clean.append({"ticker": t, "company": r.get("company", t),
+                      "sector": r.get("sector", ""), "index": "SUPPLEMENTARY"})
+    if not clean:
+        return None, None
+    log.info(f"[WP-A2] {len(clean)} supplementary constituent(s) appended for {group}")
+    return pd.DataFrame(clean), None
+
+
 def fetch_constituents(group):
     """
     Dispatch constituent fetch for all indices in a group.
     Returns (combined_df, warnings_list).
+
+    WP-A2 (26-Jul-26): after the index fetchers, any names listed for this group in
+    supplementary_constituents.json are appended (see _load_supplementary).
     """
     index_list = GROUP_INDICES.get(group, [])
     all_dfs = []
@@ -1103,6 +1211,17 @@ def fetch_constituents(group):
             all_dfs.append(df)
         else:
             warnings.append(f"CONSTITUENT_SOURCE_FAILURE:{idx}")
+    # WP-A2 (26-Jul-26, Path C absorption): append any supplementary constituents for this group.
+    # These are names no index screen reaches (Canada, ADR lines, FTSE 100, and the June-2026 audit's
+    # never-actioned Priority-1 additions). Data-driven and fail-safe: a missing, inactive or
+    # unparseable file logs a warning and leaves the screen unchanged. De-duplication against index
+    # members and STRUCTURAL_EXCLUSIONS are handled by the existing lines below.
+    sup_df, sup_warn = _load_supplementary(group)
+    if sup_warn:
+        warnings.append(sup_warn)
+    if sup_df is not None and not sup_df.empty:
+        all_dfs.append(sup_df)
+
     if not all_dfs:
         return pd.DataFrame(columns=["ticker", "index"]), warnings
     combined = pd.concat(all_dfs, ignore_index=True)
@@ -2405,6 +2524,11 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     if current_price and low_52wk and low_52wk > 0:
         pct_above_low = (current_price - low_52wk) / low_52wk
     out["position_52wk"] = position_52wk
+    # WP-D (29-Jul-26): high_52wk was COMPUTED here but never emitted, so door_inflection's
+    # `1 - price/high_52wk >= 25%` test read None and the door was False for 100% of rows in
+    # every screen ever run (423/423 NASDAQ 24-Jul, 271/271 STOXX600 25-Jul). One-line emit.
+    out["high_52wk"] = high_52wk or None
+    out["low_52wk"]  = low_52wk or None
     if pct_above_low is None:
         out["score_b_52wk"] = 0
     elif pct_above_low < 0.15:
@@ -2548,7 +2672,19 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
 
     # Metric 12: Book-to-Bill Trailing 2 Quarters
     # Source: earnings call disclosures — not available in automated run.
-    # To inject: set info["_book_to_bill_trailing_2q"] before calling score_part_b.
+    # RETIRED 29-Jul-2026 (WP4). These two metrics require info["_book_to_bill_trailing_2q"] /
+    # info["_backlog_ttm"] to be INJECTED by a caller. Nothing in the pipeline has ever injected
+    # them, and yfinance carries neither (book-to-bill is a SEMI industry release; backlog is
+    # 10-Q/10-K narrative). Result: book_to_bill_status == backlog_ev_status == "unresolved" for
+    # 30/30 applicable semiconductor names on the 24-Jul-26 NASDAQ run, and score_b_book_to_bill /
+    # score_b_backlog_ev blank for 100% of rows in every screen ever produced.
+    # They are INERT, not harmful — b2b_effective_max() correctly holds the denominator at /22 when
+    # nothing scored, so semis are not penalised. Retained as no-op hooks (deleting the columns
+    # would break the full_data schema and every downstream reader); status now reports "retired"
+    # so the output stops implying instrumentation that does not exist.
+    # The real gap this leaves — no semiconductor CYCLE indicator, which is what the MU July-26
+    # drawdown exposed — is registered as WPM-6 for a sector-level overlay build.
+    _B2B_RETIRED = True
     btb_val = safe_float(info.get("_book_to_bill_trailing_2q")) if info else None
     out["book_to_bill_trailing_2q"] = btb_val
     if not out["b2b_applicable"]:
@@ -2559,7 +2695,7 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         # structurally penalised for a field no automated source populates. Capture moves
         # to the Step-12/intramonth deep-dive (Data_Sourcing_Policy 39-46).
         out["score_b_book_to_bill"] = None
-        out["book_to_bill_status"]  = "unresolved"
+        out["book_to_bill_status"]  = "retired" if _B2B_RETIRED else "unresolved"
     elif btb_val >= BOOK_TO_BILL_SCORE_THRESHOLDS[0]:    # strong >= 1.20
         out["score_b_book_to_bill"] = 2
         out["book_to_bill_status"]  = "scored"
@@ -2583,7 +2719,7 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["backlog_ev_status"]  = "not_applicable"
     elif backlog_ev is None:
         out["score_b_backlog_ev"] = None   # review item 7: N/A, not 0 (see book_to_bill)
-        out["backlog_ev_status"]  = "unresolved"
+        out["backlog_ev_status"]  = "retired" if _B2B_RETIRED else "unresolved"
     elif backlog_ev >= BACKLOG_EV_SCORE_THRESHOLDS[0]:    # strong >= 2.00
         out["score_b_backlog_ev"] = 2
         out["backlog_ev_status"]  = "scored"
@@ -2935,6 +3071,10 @@ FIELD_MAP = [
     # Forward axis (Part 3 §13) + per-stock max — carried into the screen output for SUMMARY + shadow
     "forward_axis_score", "revisions_score", "score_f_eps_trend", "score_f_margin_traj", "score_f_rev_est", "score_f_price_mom",
     "eps_trend_mom_pct", "margin_traj_delta_pp", "rev_est_fwd_pct", "price_mom_12_1m_pct", "total_max", "part_b_max",
+    # WP-M (29-Jul-26): short-horizon momentum, its cross-sectional percentile, the blended score and
+    # the two-horizon state label. WP-D: high_52wk (door_inflection dependency that never existed).
+    "price_mom_1m_pct", "score_f_price_mom_1m", "price_mom_pctl", "score_f_price_mom_blend",
+    "momentum_state", "timing_gate_shadow", "high_52wk", "low_52wk",
     "revision_stage", "revision_runway",
     "score_b_peg", "score_b_ev_g", "score_b_pfcf_g", "score_b_est_rev",
     "est_rev_direction",
@@ -3181,6 +3321,53 @@ def _price_momentum_score(history, lookback=None, skip=None):
         return None, None
 
 
+def _price_momentum_short(history, lookback=None, skip=None):
+    """Trailing 1-MONTH price return % + 0/1/2 band. WP-M (29-Jul-26).
+    This is the window `_price_momentum_score`'s 21-day SKIP deliberately discards. Horizon study
+    (217 Nasdaq growth names, 44 monthly formation dates) rank-IC -> forward 1m:
+        12-1m -0.005 (t -0.19) | 3m +0.012 | 1m +0.036 (t 1.74, 64% hit) | 5d -0.003 (REJECTED, noise)
+    Reconciliation (29-Jul-26) on the Jun-26 panel (Nasdaq+MidCap400): 1m was positive in 4/4
+    panel x window cells; 12-1m in only 2/4 (its 4y edge vanishes at 5y). Hence PRICE_MOM_BLEND
+    leans short. Bands are provisional — percentile scoring replaces them cross-sectionally."""
+    try:
+        if history is None or (hasattr(history, "empty") and history.empty):
+            return None, None
+        cols = getattr(history, "columns", [])
+        close = history["Close"].dropna() if "Close" in cols else None
+        if close is None or len(close) < 25:
+            return None, None
+        lb = int(getattr(_cfg, "PRICE_MOM_SHORT_LOOKBACK", 21)) if lookback is None else lookback
+        sk = int(getattr(_cfg, "PRICE_MOM_SHORT_SKIP", 0)) if skip is None else skip
+        n = len(close)
+        end = float(close.iloc[-(sk + 1)]) if n > sk else float(close.iloc[-1])
+        ref_pos = n - 1 - sk - lb
+        ref = float(close.iloc[ref_pos]) if ref_pos >= 0 else float(close.iloc[0])
+        if ref <= 0:
+            return None, None
+        mom = (end / ref - 1) * 100.0
+        return round(mom, 1), (2 if mom >= 10.0 else (1 if mom >= 0.0 else 0))
+    except Exception:
+        return None, None
+
+
+def _momentum_state(long_pct, short_pct):
+    """Two-horizon disagreement label — the second-derivative read the single 12-1m window cannot give.
+    Robust to which IC estimate is correct because it detects DIVERGENCE, not level.
+    NAMING (29-Jul-26): values are PX_-prefixed so they can NEVER be confused with `revision_stage`,
+    which is about ANALYST ESTIMATES and has its own "Rolling over" value feeding SUMMARY_STAGE_EXCLUDE.
+    These two are different measurements and the collision caused real confusion on day one.
+      PX_RECOVERING    long<=0, short>0   (PCTY 24-Jul-26: 12-1m -42.9%, 1m +19.5% -> rose 38% in the month)
+      PX_ADVANCING     long >0, short>0
+      PX_DETERIORATING long >0, short<=0  (MU 24-Jul-26: 12-1m +758.9%, 1m -12.2% -> fell 32% in the month)
+      PX_DECLINING     long<=0, short<=0
+    """
+    if long_pct is None or short_pct is None:
+        return None
+    if long_pct > 0:
+        return "PX_ADVANCING" if short_pct > 0 else "PX_DETERIORATING"
+    return "PX_RECOVERING" if short_pct > 0 else "PX_DECLINING"
+
+
 def _revision_journey_stage(eps_trend_df):
     """Classify WHERE a rising +1y EPS estimate sits in its UPGRADE JOURNEY (revision drift decays late).
     Returns (stage_label, runway 0-2 | None) from the eps_trend 90d trajectory; degrades gracefully.
@@ -3233,6 +3420,10 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
         history = info.get("history")
     pm, scored["score_f_price_mom"] = _price_momentum_score(history)
     scored["price_mom_12_1m_pct"] = pm
+    # WP-M: the SHORT window (trailing 1m) the 21-day skip discards, + the two-horizon state label.
+    pm_s, scored["score_f_price_mom_1m"] = _price_momentum_short(history)
+    scored["price_mom_1m_pct"] = pm_s
+    scored["momentum_state"]   = _momentum_state(pm, pm_s)
     scored["revision_stage"], scored["revision_runway"] = _revision_journey_stage(info.get("eps_trend"))
     # Stage-label gate (Jul-26): a high-conviction price/estimate label ("Accelerating"/"Igniting") is only
     # credible when est-rev direction confirms; otherwise downgrade to "Sustained" so the label can't
@@ -3251,15 +3442,36 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     # The forward AXIS is now PRICE + MARGIN only (the estimate-revision signals are pulled OUT into a
     # separate `revisions_score` so SOURCE_WEIGHTS can weight "forward" (0.60) and "revisions" (0.15)
     # independently without double-counting). Bucket weights: margin 0.30 / price 0.70 (price-dominant).
-    bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"margin": 0.30, "price": 0.70})
-    # Price bucket: impute 0 when momentum is unmeasurable (penalise, do NOT exclude the stock).
-    pm_score = scored.get("score_f_price_mom")
-    pm_bucket = pm_score if pm_score is not None else 0
-    buckets = [(bw.get("price", 0.70), pm_bucket / 2.0)]
+    bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"estimates": 1/3, "margin": 1/3, "price": 1/3})
+    # WP-M price bucket: BLEND of the long (12-1m) and short (1m) horizons, per PRICE_MOM_BLEND.
+    # Impute 0 only when BOTH are unmeasurable (penalise, do NOT exclude the stock).
+    _bl = getattr(_cfg, "PRICE_MOM_BLEND", {"long": 0.35, "short": 0.65})
+    _L, _S = scored.get("score_f_price_mom"), scored.get("score_f_price_mom_1m")
+    _parts = [(_bl.get("long", 0.35), _L), (_bl.get("short", 0.65), _S)]
+    _avail = [(w, v) for w, v in _parts if v is not None]
+    if _avail:
+        _w = sum(w for w, _ in _avail)
+        pm_bucket = sum(w * v for w, v in _avail) / _w
+    else:
+        pm_bucket = 0
+    scored["score_f_price_mom_blend"] = round(pm_bucket, 3)
+    buckets = [(bw.get("price", 1/3), pm_bucket / 2.0)]
     if scored.get("score_f_margin_traj") is not None:
-        buckets.append((bw.get("margin", 0.30), scored["score_f_margin_traj"] / 2.0))
+        buckets.append((bw.get("margin", 1/3), scored["score_f_margin_traj"] / 2.0))
+    # WP-M: estimates bucket restored to the axis (Jun-26 pre-registered 1/3 split). Sourced from the
+    # SINGLE canonical revisions computation below so there is no second estimates recipe to drift.
+    # NOTE: estimate signals therefore carry axis weight (0.60 x 1/3 = 20%) PLUS SOURCE_WEIGHTS
+    # ["revisions"] = 15% => ~35% total effective. Documented deliberately; SOURCE_WEIGHTS unchanged.
+    _est_sub = [v for v in (scored.get("score_f_eps_trend"), scored.get("score_f_rev_est"),
+                            scored.get("score_b_est_rev"), scored.get("revision_runway")) if v is not None]
+    if _est_sub and bw.get("estimates"):
+        buckets.append((bw["estimates"], sum(_est_sub) / (len(_est_sub) * 2.0)))
     wsum = sum(w for w, _ in buckets)
     scored["forward_axis_score"] = round(100.0 * sum(w * f for w, f in buckets) / wsum, 1) if wsum > 0 else None
+    # Shadow deployment-timing tag (gates nothing while MOMENTUM_TIMING_GATE_ACTIVE is False).
+    _blk = getattr(_cfg, "MOMENTUM_TIMING_BLOCK_STATES", ("FALLING", "ROLLING_OVER"))
+    scored["timing_gate_shadow"] = ("BLOCK" if scored.get("momentum_state") in _blk else "OK") \
+        if scored.get("momentum_state") else None
 
     # Separate revisions_score (0-100): the estimate-revision JOURNEY (eps_trend, fwd rev-est,
     # scored est-rev, and the runway stage) — averaged over available sub-signals, each 0-2.
@@ -3268,6 +3480,86 @@ def compute_forward_axis(scored, info, quarterly_income_stmt, history=None):
     rev_av = [v for v in rev_subs if v is not None]
     scored["revisions_score"] = round(100.0 * sum(rev_av) / (len(rev_av) * 2.0), 1) if rev_av else None
     return scored
+
+
+def apply_cross_sectional_momentum(rows):
+    """WP-M (29-Jul-26) — CROSS-SECTIONAL momentum scoring + forward-axis restamp.
+
+    WHY: absolute bands (PRICE_MOM_THRESHOLDS 30/0) saturate at both tails. On 24-Jul-26 MU scored
+    2/2 at +753% AND would score 2/2 at +40%; PCTY scored 0/2 at -44.3% AND at -42.1% while it was
+    improving. The score therefore carried no information about direction of travel at the extremes,
+    which is exactly where the decisions get made. Percentile ranking within the run restores it.
+
+    Runs ONCE per screen, after per-ticker scoring, BEFORE the overlay gate and Source stamping
+    (both consume forward_axis_score). No-op when PRICE_MOM_SCORING != "percentile".
+    Returns the number of rows restamped. Never raises — a failure leaves band scores in place.
+    """
+    if str(getattr(_cfg, "PRICE_MOM_SCORING", "bands")).lower() != "percentile":
+        return 0
+    try:
+        hi_cut, lo_cut = getattr(_cfg, "PRICE_MOM_PCTL_CUTS", (0.667, 0.333))
+        blend = getattr(_cfg, "PRICE_MOM_BLEND", {"long": 0.5, "short": 0.5})
+
+        def _pctl(field):
+            """Percentile rank in [0,1] for rows with a value; None-valued rows excluded."""
+            vals = [(i, safe_float(r.get(field))) for i, r in enumerate(rows)]
+            vals = [(i, v) for i, v in vals if v is not None]
+            if len(vals) < 20:                      # too thin to rank — keep absolute bands
+                return None
+            vals.sort(key=lambda t: t[1])
+            n = len(vals)
+            return {i: (k + 0.5) / n for k, (i, _) in enumerate(vals)}
+
+        p_long  = _pctl("price_mom_12_1m_pct")
+        p_short = _pctl("price_mom_1m_pct")
+        if p_long is None and p_short is None:
+            return 0
+
+        def _band(p):
+            return 2 if p >= hi_cut else (1 if p >= lo_cut else 0)
+
+        n_done = 0
+        for i, r in enumerate(rows):
+            pl = p_long.get(i) if p_long else None
+            ps = p_short.get(i) if p_short else None
+            if pl is None and ps is None:
+                r["price_mom_pctl"] = None
+                continue
+            parts = [(blend.get("long", 0.5), pl), (blend.get("short", 0.5), ps)]
+            avail = [(w, v) for w, v in parts if v is not None]
+            wsum  = sum(w for w, _ in avail)
+            comb  = sum(w * v for w, v in avail) / wsum
+            r["price_mom_pctl"] = round(comb, 4)
+            if pl is not None:
+                r["score_f_price_mom"] = _band(pl)
+            if ps is not None:
+                r["score_f_price_mom_1m"] = _band(ps)
+            r["score_f_price_mom_blend"] = round(_band(comb) * 1.0, 3)
+            n_done += 1
+
+        # Restamp the forward axis from the percentile-based price bucket (same recipe as
+        # compute_forward_axis so there is exactly ONE definition of the axis).
+        bw = getattr(_cfg, "FORWARD_AXIS_BUCKET_WEIGHTS", {"estimates": 1/3, "margin": 1/3, "price": 1/3})
+        for r in rows:
+            pmb = r.get("score_f_price_mom_blend")
+            if pmb is None:
+                continue
+            buckets = [(bw.get("price", 1/3), float(pmb) / 2.0)]
+            if r.get("score_f_margin_traj") is not None:
+                buckets.append((bw.get("margin", 1/3), r["score_f_margin_traj"] / 2.0))
+            est = [v for v in (r.get("score_f_eps_trend"), r.get("score_f_rev_est"),
+                               r.get("score_b_est_rev"), r.get("revision_runway")) if v is not None]
+            if est and bw.get("estimates"):
+                buckets.append((bw["estimates"], sum(est) / (len(est) * 2.0)))
+            wsum = sum(w for w, _ in buckets)
+            if wsum > 0:
+                r["forward_axis_score"] = round(100.0 * sum(w * f for w, f in buckets) / wsum, 1)
+        log.info(f"Cross-sectional momentum percentiles applied to {n_done} rows "
+                 f"(cuts {hi_cut}/{lo_cut}, blend {blend})")
+        return n_done
+    except Exception as e:
+        log.warning(f"apply_cross_sectional_momentum failed (non-fatal, band scores retained): {e}")
+        return 0
 
 
 def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
@@ -3523,6 +3815,10 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     # upside x conf; analyst real). At this pre-overlay point the FV composite runs on the
     # analyst-target basis (val_hist arrives WITH the overlay fetch); the FINAL screen_source is
     # re-stamped post-overlay below — "Source final before overlays" no longer holds by design.
+    # WP-M: cross-sectional momentum percentiles + forward-axis restamp. MUST run before the
+    # overlay gate and the Source stamp below — both read forward_axis_score.
+    apply_cross_sectional_momentum(scored_rows)
+
     import source_score as _ss
     _ov_floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 70.0)
     high_score_tickers = [
@@ -3598,6 +3894,28 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
 
     run_qa["end_time"]  = datetime.utcnow().isoformat()
     run_qa["elapsed_s"] = round(time.time() - start_time, 1)
+
+    # ── WP-G (29-Jul-26): stamp the calibration fingerprint + record the SUMMARY pool size, so a
+    # config change between a screen and the next pre-run can never again be consumed silently.
+    # Best-effort: a guard failure must never break a screen.
+    try:
+        import calibration_guard as _cg
+        _fp = _cg.config_fingerprint()
+        run_qa["calibration_fingerprint"] = _fp
+        _pool = run_qa.get("summary_count")
+        if _pool is not None:
+            _store = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  _cg.POOL_STORE_DEFAULT)
+            _drift = _cg.check_pool_drift(group, _pool, store=_store, exclude_run_date=run_date)
+            run_qa["pool_drift"] = _drift
+            if _drift["verdict"] in ("POOL_EXPANDED", "POOL_CONTRACTED"):
+                log.warning("POOL_DRIFT %s", _drift["message"])
+            _cg.record_pool(group, run_date, _pool,
+                            eligible_size=run_qa.get("summary_eligible_count"),
+                            store=_store, fingerprint_hash=_fp["hash"])
+        log.info("Calibration fingerprint %s stamped on run_qa", _fp["hash"])
+    except Exception as _ge:
+        log.warning("calibration_guard stamp failed (non-fatal): %s", _ge)
 
     # ── SAVE OUTPUTS ──────────────────────────────────────────────────────
     save_full_data(scored_rows, outputs_dir, run_date, group)

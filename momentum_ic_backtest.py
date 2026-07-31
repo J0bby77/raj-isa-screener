@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Forward-return IC backtest for the 3-month price-momentum signal (screener _price_momentum_score, lookback=63).
+"""Forward-return IC backtest for the price-momentum signal.
+
+PARAMETER ALIGNMENT (fixed 29-Jul-2026, WP-B): this script originally hard-coded a 63-day
+lookback, but production has used 12-1m momentum since Jun-26 (scoring_config PRICE_MOM_LOOKBACK=252,
+PRICE_MOM_SKIP=21). Calibrating a parameter the framework does not use is worse than not
+calibrating at all, so the window now DEFAULTS FROM scoring_config and is overridable via
+--lookback/--skip. The 63-day setting remains reproducible with --lookback 63 --skip 0.
 Measures how well 3m trailing momentum predicts FORWARD 21d/63d returns across a large panel and many
 monthly formation dates -> calibrates how much weight price momentum deserves in the Forward Axis.
 Resumable price cache; run repeatedly to fetch chunks, auto-computes when cache complete.
@@ -14,6 +20,8 @@ def main():
     ap.add_argument("--cache", default="/sessions/upbeat-kind-einstein/mnt/outputs/_bt_prices.csv")
     ap.add_argument("--years", default="4")
     ap.add_argument("--chunk", type=int, default=80)
+    ap.add_argument("--lookback", type=int, default=None, help="default: scoring_config.PRICE_MOM_LOOKBACK (252)")
+    ap.add_argument("--skip", type=int, default=None, help="default: scoring_config.PRICE_MOM_SKIP (21)")
     ap.add_argument("--shm", default=None)
     a=ap.parse_args()
     if a.shm and os.path.isdir(a.shm): sys.path.insert(0,a.shm)
@@ -33,11 +41,21 @@ def main():
     px=cache[[c for c in uni if c in cache.columns]].sort_index().dropna(how="all")
     idx=px.index; monthpos={}
     for i,d in enumerate(idx): monthpos[(d.year,d.month)]=i
-    form=sorted(monthpos.values()); L=63;F1=21;F3=63
+    form=sorted(monthpos.values())
+    try:
+        import scoring_config as _cfg
+        _L=int(getattr(_cfg,"PRICE_MOM_LOOKBACK",252)); _S=int(getattr(_cfg,"PRICE_MOM_SKIP",21))
+    except Exception:
+        _L,_S=252,21
+    L=a.lookback if a.lookback is not None else _L
+    SKIP=a.skip if a.skip is not None else _S
+    F1=21;F3=63
+    print(f"MOMENTUM WINDOW lookback={L} skip={SKIP} (production: {_L}/{_S})")
     ic21=[];ic63=[];dec=[];nper=0
     for p in form:
-        if p-L<0 or p+F3>=len(idx): continue
-        mom=px.iloc[p]/px.iloc[p-L]-1
+        if p-L-SKIP<0 or p+F3>=len(idx): continue
+        # 12-1m: momentum measured to SKIP days ago, so the reversal-prone last month is excluded
+        mom=px.iloc[p-SKIP]/px.iloc[p-L-SKIP]-1
         f1=px.iloc[p+F1]/px.iloc[p]-1; f3=px.iloc[p+F3]/px.iloc[p]-1
         d=pd.DataFrame({"mom":mom,"f1":f1,"f3":f3}).dropna()
         if len(d)<20: continue

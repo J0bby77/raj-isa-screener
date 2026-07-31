@@ -34,6 +34,11 @@ FEATURE_KEYS = (
     "deploy_eligible", "decision", "size_pct",
     # populated later by label_outcome:
     "outcome", "realised_return", "resolved_date",
+    # 26-Jul-26: per-row provenance. "source" distinguishes live capture from reconstruction
+    # (e.g. backfill_from_output_md); "precision" flags reconstructed rows; "note" carries the
+    # run's own qualifier. Without these a backfilled row is indistinguishable from a measured
+    # one, which would silently contaminate calibration.
+    "source", "precision", "note",
 )
 
 
@@ -236,6 +241,114 @@ if __name__ == "__main__":
 
 
 # ── A17 (P3, 18-Jul-26): write-verify — same silent-write risk class as A9 ──
+
+# Learning stores whose SIZE must move over time. (file, kind, key) -- kind: json_list | json_key | csv_rows.
+# A store that legitimately moves slowly (e.g. decision_ledger between runs) is still recorded; the
+# STALLED marker is a prompt to look, never a failure.
+# (file, kind, key, cadence_days) -- cadence_days = how long a HEALTHY store may legitimately sit
+# unchanged given the schedule that writes it. A store that has not grown but is not yet overdue is
+# QUIET, not STALLED. This matters: a check that fires every run gets ignored, and an ignored check
+# is worse than no check -- it is the Apr-Jul-26 failure with extra steps.
+LEARNING_STORES = (
+    ("vci_learning_store.json", "json_key", "observations", 40),      # monthly VCI run
+    ("eps_trend_snapshots.json", "json_series", "series", 12),        # weekly Friday task
+    ("score_panel.csv", "csv_rows", None, 12),                        # ~2 screens/week
+    ("decision_ledger.json", "json_key", "entries", 40),              # monthly review
+    ("source_performance_log.json", "json_any", None, 12),            # weekly screens
+)
+
+
+def _store_size(path, kind, key):
+    """-> int size, or None if unreadable/absent."""
+    import json as _j
+    import os as _o
+    if not _o.path.exists(path):
+        return None
+    try:
+        if kind == "csv_rows":
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                return max(0, sum(1 for _ in fh) - 1)
+        with open(path, encoding="utf-8") as fh:
+            d = _j.load(fh)
+        if kind == "json_key":
+            v = d.get(key)
+            return len(v) if isinstance(v, (list, dict)) else 0
+        if kind == "json_series":
+            ser = d.get(key) or {}
+            return sum(len(v) for v in ser.values() if isinstance(v, list))
+        if isinstance(d, dict):
+            return sum(len(v) for v in d.values() if isinstance(v, (list, dict)))
+        return len(d) if isinstance(d, list) else 0
+    except Exception:
+        return None
+
+
+def store_growth(directory=None, state_path=None, stores=LEARNING_STORES):
+    """§7.3 / WP-E: assert every learning store grows on ITS OWN cadence.
+
+    Existence checks cannot distinguish a healthy store from a dead writer -- that is precisely how
+    the VCI learning loop stayed broken from Apr to Jul 2026. Returns per-store
+    {size, previous, delta, status, days_since_growth, cadence_days} where status is
+    GREW | QUIET | STALLED | NEW | MISSING | UNREADABLE.
+
+    QUIET  = has not grown, but is not yet overdue for its schedule (normal, silent).
+    STALLED = has not grown for longer than its cadence allows -> a writer has probably stopped.
+
+    Report-only by design: surfaced in the VCI email §13 block and the monthly pre-run verify step;
+    it never blocks a run.
+    """
+    import json as _j
+    import os as _o
+    import datetime as _dt
+    d = directory or _o.path.dirname(_o.path.abspath(__file__))
+    sp = state_path or _o.path.join(d, "learning_growth_state.json")
+    now_ts = _dt.datetime.now()
+    prev = {}
+    if _o.path.exists(sp):
+        try:
+            prev = (_j.load(open(sp, encoding="utf-8")) or {}).get("stores", {})
+        except Exception:
+            prev = {}
+    now, stalled = {}, []
+    for entry in stores:
+        fname, kind, key = entry[0], entry[1], entry[2]
+        cadence = entry[3] if len(entry) > 3 else 12
+        path = _o.path.join(d, fname)
+        size = _store_size(path, kind, key)
+        pv = prev.get(fname, {}) or {}
+        was = pv.get("size")
+        last_growth = pv.get("last_growth_at")
+        days = None
+        if size is None:
+            status = "MISSING" if not _o.path.exists(path) else "UNREADABLE"
+            delta = None
+        elif was is None:
+            status, delta, last_growth = "NEW", None, now_ts.isoformat(timespec="seconds")
+        elif size > was:
+            status, delta, last_growth = "GREW", size - was, now_ts.isoformat(timespec="seconds")
+        else:
+            delta = size - was
+            try:
+                days = (now_ts - _dt.datetime.fromisoformat(last_growth)).days if last_growth else None
+            except Exception:
+                days = None
+            if days is not None and days > cadence:
+                status = "STALLED"
+                stalled.append("%s (%dd, cadence %dd)" % (fname, days, cadence))
+            else:
+                status = "QUIET"
+        now[fname] = {"size": size, "previous": was, "delta": delta, "status": status,
+                      "cadence_days": cadence, "days_since_growth": days,
+                      "last_growth_at": last_growth}
+    payload = {"checked_at": now_ts.isoformat(timespec="seconds"), "stores": now,
+               "stalled": stalled, "any_stalled": bool(stalled)}
+    try:
+        _j.dump(payload, open(sp, "w", encoding="utf-8"), indent=2)
+    except Exception:
+        pass
+    return payload
+
+
 def verify_stores(store_path=None, state_path=None, base_rates_path=None):
     """Assert the learning artefacts EXIST and are readable; return the facts for §13.
     The VCI run calls this AFTER capture/estimate and puts store_rows in the email §13
@@ -249,8 +362,15 @@ def verify_stores(store_path=None, state_path=None, base_rates_path=None):
     out = {"store_exists": _o.path.exists(sp), "state_exists": _o.path.exists(cp),
            "store_rows": 0, "base_rates_stamped": False, "status": "OK", "notes": []}
     try:
-        rows = (_load(sp, {}) or {}).get("rows", [])
+        _st = _load(sp, {}) or {}
+        # 26-Jul-26 FIX: capture() writes "observations"; this read "rows" and so
+        # reported store_rows=0 even when the store was healthy — the A17 guard could
+        # not distinguish "capture never ran" from "capture worked". Accept both keys.
+        rows = _st.get("observations", _st.get("rows", []))
         out["store_rows"] = len(rows)
+        out["resolved_rows"] = sum(1 for r in rows
+                                   if isinstance(r, dict)
+                                   and r.get("outcome") in ("win", "fail", "neutral"))
     except Exception as e:
         out["notes"].append(f"store unreadable: {e}")
     try:
@@ -265,7 +385,26 @@ def verify_stores(store_path=None, state_path=None, base_rates_path=None):
     if not out["state_exists"]:
         out["notes"].append("vci_calibration_state.json missing — estimate() not yet run (OK pre-gate "
                             "if store_rows < gate)")
-    out["status"] = "OK" if (out["store_exists"] and out["base_rates_stamped"]) else "FAIL"
+    if out["store_exists"] and out["store_rows"] == 0:
+        out["notes"].append("vci_learning_store.json present but EMPTY — capture() did not run "
+                            "this session (A17 silent-write symptom)")
+    # ---- §7.3 / WP-E (29-Jul-2026): DID EVERY LEARNING STORE GROW THIS RUN? -----------------
+    # The Apr-Jul 26 failure was not that a store was missing -- it was that capture() silently
+    # stopped writing while every existence check kept passing. Existence is not liveness. This
+    # records each store's size per run and reports the ones that did not move. Report-only: it
+    # NEVER blocks a run, exactly like the rest of A17.
+    try:
+        out["growth"] = store_growth(state_path=_o.path.join(d, "learning_growth_state.json"))
+        if out["growth"].get("stalled"):
+            out["notes"].append("stores OVERDUE for growth on their own cadence: %s -- a writer has "
+                                "probably stopped (the Apr-Jul-26 failure class). Stores merely "
+                                "between scheduled writes are QUIET and are not reported here."
+                                % "; ".join(out["growth"]["stalled"]))
+    except Exception as e:
+        out["notes"].append(f"growth check failed: {e}")
+
+    out["status"] = "OK" if (out["store_exists"] and out["store_rows"] > 0
+                             and out["base_rates_stamped"]) else "FAIL"
     return out
 
 

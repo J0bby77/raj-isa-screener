@@ -165,13 +165,21 @@ def door_flags_for_row(row, regime_state=None, get=None):
     fcfy = _num(g(row, "fcf_pos_years"))
     if fcfy is None:
         fcfy = _num(g(row, "fcf_positive_years"))
-    omt = str(g(row, "op_margin_trend") or "").lower()
+    # WP-D (29-Jul-26): op_margin_trend is a NUMBER in full_data (e.g. PCTY 0.0586), not one of
+    # ("improving","flat","stable"). The string test could never match, so door_quality was False
+    # for 100% of rows in every screen. Accept BOTH: numeric >= 0 means improving/flat.
+    _omt_raw = g(row, "op_margin_trend")
+    _omt_num = _num(_omt_raw)
+    if _omt_num is not None:
+        omt_ok = _omt_num >= 0
+    else:
+        omt_ok = str(_omt_raw or "").strip().lower() in ("improving", "flat", "stable")
     payout = _num(g(row, "div_payout_fcf"))
     quality = bool(
         pa is not None and pa >= getattr(cfg, "DOOR_QUALITY_PART_A_MIN", 20)
         and nd is not None and nd < getattr(cfg, "DOOR_QUALITY_ND_EBITDA_MAX", 1.5)
-        and fcfy is not None and fcfy >= getattr(cfg, "DOOR_QUALITY_FCF_YEARS_MIN", 5)
-        and omt in ("improving", "flat", "stable")
+        and fcfy is not None and fcfy >= getattr(cfg, "DOOR_QUALITY_FCF_YEARS_MIN", 4)
+        and omt_ok
         and (payout is None or payout < getattr(cfg, "DOOR_QUALITY_DIV_PAYOUT_FCF_MAX", 0.8)))
     price = _num(g(row, "current_price"))
     hi = _num(g(row, "high_52wk"))

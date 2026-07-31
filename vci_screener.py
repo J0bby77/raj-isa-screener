@@ -112,6 +112,15 @@ UNIVERSE = {
             'NRDY',   # Nerdy Inc — education (wrong sector, placeholder)
             'SMR',    # NuScale Power — small modular reactor
             'NNE',    # Nano Nuclear Energy — micro reactor
+            # WP-A3 (26-Jul-26): pre-scale energy names inherited from the retired Path C.
+            # (OKLO, SMR, NNE and BWXT were ALREADY in this theme — not re-added.)
+            # Path C gate-failed all of these every month on revenue<$50m or EBITDA<0 while the
+            # calibration study showed the cohort's value is asymmetric (median -24.6%, 90% of
+            # return in 3 names) — i.e. a Path B sizing problem, not a Path A screening problem.
+            'BW',      # Babcock & Wilcox — nuclear services; the June-2026 audit's Gap C2 archetype
+            'PLUG',    # Plug Power — hydrogen, EBITDA-negative
+            'AMPX',    # Amprius — silicon-anode battery
+            'SES',     # SES AI — lithium-metal battery
             'OKLO',   # Oklo — advanced fission reactor
             'ARRY',   # Array Technologies — solar trackers
             'ENPH',   # Enphase Energy — microinverters

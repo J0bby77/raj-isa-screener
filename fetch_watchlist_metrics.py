@@ -8,7 +8,6 @@ Supports three source pipelines — routing is driven by each entry's "source_pi
 
   "growth_stock"  — standard 14-metric Part A + 13-metric Part B via screener_core.py
                     Max score /54. Hard gates: ROIC >8%, FCF positive >=3yr.
-  "energy"        — 10-metric Part A + 8-metric Part B via energy_screener.py
                     Max score /36. Gates: revenue >$50M, growth >0%, EBITDA >0.
                     No gross margin gate. CapEx intensity is a positive signal.
   "vci"           — ACS score already stored in watchlist_tickers.json from VCI run.
@@ -16,7 +15,7 @@ Supports three source pipelines — routing is driven by each entry's "source_pi
                     Not re-scored via yfinance pipelines.
 
 Sections processed from watchlist_tickers.json:
-  "watchlist"      — ranked candidates (growth_stock or energy pipeline)
+  "watchlist"      — ranked candidates (growth_stock pipeline)
   "vci_watchlist"  — VCI asymmetric candidates (vci pipeline)
   "stock_sleeve"   — held positions (growth_stock pipeline by default)
 
@@ -33,7 +32,7 @@ Usage (standalone):
                                        [--month-label jun_2026]
 
 Called by: monthly_isa_prerun.py (Step 4)
-Depends on: screener_core.py, energy_screener.py (must be in the same directory)
+Depends on: screener_core.py (must be in the same directory)
 """
 
 import argparse
@@ -56,6 +55,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------------------
+# Fetch concurrency
+# ---------------------------------------------------------------------------
+# ROOT-CAUSE FIX (31-Jul-2026): `fetch_all_tickers` referenced FETCH_WORKERS at the
+# ThreadPoolExecutor call site but the name was NEVER DEFINED anywhere in the tree, so
+# EVERY call raised NameError before a single ticker was fetched. The failure was invisible
+# because monthly_isa_prerun Step 6 treats a non-zero exit as "local yfinance unavailable
+# (expected)" and falls through to the retired Composio-transfer branch — i.e. the pre-run
+# reported a benign architectural note while the local fetch had never once run. Diagnosed by
+# the 31-Jul prose/code reconciliation; see ISA_Run_Prose_Code_Reconciliation_31Jul2026.md.
+#
+# Sizing: each ticker costs ~14 yfinance calls. Measured 31-Jul-26 in the local sandbox:
+# 8 tickers / 8 workers = 4.2s, so the full ~52-name watchlist completes in one pass well
+# inside the 45s bash ceiling. No batching layer is needed at this scale; if the watchlist
+# ever outgrows the window, add the screener_local.py resume pattern rather than raising
+# workers (Yahoo rate-limits above ~24 and fetch_guard backoff then dominates the runtime).
+# Override precedence: --workers CLI > ISA_FETCH_WORKERS env > default.
+FETCH_WORKERS_DEFAULT = 12
+FETCH_WORKERS_MAX     = 24          # Yahoo rate-limit ceiling — do not exceed
+try:
+    FETCH_WORKERS = max(1, min(int(os.environ.get("ISA_FETCH_WORKERS",
+                                                  FETCH_WORKERS_DEFAULT)), FETCH_WORKERS_MAX))
+except (TypeError, ValueError):
+    FETCH_WORKERS = FETCH_WORKERS_DEFAULT
+
+# ---------------------------------------------------------------------------
 # Import screener_core (growth stock pipeline)
 # ---------------------------------------------------------------------------
 sys.path.insert(0, SCRIPT_DIR)
@@ -68,40 +92,6 @@ except ImportError as e:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Import energy_screener (energy pipeline — non-fatal if missing)
-# ---------------------------------------------------------------------------
-_ENERGY_SCREENER_AVAILABLE = False
-es = None
-try:
-    _es_path = os.path.join(SCRIPT_DIR, "energy_screener.py")
-    if os.path.exists(_es_path):
-        _es_spec = _iutil.spec_from_file_location("energy_screener", _es_path)
-        es = _iutil.module_from_spec(_es_spec)
-        _es_spec.loader.exec_module(es)
-        _ENERGY_SCREENER_AVAILABLE = True
-        log.info("energy_screener imported successfully")
-    else:
-        log.warning("energy_screener.py not found — energy tickers will be skipped")
-except Exception as _ee:
-    log.warning(f"energy_screener import failed: {_ee} — energy tickers will be skipped")
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-# Watchlist pulls are small (10-20 tickers) — conservative settings
-FETCH_WORKERS    = 8    # Increased from 5 — handles expanded candidate_pool ticker set
-                        # safely within Yahoo Finance rate limits at this concurrency
-FETCH_CHUNK      = 30   # Updated to reflect larger expected ticker set
-FETCH_COOLDOWN   = 15
-OVERLAY_TIME_CAP = 120
-
-# High-score thresholds per pipeline (triggers analyst disparity flag)
-HIGH_SCORE_GROWTH  = 40   # /54
-HIGH_SCORE_ENERGY  = 28   # /36 (~78% — proportional to growth threshold)
-
-STRONG_RATINGS = {"strongbuy", "strong buy", "buy"}
-
-
 # ---------------------------------------------------------------------------
 # Ticker data fetch — full financial data (used for growth stock + energy)
 # ---------------------------------------------------------------------------
@@ -378,109 +368,13 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# PIPELINE: ENERGY — score via energy_screener
-# ---------------------------------------------------------------------------
-def score_ticker_energy(ticker_sym: str, data: dict) -> dict:
-    """
-    Score an energy ticker using energy_screener.py's pipeline.
-    Applies 3 energy gates, then scores Part A (10 metrics, max 20pts)
-    and Part B (8 metrics, max 16pts). Total max /36.
-    Returns a merged scored dict with source_pipeline="energy".
-    If energy_screener is unavailable, returns an error dict.
-    """
-    if not _ENERGY_SCREENER_AVAILABLE or es is None:
-        log.error(f"energy_screener not available — cannot score {ticker_sym}")
-        return {
-            "source_pipeline":  "energy",
-            "error":            "energy_screener_unavailable",
-            "part_a_score":     None,
-            "part_b_score":     None,
-            "total_score":      None,
-            "part_a_status":    "Error — energy_screener not available",
-            "part_b_status":    "Error",
-        }
-
-    info = data.get("info", {})
-    inc  = data.get("income_stmt")
-    cf   = data.get("cashflow")
-    bal  = data.get("balance_sheet")
-
-    # Apply energy gates (watchlist_entry param is present in signature but unused by gates)
-    try:
-        gate_data = es.apply_energy_gates(ticker_sym, info, inc, {})
-    except Exception as e:
-        log.warning(f"Energy gates failed for {ticker_sym}: {e}")
-        gate_data = {"gate_pass": None, "gate_code": "GATE_ERROR", "gate_reason": str(e)}
-
-    scored = {
-        "gate_pass":   gate_data.get("gate_pass"),
-        "gate_code":   gate_data.get("gate_code", ""),
-        "gate_reason": gate_data.get("gate_reason", ""),
-    }
-
-    # Score Part A regardless of gate result (for diagnostic visibility)
-    try:
-        pa = es.score_part_a(ticker_sym, info, inc, cf, bal, gate_data)
-        scored.update(pa)
-    except Exception as e:
-        log.warning(f"Energy Part A failed for {ticker_sym}: {e}")
-        pa = {"part_a_score": 0, "part_a_grade": "Not Growth", "part_a_max": 20}
-        scored.update(pa)
-
-    # Score Part B (regardless of gate — provides full picture for Watch/Acceptable names)
-    try:
-        pb = es.score_part_b(ticker_sym, info, inc, bal, pa)
-        scored.update(pb)
-    except Exception as e:
-        log.warning(f"Energy Part B failed for {ticker_sym}: {e}")
-        pb = {"part_b_score": 0, "part_b_grade": "Avoid", "part_b_max": 16}
-        scored.update(pb)
-
-    # Total score
-    pa_s = scored.get("part_a_score") or 0
-    pb_s = scored.get("part_b_score") or 0
-    scored["total_score"] = pa_s + pb_s
-
-    # Status strings for display (mirrors part_a_grade / part_b_grade)
-    scored["part_a_status"] = scored.get("part_a_grade", "")
-    scored["part_b_status"] = scored.get("part_b_grade", "")
-
-    # If gate failed, override statuses for clarity
-    if gate_data.get("gate_pass") is False:
-        scored["part_b_status"] = f"Gate Fail — {gate_data.get('gate_code', '')}"
-    elif gate_data.get("gate_pass") is None:
-        scored["part_a_status"] = "Data Unresolved"
-        scored["part_b_status"] = "Data Unresolved"
-
-    # Analyst rating text (for consistency with analyst_summary in normalise_adapter.py)
-    scored["analyst_rating"] = info.get("recommendationKey", "")
-
-    # P3 (18-Jul-26): raw target_upside alias DELETED (A6 shim retired) — consumers read
-    # display_target_gap / implied_upside_fv; energy Part B keeps upside_pct natively.
-    scored["display_target_gap"] = scored.get("upside_pct")   # Fix Pack D7 — display-only name
-
-    # Next earnings
-    scored["next_earnings"] = data.get("next_earnings", "Unknown")
-
-    # Company metadata
-    scored["company"]    = info.get("longName", info.get("shortName", ticker_sym))
-    scored["sector"]     = info.get("sector", "")
-    scored["industry"]   = info.get("industry", "")
-    scored["currency"]   = info.get("currency", "")
-    scored["market_cap"] = sc.safe_float(info.get("marketCap"))
-
-    scored["source_pipeline"] = "energy"
-    return scored
-
-
-# ---------------------------------------------------------------------------
 # PIPELINE: VCI — pass-through (price only from yfinance)
 # ---------------------------------------------------------------------------
 def build_vci_entry(ticker_sym: str, data: dict, meta: dict) -> dict:
     """
     Build a scored dict for a VCI ticker.
 
-    VCI tickers are NOT scored via yfinance growth or energy pipelines.
+    VCI tickers are NOT scored via the yfinance growth pipeline.
     Their ACS score (0-100) was computed by the VCI pipeline and is stored
     in watchlist_tickers.json. Only current price is extracted from yfinance
     for the in-window check.
@@ -539,9 +433,7 @@ def dispatch_score_ticker(ticker_sym: str, data: dict, meta: dict) -> dict:
     """
     pipeline = meta.get("source_pipeline", "growth_stock")
 
-    if pipeline == "energy":
-        return score_ticker_energy(ticker_sym, data)
-    elif pipeline == "vci":
+    if pipeline == "vci":
         return build_vci_entry(ticker_sym, data, meta)
     else:
         # "growth_stock" or any unrecognised value — use growth stock path.
@@ -695,14 +587,6 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
         log.warning("No tickers found in watchlist_tickers.json")
         return {}
 
-    # Validate energy screener availability for any energy tickers
-    energy_tickers = [t for t, m in ticker_meta.items() if m.get("source_pipeline") == "energy"]
-    if energy_tickers and not _ENERGY_SCREENER_AVAILABLE:
-        log.warning(
-            f"energy_screener unavailable — {len(energy_tickers)} energy ticker(s) will score as errors: "
-            f"{energy_tickers}"
-        )
-
     # ---------------------------------------------------------------------------
     # Fetch all data (full yfinance pull for all tickers including VCI)
     # VCI tickers only use info.currentPrice — the full fetch provides this
@@ -775,15 +659,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             scored_results[ticker] = scored
 
             # Log summary line per pipeline
-            if pipeline == "energy":
-                log.info(
-                    f"  {ticker} [ENERGY]: A={scored.get('part_a_score','?')}/20 "
-                    f"B={scored.get('part_b_score','?')}/16 "
-                    f"Total={scored.get('total_score','?')}/36 "
-                    f"Gate={scored.get('gate_code','?')} "
-                    f"In-window={scored.get('_in_window','?')}"
-                )
-            elif pipeline == "vci":
+            if pipeline == "vci":
                 log.info(
                     f"  {ticker} [VCI]: ACS={scored.get('acs_score','?')}/100 "
                     f"Classification={scored.get('classification','?')} "
@@ -818,12 +694,6 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
         if s.get("_source_pipeline", "growth_stock") == "growth_stock"
         and (s.get("total_score") or 0) >= 40
     ]
-    # Energy high-score (>=28/36 — ~78% proportional to growth threshold)
-    high_score_energy = [
-        t for t, s in scored_results.items()
-        if s.get("_source_pipeline") == "energy"
-        and (s.get("total_score") or 0) >= HIGH_SCORE_ENERGY
-    ]
     # VCI deployment-ready (ACS >=75)
     high_conviction_vci = [
         t for t, s in scored_results.items()
@@ -848,9 +718,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             "sleeve_count":              len(sleeve),
             "in_window_tickers":         in_window_all,
             "high_score_tickers":        high_score_growth,   # growth stock >=40/54
-            "high_score_energy":         high_score_energy,   # energy >=28/36
             "high_conviction_vci":       high_conviction_vci, # VCI ACS >=75
-            "energy_screener_available": _ENERGY_SCREENER_AVAILABLE,
             "candidate_pool_count": len([t for t, m in ticker_meta.items()
                                          if m.get("kind") == "candidate_pool"]),
             "pipeline_counts": {
@@ -895,8 +763,15 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
     log.info(f"  Scored: {len(scored_results)} | Failed: {len(scoring_errors)}")
     log.info(f"  In-window: {in_window_all}")
     log.info(f"  High score growth (>=40/54): {high_score_growth}")
-    log.info(f"  High score energy (>=28/36): {high_score_energy}")
     log.info(f"  VCI deployment-ready (ACS>=75): {high_conviction_vci}")
+
+    # Machine-readable completion token (31-Jul-2026). The pre-run prose contract promises a
+    # terminal token the operator can assert on; before this fix it promised ALL_DONE/NOT_DONE
+    # from a batch runner that had been deleted. Single-pass IS the contract at this scale, so
+    # the token is emitted unconditionally on a completed pass. Printed to stdout (not the log
+    # stream) so monthly_isa_prerun's `print(stdout.strip())` surfaces it verbatim.
+    print(f"ALL_DONE tickers={len(scored_results)} failed={len(scoring_errors)} "
+          f"requested={len(all_tickers)} workers={FETCH_WORKERS}")
     return output
 
 
@@ -916,7 +791,17 @@ def main():
     parser.add_argument("--preflight", action="store_true",
                         help="Local-primary preflight (yfinance/dev-shm/Yahoo). On failure prints "
                              "FALLBACK_TO_COMPOSIO and exits 3. Default off = pre-run unchanged.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help=f"Concurrent fetch workers (default {FETCH_WORKERS_DEFAULT}, "
+                             f"hard max {FETCH_WORKERS_MAX} — Yahoo rate-limits above that). "
+                             f"Also settable via the ISA_FETCH_WORKERS env var.")
     args = parser.parse_args()
+
+    # --workers overrides the env/default resolved at import time.
+    if args.workers is not None:
+        global FETCH_WORKERS
+        FETCH_WORKERS = max(1, min(int(args.workers), FETCH_WORKERS_MAX))
+        log.info(f"Fetch workers set to {FETCH_WORKERS} (CLI override)")
 
     watchlist_path = args.watchlist or os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
     month_label    = args.month_label or date.today().strftime("%b_%Y").lower()

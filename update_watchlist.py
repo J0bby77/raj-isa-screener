@@ -68,8 +68,7 @@ CHINA_VIE_EXCLUSIONS = {"BZ", "PDD", "NTES", "ATAT", "BEKE", "DIDI", "TUYA", "LA
 # Path A scorecard max (Growth_Stock_Checklist.pdf: 14+13 metrics, 2pts each)
 PATH_A_MAX = 54
 
-# Path C scorecard max (energy_screener.py: 10+8 metrics, 2pts each)
-PATH_C_MAX = 36
+# Path C retired 26-Jul-2026 (energy absorbed into Path A) — PATH_C_MAX removed.
 
 # Score gate thresholds
 NORMALISED_SCORE_PROMOTION_GATE = 70.0   # new: was effectively ~50%
@@ -211,6 +210,12 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
             "target_price": target_price,
             "current_price": current_price,
             "source_file":  os.path.basename(xlsx_path),
+            # WP-M7: the calibration fingerprint build_excel/restamp_write stamps on every
+            # SUMMARY row. Carried through so the pre-run can PROVE the pool it is about to
+            # rank was produced under the live config (WP-G preflight was being called with
+            # stamped_fingerprint=None, so it could only ever answer UNSTAMPED).
+            "calibration":  (str(col(row_vals, "Calibration")).strip()
+                             if col(row_vals, "Calibration") else None),
         })
 
     wb.close()
@@ -221,30 +226,20 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
 # Phase 1: Path classification
 # ---------------------------------------------------------------------------
 
-def classify_path(row: dict, filename: str) -> str | None:
+def classify_path(row: dict, filename: str) -> str:
     """
-    Returns 'A', 'C', or None (misrouted energy — exclude from promotion).
-    'C' for energy/clean-tech/renewables; 'A' for everything else.
-    Misrouted energy in a non-ENERGY file returns None (log and exclude).
+    Always 'A'. Path C (energy) was retired 26-Jul-2026 and energy names are screened by the
+    weekly index runs on Path A.
+
+    This deliberately also removes the old "misrouted energy" exclusion, which returned None
+    for any energy- or utilities-sector name appearing in a non-ENERGY workbook and thereby kept
+    it OFF the candidate pool even when it had reached a growth SUMMARY tab on merit (measured
+    at 1-2 names per weekly screen: HBR.L, FTI, NESR, SPM.MI, FRO, TEN.MI). Under absorption
+    those names are ordinary Path A candidates.
+
+    Signature keeps a str return (never None) so callers need no None-handling.
     """
-    fname_upper = filename.upper()
-    is_energy_file = "ENERGY" in fname_upper
-
-    sector = (row.get("sector") or "").lower()
-    energy_sectors = {
-        "energy", "utilities", "oil", "gas", "renewables", "clean-tech",
-        "cleantech", "nuclear", "power generation", "upstream", "midstream",
-        "downstream", "coal", "lng", "solar", "wind", "hydro",
-    }
-    is_energy_sector = any(kw in sector for kw in energy_sectors)
-
-    if is_energy_file:
-        return "C"
-    elif is_energy_sector:
-        # Misrouted — energy stock in a non-energy file
-        return None  # caller logs as path_c_misrouted
-    else:
-        return "A"
+    return "A"
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +308,7 @@ def _base_ticker(t: str) -> str:
 def normalised_score(total: int | None, path: str) -> float | None:
     if total is None:
         return None
-    max_score = PATH_A_MAX if path == "A" else PATH_C_MAX
+    max_score = PATH_A_MAX
     return round(total / max_score * 100, 1)
 
 
@@ -321,12 +316,11 @@ def _pool_admit(ns, part_a, path, override) -> bool:
     """Candidate-pool admission (H2 fix). Default = ns >= NORMALISED_SCORE_PROMOTION_GATE (quality-total).
     When FORWARD_ELIGIBILITY is on, a Part A VIABILITY floor (path-aware) replaces the total gate so
     forward-confirmed lower-total names are NOT dropped here — rerank then applies forward eligibility +
-    the Source Score. NOTE: SUMMARY Part A is on the path scale (growth /28, energy /20)."""
+    the Source Score. NOTE: SUMMARY Part A is on the growth /28 scale (Path C retired 26-Jul-2026)."""
     if override:
         return True
     if getattr(_cfg, "FORWARD_ELIGIBILITY", False):
-        floor = (getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14) if path == "C"
-                 else getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10))
+        floor = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)
         return (part_a or 0) >= floor
     return (ns or 0) >= NORMALISED_SCORE_PROMOTION_GATE
 
@@ -444,14 +438,12 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         "additions":            [],
         "removals":             [],
         "score_updates":        [],
-        "misrouted_energy":     [],
         "stale_scores":         [],
         "rejected_candidates":  [],   # names failing the 70% gate
         "duplicate_ticker_log": [],   # cross-file duplicate appearances
         "xlsx_files_deleted":   [],   # kept for backward compatibility — always empty after archiving
         "xlsx_files_archived":  [],   # replaces xlsx_files_deleted
         "xlsx_files_read":      [],
-        "path_c_misrouted_log": [],
         "rows_parsed":          0,
         "held_removed_from_watchlist": [],
         "held_removed_from_vci":       [],
@@ -524,10 +516,32 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         _globs.append(os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, _ym, "Growth Stock Analysis*.xlsx"))
     _all = []
     _seen = set()
+    # ── WP-M7 (29-Jul-2026) BACKUP-FILE GUARD ───────────────────────────────────────────────
+    # The glob is "Growth Stock Analysis*.xlsx", so ANY backup copy left beside a screen file is
+    # ingested as if it were a screen. On 29-Jul-2026 the WP-M restamp wrote 7 "*_PRE_WPM.xlsx"
+    # backups into this folder; every one carried a full SUMMARY tab scored under the SUPERSEDED
+    # calibration and all 7 passed the cycle filter (same W-e date). The pre-run would have merged
+    # the pre-restamp and post-restamp pools into one candidate set and reported nothing wrong —
+    # silently undoing the restamp it had just been given.
+    # A real screen file ALWAYS ends with its "W-e DD-Mon-YY" stamp. Anything with a suffix after
+    # that (_PRE_WPM, _bak, " copy", "(1)", "_v2") is not a screen output. Excluded and LOGGED —
+    # never silently dropped, so a genuine file with an unexpected name is visible, not lost.
+    _SCREEN_STEM = re.compile(r"W-e\s+\d{2}-[A-Za-z]{3}-\d{2}$", re.I)
+    _excluded_not_screen = []
     for _g in _globs:
         for _p in sorted(glob.glob(_g)):
-            if os.path.basename(_p) not in _seen:
-                _seen.add(os.path.basename(_p)); _all.append(_p)
+            _b = os.path.basename(_p)
+            if _b in _seen:
+                continue
+            if not _SCREEN_STEM.search(os.path.splitext(_b)[0].strip()):
+                _excluded_not_screen.append(_b)
+                _seen.add(_b)
+                continue
+            _seen.add(_b); _all.append(_p)
+    if _excluded_not_screen:
+        promotion_log.setdefault("excluded_not_screen_file", []).extend(_excluded_not_screen)
+        print(f"  [update_watchlist] Backup-file guard: excluded {len(_excluded_not_screen)} "
+              f"non-screen xlsx (name does not end 'W-e DD-Mon-YY'): {_excluded_not_screen}")
 
     # CYCLE FILTER (Jul-2026, Raj): a month-end run analyses ONLY the PREVIOUS calendar
     # month's growth screens (e.g. a July run uses the June W-e files; the first July screen
@@ -606,6 +620,9 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             print(f"  [update_watchlist] WARNING: {fname} unreadable — excluded from screen universe")
             continue
         promotion_log["rows_parsed"] += len(rows)
+        # WP-M7: record the distinct calibration stamps this file carries (normally exactly one).
+        _stamps = sorted({r["calibration"] for r in rows if r.get("calibration")})
+        promotion_log.setdefault("calibration_stamps", {})[fname] = _stamps or [None]
 
         for row in rows:
             ticker = (row.get("ticker") or "").upper()
@@ -613,19 +630,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                 continue
             summary_universe.add(ticker)
 
-            # Phase 1: classify path
-            path = classify_path(row, fname)
-            if path is None:
-                # Misrouted energy stock
-                promotion_log["misrouted_energy"].append({
-                    "ticker": ticker,
-                    "file":   fname,
-                    "note":   "Energy sector in non-ENERGY file — scored on Path A; advisory only",
-                })
-                promotion_log["path_c_misrouted_log"].append(ticker)
-                continue
-
-            row["path"] = path
+            # Phase 1: classify path (always "A" since Path C retired 26-Jul-2026)
+            row["path"] = classify_path(row, fname)
 
             # Phase 2: hard exclusions
             if ticker in portfolio_tickers:
@@ -898,7 +904,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "entry_currency":          row.get("currency", "USD"),
             "entry_level_provisional": True,
             "sector":                  row.get("sector", ""),
-            "source_pipeline":         "growth_stock" if path == "A" else "energy",
+            "source_pipeline":         "growth_stock",
             "path":                    path,
             "total":                   total,
             "part_a":                  row.get("part_a"),
@@ -1033,7 +1039,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "name":                    row.get("company", ticker),
             "exchange":                row.get("exchange", "NASDAQ"),
             "path":                    row.get("path", "A"),
-            "source_pipeline":         "growth_stock" if row.get("path", "A") == "A" else "energy",
+            "source_pipeline":         "growth_stock",
             "normalised_score":        round(ns, 1),
             "total":                   row.get("total"),
             "part_a":                  row.get("part_a"),
@@ -1126,8 +1132,6 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     print(f"  [update_watchlist] Score updates: {len(promotion_log['score_updates'])}")
     print(f"  [update_watchlist] Candidate pool: {len(pool_entries)} entries")
     print(f"  [update_watchlist] Rejected (below 70% gate): {len(promotion_log['rejected_candidates'])}")
-    if promotion_log["misrouted_energy"]:
-        print(f"  [update_watchlist] Misrouted energy: {promotion_log['path_c_misrouted_log']}")
     if promotion_log["stale_scores"]:
         print(f"  [update_watchlist] Stale scores: {[e['ticker'] for e in promotion_log['stale_scores']]}")
     if promotion_log["duplicate_ticker_log"]:

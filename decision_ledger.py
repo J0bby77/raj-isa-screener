@@ -241,3 +241,189 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Transaction-truth reconciliation  (extract_transactions.py, 26-Jul-2026)
+# ---------------------------------------------------------------------------
+# reconcile_executions() above infers execution from month-to-month HOLDINGS
+# deltas. That can confirm presence, but it cannot see the date, the fill price,
+# the dealing cost, or a top-up/trim without quantities on both sides. When a
+# monthly AJ Bell transaction export is available, this function reconciles from
+# the actual dealing record instead, and falls back to the holdings-delta logic
+# per-entry for anything the transactions do not cover. Purely additive: the
+# original function is untouched and remains the fallback path.
+
+def _txn_window(transactions, ticker, start_date, end_date=None):
+    """Trades on `ticker` in (start_date, end_date]. Recommendations are made at
+    a review; only trades AFTER that review can be that recommendation."""
+    t = (ticker or "").strip().upper()
+    out = []
+    for x in transactions or []:
+        if str(x.get("ticker") or "").strip().upper() != t:
+            continue
+        if x.get("type") not in ("buy", "sell"):
+            continue
+        d = str(x.get("date") or "")
+        if start_date and d < start_date:
+            continue
+        if end_date and d > end_date:
+            continue
+        out.append(x)
+    return sorted(out, key=lambda x: x.get("date") or "")
+
+
+def _stamp_execution(entry, txn):
+    """Record what actually happened, not merely that something happened."""
+    entry["executed_date"] = txn.get("date")
+    entry["executed_quantity"] = txn.get("quantity")
+    entry["executed_price"] = txn.get("price")
+    entry["executed_amount_gbp"] = txn.get("amount_gbp")
+    entry["dealing_cost_gbp"] = txn.get("cost_gbp")
+    entry["dealing_cost_pct"] = txn.get("cost_pct")
+    entry["execution_source"] = "transaction_record"
+    limit = entry.get("limit_price") or entry.get("execution", {}).get("limit_price")
+    fill = txn.get("price")
+    if limit and fill:
+        try:
+            entry["slippage_vs_limit_pct"] = round((fill / float(limit) - 1) * 100, 4)
+        except (TypeError, ValueError, ZeroDivisionError):
+            entry["slippage_vs_limit_pct"] = None
+
+
+def reconcile_executions_from_transactions(path, transactions, current_holdings,
+                                           prior_holdings=None, date=None):
+    """Confirm recommendations against the ACTUAL dealing record (broker truth).
+
+    `transactions`: list of dicts as produced by
+    extract_transactions.run()["executed_trades"] — date, ticker, type
+    ('buy'/'sell'), quantity, price, amount_gbp, cost_gbp, cost_pct.
+
+    Per still-`recommended` entry:
+      * a matching trade after the recommendation date  -> confirmed_executed,
+        stamped with date / quantity / fill price / dealing cost / slippage
+      * no matching trade, but transactions cover the period -> not_executed
+      * transactions unavailable for that ticker         -> fall back to the
+        holdings-delta inference (same semantics as reconcile_executions)
+
+    Also returns `off_framework`: trades with no corresponding ledger
+    recommendation, i.e. action taken outside the framework. That is the input
+    the A13 override log needs, and holdings-diffing cannot produce it reliably.
+
+    Returns {counts, confirmed, off_framework, fallback_used}."""
+    date = date or _today()
+    cur = _as_qty_map(current_holdings)
+    prior = _as_qty_map(prior_holdings) if prior_holdings is not None else None
+    ledger = load_ledger(path)
+    txns = list(transactions or [])
+    have_txns = bool(txns)
+
+    counts = {"confirmed_executed": 0, "not_executed": 0,
+              "execution_unconfirmed": 0, "no_action_expected": 0}
+    confirmed, fallback_used = [], []
+    matched_uids = set()
+
+    for e in ledger["entries"]:
+        if e.get("execution_status") != "recommended":
+            continue
+        # Historic entries were written with mixed casing ("BUY", "HOLD"), so
+        # normalise before matching -- a case-sensitive compare would route a
+        # HOLD into the trade path and mark it not_executed.
+        d_raw = e.get("decision")
+        d = str(d_raw).strip().lower() if d_raw is not None else None
+        t = str(e.get("ticker") or "").strip().upper()
+        rec_date = str(e.get("date") or "")
+
+        if d in (None, "none", "", "pass", "hold"):
+            e["execution_status"] = "no_action_expected"
+            counts["no_action_expected"] += 1
+            continue
+
+        buy_like = {x.lower() for x in BUY_LIKE}
+        sell_like = {x.lower() for x in SELL_LIKE}
+        want = "buy" if d in buy_like else ("sell" if d in sell_like else None)
+        if want is None:
+            # Unknown decision verb: do not guess an execution for it.
+            e["execution_status"] = "no_action_expected"
+            counts["no_action_expected"] += 1
+            continue
+        cand = _txn_window(txns, t, rec_date, date) if (have_txns and want) else []
+        cand = [x for x in cand if x.get("type") == want]
+
+        if cand:
+            _stamp_execution(e, cand[0])
+            e["execution_status"] = "confirmed_executed"
+            e["executed_confirmed_date"] = date
+            counts["confirmed_executed"] += 1
+            confirmed.append({"ticker": t, "decision": d,
+                              "executed_date": cand[0].get("date"),
+                              "price": cand[0].get("price"),
+                              "amount_gbp": cand[0].get("amount_gbp")})
+            for x in cand[:1]:
+                matched_uids.add((x.get("date"), t, x.get("type"),
+                                  x.get("reference")))
+            continue
+
+        if have_txns:
+            # Transactions exist for this period and none matches -> the
+            # recommendation was genuinely not acted on. This is a REAL signal
+            # (Raj declined the framework), not missing data.
+            e["execution_status"] = "not_executed"
+            counts["not_executed"] += 1
+            continue
+
+        # No transaction data at all: legacy holdings-delta inference.
+        fallback_used.append(t)
+        held_now = t in cur
+        if d in buy_like and d != "top_up":
+            status = "confirmed_executed" if held_now else "not_executed"
+        elif d == "sell":
+            status = "confirmed_executed" if not held_now else "not_executed"
+        elif d in ("top_up", "trim"):
+            cq = cur.get(t)
+            pq = prior.get(t) if prior is not None else None
+            if prior is None or cq is None or pq is None:
+                status = "execution_unconfirmed"
+            elif d == "top_up":
+                status = "confirmed_executed" if cq > pq else "not_executed"
+            else:
+                status = "confirmed_executed" if cq < pq else "not_executed"
+        else:
+            status = "no_action_expected"
+        e["execution_status"] = status
+        if status == "confirmed_executed":
+            e["executed_confirmed_date"] = date
+            e["execution_source"] = "holdings_delta"
+        counts[status] = counts.get(status, 0) + 1
+
+    # Trades the framework never recommended — action taken outside the process.
+    off_framework = []
+    for x in txns:
+        key = (x.get("date"), str(x.get("ticker") or "").upper(),
+               x.get("type"), x.get("reference"))
+        if key in matched_uids:
+            continue
+        off_framework.append({
+            "date": x.get("date"), "ticker": x.get("ticker"),
+            "type": x.get("type"), "quantity": x.get("quantity"),
+            "price": x.get("price"), "amount_gbp": x.get("amount_gbp"),
+            "note": "executed with no matching ledger recommendation",
+        })
+
+    save_ledger(ledger, path)
+    return {"counts": counts, "confirmed": confirmed,
+            "off_framework": off_framework,
+            "fallback_used": sorted(set(fallback_used)),
+            "source": "transactions" if have_txns else "holdings_delta"}
+
+
+def load_transactions(transactions_json_path):
+    """Read executed_trades out of transactions_data_[mmm_yyyy].json.
+    Returns [] when the file is absent — a missing export degrades, never fails."""
+    if not transactions_json_path or not os.path.exists(transactions_json_path):
+        return []
+    try:
+        with open(transactions_json_path, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("executed_trades", []) or []
+    except Exception:
+        return []

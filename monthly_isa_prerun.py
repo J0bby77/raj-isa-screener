@@ -46,12 +46,13 @@ try:
 except Exception:
     pass
 import json
+import datetime
 import os
 import re
 import subprocess
 import sys
 import traceback
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -62,6 +63,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = {
     "extract_portfolio":      os.path.join(SCRIPT_DIR, "extract_portfolio.py"),
     "extract_xray":           os.path.join(SCRIPT_DIR, "extract_xray.py"),
+    "extract_transactions":   os.path.join(SCRIPT_DIR, "extract_transactions.py"),  # Step 1b (26-Jul-26)
     "derive_required_return": os.path.join(SCRIPT_DIR, "derive_required_return.py"),
     "analytics":              os.path.join(SCRIPT_DIR, "portfolio_analytics.py"),
     "update_watchlist_py":    os.path.join(SCRIPT_DIR, "update_watchlist.py"),
@@ -134,9 +136,68 @@ def run_script(name: str, args: list[str], dry_run: bool = False) -> tuple[bool,
         return False, "", str(e)
 
 
+def run_script_rc(name: str, args: list[str], dry_run: bool = False):
+    """As run_script, but returns the RETURN CODE rather than a bool.
+
+    Needed by Step 1b: extract_transactions exits 3 when no transaction export
+    exists, which is a degradation (fall back to holdings-delta inference), not
+    a failure. Collapsing that to False would make a routine "Raj hasn't saved
+    the file yet" indistinguishable from a crash."""
+    script_path = SCRIPTS[name]
+    if not os.path.exists(script_path):
+        return 127, "", f"Script not found: {script_path}"
+    cmd = [sys.executable, script_path] + args
+    if dry_run:
+        print(f"  [DRY RUN] Would run: {' '.join(cmd)}")
+        return 0, "[dry run]", ""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"Script timed out after 120s: {name}"
+    except Exception as e:
+        return 1, "", str(e)
+
+
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
+def metrics_coverage(metrics_path: str, watchlist_path: str) -> tuple[int, list[str]]:
+    """(n_scored, missing_tickers) for a metrics file against the CURRENT watchlist config.
+
+    Shared by the Step 6 idempotence check and the Step 6 failure branch so both judge
+    "are these metrics usable?" by exactly one rule. `missing` is authoritative: a file with
+    plenty of tickers that predates a watchlist refresh is NOT usable.
+    """
+    n, missing = 0, []
+    try:
+        with open(metrics_path, encoding="utf-8") as f:
+            got = set(json.load(f).get("tickers", {}).keys())
+        n = len(got)
+        with open(watchlist_path, encoding="utf-8") as f:
+            wl = json.load(f)
+        needed = ({e.get("ticker") for e in wl.get("watchlist", [])}
+                  | {e.get("ticker") for e in wl.get("vci_watchlist", [])}
+                  | {s.get("ticker") for s in wl.get("stock_sleeve", [])}
+                  | {p.get("ticker") for p in wl.get("candidate_pool", [])})
+        missing = sorted(t for t in needed if t and t not in got)
+    except Exception:
+        return 0, []
+    return n, missing
+
+
+def _skip_fetch_reason(args, metrics_path: str, watchlist_path: str) -> str | None:
+    """Return a human reason to skip Step 6, or None to fetch. See the Step 6 call site."""
+    if getattr(args, "skip_fetch", False):
+        return "--skip-fetch requested"
+    if not os.path.exists(metrics_path):
+        return None
+    n, missing = metrics_coverage(metrics_path, watchlist_path)
+    if n > 0 and not missing:
+        return f"metrics already cover all {n} current tickers"
+    return None
+
+
 def validate_json_output(path: str, required_keys: list[str]) -> tuple[bool, str]:
     """Check output JSON exists and has required top-level keys."""
     if not os.path.exists(path):
@@ -194,6 +255,20 @@ def check_large_month_on_month_change(analytics_path: str, portfolio_path: str) 
 # ---------------------------------------------------------------------------
 # Staging file writer
 # ---------------------------------------------------------------------------
+def _compliance_block():
+    """Employer PAD regime state for the review session (compliance.py is authoritative).
+    Staged into run_context so the session never re-derives compliance rules from prose."""
+    try:
+        import compliance
+        b = compliance.as_dict()
+        b["status_line"] = compliance.status_line()
+        b["execution_reminder"] = compliance.execution_reminder()
+        return b
+    except Exception as e:                       # fail SAFE: assume the restrictive regime
+        return {"regime": "CITI_PT", "active": True, "error": str(e)[:200],
+                "status_line": "Compliance module unavailable - assume preclearance REQUIRED."}
+
+
 def write_run_context(
     month_label:            str,
     run_month:              str,
@@ -226,6 +301,8 @@ def write_run_context(
         "files": {
             "portfolio_data":       portfolio_path,
             "xray_data":            xray_path,
+            "transactions_data":    os.path.join(SCRIPT_DIR, f"transactions_data_{month_label}.json"),
+            "transaction_ledger":   os.path.join(SCRIPT_DIR, "transaction_ledger.json"),
             "analytics_data":       analytics_path,
             "watchlist_metrics":    watchlist_metrics_path,
             "watchlist_scored":     watchlist_scored_path,
@@ -245,6 +322,7 @@ def write_run_context(
             "score_panel":          os.path.join(SCRIPT_DIR, "score_panel.csv"),
         },
         "summary": summary,
+        "compliance": _compliance_block(),
         "flags":   flags,
         "warnings": warnings,
         "error":   error_message,
@@ -333,6 +411,11 @@ def main():
                         help="ISA root folder (parent of Investment Analysis). Auto-detected if omitted.")
     parser.add_argument("--prior-portfolio", default=None,
                         help="Path to prior month portfolio JSON for phase transition check.")
+    parser.add_argument("--skip-fetch",      action="store_true",
+                        help="Skip the Step 6 metrics fetch and reuse the existing "
+                             "watchlist_metrics file. Step 6 also self-skips whenever that "
+                             "file already covers every current ticker, so the second "
+                             "orchestrator pass is idempotent without this flag.")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Print commands without executing them.")
     args = parser.parse_args()
@@ -359,6 +442,8 @@ def main():
     # Output paths
     portfolio_path          = os.path.join(SCRIPT_DIR, f"portfolio_data_{month_label}.json")
     xray_path               = os.path.join(SCRIPT_DIR, f"xray_data_{month_label}.json")
+    transactions_path       = os.path.join(SCRIPT_DIR, f"transactions_data_{month_label}.json")
+    txn_ledger_path         = os.path.join(SCRIPT_DIR, "transaction_ledger.json")
     analytics_path          = os.path.join(SCRIPT_DIR, f"analytics_data_{month_label}.json")
     watchlist_metrics_path  = os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
     watchlist_scored_path   = os.path.join(SCRIPT_DIR, f"watchlist_scored_{month_label}.json")
@@ -449,6 +534,81 @@ def main():
                     })
 
     # ---------------------------------------------------------------------------
+    # Step 1b: Import the monthly transaction export into the persistent ledger.
+    # Gives Step 1.5 the ACTUAL dealing record (date, fill price, cost) instead
+    # of a holdings delta. Absent file => WARN + fall back; never an ERROR.
+    # ---------------------------------------------------------------------------
+    txn_status = "ABSENT"
+    txn_data = {}
+    print("\n[1b] Importing transaction history...")
+    rc, stdout, stderr = run_script_rc(
+        "extract_transactions",
+        ["--isa-folder", isa_folder, "--ledger", txn_ledger_path,
+         "--out", transactions_path],
+        dry_run=args.dry_run,
+    )
+    if rc == 3:
+        txn_status = "ABSENT"
+        warnings.append(
+            "Step 1b: no 'Transaction History MM-YYYY.xlsx' found in the ISA "
+            "folder -- execution reconciliation falls back to holdings-delta "
+            "inference, and dealing costs/fill prices are unavailable this month."
+        )
+        print("  No transaction export found -- reconciliation degrades to holdings-delta.")
+    elif rc != 0:
+        txn_status = "ERROR"
+        warnings.append(f"Step 1b (extract_transactions): {stderr or stdout or 'unknown error'}")
+        print(f"  FAILED (non-fatal): {stderr or stdout}")
+    else:
+        print(stdout.strip())
+        if os.path.exists(transactions_path):
+            try:
+                with open(transactions_path, encoding="utf-8") as _tf:
+                    txn_data = json.load(_tf)
+                txn_status = txn_data.get("_meta", {}).get("status", "OK")
+                _ms = txn_data.get("month_summary", {})
+                _br = txn_data.get("broker_reconciliation", {})
+                summary["transactions"] = {
+                    "status":              txn_status,
+                    "source_file":         txn_data.get("_meta", {}).get("source_file"),
+                    "n_trades":            _ms.get("n_trades"),
+                    "buys":                _ms.get("buys"),
+                    "sells":               _ms.get("sells"),
+                    "dealing_costs_gbp":   _ms.get("total_dealing_costs_gbp"),
+                    "net_cash_impact_gbp": _ms.get("net_cash_impact_gbp"),
+                    "distributions_gbp":   _ms.get("distributions_gbp"),
+                    "broker_reconciliation": _br.get("status"),
+                    "ledger_entries":      txn_data.get("ledger_meta", {}).get("total_entries"),
+                    "cost_calibration":    txn_data.get("cost_calibration", {}),
+                }
+                for w in txn_data.get("warnings", []):
+                    warnings.append(f"Step 1b: {w}")
+                if _br.get("status") == "INCOMPLETE_WINDOW":
+                    warnings.append(
+                        "Step 1b: transaction ledger does not yet span the "
+                        "holding period of %d of %d positions -- seed it with a "
+                        "full history export (extract_transactions.py --seed) "
+                        "to enable the completeness check."
+                        % (_br.get("n_missing_from_ledger", 0),
+                           _br.get("n_compared", 0)))
+                elif _br.get("status") == "MISMATCH":
+                    # The ledger disagrees with the broker portfolio file. Either a
+                    # monthly export was never saved, or a row mis-parsed. Surface
+                    # it loudly -- a silently incomplete ledger is worse than none.
+                    flags.append({
+                        "type": "TRANSACTION_LEDGER_INCOMPLETE",
+                        "message": ("Ledger-implied holdings do not match the broker "
+                                    "portfolio file: "
+                                    + "; ".join(
+                                        f"{d['ticker']} broker {d['broker_quantity']} "
+                                        f"vs ledger {d['ledger_quantity']}"
+                                        for d in _br.get("differences", [])[:6])),
+                    })
+            except Exception as exc:
+                txn_status = "ERROR"
+                warnings.append(f"Step 1b: could not read {os.path.basename(transactions_path)}: {exc}")
+
+    # ---------------------------------------------------------------------------
     # Step 1.5: Reconcile prior recommendations vs broker truth (recommendations != executions).
     # The system never assumes a prior recommendation was executed; it confirms from THIS month's
     # actual holdings (broker file). Additive — no-op until a decision ledger exists.
@@ -471,8 +631,29 @@ def main():
                         _prior_h = {s.get("ticker"): s.get("quantity") for s in _ppd.get("stocks", []) if s.get("ticker")}
                     except Exception:
                         _prior_h = None
-                _rc = _dl_mod.reconcile_executions(ledger_path, _held, prior_holdings=_prior_h, date=run_date.isoformat())
+                # Transaction-truth reconciliation (26-Jul-26). Confirms from the
+                # actual dealing record where available -- date, fill price and
+                # dealing cost included -- and degrades to the original
+                # holdings-delta inference when no export exists.
+                _txns = _dl_mod.load_transactions(transactions_path)
+                _res = _dl_mod.reconcile_executions_from_transactions(
+                    ledger_path, _txns, _held, prior_holdings=_prior_h,
+                    date=run_date.isoformat())
+                _rc = _res["counts"]
                 summary["ledger_reconcile"] = _rc
+                summary["ledger_reconcile_source"] = _res["source"]
+                summary["ledger_reconcile_confirmed"] = _res["confirmed"]
+                if _res["off_framework"]:
+                    # Trades with no matching recommendation: acted outside the
+                    # framework. Holdings-diffing cannot see these reliably.
+                    summary["off_framework_trades"] = _res["off_framework"]
+                    flags.append({
+                        "type": "OFF_FRAMEWORK_TRADE",
+                        "message": "; ".join(
+                            f"{o['type']} {o['ticker']} {o['quantity']} @ {o['price']} "
+                            f"on {o['date']} (GBP {o['amount_gbp']}) -- no ledger recommendation"
+                            for o in _res["off_framework"][:6]),
+                    })
                 print(f"  Reconciled prior recommendations vs broker truth: {_rc}")
                 # ── Fix Pack A13 (P2): OVERRIDE LOG — broker-truth changes NOT matching a ledger
                 # recommendation. Two classes: (a) a recommendation marked not_executed (Raj
@@ -650,6 +831,64 @@ def main():
             # Guardrail: a SUMMARY tab that parses to zero rows is a silent parser failure.
             n_files = len(watchlist_promotion_log.get("xlsx_files_read", []))
             n_rows  = watchlist_promotion_log.get("rows_parsed", 0)
+            # ── WP-G (29-Jul-2026): CALIBRATION PREFLIGHT ────────────────────────────────────
+            # The pre-run consumes SUMMARY tabs produced by screens that ran under whatever
+            # calibration was live AT THAT TIME. On 29-Jul-2026 the forward-axis bucket weights
+            # changed (price .70 -> thirds) while the next screen was not until 07-Aug, so the
+            # 01-Aug pre-run would have ranked candidates under a config that no longer existed
+            # and nothing could detect it. This checks every ingested workbook's calibration
+            # stamp against live config, and the pool size against its own trailing median.
+            # WARN-ONLY by design: it annotates and degrades, it never halts the review.
+            try:
+                import calibration_guard as _cg
+                _live = _cg.config_fingerprint()
+                summary["calibration_fingerprint"] = _live["hash"]
+                # WP-M7 (29-Jul-2026): pass the REAL stamps. This was hardcoded to None, so the
+                # guard could only ever return UNSTAMPED and the whole fingerprint mechanism was
+                # inert at the one place it mattered. update_watchlist now carries the per-file
+                # calibration stamp off the SUMMARY rows.
+                _stamp_map = watchlist_promotion_log.get("calibration_stamps") or {}
+                _stale_files, _unstamped_files = [], []
+                for _fn, _sts in _stamp_map.items():
+                    for _st in (_sts or [None]):
+                        _v = _cg.compare_fingerprint({"hash": _st, "params": {}} if _st else None,
+                                                     live=_live)["verdict"]
+                        if _v == "STALE":
+                            _stale_files.append(f"{_fn} ({_st})")
+                        elif _v == "UNSTAMPED":
+                            _unstamped_files.append(_fn)
+                summary["calibration_files"] = {"stale": _stale_files,
+                                                "unstamped": _unstamped_files,
+                                                "checked": len(_stamp_map)}
+                if _stale_files:
+                    warnings.append(
+                        "Step 4 CALIBRATION STALE: %d ingested workbook(s) were scored under a "
+                        "SUPERSEDED calibration (live %s): %s. Their SUMMARY ranking is not "
+                        "current -- restamp via restamp_screener_outputs.py + restamp_write.py "
+                        "before trusting the candidate pool."
+                        % (len(_stale_files), _live["hash"], ", ".join(_stale_files[:6])))
+                    print("  CALIBRATION STALE in %d file(s): %s"
+                          % (len(_stale_files), ", ".join(_stale_files[:4])))
+                if _unstamped_files:
+                    print("  Calibration: %d file(s) predate the fingerprint (unverifiable): %s"
+                          % (len(_unstamped_files), ", ".join(_unstamped_files[:4])))
+                _one = sorted({_st for _sts in _stamp_map.values() for _st in (_sts or []) if _st})
+                _pf = _cg.preflight("PRERUN_POOL", n_rows,
+                                    stamped_fingerprint=({"hash": _one[0], "params": {}}
+                                                         if len(_one) == 1 else None),
+                                    store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT))
+                summary["calibration_preflight"] = _pf
+                if _pf.get("attention_required"):
+                    warnings.append("Step 4 CALIBRATION: " + _pf["headline"][:400])
+                    print("  CALIBRATION ATTENTION: " + _pf["headline"][:200])
+                else:
+                    print(f"  Calibration preflight OK (live {_live['hash']}, pool {n_rows}).")
+                _cg.record_pool("PRERUN_POOL", run_date.isoformat(), n_rows,
+                                store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT),
+                                fingerprint_hash=_live["hash"])
+            except Exception as _cgerr:
+                warnings.append(f"Step 4 calibration preflight unavailable (non-fatal): {_cgerr}")
+                print(f"  WARNING: calibration preflight unavailable: {_cgerr}")
             if n_files == 0:
                 warnings.append("Step 4 guardrail: no Growth Stock Analysis xlsx found in working dir or month archive -- no candidates ingested.")
                 degraded = True
@@ -708,6 +947,31 @@ def main():
         warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
         with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
             json.dump({"_meta": {"month_label": month_label}, "tickers": {}}, f)
+    elif _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path):
+        # IDEMPOTENCE (31-Jul-2026). The pre-run prose runs this orchestrator TWICE — once to
+        # build the base data, once after the metrics fetch to rebuild Steps 7-9 on live scores.
+        # Re-fetching on the second pass costs ~20s of the 45s bash budget and can only make the
+        # data staler-or-equal, so a populated metrics file that already covers the CURRENT
+        # ticker set short-circuits Step 6. `--skip-fetch` forces the same path unconditionally.
+        _reason = _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path)
+        print(f"  SKIPPED -- {_reason} (existing metrics preserved).")
+        if not os.path.exists(watchlist_metrics_path):
+            # --skip-fetch on a cold folder (the fast first pass of the two-phase pre-run):
+            # downstream steps require the file to exist, so seed the documented placeholder.
+            with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+                json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                           "_warning": "--skip-fetch: metrics not pulled on this pass"}, f)
+            print("  Placeholder metrics file written (fetch deferred to the standalone STEP 2).")
+        try:
+            with open(watchlist_metrics_path, encoding="utf-8") as f:
+                _wm = json.load(f)
+            summary["watchlist_tickers_scored"] = len(_wm.get("tickers", {}))
+            summary["in_window_names"] = _wm.get("_meta", {}).get("in_window_tickers", [])
+            print("  Scored " + str(summary["watchlist_tickers_scored"])
+                  + " tickers (from existing file) | In-window: "
+                  + str(summary["in_window_names"]))
+        except Exception as _e:
+            warnings.append(f"Step 6 skip: could not summarise existing metrics ({_e}).")
     else:
         ok, stdout, stderr = run_script(
             "fetch_watchlist",
@@ -721,47 +985,38 @@ def main():
         # Watchlist pull is non-fatal (yfinance may fail for some tickers)
         if not ok:
             msg = stderr or stdout or "Unknown error in fetch_watchlist_metrics"
-            # ARCHITECTURE: fetch_watchlist_metrics.py runs in Composio (remote) and the
-            # metrics JSON is transferred to this folder out of band. A local yfinance
-            # ImportError is EXPECTED and benign IF a populated metrics file is already
-            # present. Only degrade when NO usable metrics exist (transfer never happened).
-            metrics_n = 0
-            metrics_tickers = []
-            if os.path.exists(watchlist_metrics_path):
-                try:
-                    with open(watchlist_metrics_path, encoding="utf-8") as f:
-                        _m = json.load(f)
-                    metrics_tickers = list(_m.get("tickers", {}).keys())
-                    metrics_n = len(metrics_tickers)
-                except Exception:
-                    metrics_n = 0
+            # ARCHITECTURE (corrected 31-Jul-2026): the metrics fetch is LOCAL-PRIMARY. It runs
+            # in this sandbox via yfinance on tmpfs; Composio is fallback-only and there is NO
+            # out-of-band transfer step. The previous note here claimed the opposite and told the
+            # operator to "run the Composio metrics pull + transfer", contradicting the pre-run
+            # prompt. It also made a REAL failure look benign: fetch_watchlist_metrics raised
+            # NameError on FETCH_WORKERS at every invocation (undefined name, fixed 31-Jul), and
+            # this branch reported it as "local yfinance unavailable (expected)". A fetch failure
+            # is now always surfaced as a WARNING naming the actual error.
+            # Reusing stale metrics is still permitted (better than nothing) but never silent.
+            metrics_n, missing = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
             if metrics_n > 0:
-                # Check the transferred metrics actually cover the CURRENT ticker set.
-                try:
-                    with open(watchlist_config_path, encoding="utf-8") as f:
-                        _wl = json.load(f)
-                    needed = ({e.get("ticker") for e in _wl.get("watchlist", [])}
-                              | {e.get("ticker") for e in _wl.get("vci_watchlist", [])}
-                              | {s.get("ticker") for s in _wl.get("stock_sleeve", [])}
-                              | {p.get("ticker") for p in _wl.get("candidate_pool", [])})
-                    missing = sorted(t for t in needed if t and t not in set(metrics_tickers))
-                except Exception:
-                    missing = []
-                print(f"  NOTE: local yfinance unavailable (expected) -- using Composio-transferred metrics ({metrics_n} tickers).")
+                print(f"  WARNING: local metrics fetch FAILED ({msg.splitlines()[0][:160]}) "
+                      f"-- falling back to the existing metrics file ({metrics_n} tickers).")
+                warnings.append(f"Step 6 (fetch_watchlist) FAILED: {msg.splitlines()[0][:200]} "
+                                f"-- reusing pre-existing metrics ({metrics_n} tickers). Scores may "
+                                f"be stale; investigate before relying on Step 9 output.")
+                degraded = True
                 if missing:
-                    warnings.append(f"Step 6: using Composio-transferred metrics ({metrics_n} tickers), but "
-                                    f"{len(missing)} current name(s) are NOT covered and will be unscored: {missing[:20]}"
+                    warnings.append(f"Step 6: reused metrics do not cover {len(missing)} current "
+                                    f"name(s), which will be unscored: {missing[:20]}"
                                     + (" ..." if len(missing) > 20 else ""))
-                    degraded = True
             else:
-                warnings.append(f"Step 6 (fetch_watchlist): {msg} AND no Composio-transferred metrics file present "
-                                "-- downstream scoring will be empty. Run the Composio metrics pull + transfer.")
+                warnings.append(f"Step 6 (fetch_watchlist): {msg} AND no usable metrics file present "
+                                "-- downstream scoring will be empty. Re-run the local fetch "
+                                "(see the pre-run task STEP 2 recipe); use the Composio fallback "
+                                "only if the local sandbox cannot reach Yahoo at all.")
                 print(f"  WARNING: {msg} (no metrics available)")
                 degraded = True
                 if not os.path.exists(watchlist_metrics_path):
                     with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
                         json.dump({"_meta": {"month_label": month_label}, "tickers": {},
-                                   "_warning": "fetch failed and no transfer: " + msg}, f)
+                                   "_warning": "local fetch failed, no prior metrics: " + msg}, f)
         else:
             print(stdout.strip())
             valid, vmsg = validate_json_output(watchlist_metrics_path, ["_meta", "tickers"])
@@ -1005,8 +1260,11 @@ def main():
             _live = 0
         if _live == 0:
             warnings.append("Step 7.5 (rerank): no live scores in conviction_ranking -- skipping re-rank "
-                            "(watchlist left on screening-score order). Metrics likely not yet transferred.")
-            print("  SKIPPED -- no live scores present (run the Composio metrics pull first).")
+                            "(watchlist left on screening-score order). Step 6 produced no usable "
+                            "metrics -- fix the LOCAL fetch first (31-Jul-26: the old 'metrics not yet "
+                            "transferred' wording described a retired Composio hand-off and masked a "
+                            "real local-fetch failure).")
+            print("  SKIPPED -- no live scores present (re-run the local metrics fetch, pre-run STEP 2).")
             degraded = True
         else:
             ok, stdout, stderr = run_script(
@@ -1109,6 +1367,43 @@ def main():
                 print("  Validation: " + vmsg)
 
     # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Step 9b.5 (WP-C, 29-Jul-2026): read the between-run position-alert store written by the
+    # weekly EPS snapshot task. DETECTION ONLY -- surfaced as Step 5 context for the session;
+    # never an action, and never a sell signal (C-1). Absence of the file is normal and silent.
+    # ---------------------------------------------------------------------------
+    _alerts_path = os.path.join(SCRIPT_DIR, "position_alerts.json")
+    _alerts_block = {"status": "NONE"}
+    try:
+        if os.path.exists(_alerts_path):
+            with open(_alerts_path, encoding="utf-8") as _af:
+                _ap = json.load(_af)
+            _al = _ap.get("alerts") or []
+            _stale = (_ap.get("as_of_date") or "") < (run_date - timedelta(days=14)).isoformat()
+            _alerts_block = {
+                "status": "ALERTS" if _al else "NONE",
+                "as_of": _ap.get("as_of_date"),
+                "n_alerts": len(_al),
+                "n_held": sum(1 for a in _al if a.get("class") == "HELD"),
+                "n_in_min_hold": sum(1 for a in _al if a.get("in_min_hold_window")),
+                "alerts": _al,
+                "stale": bool(_stale),
+                "doctrine": _ap.get("doctrine"),
+            }
+            if _stale:
+                warnings.append("Position alerts store is >14 days old (as_of %s) -- the weekly EPS "
+                                "snapshot task may not be running." % _ap.get("as_of_date"))
+            if _al:
+                print("  POSITION ALERTS: %d (%d held, %d inside min-hold window -- context only)"
+                      % (len(_al), _alerts_block["n_held"], _alerts_block["n_in_min_hold"]))
+        else:
+            _alerts_block = {"status": "NO_STORE",
+                             "note": "position_alerts.json absent -- weekly alert task has not written yet."}
+    except Exception as _pae:
+        warnings.append("Position alerts read: " + str(_pae))
+        _alerts_block = {"status": "ERROR", "error": str(_pae)[:200]}
+    summary["position_alerts"] = _alerts_block
+
     # Step 9c (Jul-26 Part 9): Calibration report — surface each signal's forward-return IC by horizon
     # (1m/3m/6m/12m, filling left-to-right as the score panel matures). Evidence only; never blocks.
     # ---------------------------------------------------------------------------
@@ -1118,12 +1413,30 @@ def main():
     try:
         _panel_store = os.path.join(SCRIPT_DIR, "score_panel.csv")
         if os.path.exists(_panel_store):
+            # WP-B (29-Jul-26): batched+cached price fetch (the old per-ticker call could not
+            # finish inside run_script's 120s budget once the panel passed ~1k rows) and a
+            # store-growth assertion (a learning loop that silently stops writing is the exact
+            # failure the VCI store hit Apr-Jul 26). NOT_DONE is a WARN, never fatal: the price
+            # cache is resumable and the next run continues it.
             ok, stdout, stderr = run_script(
                 "calibration_report",
-                ["--store", _panel_store, "--asof", run_date.isoformat(), "--out", calib_report_path],
+                ["--store", _panel_store, "--asof", run_date.isoformat(), "--out", calib_report_path,
+                 "--price_cache", os.path.join(SCRIPT_DIR, "calibration_prices.csv"),
+                 "--growth-state", os.path.join(SCRIPT_DIR, "calibration_state.json"),
+                 "--assert-growth"],
                 dry_run=args.dry_run,
             )
-            if ok:
+            _out = (stdout or "") + (stderr or "")
+            if "PANEL_STALE" in _out:
+                warnings.append("Calibration: score_panel.csv did NOT grow since the last run -- "
+                                "a weekly screen is not calling score_panel_logger. Investigate.")
+                print("  WARNING: PANEL_STALE -- score panel did not grow since last calibration run.")
+            if "NOT_DONE" in _out:
+                warnings.append("Calibration: price cache incomplete this run (resumable) -- IC table "
+                                "will fill on the next run; no report written.")
+                print("  NOTE: price cache incomplete (resumable) -- continuing.")
+                calib_summary = {"status": "PRICE_CACHE_INCOMPLETE", "report_path": calib_report_path}
+            elif ok:
                 calib_summary = {"report_path": calib_report_path, "ic_table": stdout.strip()}
                 print(stdout.strip()[:800])
             else:

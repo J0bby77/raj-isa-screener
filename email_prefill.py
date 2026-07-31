@@ -50,6 +50,26 @@ TAX_YEAR_ANNUAL = 20000.0
 TAX_YEAR_LABEL  = "2026/27"
 
 # MS rating integer → star string for email
+def _pf_trade_note_hint():
+    """Placeholder hint for the trade `note` field, regime-aware (compliance.py authoritative)."""
+    try:
+        import compliance
+        if compliance.active():
+            return "[Preclearance required? / %d-day hold / etc.]" % compliance.min_hold_days()
+        return "[Timing / limit / dealing cost — no preclearance or regulatory hold while PAD regime paused]"
+    except Exception:
+        return "[Preclearance required? / 30-day hold / etc.]"
+
+
+def _pf_earliest_sale_hint():
+    try:
+        import compliance
+        if compliance.active():
+            return "[Day %d from preclearance: DD-Mon-YYYY or N/A]" % (compliance.min_hold_days() + 1)
+        return "N/A (no regulatory holding period — PAD regime paused)"
+    except Exception:
+        return "[Day 31 from preclearance: DD-Mon-YYYY or N/A]"
+
 def ms_stars_str(rating) -> str:
     if rating is None:
         return "—"
@@ -683,7 +703,7 @@ def skeleton_s1() -> dict:
                 "conviction":       "[XX/100 High/Medium]",
                 "conviction_level": "high",
                 "timing":           "[This week / Wait for entry / etc.]",
-                "note":             "[Preclearance required? / 30-day hold / etc.]",
+                "note":             _pf_trade_note_hint(),
             }
         ],
         "net_effect": "[Claude fills: stock sleeve rises/falls from X% to Y% post-trade.]",
@@ -766,7 +786,7 @@ def skeleton_s4() -> dict:
                 "gain_loss_sign": "positive",
                 "action":         "[SELL / HOLD / MONITOR]",
                 "action_type":    "sell",
-                "earliest_sale":  "[Day 31 from preclearance: DD-Mon-YYYY or N/A]",
+                "earliest_sale":  _pf_earliest_sale_hint(),
                 "reason":         "[Claude: thesis trigger, concentration, size too small, etc.]",
             }
         ],

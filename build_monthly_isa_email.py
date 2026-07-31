@@ -1065,10 +1065,19 @@ def build_footer(meta):
         f' &nbsp;|&nbsp; {broker}'
         f'{(" &nbsp;|&nbsp; Data as at " + data_date) if data_date else ""}<br>'
         f'This is a personal financial record, not investment advice. '
-        f'Citi preclearance required before executing any individual stock trade.'
+        f'{_compliance_footer()}'
         f'</p>\n'
     )
 
+
+def _compliance_footer():
+    """Regime-driven execution reminder (compliance.py is authoritative -- never hardcode Citi)."""
+    try:
+        import compliance
+        return compliance.execution_reminder()
+    except Exception:
+        # Fail SAFE: if the module cannot be imported, state the restrictive rule.
+        return "Citi preclearance required before executing any individual stock trade."
 
 # ---------------------------------------------------------------------------
 # Section dispatch

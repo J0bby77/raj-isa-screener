@@ -1,5 +1,5 @@
 {
-  "_instructions": "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci | energy) that controls rendering. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
+  "_instructions": "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci) that controls rendering. The 'energy' pipeline was RETIRED 26-Jul-2026 — energy names use growth_stock. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
   "meta": {
     "run_date_display": "Saturday 1 June 2026",
     "data_date": "1 June 2026",
@@ -239,7 +239,7 @@
       ]
     },
     {
-      "_schema_note": "PATH C (ENERGY/CLEAN-TECH) — use this structure for energy, renewables, or clean-tech stocks. Scorecard is /36 (not /54). Note: only the energy_screener.py thresholds apply.",
+      "_schema_note": "RETIRED 26-Jul-2026 — Path C no longer exists. Energy, renewables and clean-tech stocks now use the PATH A (growth_stock) schema above: same /28 + /22 = /50 scorecard, same gates, same Source Score. This block is kept only so an older email JSON still parses; do NOT populate it.",
       "action": "BUY",
       "ticker": "[TICKER]",
       "name": "[Energy Company Name]",
@@ -378,7 +378,7 @@
         "action_trigger": "2a: Thesis [intact/strengthening] — [NVIDIA signals 5/6 active]. 2b: Price $[X] vs entry $[Y] — [at/above entry by X%] — [full/reduced size outcome]."
       },
       {
-        "_schema_note": "PATH C (energy) watchlist item — score shows X/36",
+        "_schema_note": "RETIRED 26-Jul-2026 — use the growth_stock watchlist item schema.",
         "rank": "[N]",
         "ticker": "[TICKER]",
         "name": "[Energy Company]",
@@ -412,7 +412,7 @@
         ]
       },
       {
-        "_schema_note": "PATH C (energy) detail item — energy scorecard /36.",
+        "_schema_note": "RETIRED 26-Jul-2026 — use the growth_stock detail item schema.",
         "ticker": "[TICKER]",
         "name": "[Energy Company]",
         "pipeline": "energy",

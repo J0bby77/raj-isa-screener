@@ -2,7 +2,7 @@
 """
 sync_repo_to_github.py — make the GitHub FALLBACK repo MIRROR the local OneDrive scripts.
 
-Run as a PREFLIGHT at the start of EVERY scheduled ISA task (growth, energy, VCI, pre-run, intramonth).
+Run as a PREFLIGHT at the start of EVERY scheduled ISA task (growth, VCI, pre-run, intramonth).
 Guarantees the Composio/GitHub fallback never runs stale code: any enhancement Raj makes to a tracked script
 on OneDrive — between sessions, by hand — is pushed to J0bby77/raj-isa-screener BEFORE a fallback could fire.
 Covers ALL tracked repo files automatically (screener_core, screener_local, energy_screener, build_*, the VCI
@@ -21,7 +21,7 @@ import argparse, os, sys, hashlib, subprocess, shutil, datetime, re, ast, tempfi
 NEW_FILES = ["screener_local.py", "sync_repo_to_github.py"]   # may not be tracked yet
 NEVER = {".env", ".env.local"}
 # runtime INPUT data the scripts read (NOT run outputs/caches). New .py scripts are auto-discovered separately.
-RUNTIME_JSON = {"energy_watchlist.json", "watchlist_tickers.json", "target_weights.json",
+RUNTIME_JSON = {"watchlist_tickers.json", "target_weights.json",
                 "source_performance_log.json", "yfinance_metric_label_map.json",
                 "update_vci_watchlist_TEMPLATE.json", "vci_email_data_TEMPLATE.json",
                 "theme_opportunity.json",

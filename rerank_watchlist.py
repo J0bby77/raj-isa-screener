@@ -67,7 +67,7 @@ def _to_num(v):
 def _norm(total, pipeline, total_max=None):
     if total is None:
         return None
-    mx = total_max or (_cfg.ENERGY_TOTAL_MAX if pipeline == "energy" else _cfg.GROWTH_TOTAL_MAX)
+    mx = total_max or _cfg.GROWTH_TOTAL_MAX      # Path C retired 26-Jul-2026
     return round(total / mx * 100, 1)
 
 
@@ -259,6 +259,11 @@ def _resolve_action(name, cfg, ctx=None):
             delta     = getattr(cfg, "UPGRADE_DELTA", 15)
             insufficient_capital = ctx.get("insufficient_fresh_capital", True)
             slots     = ctx.get("upgrade_slots", 1)
+            try:
+                import compliance as _comp
+                _comp.clear_regime_blockers(name)   # no-op while a PAD regime binds
+            except Exception:
+                pass                                # fail safe: leave blockers as found
             blocked   = bool(name.get("upgrade_blocked") or name.get("in_30day_hold")
                              or name.get("active_selloff") or name.get("preclearance_block"))
             if (best is not None and (best - s) >= delta and insufficient_capital
@@ -544,9 +549,7 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         live = cr.get(t)
         total = None
         if live:
-            total = live.get("total_score_36") if pipeline == "energy" else (live.get("total_score_50") or live.get("total_score_54"))
-            if total is None:
-                total = live.get("total_score_50") or live.get("total_score_54") or live.get("total_score_36")
+            total = live.get("total_score_50") or live.get("total_score_54")
         src = live
         if total is None:
             tkd = tk.get(t)
@@ -569,7 +572,6 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     log["compliance_excluded"] = []
     _use_fe = getattr(_cfg, "FORWARD_ELIGIBILITY", False)
     _pa_floor_a = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)
-    _pa_floor_c = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR_ENERGY", 14)
     eligible = []
     _q_floor = getattr(_cfg, "NORMALISED_SCORE_HARD_REMOVE_BELOW", 60.0)
     for t, e in registry.items():
@@ -588,8 +590,7 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             # confirmed catalyst) — NOT the fixed ns>=70 quality-total gate. Admits forward-confirmed,
             # lower-total names so the Source Score can rank (not pre-filter) them.
             _pa = e.get("part_a") or 0
-            _floor = _pa_floor_c if e.get("source_pipeline") == "energy" else _pa_floor_a
-            if _pa < _floor:
+            if _pa < _pa_floor_a:
                 continue
             _epspos = (_eps_mom_sign(mom_map.get(t)) or 0) > 0
             _cat = bool(e.get("confirmed_catalyst") or e.get("catalyst_protected"))

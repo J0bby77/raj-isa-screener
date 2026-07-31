@@ -26,6 +26,11 @@ except Exception:
     _alang = None
 
 
+# Tick 6 (WP-D): minimum length for a falsification statement. Deliberately low — this is a
+# completeness gate, not a quality gate. A one-word "none" must fail; a real sentence must pass.
+FALSIFICATION_MIN_CHARS = 40
+
+
 def _to_ledger_decision(decision):
     """P2-3: map a canonical/stack action (BUY/STARTER/ADD/WATCH/...) to the decision_ledger vocabulary
     {buy,trim,sell,top_up,PASS,hold} so log_decision never raises. Valid ledger decisions pass through;
@@ -59,6 +64,7 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
                           whose stage_gate is BLOCKED_PENDING_CASE or late_cycle_flag is True
                           (A3/A15) must carry a documented cause (t1_gate_overrides recorded via
                           decision["documented_causes"][ticker] or the step9 record itself).
+      falsification    : optional {ticker: statement} — tick (6). See _tick6 below.
     Any non-empty `blocks` list means the decision is BLOCKED."""
     blocks = []
     top5 = [str(t).strip().upper() for t in (top5 or []) if str(t).strip()][:REQUIRED_TOP]
@@ -131,6 +137,50 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
             if (_fc.get(c) or 0) > 0:
                 blocks.append(f"{c} raises AI-complex weight while cap is in BREACH (B3/D15) — "
                               f"de-concentrate first or choose a non-factor name")
+
+    # (6) FALSIFICATION TEST (WP-D, 29-Jul-2026 — assessment §5.3).
+    #     Ticks 1-2 prove the chosen name beat the other four. They do NOT test whether all five
+    #     were wrong: a comparative contest is a RELATIVE test and is blind to a shared error.
+    #     This tick forces the disconfirming question BEFORE capital is committed, which is where
+    #     the framework previously had no adversarial step at all (the full bull/bear case sits at
+    #     Step 10.3, "Decided Action Only" — i.e. after the name has already won).
+    #
+    #     The machine verifies (a) a non-trivial statement EXISTS for each chosen name, and
+    #     (b) that it ENGAGES with any disconfirming evidence the pre-run already surfaced —
+    #     mirroring the tick-4 documented-cause mechanism. Its CONTENT is the review's judgment;
+    #     this is a completeness gate, not a quality gate.
+    _fals = {str(k).strip().upper(): v for k, v in (decision.get("falsification") or {}).items()}
+    for c in sorted(chosen_set):
+        stmt = str(_fals.get(c) or "").strip()
+        if len(stmt) < FALSIFICATION_MIN_CHARS:
+            blocks.append(f"{c} missing falsification test (tick 6): state what observable evidence "
+                          f"would make this a mistake, whether any is already visible in the pre-run "
+                          f"data, and what would trigger a thesis-break "
+                          f"(decision['falsification']['{c}'], >= {FALSIFICATION_MIN_CHARS} chars)")
+            continue
+        # (b) if the pre-run already flagged disconfirming evidence, the statement must address it
+        rec = _s9.get(c) or {}
+        _rf = rec.get("risk_flags") or {}
+        visible = []
+        if rec.get("disqualifier_flags"):
+            visible.append("disqualifier_flags")
+        if _rf.get("delta_score_direction") in ("down", "falling", "deteriorating"):
+            visible.append("delta_score_direction")
+        if _rf.get("analyst_disparity"):
+            visible.append("analyst_disparity")
+        if _rf.get("binary_event_within_90d"):
+            visible.append("binary_event_within_90d")
+        if rec.get("recent_reversal_vs_12_1m") or _rf.get("recent_reversal_vs_12_1m"):
+            visible.append("recent_reversal_vs_12_1m")
+        if rec.get("review_flags"):
+            visible.append("review_flags")
+        if visible and not decision.get("falsification_addresses_flags", {}).get(c):
+            low = stmt.lower()
+            if not any(tok.split("_")[0] in low or tok.replace("_", " ") in low for tok in visible):
+                blocks.append(f"{c} falsification test does not engage the disconfirming evidence the "
+                              f"pre-run already surfaced ({', '.join(visible)}) — address it, or set "
+                              f"decision['falsification_addresses_flags']['{c}']=True with the reason "
+                              f"stated in the case (tick 6)")
 
     # (3) log all N (incl passes) — at minimum every top-5 name must be logged
     not_logged = [t for t in top5 if t not in logged]

@@ -3,7 +3,7 @@
 scoring_config.py — SINGLE SOURCE OF TRUTH for ISA path-scorer thresholds.
 
 WHY THIS EXISTS
-  The pre-run must use ONLY the scorers used in the 3 paths (growth / energy / VCI),
+  The pre-run must use ONLY the scorers used in the 2 live paths (growth / VCI; Path C energy
   which are continually enhanced. To stop display/threshold constants drifting out of
   sync (the the former pre-run formatter "/54" divergence), the canonical thresholds live HERE and are
   imported by: screener_core.py, energy_screener.py, and the pre-run formatter
@@ -96,10 +96,11 @@ PRICE_MOM_THRESHOLDS     = (30.0, 0.0)  # 12-1m price return % : strong>=30, acc
 # Rolling-over=0. Carried as a field + review timing context; added to F only when this flag is on (post-shadow).
 REVISION_RUNWAY_IN_F     = True
 
-# Energy valuation parity (redesign Part 2 §F) — bring energy Part B into line with growth v27:
-# growth-ADJUST EV/EBITDA + Forward P/E (vs raw multiples) and DROP the stale 52-week-position metric
-# (Part B max 16 -> 14 when on). DEFAULT False = current energy scoring (Sunday-run-safe); activate + test.
-ENERGY_VALUATION_PARITY  = True
+# Energy valuation parity — REMOVED 26-Jul-2026 with Path C (see ISA_PathC_Energy_Assessment_Jul2026.md
+# and ISA_PathC_Energy_Calibration_Study_Jul2026.md). The flag's own change deleted the 52-week-position
+# metric, which the calibration study then found to be the single strongest signal in the energy universe
+# (IC +0.262, 5/5 stability). Energy names are now screened by Path A, whose forward axis already carries
+# price momentum and whose Source Score weights quality at 0.05 — the weighting the energy data supports.
 FORWARD_AXIS_IN_RANKING  = True        # when True, Source Score (rerank) ranks on F — activate after shadow
 
 # H2/H3 debug fix (redesign §7.5 / §13.1). When FORWARD_ELIGIBILITY is on, selection gates on a
@@ -116,9 +117,9 @@ FORWARD_ELIG_PART_A_FLOOR         = 10    # growth VIABILITY floor = bottom of "
                                           # lowered to 14 (redesign §8 viability-not-quality) so forward-confirmed
                                           # reversals (e.g. ORCL scored Part A=14) are NOT pre-excluded — the
                                           # Source Score + count-cap do the selection. 22 stays the "Strong" label.
-FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-kick-in line on /20 (NOT the Acceptable
-                                          # floor of 8); energy is a curated ~28-name list + Part B only computes for
-                                          # Part A>=14, so 14 is its natural fully-scorable floor (conscious asymmetry).
+# FORWARD_ELIG_PART_A_FLOOR_ENERGY — REMOVED 26-Jul-2026 with Path C. It was dead code in any case:
+# rerank_watchlist eliminated energy-pipeline names one branch earlier on `ns is None`, so the
+# energy-aware floor could never be reached (ISA_PathC_Energy_Assessment_Jul2026.md §3.2).
 
 # Source Score weights (redesign Part 3 §13) — the FORWARD-LED ranking composite in rerank_watchlist.
 # F dominant, quality de-emphasised, cheapness earns no separate credit. PROVISIONAL — calibrate in
@@ -128,6 +129,13 @@ FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-
 # revisions 0.15 / deployability 0.10 / quality 0.05 / analyst 0.10 (higher-end, per Raj's call).
 # FROZEN 12-Jul-2026 (Fix Pack A8 / decision D5, Raj-approved) - SOURCE_WEIGHTS and
 # FORWARD_AXIS_BUCKET_WEIGHTS may change ONLY via the pre-registered calibration rule below.
+# *** OVERRIDE 29-Jul-2026 (Raj, WP-M): FORWARD_AXIS_BUCKET_WEIGHTS changed OUTSIDE the
+# *** pre-registered rule. Justification: the rule cannot fire before ~late Sep 2026 (it needs
+# *** CALIBRATION_MIN_MATURED_3M matured 3m observations and score_panel.csv only begins
+# *** 25-Jun-2026), while the live setting contradicted the Jun-26 study that introduced it.
+# *** This is a REVERSION TO PRE-REGISTERED GUIDANCE, not a new judgment recalibration.
+# *** SOURCE_WEIGHTS itself is UNCHANGED and remains frozen.
+# *** Evidence: ISA_Momentum_Diagnostic_PCTY_MU_Jul2026.md (§3, §7).
 # No judgment recalibrations. These weights are UNVALIDATED PRIORS until score_panel matures.
 # PRE-REGISTERED RULE (evaluate quarterly once >= 200 matured 3m observations exist in
 # score_panel.csv, via calibration_report.py):
@@ -136,6 +144,9 @@ FORWARD_ELIG_PART_A_FLOOR_ENERGY  = 14    # energy: 14 = energy "Strong"/Part-B-
 #   (2) if IC_3m(revisions_score) >= 2x IC_3m(score_f_price_mom) -> FORWARD_AXIS_BUCKET_WEIGHTS
 #       price 0.70->0.40, margin 0.30->0.60 (estimate signals already live in revisions_score).
 #   (3) any change: calibration changelog entry + one shadow cycle before live.
+# Gate for the pre-registered rule above, read by calibration_report.py (no magic numbers).
+CALIBRATION_MIN_MATURED_3M = 200
+
 SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}
 
 # --- VCI forward-led (Jul-2026) — VCI_Forward_Led_Framework_Implementation_Jul2026.md -------
@@ -302,7 +313,9 @@ REGIME_OPEN_DOORS = {              # B7(2): doors open per regime (momentum neve
 }
 DOOR_QUALITY_PART_A_MIN = 20       # B7 quality-stability door (Doc B spec)
 DOOR_QUALITY_ND_EBITDA_MAX = 1.5
-DOOR_QUALITY_FCF_YEARS_MIN = 5
+DOOR_QUALITY_FCF_YEARS_MIN = 4   # WP-D 29-Jul-26: was 5 — UNREACHABLE. fcf_positive_years is
+#   computed over a 5-year window whose observed MAXIMUM across the whole 423-name NASDAQ universe
+#   is 4 (264 names at 4, 78 at 3, ZERO at 5). The door could never open on this criterion alone.
 DOOR_QUALITY_DIV_PAYOUT_FCF_MAX = 0.8  # dividend covered; no dividend (None) = covered
 DOOR_INFLECTION_PART_A_MIN = 16    # B7 inflection door
 DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
@@ -333,17 +346,13 @@ REGIME_RULES = {                         # B7(1) — pure decision table: (vs-20
 }                                        # dd bands: 0 = >-5%, 1 = -5..-15%, 2 = <=-15%
 
 # ===========================================================================
-# ENERGY  (energy_screener.py — Part A /20 + Part B /16 = Total /36)
+# ENERGY (Path C) — RETIRED 26-Jul-2026. Raj decision: absorb energy names into Path A.
+# The scorecard had no measurable predictive power (Part A IC +0.029 pooled, -0.005 on a
+# 2025 holdout, bands inverted) and all three of its differentiated rules were contradicted
+# by 627 point-in-time observations across 210 names in 8 regions. Energy/utilities names are
+# now screened by the weekly index runs on Path A; pre-scale binaries route to Path B.
+# Evidence: ISA_PathC_Energy_Calibration_Study_Jul2026.md
 # ===========================================================================
-ENERGY_PART_A_MAX        = 20
-ENERGY_PART_B_MAX        = 16
-ENERGY_TOTAL_MAX         = 36
-
-ENERGY_PART_A_STRONG     = 14
-ENERGY_PART_A_ACCEPTABLE = 8
-ENERGY_PART_B_STRONG     = 11
-ENERGY_PART_B_WATCH      = 6
-ENERGY_HIGH_SCORE        = 28     # ~78% of 36
 
 # ===========================================================================
 # PRELIMINARY conviction brackets — DISPLAY ONLY (Claude refines to /100 at Step 9).
@@ -365,7 +374,6 @@ def conviction_brackets(total_max):
     return _brackets(total_max)
 
 GROWTH_CONVICTION_BRACKETS = _brackets(GROWTH_TOTAL_MAX)   # 46 / 41 / 35 on /50
-ENERGY_CONVICTION_BRACKETS = _brackets(ENERGY_TOTAL_MAX)   # 33 / 30 / 25 on /36
 
 # ===========================================================================
 # FUND SLEEVE — return sourcing + 12% gate (redesign retro #5 G1/G2). The fund-sleeve weighted-average
@@ -443,13 +451,124 @@ REVISION_RUNWAY_CAP        = True
 FORWARD_AXIS_BUCKETED      = True
 # Bucket weights. Equal (1/1/1) => price ~= 1/3 of the axis (above each individual analyst signal,
 # but not dominant). To test price as a smaller timing overlay, lower "price" (e.g. 0.7).
-FORWARD_AXIS_BUCKET_WEIGHTS = {"margin": 0.30, "price": 0.70}   # Jul-26 Part 2: forward axis = price+margin ONLY;
-#   estimate-revision signals pulled OUT into a separate revisions_score (SOURCE_WEIGHTS["revisions"]=0.15)
+# ---------------------------------------------------------------------------------------------
+# WP-M (29-Jul-2026) — MOMENTUM REBALANCE. RAJ OVERRIDE of the 12-Jul freeze, evidence:
+#   ISA_Momentum_Diagnostic_PCTY_MU_Jul2026.md + ISA_Momentum_Horizon_Study_Jul2026.md
+# WHY: the Jul-26 Part 2 split set price=0.70, which made trailing price momentum 0.60*0.70 = 42%
+# of the Source Score. That directly contradicted the pre-registered instruction in
+# Forward_Axis_Backtest_Findings_Jun2026.md: "KEEP bucketed forward axis at equal 1/3
+# (estimates / margin / price). Do not raise price above 1/3." Restoring the 1/3 split and putting
+# the estimate signals back into the axis. Momentum now = 0.60 * 0.3333 = 20% of Source Score.
+# ROLLBACK: set FORWARD_AXIS_BUCKET_WEIGHTS back to {"margin":0.30,"price":0.70} and
+# PRICE_MOM_BLEND to {"long":1.0,"short":0.0} and PRICE_MOM_SCORING="bands".
+# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
+# WP-M7 (29-Jul-2026) — ESTIMATES WEIGHT DECIDED. Raj: "decide the estimates weight".
+# Evidence: ISA_Estimates_Weight_Decision_Jul2026.md (1,176-row / 5-screener panel, permutation
+# influence study). Registry entry WPM-7.
+#
+# THE DEFECT. The axis "estimates" bucket and `revisions_score` are not merely correlated, they are
+# the SAME NUMBER: both are mean(score_f_eps_trend, score_f_rev_est, score_b_est_rev,
+# revision_runway)/2. Verified identical on 1176/1176 rows. Under thirds the estimate signals
+# therefore carried 0.60*(1/3) + 0.15 = 35% of the Source Score, against margin 20% and price 20%.
+# Nobody chose 35% — it is the arithmetic of implementing the Jun-26 "equal thirds" instruction on
+# top of the Jul-26 Part 2 split that had already pulled estimates OUT into their own 15% term.
+#
+# WHY NOT SIMPLY REMOVE THE DUPLICATE. Setting estimates=0 forces margin+price to 0.5/0.5, i.e.
+# momentum back to 30% of Source — reversing the WP-M reweight delivered the same day on a
+# 43k-stock-month panel. SOURCE_WEIGHTS is frozen, so `revisions`=0.15 cannot absorb it either.
+# The duplication cannot be removed; it can only be SIZED. Constraints that bind:
+#     price effective = 20%  (WP-M decision, evidence-backed, locked)
+#     SOURCE_WEIGHTS frozen  =>  estimates_eff + margin_eff = 55% exactly
+# Every point taken off estimates MUST go to margin. There is no third destination.
+#
+# THE DECISION: estimates_eff = margin_eff = 27.5%.  Solve 60e+15 = 60m subject to e+m = 2/3:
+#     e = 5/24, m = 11/24, p = 8/24 (= 1/3).
+# This is the correct translation of the Jun-26 "equal 1/3 estimates/margin/price" instruction into
+# the post-split architecture: equal EFFECTIVE weight across the three forward dimensions, subject
+# to the momentum lock — not equal RAW axis shares, which is what produced the 35%.
+#
+# WHY EQUAL AND NOT A VIEW. Neither estimates nor margin has a validated IC and neither CAN be
+# validated before score_panel matures (~Sep-26 at the earliest; the bucket weights themselves are
+# not reconstructable at all — see calibration_registry WPM-1). Equal weight is the minimum-judgment
+# allocation under genuine ignorance. The measured alternatives were all worse on one of the two
+# influence metrics: at 35/20 estimates permutation changes 4.05 of the top 5 (margin 1.95, price
+# 2.40) — estimates dominates selection; at 20/35 margin's mean |rank shift| hits 52 vs 20/26 —
+# margin dominates the cross-section. 27.5/27.5 is inside the balanced zone on both.
+#
+# MATERIALITY (measured, not asserted): SUMMARY pool 46 -> 48; the deployable TOP 5 is UNCHANGED in
+# NASDAQ, SP500, STOXX600 and F250SPI, and swaps ranks 4-5 in MIDCAP400 only (FTI out, WTS in).
+# This is a correctness fix to a weight nobody chose, not a change to what gets deployed.
+#
+# IT DOES NOT DEMOTE MU, and was not chosen to. MU holds rank 2 in NASDAQ and SP500 at every
+# setting tested from 35% down to 20%. MU's problem is ROIC 13.6% vs WACC 16.0% — destroying value
+# — and quality carries 5% in the FROZEN SOURCE_WEIGHTS. The quality weight is the MU lever; the
+# estimates weight is not. Do not re-litigate this one via the axis.
+#
+# NEW DEFECT SURFACED, NOT FIXED HERE (registry WPM-8): score_f_margin_traj is missing for 20.7% of
+# the universe and 27% of the selected pool. wsum renormalisation silently reallocates margin's
+# weight to price+estimates for exactly those names, and the distortion SCALES with margin's weight
+# (1.50x at thirds -> 1.85x here). Margin-missing names already score lower (41.6 vs 45.2 mean
+# source). Deliberately left alone: one lever, one cycle. Do not raise margin further until fixed.
+#
+# ROLLBACK: FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 1/3, "margin": 1/3, "price": 1/3}
+# (WP-M as delivered 29-Jul); the pre-WP-M setting was {"margin": 0.30, "price": 0.70}.
+# ---------------------------------------------------------------------------------------------
+FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 5/24, "margin": 11/24, "price": 1/3}
 
-# Price-momentum window (Jun-26 backtest): 12-1 month = 252-day window ending ~21 trading days ago.
-# 63-day (one-quarter) momentum was reversal-prone/dead in the forward-return panel; 12-1m carries the edge.
+# Price-momentum windows. LONG = 12-1m (252-day window ending ~21 trading days ago) — the Jun-26
+# backtest signal. SHORT = trailing 1 month (21d, no skip) — the window the LONG signal discards.
+# Horizon study (29-Jul-26, 217 Nasdaq growth names, 44 monthly formation dates, rank-IC -> fwd 1m):
+#     12-1m -0.005 (t -0.19) | 12m +0.000 | 6-1m -0.006 | 3m +0.012 | 1m +0.036 (t 1.74, 64% hit) | 5d -0.003
+# 1m is the strongest horizon at the 1-month decision cadence and is exactly what SKIP removed.
+# 5d was tested and REJECTED (t -0.16, microstructure noise) — do not add it.
+# CAUTION: t=1.74 is below significance and contradicts the classic short-term-reversal literature;
+# this universe is a survivorship-biased growth screen. Blend is deliberately modest and logged.
 PRICE_MOM_LOOKBACK         = 252
 PRICE_MOM_SKIP             = 21
+PRICE_MOM_SHORT_LOOKBACK   = 21     # trailing 1 month
+PRICE_MOM_SHORT_SKIP       = 0      # no skip — this IS the recent-month signal
+PRICE_MOM_BLEND            = {"long": 0.50, "short": 0.50}
+# CORRECTED 29-Jul-26 after the FULL cross-universe panel (978 names / 5 screeners / 45 formation
+# dates / ~43k stock-months). The earlier 0.35/0.65 lean-short was fitted to NASDAQ ONLY and does
+# NOT generalise: pooled 5y rank-IC -> fwd 1m is 12-1m +0.0254 vs 1m +0.0207 (i.e. the LONG window
+# is marginally better pooled), and in STOXX600 12-1m (+0.0328) beats 1m (+0.0259) outright.
+# What DOES generalise is the BLEND: highest t-stat of the three in the pooled panel on both
+# windows (5y +0.0252 t 1.32; 4y +0.0430 t 2.06 — the only t>2 in the study). Blending beats
+# picking a horizon. 50/50 is therefore the evidence-supported setting; do not lean either way
+# without a pooled result that survives both windows.
+# PER-UNIVERSE CAVEAT: F250SPI shows NO momentum edge (5y 12-1m -0.0077; 12-1m -> fwd 3m -0.0341
+# t -1.82, 29% hit). Flagged for a per-universe weight review — see calibration_registry WPM-5.
+
+# Momentum scoring mode. "percentile" = cross-sectional rank within the run (fixes the saturation
+# that scored MU 2/2 at +753% AND at +40%, and PCTY 0/2 at -44.3% AND at -42.1% while improving).
+# "bands" = legacy absolute PRICE_MOM_THRESHOLDS. Percentile needs the whole cross-section, so it is
+# applied by screener_core.apply_cross_sectional_momentum() after per-ticker scoring.
+PRICE_MOM_SCORING          = "percentile"
+PRICE_MOM_PCTL_CUTS        = (0.667, 0.333)   # >=P67 -> 2 ; >=P33 -> 1 ; else 0
+
+# Momentum state (long vs short disagreement) — the second-derivative read that was missing.
+# PX_-prefixed so they can never be confused with `revision_stage` (ANALYST ESTIMATES), which has
+# its own "Rolling over" value feeding SUMMARY_STAGE_EXCLUDE. Different measurements entirely.
+# PX_RECOVERING    : long <= 0, short > 0   (PCTY 24-Jul: 12-1m -42.9%, 1m +19.5%)
+# PX_ADVANCING     : long  > 0, short > 0
+# PX_DETERIORATING : long  > 0, short <= 0  (MU   24-Jul: 12-1m +758.9%, 1m -12.2%)
+# PX_DECLINING     : long <= 0, short <= 0
+MOMENTUM_STATE_IN_AXIS     = False   # label is DIAGNOSTIC + routing only; it must not re-score
+# Deployment-timing gate (WP-M2). Reconciliation study 29-Jul-26 showed BOTH momentum horizons have
+# ~zero rank-IC against FORWARD 3-MONTH returns on 5y data (12-1m -0.000 t -0.00 on the June panel),
+# while 1m retains weak FORWARD 1-MONTH power. Momentum is therefore an ENTRY-TIMING signal, not a
+# SELECTION signal. SHADOW THIS CYCLE: recorded on every row, gates nothing. Flip to True after one
+# clean cycle to block deployment into FALLING / ROLLING_OVER names.
+MOMENTUM_TIMING_GATE_ACTIVE = False
+MOMENTUM_TIMING_BLOCK_STATES = ("PX_DECLINING", "PX_DETERIORATING")
+# EVIDENCE 29-Jul-26 (964 names / 5 screeners / 44 dates): gating SUMMARY on these states is NOT
+# supported — excluding them earns +0.119pp/month (t +0.74, i.e. zero) while cutting candidate
+# breadth 41%. The state label is a coarse SIGN split and discards the tail information the
+# continuous percentile score keeps. It is therefore DIAGNOSTIC + a deployment BLOCK tag only,
+# and must never gate SUMMARY membership. Mean fwd 1m by state: PX_ADVANCING +1.86 / PX_RECOVERING
+# +1.45 / PX_DETERIORATING +1.56 / PX_DECLINING +1.44 / universe +1.57.
+MOMENTUM_STATE_GATES_SUMMARY = False
 
 # SUMMARY forward-runway gate (Jul-26): exclude estimate-cycle stages with no forward runway from the
 # SUMMARY candidate pool (the pre-run deployment funnel). Igniting/Accelerating/Sustained/Early-unconfirmed
@@ -486,6 +605,35 @@ SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
 DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by
 
 
+# --- WP-C position alerts (29-Jul-2026): between-run early warning thresholds -----------------
+# Consumed by position_alerts.py, run by the weekly EPS snapshot task over data it already fetches.
+# DETECTION ONLY -- these never trigger a trade. An alert is context for the NEXT SCHEDULED review
+# (see position_alerts.py docstring / C-1). Tune from observed false-positive rate, not intuition.
+ALERT_EPS_WOW_DROP_PCT    = -3.0   # +1y consensus EPS fall week-on-week
+ALERT_EPS_TRAJ_DROP_PCT   = -6.0   # cumulative +1y EPS fall across the trajectory window
+ALERT_TARGET_CUT_PCT      = -8.0   # mean analyst target cut across the window
+ALERT_CONSEC_DOWN_WEEKS   = 2      # consecutive down weeks == direction change
+ALERT_TRAJECTORY_WEEKS    = 6      # trajectory lookback (weekly observations)
+
+# --- COMPLIANCE REGIME (Raj 29-Jul-2026: Citi redundancy) -----------------------------------
+# THE single switch governing employer personal-account-dealing (PAD) rules. Flip to "CITI_PT"
+# to restore Citi-equivalent behaviour the day Raj joins another bank -- one line, no other edit.
+# NEVER test this constant directly in a caller: import compliance and use its predicates (H-7).
+#
+# WARNING -- TWO DIFFERENT MIN-HOLDS, DO NOT CONFLATE:
+#   * MIN_HOLD_DAYS = 182  -> FRAMEWORK anti-churn rule (C-1 fix, 22-Jul-26). REGIME-INDEPENDENT.
+#                             Still fully in force. Pausing it would re-open the -GBP1,097 churn
+#                             pattern the audit identified as the framework's costliest defect.
+#   * compliance.min_hold_days() -> REGULATORY hold (Citi PT 30d -> 0d while paused).
+COMPLIANCE_REGIME = "NONE"                      # "CITI_PT" | "NONE"
+COMPLIANCE_REGIME_EFFECTIVE_FROM = "2026-07-29"
+COMPLIANCE_REGIME_NOTE = (
+    "Citi redundancy confirmed by Raj 29-Jul-2026. Preclearance, 2-day approval validity, "
+    "30-day regulatory hold and the narrow/broad instrument test are PAUSED, not retired. "
+    "Restore by setting COMPLIANCE_REGIME='CITI_PT' if Raj joins another bank; positions opened "
+    "while paused carry a restoration-risk marker (compliance.restoration_risk)."
+)
+
 # --- C-1 fix (audit item #3, WP-3, 26-Jul-26): entry-time stability + minimum-hold ---
 # Additive config, NOT a scoring-weight change - H-1 freeze untouched.
 ENTRY_STABILITY_LOOKBACK_DAYS = 182
@@ -502,11 +650,18 @@ KNOWN_STORE_PATTERNS = (
     r"|watchlist_metrics|watchlist_scored|xray_data|vci_email_data|vci_prescore_cache"
     r"|vci_prescore|entry_level_audit)_[a-z]{3}_\d{4}\.json",
     r"[A-Za-z0-9_]+_TEMPLATE\.json",
-    r"(decision_ledger|drawdown_state|energy_watchlist|eps_snapshot_resume"
+    r"(decision_ledger|drawdown_state|eps_snapshot_resume"
     r"|eps_trend_snapshots|factor_map|fund_returns_cache|sleeve_counterfactual"
     r"|source_performance_log|target_state|target_weights|theme_opportunity"
     r"|vci_base_rates|vci_fv_inputs|vci_learning_store|vci_calibration_state"
-    r"|watchlist_tickers)\.json",
+    r"|watchlist_tickers"
+    # 29-Jul-26: two PRE-EXISTING unregistered stores (both live inputs, both were showing as
+    # ORPHAN-SUSPECT) plus the three WP-B/WP-C stores.
+    # transaction_ledger = Step 1b dealing record, PERSISTENT - never delete it.
+    # supplementary_constituents = screener universe supplement.
+    r"|transaction_ledger|supplementary_constituents"
+    r"|position_alerts|calibration_state|score_panel_backfill_manifest|learning_growth_state"
+    r")\.json",
 )
 
 # --- H-8 (audit item #8, 26-Jul-26): semis-complex look-through ---

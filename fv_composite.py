@@ -69,8 +69,9 @@ def classify_stock_type_detail(t, get=None):
     bucket = (g(t, "sector_bucket") or "").strip().lower()
     sector = (g(t, "sector") or "")
     industry = (g(t, "industry") or "")
-    if pipeline == "energy":
-        return {"sector_type": "energy", "sector_type_inferred": False, "sector_type_basis": "pipeline=energy"}
+    # Path C retired 26-Jul-2026: the pipeline->sector_type bridge is gone. Energy-sector names
+    # still classify as sector_type "energy" via the keyword list below (unchanged), which is what
+    # Path A entry levels and the fund sleeve consume.
     if bucket in SEMI_BUCKETS:
         return {"sector_type": "cyclical", "sector_type_inferred": False, "sector_type_basis": f"bucket={bucket}"}
     if bucket == "software_saas":
