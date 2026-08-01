@@ -163,6 +163,10 @@ TRACKED_SCRIPTS = (
     "decision_ledger.py", "checkpoint_d.py", "compliance.py", "etf_tactical.py",
     "position_alerts.py", "calibration_report.py", "fund_returns.py", "drawdown_monitor.py",
     "consistency_check.py", "scoring_config.py",
+    # 01-Aug-26: isa_env_guard.py added — it is imported by fetch_watchlist_metrics.py and
+    # owns the tmpfs guard + the H-4 secrets loader, so a stale copy on the Composio
+    # fallback path would silently change where temp files and API keys come from.
+    "isa_env_guard.py",
 )
 # Kept identical (by design, checked at self-test time is not automated — see the pre-run
 # task's MAINTENANCE RULE list) to the set of scripts whose edits must be pushed to GitHub.
