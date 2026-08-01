@@ -49,7 +49,19 @@ def load_secrets(script_dir=None, _print=print, _environ=None):
     -> local non-synced (LOCALAPPDATA\\ISA\\.env on Windows, ~/.isa/.env portable) ->
     legacy Investment Analysis/.env with a DEPRECATED warning (kept so sandbox/Composio
     runs still work; that copy must hold ONLY API keys once the PAT is rotated).
-    NEVER logs secret values - warnings name paths and key names only."""
+    NEVER logs secret values - warnings name paths and key names only.
+
+    01-Aug-26 CONSTRAINT (Raj decision: LEAVE AS-IS, DOCUMENTED). On the path that actually
+    needs these keys - the monthly pre-run, which executes in the LINUX sandbox - the first
+    three candidates are all unreachable: %LOCALAPPDATA% does not exist, and ~/.isa/.env sits
+    on an ephemeral filesystem wiped between bash calls (only /sessions/<s>/mnt/* is mounted,
+    and the sole mount is the OneDrive ISA folder). So the synced .env is the ONLY durable
+    location the sandbox can read, and the DEPRECATED warning will fire on every run by
+    design - it is NOT an unactioned finding. Exposure was verified 01-Aug-26: ".env" is in
+    sync_repo_to_github.NEVER and returns HTTP 404 on the public repo, so no secret has
+    reached GitHub; residual risk is confined to OneDrive cloud sync. To retire the warning
+    properly, either export ISA_ENV_PATH to a non-synced mounted path (none exists today) or
+    mount a second non-synced folder into the sandbox."""
     import re as _re
     env = _environ if _environ is not None else os.environ
     sd = script_dir or os.path.dirname(os.path.abspath(__file__))
