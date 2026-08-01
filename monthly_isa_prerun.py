@@ -88,9 +88,25 @@ def _resolve_memory_base() -> str:
     home  = os.path.expanduser("~")
     SPACE = "aa27f2f8-c3d3-4862-ba9a-a67b7f6d74b9"
     base  = os.path.join(home, "AppData", "Roaming", "Claude", "local-agent-mode-sessions")
-    candidates = [os.path.join(base, "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
-                               "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
-                               "spaces", SPACE, "memory")]
+    candidates = []
+    # 01-Aug-26 ROOT-CAUSE FIX: the pre-run executes in the LINUX sandbox, where HOME is
+    # /sessions/<session> and the Windows AppData tree below does NOT exist -- so every
+    # candidate failed and MEMORY_BASE pointed at nothing. The memory dir IS mounted, at
+    # /sessions/<session>/mnt/.auto-memory. The earlier "fix" (dropping the '..' climb out
+    # of the OneDrive tree) corrected the wrong environment and never took effect. The
+    # consequence was NOT limited to the visible Step 5 skip: find_memory_file
+    # ("project_isa_trades_log.md") also returned None SILENTLY, so analytics ran with no
+    # purchase dates. Sandbox-native locations are probed FIRST; the Windows paths remain
+    # for a native/desktop invocation.
+    if os.environ.get("ISA_MEMORY_DIR"):
+        candidates.append(os.environ["ISA_MEMORY_DIR"])
+    candidates += sorted(_g.glob("/sessions/*/mnt/.auto-memory"))
+    # SCRIPT_DIR is <mnt>/ISA/Investment Analysis -> ../../.auto-memory
+    candidates.append(os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", ".auto-memory")))
+    candidates.append(os.path.join(base, "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
+                                   "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
+                                   "spaces", SPACE, "memory"))
     candidates += _g.glob(os.path.join(base, "*", "*", "spaces", SPACE, "memory"))
     for c in candidates:
         if os.path.isdir(c):
@@ -416,6 +432,13 @@ def main():
                              "watchlist_metrics file. Step 6 also self-skips whenever that "
                              "file already covers every current ticker, so the second "
                              "orchestrator pass is idempotent without this flag.")
+    parser.add_argument("--skip-vci-sync",   action="store_true",
+                        help="Skip Step 5 (sync_vci_watchlist) and reuse the vci_watchlist "
+                             "section already in watchlist_tickers.json. Added 01-Aug-26: once "
+                             "MEMORY_BASE was fixed, Step 5 actually executes and costs ~14s of "
+                             "network time, pushing a full pass past the 45s bash ceiling. Run "
+                             "the orchestrator once to land Steps 1-5, then re-run with this "
+                             "flag (Step 6 self-skips on metrics coverage) to rebuild Steps 7-9.")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Print commands without executing them.")
     args = parser.parse_args()
@@ -762,6 +785,17 @@ def main():
             analytics_args += ["--prior-portfolio", prior_port_path]
         if trades_log_path:
             analytics_args += ["--trades-log", trades_log_path]
+        else:
+            # 01-Aug-26: previously a SILENT omission. Without the trades log,
+            # parse_trades_log_positions() returns [] and the stock-sleeve return is
+            # computed with no purchase dates, and the Step 8 thesis-break conditions are
+            # absent -- with nothing printed. Degraded data must be visible.
+            warnings.append(
+                "Step 3 (analytics): project_isa_trades_log.md not found at MEMORY_BASE "
+                f"({MEMORY_BASE}) -- stock-sleeve return computed WITHOUT purchase dates and "
+                "Step 8 thesis-break conditions are unavailable. Treat sleeve return as indicative.")
+            print(f"  WARNING: trades log not found -- sleeve return degraded. MEMORY_BASE={MEMORY_BASE}")
+            degraded = True
 
         ok, stdout, stderr = run_script(
             "analytics", analytics_args, dry_run=args.dry_run
@@ -905,7 +939,19 @@ def main():
     # ---------------------------------------------------------------------------
     print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
     vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
-    if not vci_md_path:
+    _vci_existing = 0
+    try:
+        with open(watchlist_config_path, encoding="utf-8") as _f:
+            _vci_existing = len((json.load(_f) or {}).get("vci_watchlist") or [])
+    except Exception:
+        _vci_existing = 0
+    if args.skip_vci_sync:
+        print(f"  SKIPPED (--skip-vci-sync) -- reusing {_vci_existing} existing vci_watchlist entr(y/ies).")
+        if _vci_existing == 0:
+            warnings.append("Step 5 SKIPPED via --skip-vci-sync but watchlist_tickers.json holds "
+                            "NO vci_watchlist entries -- run one pass without the flag.")
+            degraded = True
+    elif not vci_md_path:
         warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found at resolved MEMORY_BASE -- VCI watchlist not synced. (Held names are still removed at Step 4.)")
         print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped. MEMORY_BASE={MEMORY_BASE}")
         degraded = True
