@@ -242,6 +242,28 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
     if u.get("isin") and not isin_is_valid(u["isin"]):
         out["notes"].append(f"ISIN {u['isin']} fails its own check digit")
 
+    man = u.get("manual_returns")
+    if man and u.get("resolution_status") == "manual_factsheet":
+        out["status"] = "manual_factsheet"
+        src = man["source"]
+        for w in WINDOWS:
+            v = man["annualised_pct"].get(w)
+            if v is None:
+                m = Missing(man.get("absent_reason", {}).get(w, "not published by source"),
+                            man["as_of"], src)
+                out["returns"][w] = {"cumulative": as_dict(m), "annualised": as_dict(m),
+                                     "proxy_used": False}
+            else:
+                mm = Metric(v, man["as_of"], src, confidence=man.get("confidence", 1.0),
+                            unit="%", note="manager/platform factsheet")
+                out["returns"][w] = {"cumulative": as_dict(
+                                         Missing("factsheet publishes annualised only",
+                                                 man["as_of"], src)),
+                                     "annualised": as_dict(mm), "proxy_used": False}
+        out["notes"].append(f"NAV feed unavailable; trailing returns taken from {src} "
+                            f"as at {man['as_of']} (stamped, not inferred).")
+        return out
+
     if u.get("resolution_status") != "resolved" or not u.get("yf_symbol"):
         r = u.get("unresolved_reason", "no yf_symbol")
         out["status"] = "unresolved"
@@ -270,15 +292,19 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
         out["invariants"]["I1_price_match"] = {"pass": ok, "detail": msg,
                                                "lag_days": lag}
         out["pricing_lag_days"] = lag
-        if ok and lag:
-            effective_as_of = as_of - dt.timedelta(days=lag)
+        # NOTE: lag is recorded for the I1 identity check ONLY. Returns are
+        # measured to the CALENDAR as_of -- confirmed against two managers'
+        # published figures on the exact held share class:
+        #   MI Thornbridge C Acc  1y 13.32 / 3y 15.57 / 5y 16.93  (HL)
+        #   Ranmore Institutional 1y 16.82 / 3y 19.94 / 5y n/a    (AJ Bell)
+        # Both reproduce EXACTLY on the calendar basis. Lag-pinning reproduced
+        # neither and was reverted.
         if not ok:
             out["status"] = "price_mismatch"
             out["notes"].append("I1 FAILED -- likely wrong share class. "
                                 "Figures suppressed rather than published.")
     out["as_of_effective"] = effective_as_of.isoformat()
-    out["as_of_basis"] = ("broker pricing date (lag-pinned)"
-                          if effective_as_of != as_of else "as_of (no lag)")
+    out["as_of_basis"] = "calendar as_of (validated vs manager factsheets)"
 
     proxy = u.get("proxy") or {}
     proxy_series = None
