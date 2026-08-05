@@ -167,6 +167,11 @@ TRACKED_SCRIPTS = (
     # owns the tmpfs guard + the H-4 secrets loader, so a stale copy on the Composio
     # fallback path would silently change where temp files and API keys come from.
     "isa_env_guard.py",
+    # 02-Aug-26: capture_archive.py added — Capture Layer Item 0. It owns the archive/purge
+    # split at post-run cleanup, so a stale or absent copy silently reverts the framework to
+    # deleting step9_pre and the decision record stops accruing again.
+    "capture_archive.py",
+    "regime_resolver.py",
 )
 # Kept identical (by design, checked at self-test time is not automated — see the pre-run
 # task's MAINTENANCE RULE list) to the set of scripts whose edits must be pushed to GitHub.
@@ -255,6 +260,88 @@ def pair_monthly_retired(ctx_text):
                 errs.append(f"A18/M4: retired construct /{pat}/ in operative monthly prose "
                             f"({why}) — line: {ln.strip()[:110]}")
                 break
+    return errs
+
+
+# Files that ARE the decision record. No operative monthly prose may instruct their deletion.
+# Kept in step with capture_archive.ARCHIVE_SET / NEVER_PURGE — if you add a permanent store
+# there, add its stem here.
+CAPTURE_PERMANENT = (
+    "step9_pre", "step9_conviction", "run_manifest", "action_stack", "entry_level_audit",
+    "shadow_ledger", "gate_variables", "transaction_ledger", "decision_ledger", "score_panel",
+    # 02-Aug-2026: §7.7 intelligence store and §7.2 MOA are decision record too. The
+    # intelligence store is append-only and the MOA file is the ONLY instrument pointed at
+    # rejected names — losing either at cleanup would be silent and unrecoverable.
+    "intelligence", "missed_opportunity",
+)
+
+
+def pair_monthly_capture_retention(ctx_text, exists=os.path.exists):
+    """M9 (02-Aug-2026, Capture Layer Item 0 / Dashboard Spec 7.6.1).
+
+    The defect: post-run cleanup item 8 said 'Delete ... step9_pre_[mmm_yyyy].json'. That file
+    is the only record of the Step 9A inputs, so every month the framework destroyed the
+    reasoning behind its own most consequential decision and acceptance criterion #19 could
+    never be met. Prose was the ONLY thing holding the rule, which is why it survived so long.
+
+    Three assertions, because reverting any one of them re-opens the hole:
+      (a) no operative line instructs deletion of a permanent capture store;
+      (b) the cleanup contract names capture_archive.py (the mechanical archiver), and it exists;
+      (c) the archive destination is stated, so 'archive it' cannot degrade to 'leave it lying
+          around until something else tidies up'.
+    """
+    errs = []
+    for ln in _live_lines(ctx_text):
+        if not re.search(r"\b(delete|remove|purge|rm -f)\b", ln, re.I):
+            continue
+        for stem in CAPTURE_PERMANENT:
+            # 'never deleted' / 'is NOT deleted' are the correct instruction, not a violation.
+            if re.search(rf"\b(delete|remove|purge)\b[^.]*\b{stem}", ln, re.I) and \
+               not re.search(rf"\b(never|not|no)\b[^.]{{0,40}}\b(delete|deleted|remove|removed|purge|purged)\b", ln, re.I):
+                errs.append(f"A18/M9: operative monthly prose instructs deletion of the permanent "
+                            f"capture store '{stem}' — line: {ln.strip()[:110]}")
+                break
+    if "capture_archive.py" not in ctx_text:
+        errs.append("A18/M9: post-run cleanup does not invoke capture_archive.py — the "
+                    "archive/purge split is prose-only again and will silently regress")
+    elif not exists(os.path.join(HERE, "capture_archive.py")):
+        errs.append("A18/M9: Run_Context invokes capture_archive.py but it is not on disk")
+    if "archive/decision_capture" not in ctx_text:
+        errs.append("A18/M9: cleanup contract does not state the archive destination "
+                    "(archive/decision_capture)")
+    return errs
+
+
+def pair_monthly_two_regimes(ctx_text, exists=os.path.exists):
+    """M10 (02-Aug-2026). The framework carries TWO four-state regime variables:
+
+        macro_regime   Expansion|Slowdown|Contraction|Recovery  — Step 4 judgement, ECONOMY,
+                       forward-looking, governs the Step 6.3 fund-band tilt.
+        market_regime  RISK_ON|LATE_CYCLE|RISK_OFF|RECOVERY     — drawdown_monitor, PRICE,
+                       lagging by construction, governs B1 tranches, B7 doors, B4 Category 8.
+
+    They measure different things, so they cannot contradict each other — but both are called
+    "regime", both are four-state, and both contain a state spelled Recovery/RECOVERY. That
+    collision is what invites a cross-wire, and a cross-wire here would let a macro OPINION
+    fire a drawdown deployment tranche.
+
+    Asserts the operative prose keeps them distinguishable and names the resolver.
+    """
+    errs = []
+    if "regime_resolver.py" not in ctx_text:
+        errs.append("A18/M10: the monthly contract never names regime_resolver.py — the two "
+                    "regime variables have no stated precedence and can be cross-wired")
+    elif not exists(os.path.join(HERE, "regime_resolver.py")):
+        errs.append("A18/M10: Run_Context names regime_resolver.py but it is not on disk")
+    for term in ("macro_regime", "market_regime"):
+        if term not in ctx_text:
+            errs.append(f"A18/M10: '{term}' never appears in the monthly contract — the two "
+                        f"regimes are not namespaced and 'regime' remains ambiguous")
+    # The precedence rule that stops a judgement moving capital.
+    if "market_regime" in ctx_text and not re.search(
+            r"B1[^.\n]{0,80}market_regime|market_regime[^.\n]{0,80}B1", ctx_text):
+        errs.append("A18/M10: the B1 drawdown ladder is not explicitly bound to market_regime. "
+                    "A macro judgement must never be able to fire a deployment tranche.")
     return errs
 
 
@@ -398,6 +485,8 @@ def check_all():
         errs += pair_monthly_retired(mctx)
         errs += pair_monthly_prerun_stages(mctx, prerun)
         errs += pair_monthly_prerun_reads(mctx)
+        errs += pair_monthly_capture_retention(mctx)
+        errs += pair_monthly_two_regimes(mctx)
         if cfg is not None:
             errs += pair_monthly_t1_mode(mctx, bool(getattr(cfg, "T1_QUALIFICATION_MODE", False)))
         # Contracts that name executables: a missing script is a silent monthly failure.
@@ -471,6 +560,36 @@ def _selftest():
     assert not pair_monthly_prerun_reads(good_m)
     assert not pair_monthly_t1_mode(good_m, True)
 
+    # M10 — two regimes. Good fixture names both, the resolver, and binds B1 to market_regime.
+    good_reg = (good_m + "\nRegimes: macro_regime (Step 4) vs market_regime (mechanical). "
+                "Resolve via regime_resolver.py. The B1 drawdown ladder reads market_regime "
+                "ONLY.\n")
+    assert not pair_monthly_two_regimes(good_reg, exists=lambda p: True), \
+        pair_monthly_two_regimes(good_reg, exists=lambda p: True)
+    assert pair_monthly_two_regimes(good_reg.replace("macro_regime", "regime"),
+                                    exists=lambda p: True)
+    assert pair_monthly_two_regimes(good_reg.replace("regime_resolver.py", "x.py"),
+                                    exists=lambda p: True)
+    assert pair_monthly_two_regimes(good_reg.replace(
+        "The B1 drawdown ladder reads market_regime ONLY.", ""), exists=lambda p: True)
+
+    # M9 — capture retention. Good fixture: archives via capture_archive.py, names the target.
+    good_cap = (good_m + "\n8. Post-run cleanup: run `python3 capture_archive.py --month "
+                "[mmm_yyyy] --purge`. step9_pre_[mmm_yyyy].json is NOT deleted; it is archived "
+                "into archive/decision_capture/. Delete watchlist_metrics_[mmm_yyyy].json only.\n")
+    assert not pair_monthly_capture_retention(good_cap, exists=lambda p: True), \
+        pair_monthly_capture_retention(good_cap, exists=lambda p: True)
+    # THE real-world mutation: cleanup reverts to deleting the Step 9A inputs.
+    bad_cap = good_cap.replace("step9_pre_[mmm_yyyy].json is NOT deleted; it is archived "
+                               "into archive/decision_capture/.",
+                               "Delete step9_pre_[mmm_yyyy].json after the email sends.")
+    assert pair_monthly_capture_retention(bad_cap, exists=lambda p: True)
+    # ...and dropping the mechanical archiver, leaving prose alone to hold the rule.
+    assert pair_monthly_capture_retention(good_cap.replace("capture_archive.py", "tidy_up.py"),
+                                          exists=lambda p: True)
+    # ...and naming it while it is absent from disk.
+    assert pair_monthly_capture_retention(good_cap, exists=lambda p: False)
+
     # M1 — the live defect: "rank all 7" above a list of 8 (Category 8 silently dropped).
     assert pair_monthly_action_categories(good_m.replace("rank all 3", "rank all 7"))
     # ...and every restatement of the count must agree with the header.
@@ -513,7 +632,7 @@ def _selftest():
     assert not pair_undefined_constants(          # builtins are not undefined
         {"f.py": "def go():\n    raise NotImplementedError\n"})
 
-    print("consistency_check SELF-TEST OK (growth pairs + 8 monthly pairs)")
+    print("consistency_check SELF-TEST OK (growth pairs + 10 monthly pairs)")
 
 
 if __name__ == "__main__":

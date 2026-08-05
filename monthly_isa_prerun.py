@@ -51,6 +51,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 from datetime import date, datetime, timedelta
 
@@ -127,6 +128,106 @@ def find_memory_file(pattern: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Run a script as a subprocess
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# CAPTURE LAYER ITEM 2 (Dashboard Spec 7.6A) — run manifest + fail-loud.
+#
+# Instrumentation is CENTRAL, not per-call-site: every pre-run step goes through run_script or
+# run_script_rc, so recording there captures duration, exit code and output size for all of
+# them without 16 opportunities to forget one. Steps declare rows/coverage explicitly via
+# _mf_measure() where they know it.
+#
+# The stage `print(f"\n[N/9] ...")` lines are deliberately left untouched — consistency_check
+# pair M5 parses them to prove every executed stage has a Run_Context table row. _mf_begin()
+# sits alongside them rather than replacing them.
+# ---------------------------------------------------------------------------
+try:
+    import run_manifest as _RM
+except Exception:                                    # pragma: no cover
+    _RM = None
+
+MANIFEST = None          # run_manifest.Manifest, created in main()
+_MF_CUR = None           # {"id","name","t0","rows_in","rows_out","coverage","non_null","notes"}
+
+
+def _mf_begin(step_id, name):
+    """Open a manifest step. Closing the previous one first means a step that never reached
+    its own _mf_end (an early return, an exception swallowed downstream) is recorded as it
+    actually was, rather than vanishing."""
+    global _MF_CUR
+    if MANIFEST is None:
+        return
+    _mf_end()
+    _MF_CUR = {"id": str(step_id), "name": name, "t0": time.time(), "rows_in": None,
+               "rows_out": None, "coverage": None, "non_null": None, "notes": [],
+               "status": None}
+
+
+def _mf_measure(rows_in=None, rows_out=None, coverage=None, non_null_share=None,
+                note=None, status=None):
+    """Declare what the current step actually produced. A step that declares nothing is
+    recorded DEGRADED by run_manifest — silence is no longer indistinguishable from success."""
+    if _MF_CUR is None:
+        return
+    if rows_in is not None:
+        _MF_CUR["rows_in"] = rows_in
+    if rows_out is not None:
+        _MF_CUR["rows_out"] = rows_out
+    if coverage is not None:
+        _MF_CUR["coverage"] = coverage
+    if non_null_share is not None:
+        _MF_CUR["non_null"] = non_null_share
+    if note:
+        _MF_CUR["notes"].append(str(note)[:300])
+    if status:
+        _MF_CUR["status"] = status
+
+
+def _mf_probe_json(path, count_path=None, non_null_key=None, note=None, add=False):
+    """Declare a step's output from the file it just wrote.
+
+    Every step used to end without saying what it produced, and run_manifest correctly
+    reports that as DEGRADED — but if 11 of 16 steps are permanently amber then amber
+    conveys nothing and the alarm has been rebuilt in a new colour. The remedy is to make
+    the steps declare, not to soften the rule.
+
+    count_path: dotted path to a list, e.g. "country_exposure" or "fund_drift_table.rows".
+    non_null_key: key within each element that must be present for the row to count as real.
+    """
+    try:
+        if not os.path.exists(path):
+            _mf_measure(rows_out=0, note=f"{os.path.basename(path)} not written")
+            return
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        node = d
+        if count_path:
+            for part in count_path.split("."):
+                node = (node or {}).get(part) if isinstance(node, dict) else None
+        rows = node if isinstance(node, list) else (list(node) if isinstance(node, dict) else [])
+        n = len(rows)
+        nn = None
+        if non_null_key and isinstance(node, list) and n:
+            nn = sum(1 for e in rows if isinstance(e, dict)
+                     and e.get(non_null_key) is not None) / n
+        if add and _MF_CUR is not None and _MF_CUR.get("rows_out"):
+            n += _MF_CUR["rows_out"]
+        _mf_measure(rows_out=n, non_null_share=nn, note=note or f"{count_path or 'root'}={n}")
+    except Exception as e:
+        _mf_measure(note=f"probe failed on {os.path.basename(path)}: {e}")
+
+
+def _mf_end():
+    global _MF_CUR
+    if MANIFEST is None or _MF_CUR is None:
+        return
+    c = _MF_CUR
+    _MF_CUR = None
+    MANIFEST.record(c["id"], c["name"], status=c["status"], rows_in=c["rows_in"],
+                    rows_out=c["rows_out"], coverage=c["coverage"],
+                    non_null_share=c["non_null"], duration_s=round(time.time() - c["t0"], 2),
+                    notes=c["notes"])
+
+
 def run_script(name: str, args: list[str], dry_run: bool = False) -> tuple[bool, str, str]:
     """
     Run a Python script. Returns (success, stdout, stderr).
@@ -141,14 +242,19 @@ def run_script(name: str, args: list[str], dry_run: bool = False) -> tuple[bool,
         return True, "[dry run]", ""
 
     try:
+        _t0 = time.time()
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120
         )
         success = result.returncode == 0
+        _mf_measure(note=f"{name} rc={result.returncode} in {time.time()-_t0:.1f}s",
+                    status=(None if success else "ERROR"))
         return success, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
+        _mf_measure(note=f"{name} TIMEOUT after 120s", status="ERROR")
         return False, "", f"Script timed out after 120s: {name}"
     except Exception as e:
+        _mf_measure(note=f"{name} raised {type(e).__name__}: {e}", status="ERROR")
         return False, "", str(e)
 
 
@@ -167,11 +273,15 @@ def run_script_rc(name: str, args: list[str], dry_run: bool = False):
         print(f"  [DRY RUN] Would run: {' '.join(cmd)}")
         return 0, "[dry run]", ""
     try:
+        _t0 = time.time()
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        _mf_measure(note=f"{name} rc={result.returncode} in {time.time()-_t0:.1f}s")
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
+        _mf_measure(note=f"{name} TIMEOUT after 120s", status="ERROR")
         return 124, "", f"Script timed out after 120s: {name}"
     except Exception as e:
+        _mf_measure(note=f"{name} raised {type(e).__name__}: {e}", status="ERROR")
         return 1, "", str(e)
 
 
@@ -336,6 +446,11 @@ def write_run_context(
             "target_state":         os.path.join(SCRIPT_DIR, "target_state.json"),
             "calibration_report":   os.path.join(SCRIPT_DIR, f"calibration_report_{month_label}.md"),
             "score_panel":          os.path.join(SCRIPT_DIR, "score_panel.csv"),
+            # CAPTURE LAYER — the permanent per-run record set (Items 1-4).
+            "run_manifest":         os.path.join(SCRIPT_DIR, f"run_manifest_{month_label}.json"),
+            "gate_variables":       os.path.join(SCRIPT_DIR, "gate_variables.csv"),
+            "step9_conviction":     os.path.join(SCRIPT_DIR, f"step9_conviction_{month_label}.json"),
+            "shadow_ledger":        os.path.join(SCRIPT_DIR, "shadow_ledger.json"),
         },
         "summary": summary,
         "compliance": _compliance_block(),
@@ -439,6 +554,10 @@ def main():
                              "network time, pushing a full pass past the 45s bash ceiling. Run "
                              "the orchestrator once to land Steps 1-5, then re-run with this "
                              "flag (Step 6 self-skips on metrics coverage) to rebuild Steps 7-9.")
+    parser.add_argument("--skip-universe-prices", action="store_true",
+                        help="Skip the Capture Layer Item 5 resumable price-cache extension "
+                             "(one chunk per run). The cache is resumable, so skipping only "
+                             "defers work; it never loses any.")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Print commands without executing them.")
     args = parser.parse_args()
@@ -507,10 +626,17 @@ def main():
     degraded = False   # True -> status downgraded to PARTIAL (step ran but data incomplete)
     watchlist_promotion_log = {}
 
+    # CAPTURE LAYER ITEM 2 — open the run manifest before any step runs.
+    global MANIFEST
+    if _RM is not None:
+        MANIFEST = _RM.Manifest(month_label, script_dir=SCRIPT_DIR)
+    manifest_path = os.path.join(SCRIPT_DIR, f"run_manifest_{month_label}.json")
+
     # ---------------------------------------------------------------------------
     # Step 1: Extract portfolio
     # ---------------------------------------------------------------------------
     print(f"\n[1/9] Extracting portfolio from xlsx...")
+    _mf_begin("1", "extract_portfolio")
     ok, stdout, stderr = run_script(
         "extract_portfolio",
         ["--isa-folder", isa_folder, "--out", portfolio_path],
@@ -563,7 +689,10 @@ def main():
     # ---------------------------------------------------------------------------
     txn_status = "ABSENT"
     txn_data = {}
+    _mf_probe_json(portfolio_path, "stocks", "value_gbp", "stocks extracted")
+    _mf_probe_json(portfolio_path, "funds", "value_gbp", "funds extracted", add=True)
     print("\n[1b] Importing transaction history...")
+    _mf_begin("1b", "extract_transactions")
     rc, stdout, stderr = run_script_rc(
         "extract_transactions",
         ["--isa-folder", isa_folder, "--ledger", txn_ledger_path,
@@ -571,6 +700,11 @@ def main():
         dry_run=args.dry_run,
     )
     if rc == 3:
+        # Policy, not degradation: "missing transaction export = WARN, never ERROR"
+        # (project_isa_transaction_ledger). Declaring it SKIPPED keeps the manifest honest
+        # without manufacturing an alarm Raj cannot act on.
+        _mf_measure(status="SKIPPED", note="no Transaction History export saved this month "
+                                           "-- policy fallback to holdings-delta inference")
         txn_status = "ABSENT"
         warnings.append(
             "Step 1b: no 'Transaction History MM-YYYY.xlsx' found in the ISA "
@@ -640,6 +774,7 @@ def main():
         ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
         if os.path.exists(ledger_path):
             print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
+            _mf_begin("1.5", "ledger_reconciliation")
             try:
                 sys.path.insert(0, SCRIPT_DIR)
                 import decision_ledger as _dl_mod
@@ -732,7 +867,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 2: Extract X-Ray
     # ---------------------------------------------------------------------------
+    _mf_probe_json(txn_ledger_path, "entries", "date", "transaction ledger entries")
     print(f"\n[2/9] Extracting X-Ray from PDF...")
+    _mf_begin("2", "extract_xray")
     ok, stdout, stderr = run_script(
         "extract_xray",
         ["--isa-folder", isa_folder, "--out", xray_path],
@@ -772,7 +909,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 3: Analytics
     # ---------------------------------------------------------------------------
+    _mf_probe_json(xray_path, "country_exposure", "equity_pct", "X-Ray country rows")
     print(f"\n[3/9] Running portfolio analytics...")
+    _mf_begin("3", "portfolio_analytics")
     if errors:
         print("  SKIPPED -- portfolio extraction failed (required input).")
         warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
@@ -825,7 +964,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 4: Update watchlist (promotion/removal/score-delta)
     # ---------------------------------------------------------------------------
+    _mf_probe_json(analytics_path, "fund_drift_table.rows", "ticker", "drift rows")
     print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
+    _mf_begin("4", "update_watchlist")
     if errors:
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
@@ -937,7 +1078,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 5: Sync VCI watchlist from memory file + refresh Part A scores
     # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "watchlist entries")
     print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
+    _mf_begin("5", "sync_vci_watchlist")
     vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
     _vci_existing = 0
     try:
@@ -979,7 +1122,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 6: Fetch watchlist + stock sleeve metrics (yfinance pull)
     # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_config_path, "vci_watchlist", "ticker", "VCI entries")
     print(f"\n[6/9] Fetching watchlist & sleeve metrics (yfinance)...")
+    _mf_begin("6", "fetch_watchlist_metrics")
     if not os.path.exists(watchlist_config_path):
         warnings.append("Step 6: watchlist_tickers.json not found -- skipping metrics pull. "
                         "Create it in Investment Analysis folder.")
@@ -1087,7 +1232,19 @@ def main():
     #   watchlist_tickers.json so Step 8 (step9_pre_builder) consumes fresh, not stale, values.
     #   ACS is NOT re-scored here (stickier); only the price-driven terms refresh.
     # ---------------------------------------------------------------------------
+    # Step 6 coverage — tickers priced / tickers the current watchlist needs. This is the
+    # number STOXX600 publishes a ranking on without saying so; here it is declared.
+    try:
+        _n6, _miss6 = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
+        _need6 = _n6 + len(_miss6)
+        _mf_measure(rows_in=_need6 or None, rows_out=_n6,
+                    coverage=(_n6 / _need6) if _need6 else None,
+                    note=(f"missing: {_miss6[:12]}" if _miss6 else None))
+    except Exception as _e6:
+        _mf_measure(note=f"coverage probe failed: {_e6}")
+
     print(f"\n[6.5] VCI forward-led re-price (fv_asymmetry / VCI_Source_Score at live price)...")
+    _mf_begin("6.5", "vci_reprice")
     if not os.path.exists(watchlist_config_path):
         print("  SKIPPED -- watchlist_tickers.json not found.")
     else:
@@ -1200,7 +1357,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 7: Score Part A/B
     # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_metrics_path, "tickers", None, "VCI re-price / metrics tickers")
     print(f"\n[7/9] Scoring Part A/B and building email structures...")
+    _mf_begin("7", "normalise_adapter")
     if not os.path.exists(watchlist_metrics_path):
         warnings.append("Step 7: watchlist_metrics JSON missing -- skipping scorer.")
         print("  WARNING: metrics file missing -- skipped.")
@@ -1239,7 +1398,25 @@ def main():
     # entry_level_builder.py creates governed provisional entry levels for every
     # watchlist + candidate_pool name BEFORE rerank/step9 tier on price-vs-entry,
     # so high-scoring names with no manual entry no longer fall straight to T3.
+    # Step 7 coverage — how many scored rows carry a LIVE total score. `rows exist but the
+    # values do not` is the exact shape the FETCH_WORKERS bug produced, so non_null_share is
+    # declared separately from the row count and run_manifest ERRORs on it.
+    try:
+        with open(watchlist_scored_path, encoding="utf-8") as _f7:
+            _sc7 = json.load(_f7)
+        _cr7 = _sc7.get("conviction_ranking", []) or []
+        _live7 = sum(1 for e in _cr7
+                     if (e.get("total_score_54") or e.get("total_score_50")
+                         or e.get("total_score_36")) is not None)
+        _mf_measure(rows_out=len(_cr7),
+                    coverage=(_live7 / len(_cr7)) if _cr7 else None,
+                    non_null_share=(_live7 / len(_cr7)) if _cr7 else None,
+                    note=f"{_live7}/{len(_cr7)} rows carry a live total score")
+    except Exception as _e7:
+        _mf_measure(note=f"scored-file probe failed: {_e7}")
+
     print(f"\n[7.25] Building composite entry levels...")
+    _mf_begin("7.25", "entry_level_builder")
     if not os.path.exists(watchlist_metrics_path) or not os.path.exists(watchlist_config_path):
         warnings.append("Step 7.25 (entry_level_builder) skipped -- metrics or watchlist file missing.")
         print("  SKIPPED -- metrics or watchlist file missing.")
@@ -1291,7 +1468,9 @@ def main():
     # AND the candidate_pool, re-rank the top-10 on the live normalised score so the
     # watchlist reflects fresh data, not stale screening scores. step9_pre_builder
     # (below) reads the re-ranked watchlist_tickers.json, so downstream stays consistent.
+    _mf_probe_json(entry_audit_path, "entries", "ticker", "entry levels built")
     print(f"\n[7.5] Re-ranking watchlist on live re-scored values...")
+    _mf_begin("7.5", "rerank_watchlist")
     if not os.path.exists(watchlist_scored_path) or not os.path.exists(watchlist_config_path):
         warnings.append("Step 7.5 (rerank_watchlist) skipped -- scored or watchlist file missing.")
         print("  SKIPPED -- scored or watchlist file missing.")
@@ -1351,7 +1530,9 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 8: Build Step 9 pre-scored output
     # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "re-ranked watchlist")
     print(f"\n[8/9] Building Step 9 pre-scored output...")
+    _mf_begin("8", "step9_pre_builder")
     if not os.path.exists(watchlist_scored_path):
         warnings.append("Step 8 (step9_pre_builder): watchlist_scored JSON missing -- skipping.")
         print(f"  WARNING: watchlist_scored JSON missing -- skipped.")
@@ -1385,7 +1566,170 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 9: Email prefill
     # ---------------------------------------------------------------------------
+    # Step 8 coverage — deployment_priority_rank is the PRIMARY candidate ranking for Step 9.
+    # An empty one is not "no opportunities", it is a failed build, and run_manifest ERRORs.
+    try:
+        with open(step9_pre_path, encoding="utf-8") as _f8:
+            _s9 = json.load(_f8)
+        _dpr = _s9.get("deployment_priority_rank", []) or []
+        _scored8 = sum(1 for e in _dpr if e.get("source_score") is not None)
+        _mf_measure(rows_out=len(_dpr),
+                    coverage=(_scored8 / len(_dpr)) if _dpr else None,
+                    non_null_share=(_scored8 / len(_dpr)) if _dpr else None,
+                    note=f"deployment_priority_rank={len(_dpr)}, source_score present on {_scored8}")
+        # The action stack is a separate consumer with its own refusal threshold.
+        _as_path = os.path.join(SCRIPT_DIR, f"action_stack_{month_label}.json")
+        if os.path.exists(_as_path) and _RM is not None:
+            with open(_as_path, encoding="utf-8") as _fa:
+                _asj = json.load(_fa)
+            _stack = _asj.get("stack", _asj if isinstance(_asj, list) else []) or []
+            _cov_a = (_scored8 / len(_dpr)) if _dpr else None
+            _allowed, _why = _RM.gate_emission("action_stack", coverage=_cov_a,
+                                               rows_out=len(_stack), raise_on_refuse=False)
+            if not _allowed:
+                # Honour the SAME registered acknowledgement that covers the step whose
+                # coverage this refusal is judging. Acknowledging a condition in one place
+                # while hard-blocking on it in another yields a run that cannot proceed and
+                # cannot explain itself.
+                _ack = None
+                if MANIFEST is not None:
+                    _ack = (_RM.acknowledgement_for("action_stack", _why, MANIFEST.acks)
+                            or _RM.acknowledgement_for("8", _why, MANIFEST.acks))
+                    if _ack and _ack.get("_expired"):
+                        _ack = None
+                if _ack:
+                    warnings.append(f"ACTION STACK emission ACKNOWLEDGED under "
+                                    f"{_ack['registry_id']} until {_ack['_expiry_date']} "
+                                    f"(true status: REFUSED). " + _why)
+                    print(f"  ACKNOWLEDGED ({_ack['registry_id']}, expires "
+                          f"{_ack['_expiry_date']}): " + _why)
+                else:
+                    errors.append("ACTION STACK REFUSED TO EMIT: " + _why)
+                    print("  ERROR: " + _why)
+            elif _why:
+                warnings.append(_why)
+    except Exception as _e8:
+        _mf_measure(note=f"step9_pre probe failed: {_e8}")
+
+    # ---------------------------------------------------------------------------
+    # Step 8b (Capture Layer Item 3 / Dashboard Spec 7.6.2): conviction skeleton.
+    # Emits step9_conviction_[mmm_yyyy].json with every MACHINE-computed field filled and
+    # every JUDGEMENT field explicitly null. The review session completes D8/D9/D10 with
+    # their rationales before the email sends; conviction_capture.write() refuses the file
+    # until it has. Prefilling a plausible default would be worse than no capture at all --
+    # it would look like reasoning.
+    # ---------------------------------------------------------------------------
+    # R4 (Aug-2026 retrospective item 4): log the (t1_qualified x est_rev_direction) joint
+    # distribution every month, so "every T1-qualified name has NEUTRAL revisions while every
+    # improving-revision name failed a gate" is MEASURED rather than noticed once. Registered
+    # as CAP-3; reviewed after six runs. Nothing is changed here (H7).
+    try:
+        import gate_variables as _gv
+        with open(step9_pre_path, encoding="utf-8") as _f:
+            _s9r4 = json.load(_f)
+        _mx4 = {}
+        try:
+            with open(watchlist_metrics_path, encoding="utf-8") as _fm:
+                _mx4 = json.load(_fm)
+        except Exception as _mxe:
+            # Do NOT let this fail silently: null levels here look identical to measured
+            # zeros downstream, and that conflation is the defect this whole file exists to
+            # remove. Record the reason on the run.
+            flags.append({"type": "GATE_VARIABLES_LEVELS_UNAVAILABLE",
+                          "message": f"watchlist_metrics unreadable ({_mxe}); monthly "
+                                     f"gate_variables rows will carry NO measured levels."})
+        _n4, _t4 = _gv.log_monthly_t1_distribution(_s9r4, run_date.isoformat(), metrics=_mx4)
+        _ct = _gv.revisions_crosstab(group="MONTHLY_T1", run_date=run_date.isoformat())
+        summary["t1_revisions_crosstab"] = _ct
+        print(f"  [R4] A4 qualification x 30d revisions logged ({_n4} names): "
+              f"improving_and_qualified={_ct.get('improving_and_qualified')} of "
+              f"{_ct.get('improving_total')} improving in the universe")
+        if _ct.get("improving_total") and not _ct.get("improving_and_qualified"):
+            flags.append({
+                "type": "FORWARD_SIGNAL_ABSENT_FROM_QUALIFIED_SET",
+                "message": ("No A4-qualified name carries improving 30-day revisions this "
+                            f"month, while {_ct['improving_total']} name(s) in the universe do "
+                            "and each failed a gate. In a forward-led framework that is worth "
+                            "reading before Step 9. EVIDENCE ONLY - registered as CAP-3, "
+                            "reviewed after six runs; no gate changes on one month."),
+            })
+    except Exception as _r4e:
+        warnings.append(f"R4 revisions crosstab skipped: {_r4e}")
+
+    print("\n[8b] Building Step 9 conviction skeleton (judgement capture)...")
+    _mf_begin("8b", "conviction_capture")
+    try:
+        import conviction_capture as _cc
+        _regime = None
+        try:
+            _regime = (summary.get("macro") or {}).get("regime")
+        except Exception:
+            pass
+        _cdoc = _cc.prefill(month_label, here=SCRIPT_DIR, regime=_regime)
+        _cpath = os.path.join(SCRIPT_DIR, f"step9_conviction_{month_label}.json")
+        _cerrs = _cc.validate(_cdoc, strict_judgement=False)
+        if _cerrs:
+            warnings.append("Step 8b conviction skeleton structural errors: "
+                            + "; ".join(_cerrs[:4]))
+        with open(_cpath, "w", encoding="utf-8") as _cf:
+            json.dump(_cdoc, _cf, indent=2, ensure_ascii=False)
+        _mf_measure(rows_out=len(_cdoc["names"]),
+                    coverage=(1.0 if not _cerrs else 0.0),
+                    note=f"names={len(_cdoc['names'])}, "
+                         f"not_progressed={len(_cdoc['not_progressed'])}")
+        summary["conviction_capture"] = {
+            "path": _cpath, "names": len(_cdoc["names"]),
+            "not_progressed": len(_cdoc["not_progressed"]),
+            "state": "SKELETON_AWAITING_JUDGEMENT",
+        }
+        print(f"  Conviction skeleton: {len(_cdoc['names'])} names, "
+              f"{len(_cdoc['not_progressed'])} not-progressed -> {os.path.basename(_cpath)}")
+        print("  Step 9 must fill D8/D9/D10 score + rationale for every name before the email "
+              "sends.")
+    except Exception as _cce:
+        warnings.append(f"Step 8b (conviction skeleton) failed: {_cce}")
+        _mf_measure(status="ERROR", note=f"conviction prefill failed: {_cce}")
+        print(f"  WARNING: conviction skeleton failed: {_cce}")
+
+    # ---------------------------------------------------------------------------
+    # Step 8c (Capture Layer Item 4): freeze this month's action stack immutably into the
+    # shadow ledger, then mark every cohort. Freezing happens HERE, at run time, because a
+    # stack reconstructed later is a stack chosen with hindsight. Marking is best-effort and
+    # resumable -- a price-fetch shortfall must never block the review.
+    # ---------------------------------------------------------------------------
+    print("\n[8c] Freezing action stack into the shadow ledger (Books A/B/C)...")
+    _mf_begin("8c", "shadow_ledger")
+    try:
+        import shadow_ledger as _sl
+        _coh, _written = _sl.freeze(month_label, here=SCRIPT_DIR)
+        print(f"  Cohort {month_label}: {_coh['n_buys']} BUY recommendations, "
+              f"hash {_coh['stack_hash']} "
+              f"({'frozen' if _written else 'already frozen — identical'})")
+        _mf_measure(rows_out=_coh["n_buys"], coverage=1.0,
+                    note=f"stack_hash={_coh['stack_hash']} written={_written}")
+        if not args.dry_run:
+            try:
+                _marks = _sl.mark(asof=run_date.isoformat(), here=SCRIPT_DIR)
+                summary["shadow_ledger"] = {
+                    "cohorts": len(_marks),
+                    "books": {m: {b: v["return"] for b, v in mk["books"].items()}
+                              for m, mk in _marks.items()},
+                }
+                print("  " + _sl.report(here=SCRIPT_DIR).replace("\n", "\n  ")[:1400])
+            except Exception as _sme:
+                warnings.append(f"Shadow ledger marking incomplete (resumable): {_sme}")
+                print(f"  NOTE: marking incomplete (resumable): {_sme}")
+    except _sl.ImmutableCohortError as _ice:   # noqa: F821
+        errors.append("SHADOW LEDGER IMMUTABILITY: " + str(_ice))
+        _mf_measure(status="ERROR", note=str(_ice)[:300])
+        print("  ERROR: " + str(_ice))
+    except Exception as _sle:
+        warnings.append(f"Step 8c (shadow ledger) failed: {_sle}")
+        _mf_measure(status="ERROR", note=f"shadow freeze failed: {_sle}")
+        print(f"  WARNING: shadow ledger failed: {_sle}")
+
     print(f"\n[9/9] Pre-populating email JSON...")
+    _mf_begin("9", "email_prefill")
     if errors:
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 9 (email_prefill) skipped -- prior step failures.")
@@ -1453,7 +1797,9 @@ def main():
     # Step 9c (Jul-26 Part 9): Calibration report — surface each signal's forward-return IC by horizon
     # (1m/3m/6m/12m, filling left-to-right as the score panel matures). Evidence only; never blocks.
     # ---------------------------------------------------------------------------
+    _mf_probe_json(email_path, None, None, "email data top-level sections")
     print(f"\n[cal] Calibration report (signal IC by horizon)...")
+    _mf_begin("cal", "calibration_report")
     calib_report_path = os.path.join(SCRIPT_DIR, f"calibration_report_{month_label}.md")
     calib_summary = {}
     try:
@@ -1474,9 +1820,68 @@ def main():
             )
             _out = (stdout or "") + (stderr or "")
             if "PANEL_STALE" in _out:
-                warnings.append("Calibration: score_panel.csv did NOT grow since the last run -- "
-                                "a weekly screen is not calling score_panel_logger. Investigate.")
-                print("  WARNING: PANEL_STALE -- score panel did not grow since last calibration run.")
+                # 02-Aug-2026 (Aug retrospective item 3): PANEL_STALE is an ERROR, not a WARN,
+                # whenever a weekly screen has demonstrably run MORE RECENTLY than the newest
+                # row in the panel. That comparison is free: both dates are already on disk.
+                #
+                # Why it has to be an error. The panel is simultaneously the input to the
+                # calibration IC report, the C-1 entry-stability gate and the A5v3 sightings
+                # test. When it stops growing, THREE separate safeguards degrade together and
+                # not one of them raises. A warning in a list of twenty warnings is not a
+                # control; it is a note.
+                #
+                # A stale panel with NO newer screen is a different fact -- no screen has run,
+                # which is expected between weekly slots -- and stays a warning.
+                _newest_panel, _newest_screen = None, None
+                try:
+                    import csv as _csv, glob as _glob, re as _re
+                    from datetime import datetime as _dtm
+                    _pp = os.path.join(SCRIPT_DIR, "score_panel.csv")
+                    if os.path.exists(_pp):
+                        with open(_pp, encoding="utf-8", newline="") as _f:
+                            for _row in _csv.DictReader(_f):
+                                _d = str(_row.get("run_date", ""))[:10]
+                                if _d and (_newest_panel is None or _d > _newest_panel):
+                                    _newest_panel = _d
+                    _MON = {m: i for i, m in enumerate(
+                        ["jan","feb","mar","apr","may","jun",
+                         "jul","aug","sep","oct","nov","dec"], start=1)}
+                    for _pat in (os.path.join(SCRIPT_DIR, "Growth Stock Analysis*.xlsx"),
+                                 os.path.join(SCRIPT_DIR, "archive", "*",
+                                              "Growth Stock Analysis*.xlsx")):
+                        for _fp in _glob.glob(_pat):
+                            _m = _re.search(r"W-e (\d{2})-([A-Za-z]{3})-(\d{2})",
+                                            os.path.basename(_fp))
+                            if not _m:
+                                continue
+                            _iso = "20%s-%02d-%s" % (_m.group(3),
+                                                     _MON.get(_m.group(2).lower(), 0),
+                                                     _m.group(1))
+                            if _newest_screen is None or _iso > _newest_screen:
+                                _newest_screen = _iso
+                except Exception:
+                    pass
+
+                if _newest_screen and _newest_panel and _newest_screen > _newest_panel:
+                    errors.append(
+                        "PANEL_STALE (ERROR): the newest weekly screen workbook is dated "
+                        f"{_newest_screen} but score_panel.csv stops at {_newest_panel}. A "
+                        "screen ran and did NOT call score_panel_logger. Three safeguards "
+                        "degrade together on this one input -- the calibration IC report, the "
+                        "C-1 entry-stability gate and the A5v3 sightings test -- and none of "
+                        "them raises on its own. Re-run that screen's logging step before "
+                        "trusting any of the three.")
+                    print(f"  ERROR: PANEL_STALE -- screen {_newest_screen} newer than panel "
+                          f"{_newest_panel}; a weekly screen is not logging.")
+                else:
+                    warnings.append(
+                        "Calibration: score_panel.csv did not grow since the last calibration "
+                        f"run (newest panel row {_newest_panel or 'unknown'}; newest screen "
+                        f"{_newest_screen or 'none found'}). No NEWER screen was found, so this "
+                        "is consistent with no screen having run yet -- not evidence of a "
+                        "logging failure.")
+                    print("  WARNING: PANEL_STALE -- panel did not grow, but no newer screen "
+                          "exists either.")
             if "NOT_DONE" in _out:
                 warnings.append("Calibration: price cache incomplete this run (resumable) -- IC table "
                                 "will fill on the next run; no report written.")
@@ -1502,7 +1907,86 @@ def main():
     # surface · A20 reversal worklist · A19 anchor derivation/coherence · A18 checker.
     # Failures land in errors[]/warnings[] per the existing ERROR protocol (invariant 3).
     # ---------------------------------------------------------------------------
+    # Calibration coverage — the panel is the input to the IC report, the C-1 entry-stability
+    # gate and the A5v3 sightings test. When it stops growing all three degrade together and
+    # none of them errors, which is why its size is declared rather than assumed.
+    try:
+        _panel_p = os.path.join(SCRIPT_DIR, "score_panel.csv")
+        _n_panel = 0
+        if os.path.exists(_panel_p):
+            with open(_panel_p, encoding="utf-8", errors="ignore") as _pf:
+                _n_panel = max(sum(1 for _ in _pf) - 1, 0)
+        _mf_measure(rows_out=_n_panel, note=f"score_panel rows={_n_panel}")
+    except Exception as _ecal:
+        _mf_measure(note=f"panel probe failed: {_ecal}")
+
+    # CAPTURE LAYER ITEM 5 — extend the price cache toward the FULL constituent universe,
+    # one resumable chunk per run. Item 1 records gate variables for every constituent so
+    # rule_frictions can ask "did the names our gates BLOCKED subsequently perform?"; that
+    # question needs prices for the blocked names, which is exactly what the panel-derived
+    # cache never had. Best-effort and resumable: a shortfall defers work, it never loses any.
+    if not args.skip_universe_prices and not args.dry_run:
+        try:
+            import calibration_universe as _cu
+            for _g in ("STOXX600", "F250-SPI"):
+                _r = _cu.extend(_g, chunk=120, period="6mo")
+                if _r.get("fetched"):
+                    print(f"  [prices] {_g}: +{_r['fetched']} "
+                          f"(resolution {_r.get('batch_resolution')}), "
+                          f"remaining {_r['remaining']}")
+                if _r.get("remaining"):
+                    break            # one group per run; the cache resumes next month
+            _cov = _cu.coverage()
+            summary["universe_price_coverage"] = _cov
+            if _cov.get("acceptance") == "FAIL":
+                warnings.append(
+                    "Universe price coverage below the 85%% floor: "
+                    + ", ".join(f"{g}={v.get('resolution_vs_universe')}"
+                                for g, v in (_cov.get("groups") or {}).items()))
+        except Exception as _upe:
+            warnings.append(f"Universe price extension skipped: {_upe}")
+
+    # TWO-REGIME RESOLUTION (02-Aug-2026). macro_regime (Step 4 judgement, forward, economic)
+    # and market_regime (drawdown_monitor, mechanical, lagging price) are DIFFERENT VARIABLES,
+    # not two readings of one. The pre-run emits both under their namespaced names plus the
+    # advisory Category-8 composite, so the review never has to decide which "regime" was meant.
+    try:
+        import regime_resolver as _rr
+        _macro_prev = None
+        try:                                    # last month's Step 4 call, for continuity only
+            import glob as _g2
+            _prevs = sorted(_g2.glob(os.path.join(SCRIPT_DIR, "run_context_*.json")))
+            for _pf in reversed(_prevs):
+                if month_label in _pf:
+                    continue
+                with open(_pf, encoding="utf-8") as _f:
+                    _macro_prev = ((json.load(_f).get("summary") or {})
+                                   .get("regimes") or {}).get("macro_regime")
+                if _macro_prev:
+                    break
+        except Exception:
+            pass
+        _reg = _rr.resolve(macro_regime=_macro_prev, state_path=os.path.join(
+            SCRIPT_DIR, "drawdown_state.json"))
+        _reg["macro_regime_prior_month"] = _macro_prev
+        _reg["macro_regime_note"] = (
+            "macro_regime is a STEP 4 OUTPUT and is not known at pre-run time. The value above "
+            "is last month's, carried for continuity only. Step 4 must state this month's call "
+            "as REGIME: [Expansion|Slowdown|Contraction|Recovery], and Step 8 Category 8 must "
+            "re-resolve with it.")
+        summary["regimes"] = _reg
+        print(f"  [regime] macro={_reg['macro_regime'] or 'PENDING Step 4'} (prior month) | "
+              f"market={_reg['market_regime']} | {_reg['relationship']['state']}")
+        print(f"           Category 8 (advisory): "
+              f"{'ELIGIBLE' if _reg['category8']['eligible'] else 'not eligible'} "
+              f"-- {_reg['category8']['reason'][:110]}")
+    except Exception as _rge:
+        warnings.append(f"Two-regime resolution skipped: {_rge}")
+
+    _w_before_9d = len(warnings)
+    _e_before_9d = len(errors)
     print("\n[9d] Fix Pack P2 asserts (A10/A11/A18/A19/A20/A22 + P7a)...")
+    _mf_begin("9d", "mechanical_asserts")
 
     # — A10: X-Ray country schema assert (parser whitelists; surface its warnings, assert rows) —
     try:
@@ -1640,6 +2124,59 @@ def main():
         warnings.append(f"A11 fund-returns step FAILED: {_e}")
         fund_cache_status = "DEGRADED"
         summary["fund_cache_status"] = fund_cache_status
+
+    # — A23 (02-Aug-2026, Aug retrospective item 1): NO Path-B/VCI holding may appear in the
+    #   Global Action Stack. The stack scores held names on the Path A forward Source Score;
+    #   an option-like pre-revenue platform scored that way ALWAYS returns dead-money, so the
+    #   defect recurs every month and always points one way — sell the asymmetric sleeve. In
+    #   Aug-2026 it ranked ABCL the #1 SELL: a 6/6-signal position, four weeks before its
+    #   Phase 2 binary readout, inside its own min-hold, at a 19% loss.
+    #
+    #   This is an ERROR, not a warning. A manual override caught it once; a rule that depends
+    #   on being noticed is not a rule.
+    try:
+        _as_p = os.path.join(SCRIPT_DIR, f"action_stack_{month_label}.json")
+        _wt_p = os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
+        if os.path.exists(_as_p) and os.path.exists(_wt_p):
+            with open(_as_p, encoding="utf-8") as _f:
+                _asj = json.load(_f)
+            with open(_wt_p, encoding="utf-8") as _f:
+                _wtj = json.load(_f)
+            sys.path.insert(0, SCRIPT_DIR)
+            from rerank_watchlist import classify_holding_path as _chp
+            _vw = _wtj.get("vci_watchlist") or []
+            _paths = {e.get("ticker"): _chp(e, vci_watchlist=_vw)
+                      for e in (_wtj.get("stock_sleeve") or []) if e.get("ticker")}
+            _vci_tickers = {e.get("ticker") for e in _vw if e.get("ticker")}
+            _stack = _asj.get("stack") or []
+            _bad, _unknown = [], []
+            for _r in _stack:
+                _t = _r.get("ticker")
+                _cls = _paths.get(_t)
+                if _cls == "B" or _t in _vci_tickers or str(_r.get("route", "")).lower() == "vci":
+                    _bad.append(f"{_t} (action={_r.get('action')}, rank={_r.get('rank')}, "
+                                f"source_score={_r.get('source_score')})")
+                elif _cls == "UNKNOWN":
+                    _unknown.append(_t)
+            if _bad:
+                errors.append(
+                    "A23 PATH-B LEAK INTO ACTION STACK: " + "; ".join(_bad) +
+                    ". Path-B/VCI holdings are assessed on ACS and T1-T7, never on the Path A "
+                    "Source Score. Scoring them here can only ever produce a SELL. Fix the "
+                    "path/source_pipeline classification in watchlist_tickers.json and re-run "
+                    "Step 7.5 -- do NOT override the stack entry by hand.")
+                print("  A23: ERROR -- Path-B holding(s) in the action stack: " + "; ".join(_bad))
+            elif _unknown:
+                warnings.append(
+                    f"A23: holdings with an UNRESOLVED path excluded from the action stack: "
+                    f"{_unknown}. They were NOT scored (unknown never defaults to Path A), but "
+                    f"they are also not being assessed on either track until classified.")
+                print(f"  A23: {len(_unknown)} holding(s) unclassified and excluded: {_unknown}")
+            else:
+                print(f"  A23: action stack clean -- no Path-B/VCI holding present "
+                      f"({len(_stack)} rows checked)")
+    except Exception as _a23e:
+        warnings.append(f"A23 path-leak assert skipped: {_a23e}")
 
     # — A22: surface broker-reconciled allowance (extract_portfolio.parse_contributions) —
     try:
@@ -1847,6 +2384,48 @@ def main():
         status = "PARTIAL"
     else:
         status = "OK"
+    # Step 9d declares its own result: how many of the mechanical asserts raised. Zero raised
+    # is a real, positive outcome and must be distinguishable from "9d never ran".
+    try:
+        _n_raised = (len(warnings) - _w_before_9d) + (len(errors) - _e_before_9d)
+        _mf_measure(rows_out=7, coverage=1.0,
+                    note=f"7 assert families evaluated (A10/A11/A18/A19/A20/A22/P7a); "
+                         f"{_n_raised} raised a warning or error")
+    except Exception:
+        pass
+
+    # CAPTURE LAYER ITEM 2 — close the last open step and write the manifest BEFORE
+    # run_context, so run_context can carry the manifest's own verdict rather than a
+    # separately-derived one.
+    _mf_end()
+    manifest_dict = {}
+    if MANIFEST is not None:
+        try:
+            manifest_dict = MANIFEST.to_dict()
+            MANIFEST.write(manifest_path)
+            summary["run_manifest"] = {
+                "path": manifest_path,
+                "run_status": manifest_dict.get("run_status"),
+                "counts": manifest_dict.get("counts"),
+                "config_fingerprint": manifest_dict.get("config_fingerprint"),
+            }
+            print("  Manifest: " + manifest_path + "  status=" + str(manifest_dict.get("run_status")))
+            # THE INVERTED DEFAULT: a manifest ERROR is an ERROR. Under the previous policy a
+            # step that produced nothing raised a WARN and the run reported success.
+            for _me in manifest_dict.get("errors", []):
+                if _me not in errors:
+                    errors.append("MANIFEST " + _me)
+            for _md in manifest_dict.get("degraded", []):
+                _w = "MANIFEST DEGRADED " + _md
+                if _w not in warnings:
+                    warnings.append(_w)
+            if manifest_dict.get("run_status") == "ERROR":
+                status = "ERROR"
+            elif manifest_dict.get("run_status") == "DEGRADED" and status == "OK":
+                status = "PARTIAL"
+        except Exception as _mex:
+            warnings.append("Run manifest write failed: " + str(_mex))
+
     error_msg = "; ".join(errors) if errors else ""
     print("Writing run_context_" + month_label + ".json...")
     if watchlist_promotion_log:

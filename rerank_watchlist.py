@@ -201,9 +201,21 @@ def _eps_mom_sign(mm):
     d = (mm.get("est_rev_direction") or "").lower()
     up = _to_num(mm.get("est_rev_eps_up_30d")) or 0
     dn = _to_num(mm.get("est_rev_eps_down_30d")) or 0
-    if d == "up" or up > dn:
+    # BUG FIX 02-Aug-2026: this tested for "up"/"down", but est_rev_direction never emits
+    # those values — its vocabulary is improving / neutral / deteriorating. Both string
+    # branches were dead, so the function silently degraded to a raw 30-day count
+    # comparison. It fed the forward-eligibility gate, where a 1-vs-2 count decided whether
+    # a name could be scored at all. The vocabulary is now matched explicitly, and the
+    # counts remain only as a fallback when the direction string is absent.
+    if d in ("up", "improving"):
         return 1.0
-    if d == "down" or dn > up:
+    if d in ("down", "deteriorating"):
+        return -1.0
+    if d == "neutral":
+        return None
+    if up > dn:
+        return 1.0
+    if dn > up:
         return -1.0
     return None
 
@@ -386,6 +398,44 @@ def _apply_diversification(stack, cfg, ctx):
             r["_divpen"] = float(delta) if (sec and base_exp.get(sec, 0.0) >= overrep_line) else 0.0
 
 
+def classify_holding_path(entry, vci_watchlist=None, trades_log_paths=None):
+    """'A' | 'B' | 'UNKNOWN' for a stock_sleeve entry.
+
+    Explicitly separates "not Path B" from "we do not know", because those are different facts
+    and only one of them is safe to score on the Path A Source Score. Resolution order:
+
+      1. an explicit path/source_pipeline on the entry (present AND non-null);
+      2. membership of the VCI watchlist — a name the VCI pipeline tracks is Path B whatever
+         the sleeve entry forgot to say;
+      3. an explicit path from the trades log, when supplied;
+      4. UNKNOWN.
+
+    UNKNOWN is NOT Path A. See the call site for why.
+    """
+    e = entry or {}
+    tk = e.get("ticker")
+
+    def _clean(v):
+        v = str(v).strip() if v is not None else ""
+        return v if v and v.lower() not in ("none", "null", "nan", "") else None
+
+    path = _clean(e.get("path"))
+    pipe = _clean(e.get("source_pipeline"))
+    if path and path.upper() == "B":
+        return "B"
+    if pipe and pipe.lower() == "vci":
+        return "B"
+    if tk and vci_watchlist and any((v or {}).get("ticker") == tk for v in vci_watchlist):
+        return "B"
+    if trades_log_paths and tk in trades_log_paths:
+        return "B" if str(trades_log_paths[tk]).upper() == "B" else "A"
+    if path and path.upper() == "A":
+        return "A"
+    if pipe and pipe.lower() in ("growth_stock", "growth", "screen"):
+        return "A"
+    return "UNKNOWN"
+
+
 def build_action_stack(universe, cfg, month_label, ctx=None):
     """Assemble the ranked action stack from a unified universe of scored names
     (candidates + held). Returns the stack rows per CONTRACTS #6.
@@ -521,6 +571,13 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             for _t, _td in _wm.get("tickers", {}).items():
                 ind_map[_t] = (_td.get("industry"), _td.get("sector"))
                 mom_map[_t] = {"position_52wk": _td.get("position_52wk"),
+                               # revision_stage MUST be projected here: it is the field the
+                               # forward-eligibility gate reads. Omitting it made stage_gate
+                               # return NO_DATA for all 43 candidate-pool names, which never
+                               # blocks - so the gate silently degraded to "admit unless we
+                               # happen to know the stage is bad". Same null-vs-missing class
+                               # as CAP-4: an absence was doing the work of a decision.
+                               "revision_stage": _td.get("revision_stage"),
                                "est_rev_direction": _td.get("est_rev_direction"),
                                "est_rev_eps_up_30d": _td.get("est_rev_eps_up_30d"),
                                "est_rev_eps_down_30d": _td.get("est_rev_eps_down_30d"),
@@ -529,11 +586,37 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         except Exception:
             ind_map = {}
     # Jul-2026 (Raj): only PATH-A (growth) held positions are scored on the growth Source Score and
-    # enter the action stack. Path-B/VCI holdings (e.g. ONT, asymmetric) are scored on ACS, not the
-    # growth metric, so they are excluded here and handled by the VCI/Path-B review separately.
-    held = {s.get("ticker") for s in wt.get("stock_sleeve", [])
-            if str(s.get("source_pipeline", "growth_stock")).lower() != "vci"
-            and str(s.get("path", "A")).upper() != "B"}
+    # enter the action stack. Path-B/VCI holdings are scored on ACS, not the growth metric, so they
+    # are excluded here and handled by the VCI/Path-B review separately.
+    #
+    # 02-Aug-2026 FIX (Aug retrospective item 1). The filter above was correct in INTENT and wrong
+    # in DEFAULT. `s.get("source_pipeline", "growth_stock")` supplies its default only when the key
+    # is ABSENT — ABCL's entry has the key PRESENT and set to null, so the expression returned None,
+    # `str(None).lower()` is "none", and the Path-B test passed. Same for `path`. ABCL was therefore
+    # scored on the Path A forward Source Score, returned 32.6 / held_axis=dead_money, and was
+    # ranked the **#1 SELL of the month** — a 6/6-signal asymmetric position, four weeks before its
+    # Phase 2 binary readout, inside its own min-hold, at a 19% loss.
+    #
+    # Scoring an option-like pre-revenue platform on a quality-compounder forward score will ALWAYS
+    # return dead-money, so this defect recurs every month and always points the same way: sell the
+    # asymmetric sleeve.
+    #
+    # The fix is not a better default. It is that UNKNOWN must not resolve to Path A. A holding
+    # whose path cannot be established is excluded from the growth stack and reported, because the
+    # cost of wrongly excluding a Path A name (it is reviewed by hand) is trivial beside the cost of
+    # wrongly including a Path B one (a mandatory-tier SELL on the framework's own recommendation).
+    _sleeve_paths = {}
+    for _s in wt.get("stock_sleeve", []):
+        _tk_ = _s.get("ticker")
+        if _tk_:
+            _sleeve_paths[_tk_] = classify_holding_path(_s, vci_watchlist=wt.get("vci_watchlist"))
+    held = {t for t, cls in _sleeve_paths.items() if cls == "A"}
+    _excluded_non_a = {t: cls for t, cls in _sleeve_paths.items() if cls != "A"}
+    if _excluded_non_a:
+        try:
+            log["action_stack_path_exclusions"] = _excluded_non_a
+        except Exception:
+            pass
     vci = {e.get("ticker") for e in wt.get("vci_watchlist", [])}
     registry = {}
     for e in wt.get("watchlist", []):
@@ -574,9 +657,33 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     _pa_floor_a = getattr(_cfg, "FORWARD_ELIG_PART_A_FLOOR", 10)
     eligible = []
     _q_floor = getattr(_cfg, "NORMALISED_SCORE_HARD_REMOVE_BELOW", 60.0)
+
+    # ── CAP-4 (02-Aug-2026) ────────────────────────────────────────────────────
+    # Every exclusion from `eligible` is now RECORDED ON THE ENTRY instead of being
+    # left as a bare `continue`. A name that never reaches compute_source_score has
+    # no Source Score, and downstream that ABSENCE was being read as a measured zero
+    # — the recurring null-vs-missing bug class. Three fields make the verdict speak
+    # for itself:
+    #   forward_eligible          — True/False, never absent
+    #   forward_ineligible_reason — the exact condition that failed, with its values
+    #   reentry_trigger           — what would have to change for the name to qualify,
+    #                               so a false negative stays recoverable rather than
+    #                               silently disappearing from view.
+    # source_score is set explicitly to None (not left absent) so "we did not measure
+    # this" is distinguishable from "this key was never written".
+    log["forward_ineligible"] = {}
+
+    def _ineligible(entry, reason, trigger=None):
+        entry["forward_eligible"] = False
+        entry["forward_ineligible_reason"] = reason
+        entry["reentry_trigger"] = trigger
+        entry["source_score"] = None
+        log["forward_ineligible"][entry.get("ticker")] = reason
+        return None
+
     for t, e in registry.items():
         if t in held or t in vci:
-            continue
+            continue          # routed to the sleeve / VCI surfaces, not an exclusion
         ns = e.get("normalised_score")
         # Jul-2026 (Raj): HARD QUALITY FLOOR (applies in BOTH modes). A name below the
         # quality/removal floor (normalised_score < 60) is NOT deployable or rankable, so it
@@ -584,6 +691,11 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         # upside "cheap because it has lost value" names from ranking. Forward-led selection
         # ranks AMONG quality names; it is not a bypass of the quality floor.
         if ns is None or ns < _q_floor:
+            _ineligible(e,
+                        (f"quality floor: normalised_score={ns} < {_q_floor}"
+                         if ns is not None else
+                         "quality floor: normalised_score UNMEASURED (not a zero)"),
+                        f"normalised_score >= {_q_floor}")
             continue
         if _use_fe:
             # H2: viability floor (Part A, path-aware) + forward eligibility (eps_trend positive OR a
@@ -591,24 +703,109 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             # lower-total names so the Source Score can rank (not pre-filter) them.
             _pa = e.get("part_a") or 0
             if _pa < _pa_floor_a:
+                _ineligible(e,
+                            f"viability floor: part_a={_pa} < {_pa_floor_a}",
+                            f"part_a >= {_pa_floor_a}")
                 continue
-            _epspos = (_eps_mom_sign(mom_map.get(t)) or 0) > 0
+            _mm = mom_map.get(t) or {}
             _cat = bool(e.get("confirmed_catalyst") or e.get("catalyst_protected"))
-            if not (_epspos or _cat):
+            # ── 02-Aug-2026: ONE implementation of the forward gate ──────────────────
+            # This gate previously required `est_rev_direction == "improving"` — a 30-day
+            # estimate up/down count. That is NOT the agreed policy and never was. The
+            # agreed policy is the revision STAGE set in t1_gates.EVIDENCE_STAGES
+            # (Igniting / Accelerating / Sustained), excluding SUMMARY_STAGE_EXCLUDE.
+            #
+            # They are different fields measuring different things, and they selected
+            # DISJOINT populations. In Aug-2026 the direction gate admitted 3 names while
+            # 37 carried an accepted stage — so Step 8 ranked names that Step 9 went on to
+            # reject, and never scored the names Step 9 actually deliberated over. The
+            # action stack said BUY AUPH / BUY DAL; the review's own candidate set did not
+            # contain either.
+            #
+            # rerank now CALLS t1_gates.stage_gate(): one implementation, not two.
+            # est_rev_direction is RETAINED as a scoring input — it feeds revisions_score
+            # inside compute_source_score — it simply no longer bars entry. Direction
+            # should move a name's rank, never decide whether it may be ranked at all.
+            _stage = _mm.get("revision_stage") or e.get("revision_stage")
+            _st_state, _st_blocked = _t1.stage_gate(_stage)
+            if _st_blocked and not _cat:
+                _ineligible(e,
+                            f"forward gate: revision_stage='{_stage}' is excluded "
+                            f"({_st_state}), and no confirmed catalyst",
+                            "revision_stage -> Igniting / Accelerating / Sustained, "
+                            "or a confirmed catalyst")
                 continue
+            e["stage_gate_state"] = _st_state
+            # Direction is NOT a gate (see above) but it is not ignored either: a name that
+            # clears the stage gate while its estimates are being cut is stamped so Step 9
+            # and the dashboard can see it. 11 of 34 eligible names carry this in Aug-2026.
+            # Flagging beats barring — the 30-day counts are far too small to be decisive
+            # (COCO 2up/2down, ASML 5up/6down), and the signal is already priced into
+            # revisions_score inside compute_source_score.
+            _dir = _mm.get("est_rev_direction")
+            e["est_rev_direction"] = _dir
+            e["revisions_caution"] = (
+                f"estimates being cut (up_30d={_mm.get('est_rev_eps_up_30d')}, "
+                f"down_30d={_mm.get('est_rev_eps_down_30d')}) despite stage '{_stage}'"
+                if _dir == "deteriorating" else None)
         else:
             if ns is None or ns < hurdle:
+                _ineligible(e,
+                            f"quality hurdle: normalised_score={ns} < {hurdle}",
+                            f"normalised_score >= {hurdle}")
                 continue
         ind, sec = ind_map.get(t, (e.get("industry"), e.get("sector")))
         if _compliance_excluded(ind, sec):
             e["compliance_excluded"] = True
             e["compliance_reason"] = f"two-tier financial rule: industry={ind}"
             log["compliance_excluded"].append(t)
+            _ineligible(e, f"compliance: two-tier financial rule (industry={ind})", None)
             continue
+        e["forward_eligible"] = True
+        e["forward_ineligible_reason"] = None
+        e["reentry_trigger"] = None
         eligible.append(e)
     elig_ids = {id(e) for e in eligible}
     ineligible = [e for t, e in registry.items()
                   if t not in held and t not in vci and id(e) not in elig_ids]
+
+    # ── INVARIANT: Step 8's universe must CONTAIN Step 9's ────────────────────────────
+    # Step 9 deliberates over the A4/T1-qualified set, which is stage-based. If a name
+    # carries an accepted revision stage and clears the quality floor but Step 8 never
+    # scored it, the two steps are running on different populations — which is exactly the
+    # failure that made the Aug-2026 action stack disagree with the Aug-2026 review.
+    # This is deliberately a LOUD, recorded violation rather than a silent divergence:
+    # the defect was invisible for months precisely because nothing checked it.
+    # Scoped deliberately: compliance exclusions (the Citi two-tier financial rule) are a
+    # hard external constraint, NOT a forward-gate divergence, so they are not violations.
+    # Left unscoped this fires on FTK.DE and CMCX.L every month, and an alarm that is always
+    # on teaches you to ignore it — the failure mode this check exists to prevent.
+    _viol, _no_stage = [], []
+    for e in ineligible:
+        _st = (mom_map.get(e["ticker"]) or {}).get("revision_stage") or e.get("revision_stage")
+        _ns = e.get("normalised_score")
+        if e.get("compliance_excluded"):
+            continue
+        if _st in getattr(_t1, "EVIDENCE_STAGES", ()) and _ns is not None and _ns >= _q_floor:
+            _viol.append({"ticker": e["ticker"], "revision_stage": _st,
+                          "normalised_score": _ns,
+                          "excluded_by": e.get("forward_ineligible_reason")})
+    # A name admitted because its stage could not be resolved is admitted on an ABSENCE.
+    # stage_gate never blocks on NO_DATA (correct — review-visible), but the count must be
+    # reported, or "we could not look" silently becomes "we looked and it was fine".
+    for e in eligible:
+        if e.get("stage_gate_state") == "NO_DATA":
+            _no_stage.append(e["ticker"])
+    log["gate_invariant_violations"] = _viol
+    log["eligible_on_missing_stage"] = _no_stage
+    if _no_stage:
+        print(f"  [rerank] NOTE: {len(_no_stage)} name(s) admitted with an UNRESOLVED "
+              f"revision stage (admitted on absence, not on evidence): {', '.join(_no_stage[:8])}")
+    if _viol:
+        print(f"  [rerank] GATE INVARIANT VIOLATED: {len(_viol)} name(s) carry an accepted "
+              f"revision stage and clear the quality floor, yet Step 8 did not score them. "
+              f"Step 8 and Step 9 are on different universes: "
+              f"{', '.join(v['ticker'] for v in _viol[:8])}")
     max_ns = max(((e.get("normalised_score") or hurdle) for e in eligible), default=hurdle)
     q_span = (max_ns - hurdle) or 1.0
     for e in eligible:
@@ -651,6 +848,12 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             e["expected_return_12_24m"] = _erd.get("expected_return_12_24m")
             e["er_confidence"] = _erd.get("er_confidence")
             e["er_basis"] = _erd.get("er_basis")
+            # H4: carry the TERMS, not just the total. Without them a name below the deploy
+            # floor records only that it failed, and "forward earnings are falling" is
+            # indistinguishable from "the de-rate term is pinned at its cap" — opposite facts.
+            e["er_growth"] = _erd.get("er_growth")
+            e["er_rerate"] = _erd.get("er_rerate")
+            e["er_yield"] = _erd.get("er_yield")
         if td.get("revision_stage") is not None:
             e["revision_stage"] = td.get("revision_stage")   # first-class field (A3; flag-string retired)
         # A5 v3: sightings from the A8 score panel — the alternative evidence route

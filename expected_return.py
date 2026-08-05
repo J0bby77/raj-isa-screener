@@ -4,7 +4,10 @@ expected_return.py — Fix Pack A2 (12-Jul-2026). THE single E[r] implementation
 
 expected_return_12_24m = er_growth + er_rerate + er_yield   (annualised, % p.a.)
   er_growth = forward EPS growth (2y annualised; fallback: fwd-growth proxy, then rev growth x 0.8)
-  er_rerate = clamp((median_5y_multiple / current_multiple) ** 0.5 - 1, -CAP, +CAP)  # 2y drift to own median
+  er_rerate = clamp((anchor_multiple / current_multiple) ** 0.5 - 1, -CAP, +CAP), then
+              C1-shaped: zeroed inside a neutral band, and the DE-RATE side damped by regime
+              (RISK_ON 0.25 / LATE_CYCLE 0.50 / RISK_OFF 1.0). The RE-RATE credit for a cheap
+              name is never damped. Set ER_RERATE_MODE="legacy" to restore the raw monotonic term.
   er_yield  = dividend_yield + net_buyback_yield (from 3y share-count change)
 
 Own-history-anchored by design — consensus targets are sentiment data (Correction #5), never inputs here.
@@ -17,8 +20,16 @@ from __future__ import annotations
 try:
     import scoring_config as _cfg
     _CAP = float(getattr(_cfg, "ER_RERATE_CAP", 0.10))
+    _RERATE_MODE = str(getattr(_cfg, "ER_RERATE_MODE", "regime_aware"))
+    _NEUTRAL_BAND = float(getattr(_cfg, "ER_RERATE_NEUTRAL_BAND", 0.05))
+    _REGIME_DAMPING = dict(getattr(_cfg, "ER_RERATE_REGIME_DAMPING", {}) or {}) or {
+        "RISK_ON": 0.25, "LATE_CYCLE": 0.50, "RISK_OFF": 1.00, "RECOVERY": 1.00}
 except Exception:            # standalone/self-test safety — never block a screen on config import
     _CAP = 0.10
+    _RERATE_MODE = "regime_aware"
+    _NEUTRAL_BAND = 0.05
+    _REGIME_DAMPING = {"RISK_ON": 0.25, "LATE_CYCLE": 0.50,
+                       "RISK_OFF": 1.00, "RECOVERY": 1.00}
 
 
 def _num(v):
@@ -34,7 +45,8 @@ def _num(v):
 
 def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
                             current_multiple=None, median_5y_multiple=None,
-                            dividend_yield_pct=None, sharecount_change_3y_pct_pa=None):
+                            dividend_yield_pct=None, sharecount_change_3y_pct_pa=None,
+                            regime=None):
     """Pure function. Percent-unit inputs (12 == 12%). Returns dict:
     {expected_return_12_24m, er_growth, er_rerate, er_yield, er_confidence, er_basis}
     Missing term -> contributes 0, lowers er_confidence, and is named in er_basis (never silently proxied)."""
@@ -53,8 +65,40 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
 
     cur, med = _num(current_multiple), _num(median_5y_multiple)
     if cur and med and cur > 0 and med > 0:
-        rer = 100.0 * max(min((med / cur) ** 0.5 - 1.0, _CAP), -_CAP)
-        basis.append("rerate=own_5y_median"); present += 0.3
+        raw = (med / cur) ** 0.5 - 1.0
+        rer = 100.0 * max(min(raw, _CAP), -_CAP)
+        _tag = "rerate=own_history_median"
+
+        # ── C1 (02-Aug-2026): SHAPE and REGIME ────────────────────────────────────────
+        # Measured over 13.6 years, 1,680 names, multi-market: forward 52-week excess return
+        # by own-history extension decile is U-SHAPED, not monotonic —
+        #   D1 (cheapest) +2.4% · D2-D7 -2 to -3% · D10 (most extended) +6.8%
+        # A monotonic penalty therefore punishes the BEST decile hardest and rewards the
+        # WORST. It is also regime-conditional: D10-D1 spread is +8.5pp in Bull and -10.2pp
+        # in Bear, and it flips by era (+19.5 / -15.1 / +14.7pp).
+        #
+        # The sign is NOT flipped. Rewarding extension would have lost 15pp in 2020-22, the
+        # study universe has ZERO delistings (total survivorship), and the effective sample
+        # is ~9 independent observations. Two changes only, both conservative:
+        #   1. NEUTRAL BAND — inside it the middle deciles carry no information, so they are
+        #      scored 0 rather than assigned a confident penalty.
+        #   2. ASYMMETRIC REGIME DAMPING — a CHEAP name keeps its full re-rate credit in every
+        #      regime (D1 is positive everywhere, strongest in Bear). An EXPENSIVE name's
+        #      penalty is damped where the evidence says reversion does not happen.
+        # Damping is 0.25 rather than 0 in RISK_ON deliberately: the evidence is directional,
+        # not strong enough to switch the term off.
+        if _RERATE_MODE == "regime_aware":
+            band = _NEUTRAL_BAND
+            if abs(raw) <= band:
+                rer = 0.0
+                _tag = f"rerate=neutral_band(|{raw:+.3f}|<={band})"
+            elif raw < 0:                      # expensive vs its own history
+                f = _REGIME_DAMPING.get(str(regime or "").upper(), 1.0)
+                rer *= f
+                _tag = f"rerate=de_rate_damped(regime={regime or 'unknown'},x{f})"
+            else:                              # cheap vs its own history — kept in full
+                _tag = "rerate=re_rate_credit_full"
+        basis.append(_tag); present += 0.3
     else:
         rer = 0.0; basis.append("rerate=MISSING")
 
@@ -86,14 +130,44 @@ _KEYS = {
     "fwd_eps_growth_pct": [("fwd_eps_growth", 100), ("forward_eps_growth_pct", 1), ("eps_growth_fwd_pct", 1)],
     "rev_growth_pct": [("rev_est_fwd_pct", 1), ("revenue_growth_fwd_pct", 1), ("recent_revenue_growth_pct", 1)],
     "current_multiple": [("trailing_pe", 1), ("val_hist_current_pe", 1), ("current_pe", 1), ("fwd_pe", 1)],
-    "median_5y_multiple": [("val_hist_pe_3yr_avg", 1), ("val_hist_median_pe_5y", 1), ("pe_5y_median", 1)],
+    # C2: the MEDIAN anchor first, the legacy 3-year MEAN only as a fallback.
+    "median_5y_multiple": [("val_hist_pe_anchor", 1), ("val_hist_median_pe_5y", 1),
+                           ("pe_5y_median", 1), ("val_hist_pe_3yr_avg", 1)],
     "dividend_yield_pct": [("dividend_yield_pct", 1), ("dividend_yield", 1)],
     "sharecount_change_3y_pct_pa": [("share_count_change", 100), ("share_count_change_3y_pct_pa", 1),
                                     ("sharecount_change_pct_pa", 1)],
 }
 
 
-def expected_return_for_row(row, get=None):
+_REGIME_CACHE = {}
+
+
+def current_market_regime(here=None):
+    """The MECHANICAL market regime (drawdown_monitor B7: RISK_ON / LATE_CYCLE / RISK_OFF /
+    RECOVERY), read once per process from drawdown_state.json.
+
+    This is the PRICE-state regime, not Step 4's macro judgement. Precedence is deliberate and
+    matches the two-regime resolution already in the framework: mechanical price state governs
+    anything that moves capital automatically; macro judgement only shifts a threshold. E[r]
+    feeds a deploy floor, so it takes the mechanical one.
+
+    Returns None when unavailable — and None means UNDAMPED (the conservative full penalty),
+    never a guessed regime.
+    """
+    if "v" in _REGIME_CACHE:
+        return _REGIME_CACHE["v"]
+    import json as _json
+    import os as _os
+    base = here or _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        with open(_os.path.join(base, "drawdown_state.json"), encoding="utf-8") as f:
+            _REGIME_CACHE["v"] = (_json.load(f) or {}).get("regime_state")
+    except Exception:
+        _REGIME_CACHE["v"] = None
+    return _REGIME_CACHE["v"]
+
+
+def expected_return_for_row(row, get=None, regime=None):
     g = get or (lambda r, k: r.get(k) if hasattr(r, "get") else None)
     kw = {}
     for arg, cands in _KEYS.items():
@@ -106,6 +180,7 @@ def expected_return_for_row(row, get=None):
                     v = n * scale
                     break
         kw[arg] = v
+    kw["regime"] = regime if regime is not None else current_market_regime()
     return compute_expected_return(**kw)
 
 
@@ -127,8 +202,41 @@ if __name__ == "__main__":
     d = expected_return_for_row({"fwd_eps_growth": 0.14, "trailing_pe": 24, "val_hist_pe_3yr_avg": 25,
                                  "share_count_change": -0.015})
     assert d["er_growth"] == 14.0 and d["er_yield"] == 1.5, d
-    assert d["er_basis"].startswith("growth=fwd_eps") and "rerate=own_5y_median" in d["er_basis"], d
-    print("SELF-TEST OK")
+    assert d["er_basis"].startswith("growth=fwd_eps") and "rerate=" in d["er_basis"], d
+
+    # ── C1 (02-Aug-2026) ──────────────────────────────────────────────────────────────
+    # A name sitting AT its own anchor carries no information — the middle deciles were
+    # -2 to -3% excess. It is scored 0 rather than given a confident small penalty.
+    nb = compute_expected_return(fwd_eps_growth_pct=10, current_multiple=24,
+                                 median_5y_multiple=25)
+    assert nb["er_rerate"] == 0.0 and "neutral_band" in nb["er_basis"], nb
+
+    # The DE-RATE penalty is damped where the evidence says reversion does not happen...
+    on  = compute_expected_return(fwd_eps_growth_pct=10, current_multiple=40,
+                                  median_5y_multiple=22, regime="RISK_ON")
+    off = compute_expected_return(fwd_eps_growth_pct=10, current_multiple=40,
+                                  median_5y_multiple=22, regime="RISK_OFF")
+    assert off["er_rerate"] == -10.0, off
+    assert on["er_rerate"] == -2.5, on
+    assert on["er_rerate"] > off["er_rerate"], (on, off)
+
+    # ...but a CHEAP name keeps its full re-rate credit in EVERY regime (D1 is positive
+    # everywhere, strongest in Bear). Damping the upside would be an unevidenced asymmetry.
+    ch_on  = compute_expected_return(fwd_eps_growth_pct=5, current_multiple=10,
+                                     median_5y_multiple=20, regime="RISK_ON")
+    ch_off = compute_expected_return(fwd_eps_growth_pct=5, current_multiple=10,
+                                     median_5y_multiple=20, regime="RISK_OFF")
+    assert ch_on["er_rerate"] == ch_off["er_rerate"] == 10.0, (ch_on, ch_off)
+    assert "re_rate_credit_full" in ch_on["er_basis"], ch_on
+
+    # The sign is never flipped: an expensive name is never REWARDED for being expensive.
+    assert on["er_rerate"] <= 0.0, on
+
+    # C2: the median anchor is preferred over the legacy 3-year mean when present.
+    e = expected_return_for_row({"fwd_eps_growth": 0.10, "trailing_pe": 40,
+                                 "val_hist_pe_anchor": 22, "val_hist_pe_3yr_avg": 39})
+    assert e["er_rerate"] < 0, e          # the median anchor, not the contaminated mean
+    print("SELF-TEST OK (incl. C1 shape/regime + C2 anchor preference)")
 
 
 def apply_capital_signal_conflict(row):

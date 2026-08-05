@@ -224,6 +224,21 @@ SOURCE_UPSIDE_CAP   = 0.60    # A6 — upside normalisation cap in the deployabi
                               #      (was rerank_watchlist.UPSIDE_CAP; one home now)
 CONSENSUS_UPSIDE_CAP_MULT = 1.15  # A6 — composite FV <= consensus target x this (was getattr-only)
 ER_RERATE_CAP       = 0.10    # A2 — per-year multiple-drift clamp in expected_return.py
+
+
+# ── C1 (02-Aug-2026): re-rating SHAPE and REGIME ────────────────────────────────────────
+# Measured over 13.6 years / 1,680 names / multi-market (ISA_Rerating_Calibration_Study_02Aug2026.md).
+# Forward excess return by own-history extension decile is U-SHAPED (D1 +2.4%, middle -2 to -3%,
+# D10 +6.8%), so a monotonic penalty punishes the best decile and rewards the worst. The effect
+# is regime-conditional (D10-D1 +8.5pp in Bull, -10.2pp in Bear) and flips by era.
+# The sign is NOT flipped - survivorship in the study is total and the effective sample is ~9
+# independent observations. Set to "legacy" to restore the raw monotonic term.
+ER_RERATE_MODE = "regime_aware"       # "regime_aware" | "legacy"
+ER_RERATE_NEUTRAL_BAND = 0.05         # |raw| within this -> scored 0 (the middle carries no info)
+ER_RERATE_REGIME_DAMPING = {          # applied to the DE-RATE side only; re-rate credit is never damped
+    "RISK_ON": 0.25, "LATE_CYCLE": 0.50, "RISK_OFF": 1.00, "RECOVERY": 1.00,
+}
+
 ER_GATE_ACTIVE      = True    # A2 — E[r] T1-deploy gate; FLIPPED LIVE 13-Jul-26 (P2) — consumed 1-Aug pre-run
 STAGE_GATE_ACTIVE   = True    # A3 — stage gate; FLIPPED LIVE 13-Jul-26 (P2)
 T1_QUALIFICATION_MODE = True  # A4 — T1 = QUALIFICATION; FLIPPED LIVE 13-Jul-26 (P2); False = legacy rank-band rollback

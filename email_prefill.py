@@ -38,6 +38,38 @@ import sys
 from datetime import date, datetime
 
 
+# ---- M2 entry reachability (03-Aug-2026) -----------------------------------------
+# Emitted by entry_reachability.py. Import is optional and failure is silent-but-labelled:
+# an unavailable classifier yields "unknown", never a default of "reachable", so an unchecked
+# entry can never quietly present itself as a valid target.
+try:
+    from entry_reachability import classify as _reach_classify
+except Exception:                                       # pragma: no cover
+    _reach_classify = None
+
+_REACH_SUFFIX = {
+    "reachable":   "",
+    "stretch":     " (drawdown only)",
+    "unreachable": " — NOT REACHABLE",
+    "unknown":     " (reachability unchecked)",
+}
+
+
+def _entry_reach_for(ticker, row):
+    if _reach_classify is None:
+        return {"reachability": "unknown", "basis": "entry_reachability unavailable"}
+    return _reach_classify(row.get("current_price") or row.get("price"),
+                           row.get("entry_level"), row.get("realised_vol"))
+
+
+def _entry_display(entry_level, reach):
+    if entry_level in (None, "", "—"):
+        return "—"
+    return f"{entry_level}{_REACH_SUFFIX.get((reach or {}).get('reachability', 'unknown'), '')}"
+
+
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -856,6 +888,7 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
         _s9 = _s9row.get(_t, {})
         _er = _s9.get("expected_return_12_24m", row.get("expected_return_12_24m"))
         _t1q = _s9.get("t1_qualified")
+        _reach = _entry_reach_for(_t, row)
         items.append({
             "rank":         row.get("rank", "—"),
             "ticker":       _t,
@@ -870,7 +903,16 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
             "expected_return_12_24m": (f"{_er:.1f}%" if isinstance(_er, (int, float)) else "—"),
             "implied_upside_fv": row.get("implied_upside_fv", "—"),       # D7 canonical
             "sector":       row.get("sector", "—"),
-            "entry_level":  row.get("entry_level", "—"),    # relabelled "Target buy (display)"
+            # M2 (03-Aug-26): 19 of 49 August entries sat >100% BELOW the live price, every one
+            # via the return-hurdle anchor — prices at which the required return is
+            # ARITHMETICALLY GUARANTEED, not prices the market is offering. Printing them under
+            # "Target buy (display)" reads as an instruction to wait for a level that will not
+            # come. The value is still shown (hiding it would conceal what the anchor produced);
+            # it now carries its reachability so the reader is not misled. Label only — this is
+            # display-only under the A6 path and reorders nothing.
+            "entry_level":  _entry_display(row.get("entry_level", "—"), _reach),
+            "entry_reachability": (_reach or {}).get("reachability", "unknown"),
+            "entry_reach_note":   (_reach or {}).get("basis"),
             "status":       status,
             # P7b/P5-T4: ONE verdict field drives the badge — never two contradicting texts.
             # A5 v3: the verdict carries the size mode (full = evidence-confirmed; starter =
@@ -973,7 +1015,8 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
     scored sleeve data (current price, metrics, analyst rating, target upside).
     Falls back to portfolio-only if scored data is unavailable.
     """
-    # Base s7 from portfolio
+    # Base s7 from portfolio — BROKER TRUTH. Every share count, price, value, cost, gain and
+    # weight in this section comes from portfolio_data and from nowhere else.
     base = build_s7(portfolio)
     sleeve_rows_scored = scored.get("s7_sleeve_rows", [])
     if not sleeve_rows_scored:
@@ -982,16 +1025,63 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
     # Build lookup by ticker
     scored_map = {r["ticker"]: r for r in sleeve_rows_scored}
 
-    # Merge: portfolio row gets enriched with scored metrics
+    # ── 02-Aug-2026 (Aug retrospective item 5): PROVENANCE IS NOW ENFORCED, NOT ASSUMED ────
+    #
+    # watchlist_scored.s7_sleeve_rows priced AVGO at GBP 6,617.76 against the broker's
+    # 4,915.78, MU at 5,761.21 against 4,277.67, and ONT at 18,471.20 against 997.92 -- the
+    # last because ticker "ONT" resolved to "Onterris, Inc." rather than ONT.L Oxford Nanopore.
+    # The errors are FX and GBp conversions applied inconsistently, plus one outright identity
+    # error. Section 7 happened to be built from portfolio_data, so the emitted email was
+    # right; a run that had trusted the scored file would have reported a stock sleeve roughly
+    # 2.5x its real size.
+    #
+    # Two changes, because "it happened to be correct" is not a control:
+    #   1. an ALLOW-LIST -- only non-monetary, non-identity fields may cross from the scored
+    #      file. A future edit cannot widen the merge by accident;
+    #   2. a RECONCILIATION -- where the scored file does carry a value or a name, it is
+    #      compared against broker truth and any disagreement is SURFACED. Broker truth still
+    #      wins; the point is that the discrepancy stops being invisible.
+    MERGEABLE_FROM_SCORED = ("analyst_rating", "display_target_gap", "next_earnings",
+                             "total_score", "total_max")
+    MONETARY_OR_IDENTITY = ("name", "value_gbp", "market_value", "position_value", "cost_gbp",
+                            "current_price", "price", "quantity", "shares", "weight_pct")
+    discrepancies = []
+
+    def _num(v):
+        try:
+            return float(str(v).replace("GBP", "").replace("\u00a3", "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
     for h in base["holdings"]:
         ticker = h.get("ticker", "")
         s = scored_map.get(ticker, {})
+        if not s:
+            continue
+        # identity
+        s_name, b_name = s.get("name"), h.get("name")
+        if s_name and b_name and s_name.split()[0].lower() != str(b_name).split()[0].lower():
+            discrepancies.append(
+                f"{ticker}: scored file names it '{s_name}' but the broker file says "
+                f"'{b_name}' -- the ticker has resolved to the wrong company. Broker truth used.")
+        # monetary
+        for f in ("value_gbp", "market_value", "position_value"):
+            sv, bv = _num(s.get(f)), _num(str(h.get("value", "")).replace("\u00a3", ""))
+            if sv is not None and bv and abs(sv - bv) / bv > 0.05:
+                discrepancies.append(
+                    f"{ticker}: scored {f}={sv:,.2f} vs broker {bv:,.2f} "
+                    f"({(sv/bv - 1)*100:+.0f}%). Broker truth used.")
+                break
         if s:
             # Override status note with analyst rating and target upside
             analyst = s.get("analyst_rating", "—")
             upside  = s.get("display_target_gap") or "—"   # D7; P3: target_upside fallback deleted
             ne      = s.get("next_earnings", "—")
             score   = s.get("total_score")
+            # Only the allow-listed fields are consumed, and only into a TEXT note. No
+            # monetary or identity field from the scored file reaches the rendered section.
+            assert all(f not in MERGEABLE_FROM_SCORED for f in MONETARY_OR_IDENTITY), \
+                "s7 merge allow-list must never contain a monetary or identity field"
             h["status_note"] = (
                 f"Analyst: {analyst} | Target upside: {upside} | "
                 f"Next earnings: {ne}"
@@ -999,6 +1089,12 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
                 + " | [Claude: update thesis status at Step 8]"
             )
 
+    if discrepancies:
+        base["provenance_warnings"] = discrepancies
+        base["notes"] = (base.get("notes") or "") + (
+            "\n\nDATA PROVENANCE: all share counts, prices, values and weights above are from "
+            "the AJ Bell broker file. The scored file disagrees on the following and was NOT "
+            "used for any of them: " + " ".join(discrepancies))
     return base
 
 

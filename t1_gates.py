@@ -38,7 +38,7 @@ verifies PRESENCE of the documented cause (checkpoint_d ticks it), the review ow
 """
 from __future__ import annotations
 import csv, os, sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -197,9 +197,61 @@ def entry_stability(ticker, panel_path=None, ref_date=None):
     if n >= min_n and span >= min_span:
         return {"verdict": "PASS", "sightings": n, "min_score": min_score,
                 "detail": "%d sightings over %dd, all >= %g on both legs" % (n, span, floor)}
+    # 02-Aug-2026 (Aug retrospective item 2): distinguish "this NAME lacks history" from
+    # "the PANEL itself is younger than the test's own lookback".
+    #
+    # score_panel.csv begins 25-Jun-2026, so on the Aug-2026 run the maximum span available to
+    # ANY name was 37 days against a 60-day requirement. Every candidate therefore returned a
+    # bare UNVERIFIED and every Path A entry was capped at starter size — the right outcome by
+    # accident, not by design. Worse, the gate carried NO information: it could not distinguish
+    # a genuinely unstable name from a merely young panel, so a PASS was unreachable and a
+    # non-PASS meant nothing.
+    #
+    # UNVERIFIED_PANEL_TOO_YOUNG says so explicitly, and reports the date from which a PASS
+    # first becomes attainable. It is still non-PASS and still caps at starter size — the
+    # SIZING is unchanged (H7: nothing here adjusts a threshold). What changes is that the
+    # reason is now legible instead of silent.
+    panel_start = _panel_start_date(panel_path)
+    if panel_start is not None:
+        panel_span = (ref - panel_start).days
+        if panel_span < min_span:
+            return {"verdict": "UNVERIFIED_PANEL_TOO_YOUNG", "sightings": n,
+                    "min_score": min_score, "panel_start": panel_start.isoformat(),
+                    "panel_span_days": panel_span,
+                    "pass_attainable_from": (panel_start + timedelta(days=min_span)).isoformat(),
+                    "detail": ("score_panel.csv begins %s, so the widest span available to ANY "
+                               "name is %dd against the %dd this test requires. No candidate can "
+                               "return PASS before %s. This is a PANEL-AGE limit, not evidence "
+                               "about %s. Starter size per A5v3 — unchanged."
+                               % (panel_start.isoformat(), panel_span, min_span,
+                                  (panel_start + timedelta(days=min_span)).isoformat(), t))}
     return {"verdict": "UNVERIFIED", "sightings": n, "min_score": min_score,
             "detail": ("insufficient history (%d sightings, span %dd; need >= %d over >= %dd)"
                        " - starter size per A5v3" % (n, span, min_n, min_span))}
+
+
+_PANEL_START_CACHE = {}
+
+
+def _panel_start_date(panel_path):
+    """Earliest run_date in the panel. Cached per path — entry_stability is called once per
+    candidate and re-reading a 3,000-row CSV for each would be gratuitous."""
+    if panel_path in _PANEL_START_CACHE:
+        return _PANEL_START_CACHE[panel_path]
+    earliest = None
+    try:
+        with open(panel_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    dt = datetime.strptime(str(row.get("run_date", ""))[:10], "%Y-%m-%d").date()
+                except (TypeError, ValueError):
+                    continue
+                if earliest is None or dt < earliest:
+                    earliest = dt
+    except OSError:
+        earliest = None
+    _PANEL_START_CACHE[panel_path] = earliest
+    return earliest
 
 
 def min_hold_until(entry_date):

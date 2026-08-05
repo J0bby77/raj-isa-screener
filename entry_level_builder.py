@@ -113,7 +113,18 @@ def build_entry_for_ticker(t: dict, existing: dict) -> dict:
         "sector_type_basis": _st["sector_type_basis"],
         "required_upside": req_up,
         "current_price": price,
-        "entry_currency": existing.get("entry_currency") or t.get("currency") or "USD",
+        # 02-Aug-2026 FIX: the LIVE price currency wins. Every entry anchor below is derived
+        # from `current_price` / `_prices`, which are quoted in the instrument's own
+        # currency — so the entry level IS in that currency, by construction, and the label
+        # must follow it. Previously a stale stored value took precedence, and because new
+        # pool entries default to "USD" (fetch_watchlist_metrics), that default was then
+        # preserved forever: 25 of 52 names carried entry_currency="USD" against GBp, EUR,
+        # SEK, PLN and CHF prices. The stored value is now only a fallback for the case
+        # where the live row carries no currency at all.
+        "entry_currency": t.get("currency") or existing.get("entry_currency") or "USD",
+        "entry_currency_corrected": bool(
+            existing.get("entry_currency") and t.get("currency")
+            and existing.get("entry_currency") != t.get("currency")),
     }
 
     if not price:

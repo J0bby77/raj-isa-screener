@@ -90,9 +90,25 @@ def derive_sector_type(ticker_entry_wt: dict) -> tuple[str, str]:
         for kw in HEALTHCARE_KEYWORDS:
             if kw in industry:
                 return "healthcare_tech", "inferred"
-        return "quality_compounder_saas", "inferred"
 
-    # 3. Default
+    # 02-Aug-2026. Watchlist entries carry `industry: None` — only the metrics row has it — so
+    # EVERY name fell through to quality_compounder_saas. D8 macro resilience keys off this
+    # field, which meant a pharma and a defence-IT contractor were both being scored on the
+    # "Quality compounders / SaaS" row of the regime table. The vendor SECTOR is a coarser but
+    # always-present signal, so it is used before conceding to the default.
+    sector = (ticker_entry_wt.get("sector") or "").lower()
+    if sector:
+        if "health" in sector:
+            return "healthcare_tech", "inferred_sector"
+        if "energy" in sector or "utilities" in sector:
+            return "energy_adjacent", "inferred_sector"
+        if any(k in sector for k in ("industrial", "material", "consumer cyclical",
+                                     "real estate", "communication")):
+            return "cyclical", "inferred_sector"
+        if "technology" in sector or "consumer defensive" in sector or "financial" in sector:
+            return "quality_compounder_saas", "inferred_sector"
+
+    # 3. Default — now genuinely a last resort, and SAID to be one.
     return "quality_compounder_saas", "default"
 
 
@@ -214,12 +230,36 @@ def score_dim5_management(ticker_data: dict, pipeline: str, acs_breakdown: str) 
 
 
 def score_dim6_moat(ticker_data: dict, pipeline: str, acs_breakdown: str) -> tuple[int, str]:
-    """Dimension 6 — Competitive Moat (0–10)"""
+    """Dimension 6 — Competitive Moat (0–10)
+
+    02-Aug-2026 — DOUBLE-COUNT REMOVED. This was `part_b_score / 26`, i.e. the WHOLE of Part B
+    rescaled, while D1 Valuation is a SUBSET of Part B (fwd_pe + ev_ebitda + price_fcf +
+    fcf_yield + target_upside). Two of seven dimensions were therefore measuring substantially
+    one input — and Part B also drives `normalised_score` (the quality floor of 60) and the
+    quality term inside the Source Score, so it was counted four times in total.
+
+    Moat is now built from the four Part-A components that NO other dimension uses:
+      share_count  — funds itself without diluting holders
+      fcf_pos      — years of positive free cash flow, i.e. self-funding
+      fcf_cagr     — cash generation is compounding, not just present
+      capex        — asset-light; advantage is not bought each year with capital
+    Each is 0-2, so the raw total is 0-8 and scales to 0-10. These are structural-durability
+    traits and are genuinely disjoint from D1 (valuation), D2 (growth), D3 (margins),
+    D4 (leverage) and D7 (risk/reward).
+
+    This CHANGES the D1-D7 base and therefore conviction totals. It is a correction of a
+    logical defect, not a recalibration: the 60/65/75 bands were set against the old scale and
+    their re-validation belongs to the conviction OODA once capture history exists (register H6).
+    """
     td = ticker_data
     if pipeline == "growth_stock":
-        pb = _get(td, "part_b_score")
-        s = min(round(pb / 26 * 10), 10)
-        return s, f"part_b_score={pb}/26 → scaled"
+        parts = {k: _get(td, k) for k in ("score_share_count", "score_fcf_pos",
+                                          "score_fcf_cagr", "score_capex")}
+        raw = sum(parts.values())
+        s = min(round(raw * 10 / 8), 10)
+        return s, ("moat=capital-discipline: " +
+                   ", ".join(f"{k.replace('score_', '')}={v}" for k, v in parts.items()) +
+                   f" → {raw}/8 scaled")
     elif pipeline == "vci":
         acs1 = _parse_acs_dim(acs_breakdown, "ACS1")
         acs2 = _parse_acs_dim(acs_breakdown, "ACS2")
@@ -651,7 +691,12 @@ def main():
         rank = wt_entry.get("rank") or cr_lookup.get(ticker, {}).get("rank", 99)
         delta_score = cr_lookup.get(ticker, {}).get("delta_score", 0)
         part_b_driver = cr_lookup.get(ticker, {}).get("part_b_driver")
-        sector_type, sector_type_source = derive_sector_type(wt_entry)
+        # industry/sector live on the scored metrics row, not the watchlist entry
+        sector_type, sector_type_source = derive_sector_type({
+            **wt_entry,
+            "industry": ts.get("industry") or wt_entry.get("industry"),
+            "sector": ts.get("sector") or wt_entry.get("sector"),
+        })
         acs_breakdown = wt_entry.get("acs_breakdown", "")
 
         # Entry-level governance (from entry_level_builder.py)
@@ -708,6 +753,21 @@ def main():
             "sector_type_source": sector_type_source,
             "normalised_score":   wt_entry.get("normalised_score"),
             "source_score":       wt_entry.get("source_score"),
+            # The forward-gate verdict is decided in rerank_watchlist and MUST travel with the
+            # name. Without these three, step9_pre records that a name was not forward-ranked
+            # but not WHY, and the CAP-4 output degrades back to an unexplained absence — the
+            # exact defect it was built to remove.
+            # H4: the E[r] TERMS travel with the name, not just the total.
+            "er_growth":          wt_entry.get("er_growth"),
+            "er_rerate":          wt_entry.get("er_rerate"),
+            "er_yield":           wt_entry.get("er_yield"),
+            "er_confidence":      wt_entry.get("er_confidence"),
+            "forward_eligible":           wt_entry.get("forward_eligible"),
+            "forward_ineligible_reason":  wt_entry.get("forward_ineligible_reason"),
+            "reentry_trigger":            wt_entry.get("reentry_trigger"),
+            "stage_gate_state":           wt_entry.get("stage_gate_state"),
+            "revisions_caution":          wt_entry.get("revisions_caution"),
+            "revision_stage":     wt_entry.get("revision_stage"),
             "entry_level_status":      entry_status,
             "entry_level_provisional": entry_provisional,
             "entry_level_confidence":  entry_confidence,
@@ -1004,17 +1064,70 @@ def main():
     def _deployment_sort_key(entry: dict) -> tuple:
         """Jul-2026 (Raj): FORWARD-LED. Order strictly by the Source Score (forward +
         revisions + implied-upside*confidence + quality), which now excludes the price
-        window. Tiebreak: normalised_score, then ticker (deterministic)."""
-        return (-(entry.get("source_score") or 0.0),
+        window. Tiebreak: normalised_score, then ticker (deterministic).
+
+        CAP-4 (02-Aug-2026) — the sort is now PARTITIONED, not a single key.
+        Previously `-(source_score or 0.0)` fed a MISSING score into the ordering as if
+        it were a measured zero. It is not: a name has no Source Score precisely because
+        rerank_watchlist never ran compute_source_score on it, having already rejected it
+        at the forward-eligibility gate (est_rev_direction not up, no confirmed catalyst).
+        In Aug-2026 that was 35 of 41 names. The old key silently blended two populations
+        that were assessed on different axes and presented the result as one ranking.
+
+        Now: block 0 = forward-eligible names, ordered by Source Score (the real
+        deployment axis). Block 1 = forward-ineligible names, ordered by quality only.
+        Resulting on-screen order is unchanged; what changes is that the output no longer
+        claims block 1 was ranked on an axis it was never scored on.
+        """
+        ss = entry.get("source_score")
+        forward_ranked = (entry.get("forward_eligible") is not False) and (ss is not None)
+        return (0 if forward_ranked else 1,
+                -(ss if ss is not None else 0.0),
                 -(entry.get("normalised_score") or 0.0),
                 str(entry.get("ticker", "")))
+
+    _ER_FLOOR = float(getattr(_cfg, "ER_DEPLOY_FLOOR", 15.9)) if _cfg else 15.9
+
+    def _er_floor_status(entry: dict):
+        e = entry.get("expected_return_12_24m")
+        if e is None:
+            return "unmeasured"          # NOT "fail" — we could not look, which is different
+        return "pass" if e >= _ER_FLOOR else "fail"
+
+    def _er_binding(entry: dict):
+        """Which TERM puts the name below the floor. A name failing on falling forward earnings
+        is a different proposition from one failing on a de-rate assumption."""
+        e = entry.get("expected_return_12_24m")
+        if e is None or e >= _ER_FLOOR:
+            return None
+        g, r = entry.get("er_growth"), entry.get("er_rerate")
+        if g is not None and g < _ER_FLOOR:
+            return "growth"
+        if r is not None and r < 0:
+            return "rerate"
+        return "yield_or_mixed"
+
+    def _rank_basis(entry: dict) -> str:
+        ss = entry.get("source_score")
+        if (entry.get("forward_eligible") is not False) and ss is not None:
+            return "source_score"
+        return "normalised_score_fallback"
 
     _deployment_pool = []
     # Jul-2026 (Raj): the deployment priority stack lists DEPLOYABLE names only. Exclude any
     # name below the quality floor (normalised_score < 60 -> "Remove / Reject"); it is not a
     # buy candidate and must not appear in the action stack even with a high Source Score.
+    # CAP-4 sibling: same null-vs-missing class. An UNMEASURED normalised_score was being
+    # coerced to 0 and silently excluded. Excluding it is correct (fail-closed on a quality
+    # floor), but it must be recorded as "could not measure", never as "measured and failed".
+    _undeployable_unmeasured = []
+
     def _deployable(entry):
-        return (entry.get("normalised_score") or 0) >= 60
+        ns = entry.get("normalised_score")
+        if ns is None:
+            _undeployable_unmeasured.append(entry.get("ticker"))
+            return False
+        return ns >= 60
     for entry in (main_t1 + main_t2 + main_t3):
         if _deployable(entry):
             _deployment_pool.append({**entry, "_source": "watchlist"})
@@ -1032,6 +1145,27 @@ def main():
             "tier":                       entry.get("tier"),
             "source":                     entry.get("_source"),
             "source_score":               entry.get("source_score"),
+            # CAP-4: state the axis each rank was actually assigned on, and — where the
+            # forward gate rejected the name — the condition that failed and what would
+            # have to change. A consumer can no longer mistake a quality-ordered name for
+            # a forward-ranked one, and a false negative remains recoverable.
+            "rank_basis":                 _rank_basis(entry),
+            # H4 (02-Aug-2026). The stack is a ranked CANDIDATE list, not a buy list: Step 9
+            # filters it on economics. Three of the Aug top-10 fail the E[r] deploy floor —
+            # and all three fail on GROWTH, not on the multiple assumption. Recording the
+            # attribution means "fails because forward earnings are falling" is no longer
+            # indistinguishable from "fails because the re-rate term is pinned at its cap",
+            # which are opposite facts about the same number.
+            "er_growth":                  entry.get("er_growth"),
+            "er_rerate":                  entry.get("er_rerate"),
+            "er_yield":                   entry.get("er_yield"),
+            "er_confidence":              entry.get("er_confidence"),
+            "expected_return_12_24m":     entry.get("expected_return_12_24m"),
+            "er_floor_status":            _er_floor_status(entry),
+            "er_binding_constraint":      _er_binding(entry),
+            "forward_eligible":           entry.get("forward_eligible"),
+            "forward_ineligible_reason":  entry.get("forward_ineligible_reason"),
+            "reentry_trigger":            entry.get("reentry_trigger"),
             "valuation_review_flag":      entry.get("valuation_review_flag"),
             "price_ahead_of_consensus":   entry.get("price_ahead_of_consensus"),
             "implied_upside_to_fv":       entry.get("implied_upside_to_fv"),
@@ -1041,6 +1175,19 @@ def main():
             "decision_bucket":            entry.get("decision_bucket"),
             "pct_vs_entry":               entry.get("pct_vs_entry"),
         })
+
+    # CAP-4: split the ranked list into the two instruments. `deployable_stack` is
+    # re-ranked from 1 so that "rank 1" means "the best home for the next pound" with no
+    # gap or ambiguity; each row keeps `deployment_rank` as its position in the combined
+    # list so the two views can always be reconciled.
+    _deployable_stack = []
+    _forward_ineligible_queue = []
+    for _r in deployment_priority_rank:
+        if _r.get("rank_basis") == "source_score":
+            _deployable_stack.append({**_r, "deployable_rank": len(_deployable_stack) + 1})
+        else:
+            _forward_ineligible_queue.append(
+                {**_r, "queue_rank": len(_forward_ineligible_queue) + 1})
 
     # Produce output
     output = {
@@ -1061,6 +1208,17 @@ def main():
             "pool_t2_count":             len(pool_t2),
             "pool_t3_count":             len(pool_t3),
             "deployment_priority_count": len(deployment_priority_rank),
+            # CAP-4 coverage — surfaced, not inferred from a null count downstream.
+            "undeployable_unmeasured":     _undeployable_unmeasured,
+            "deployable_count":            len(_deployable_stack),
+            "forward_ineligible_count":    len(_forward_ineligible_queue),
+            "deployment_rank_basis_note": (
+                "deployment_priority_rank is PARTITIONED: ranks 1.."
+                f"{len(_deployable_stack)} are forward-eligible and ordered by "
+                "source_score; the remainder failed the forward-eligibility gate, carry "
+                "no source_score, and are ordered by normalised_score only. Read "
+                "rank_basis per row. A missing source_score is NOT a zero."
+            ),
         },
         "main_watchlist": {
             "T1": main_t1,
@@ -1078,6 +1236,17 @@ def main():
             "T3": pool_t3,
         },
         "deployment_priority_rank": deployment_priority_rank,
+        # CAP-4: the two populations, separated. `deployable_stack` is the capital-
+        # deployment instrument — every rank in it is a genuine claim on the next pound,
+        # scored on the forward axis. `forward_ineligible_queue` holds names that cleared
+        # the quality floor but failed the forward gate: not deployable today, ranked on
+        # quality only, each carrying the trigger that would make it deployable. Keeping
+        # them visible is deliberate — dropping them would make the framework blind to a
+        # name whose revisions turn up next cycle.
+        # `deployment_priority_rank` above is retained UNCHANGED in membership and order
+        # for existing consumers (email_prefill, monthly_isa_prerun coverage assert).
+        "deployable_stack":        _deployable_stack,
+        "forward_ineligible_queue": _forward_ineligible_queue,
     }
 
     with open(args.out, "w", encoding="utf-8") as f:
@@ -1087,7 +1256,12 @@ def main():
     print(f"  Main watchlist: T1={len(main_t1)}, T2={len(main_t2)}, T3={len(main_t3)}")
     print(f"  Candidate pool: T1={len(pool_t1)}, T2={len(pool_t2)}, T3={len(pool_t3)}")
     print(f"  VCI: T1-A={len(vci_t1a)}, T2-A={len(vci_t2a)}, T3-A={len(vci_t3a)}")
-    print(f"  Deployment priority list: {len(deployment_priority_rank)} names")
+    print(f"  Deployment priority list: {len(deployment_priority_rank)} names "
+          f"({len(_deployable_stack)} forward-eligible / "
+          f"{len(_forward_ineligible_queue)} forward-ineligible, quality-ranked only)")
+    if not _deployable_stack:
+        print("  WARNING: deployable_stack is EMPTY — no name passed the forward gate. "
+              "This is a real state, not a build failure, but nothing is deployable.")
     if deployment_priority_rank:
         print(f"  Top 3 deployment: "
               + " | ".join(f"#{r['deployment_rank']} {r['ticker']} [{r['tier']}] "

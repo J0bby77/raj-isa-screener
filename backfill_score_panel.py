@@ -170,8 +170,27 @@ def main():
     manifest["summary"] = {"files": len(files), "rows_in": total_in, "store_total": store_total}
     if not a.dry_run:
         json.dump(manifest, open(a.manifest, "w", encoding="utf-8"), indent=2)
+    # 02-Aug-2026: files>0 and rows_in==0 is a FAILURE, not a completion.
+    #
+    # Run against the May-2026 archive this printed "BACKFILL COMPLETE files=6 rows_in=0" and
+    # exited 0. Every workbook had been skipped because the May-era layout writes PART_A_SCORES
+    # / PART_B_SCORES / CANDIDATE_RANKING rather than a single SCORES tab — a real schema change
+    # that the reader does not handle. The word COMPLETE and the zero exit code together said
+    # "done" about a run that recovered nothing, which is the exact silent-failure signature
+    # this framework keeps rediscovering.
+    skipped = [f["file"] for f in manifest["files"]
+               if str(f.get("status", "")).startswith("SKIP")]
+    status = "DRY-RUN" if a.dry_run else ("COMPLETE" if total_in else "RECOVERED NOTHING")
     print("\nBACKFILL %s files=%d rows_in=%d store_total=%s"
-          % ("DRY-RUN" if a.dry_run else "COMPLETE", len(files), total_in, store_total))
+          % (status, len(files), total_in, store_total))
+    if files and not total_in:
+        print("ERROR: %d workbook(s) matched but NOT ONE row was recovered." % len(files))
+        if skipped:
+            print("       skipped: " + ", ".join(os.path.basename(x) for x in skipped[:8]))
+        print("       A backfill that recovers nothing has not completed - it has failed to "
+              "read its inputs. Check the workbook tab layout: pre-Jun-2026 files use "
+              "PART_A_SCORES / PART_B_SCORES / CANDIDATE_RANKING, not a single SCORES tab.")
+        return 3
     return 0
 
 

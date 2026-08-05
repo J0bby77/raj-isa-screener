@@ -1756,6 +1756,302 @@ def apply_gates_standard(ticker_sym, info, income_stmt, cashflow):
             "rev_cagr_3yr": rev_cagr}
 
 
+# Security-type classification for the CAPTURE LAYER ONLY. Never consulted by a gate, a score
+# or the universe filter (H7: the capture layer observes, it never calibrates).
+#
+# Why it exists: the NASDAQ constituent feed labelled "clean equities" contains preferred
+# depositary shares and baby bonds (ACGLN, ACGLO, ADAML/M/N ...). yfinance reports quoteType
+# "EQUITY" for all of them, so they cannot be told apart from the info payload — but the feed's
+# own `company` description names the instrument exactly. These securities have no revenue line
+# and no marketCap, so they depress every coverage statistic without any measurement having
+# failed. Left unclassified they would make a universe-hygiene problem look like a data-quality
+# problem, which is the specific confusion this framework keeps having.
+_NON_COMMON_MARKERS = (
+    "depositary share", "depositary receipt", "preferred", "pfd", "% series", "% notes",
+    "senior note", "subordinated note", " notes due", "warrant", " unit", "units)", " right",
+    " rights", "trust preferred", "capital security", "debenture",
+)
+_COMMON_MARKERS = ("common stock", "ordinary share", "ordinary stock", "class a", "class b",
+                   "class c", "american depositary share", "american depositary receipt",
+                   "shares of beneficial interest")
+
+
+def classify_security_type(company_desc, ticker=None):
+    """'common' | 'non_common' | 'unknown' from the constituent feed's own description.
+
+    American Depositary Shares are COMMON — they are the ordinary equity of a foreign issuer
+    (Abivax/ABVX). Plain 'Depositary Shares' are the preferred wrapper (Arch Capital/ACGLN).
+    That single distinction is why this reads the description rather than pattern-matching on
+    the word 'depositary'.
+    """
+    d = str(company_desc or "").lower()
+    if not d:
+        return "unknown"
+    if "american depositary" in d:
+        return "common"
+    for m in _NON_COMMON_MARKERS:
+        if m in d:
+            return "non_common"
+    for m in _COMMON_MARKERS:
+        if m in d:
+            return "common"
+    return "unknown"
+
+
+def measure_gate_variables(ticker_sym, info, income_stmt, cashflow):
+    """CAPTURE LAYER ITEM 1 — measure every gate variable UNCONDITIONALLY.
+
+    `apply_gates_standard` short-circuits by design: the moment Gate 1 rejects a name it
+    returns, so gross_margin / fcf_pos_years / rev_cagr_3yr are never computed for it. That is
+    correct for *deciding* and catastrophic for *learning* — it is precisely why gross_margin
+    ended up 1.6% non-null and rev_cagr_3yr 12.9% non-null in the emitted gate-results CSVs,
+    which are exactly the Gate-2 and Gate-4 reject counts.
+
+    This function separates MEASUREMENT from JUDGEMENT. It runs every measurement for every
+    fetched constituent, in a fixed order, with no early return. It calls the same gate
+    helpers, so the numbers are the ones the gates actually saw — it does not re-implement
+    them, and per build hazard H7 it does not change a single gate outcome. Nothing here is
+    read by any gate, score or threshold.
+
+    Returns LEVELS ONLY (see gate_variables.RANGES). Thresholds are reported alongside in
+    their own keys and are never subtracted from the level.
+    """
+    out = {
+        "ticker": ticker_sym, "measured_unconditionally": True, "measure_notes": "",
+        "sector": None, "industry": None, "sector_bucket": None, "mkt_cap": None,
+        "gross_margin": None, "gm_threshold": None,
+        "fcf_pos_years": None, "fcf_avail_years": None, "fcf_years_required": 3,
+        "rev_cagr_3yr": None, "rev_cagr_5yr": None, "rev_cagr_threshold": 0.05,
+        "op_margin": None, "capex_intensity": None, "revenue_latest": None,
+        "rev_cagr_3yr_status": None,
+        "gross_margin_source": None, "mkt_cap_source": None, "op_margin_source": None,
+    }
+    notes = []
+
+    info = info or {}
+    out["sector"]   = (info.get("sector", "") or "") or None
+    out["industry"] = (info.get("industry", "") or "") or None
+    out["mkt_cap"] = safe_float(info.get("marketCap"))
+    out["mkt_cap_source"] = "info_marketCap" if out["mkt_cap"] is not None else None
+    if out["mkt_cap"] is None:
+        # Reconstruct rather than record a hole: shares x price is the definition, and the
+        # inputs are present far more often than the pre-computed field.
+        sh = safe_float(info.get("sharesOutstanding")) or safe_float(info.get("impliedSharesOutstanding"))
+        px = safe_float(info.get("currentPrice")) or safe_float(info.get("previousClose")) \
+             or safe_float(info.get("regularMarketPrice"))
+        if sh and px:
+            out["mkt_cap"], out["mkt_cap_source"] = sh * px, "derived_shares_x_price"
+        else:
+            out["mkt_cap_source"] = "unresolved"
+            notes.append("mkt_cap: absent from info and shares x price unavailable")
+
+    # sector bucket + capex intensity (the Gate 2 threshold selector)
+    try:
+        capex_int = compute_capex_intensity(income_stmt, cashflow)
+        out["capex_intensity"] = capex_int
+        bucket = classify_sector_bucket(out["sector"] or "", out["industry"] or "",
+                                        capex_intensity=capex_int, ticker=ticker_sym)
+        out["sector_bucket"]  = bucket
+        out["gm_threshold"]   = GATE2_GM_THRESHOLD.get(bucket, GATE2_GM_THRESHOLD["default"])
+    except Exception as e:
+        notes.append(f"sector_bucket: {e}")
+
+    # Revenue level — reported in its own right, and the denominator for the margins below.
+    rev_latest = None
+    try:
+        if income_stmt is not None and not income_stmt.empty:
+            rev_latest = get_stmt_value(income_stmt,
+                ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"])
+        out["revenue_latest"] = rev_latest
+    except Exception as e:
+        notes.append(f"revenue_latest: {e}")
+
+    # Gate 2 variable — gross margin LEVEL, with a MEASUREMENT-ONLY fallback chain.
+    #
+    # gate2_pass returns the level as its 4th element for every outcome including a pass, so
+    # the primary source is exactly what the gate saw. But yfinance omits the 'Gross Profit'
+    # line for a large minority of names while still supplying 'Cost Of Revenue', and omits
+    # both for insurers and banks, so the gate's own source resolves for only ~60% of fetched
+    # constituents. For CAPTURE that is a hole; for the GATE it is correctly a
+    # GATE_DATA_UNRESOLVED and must stay one.
+    #
+    # So: the fallbacks live here and only here. gate2_pass is untouched, no gate outcome
+    # changes, and every fallback stamps `gross_margin_source` so a derived or vendor-supplied
+    # level can never be mistaken in analysis for the statement-derived one the gate used.
+    # (Same discipline as vci_learning's source/precision flags.)
+    try:
+        _g2, _r2, _c2, gm = gate2_pass(income_stmt, info, nasdaq_mode=False,
+                                       cashflow=cashflow, ticker=ticker_sym)
+        if gm is not None:
+            out["gross_margin"], out["gross_margin_source"] = gm, "stmt_gross_profit"
+        else:
+            cogs = None
+            if income_stmt is not None and not income_stmt.empty:
+                cogs = get_stmt_value(income_stmt,
+                    ["Cost Of Revenue", "Reconciled Cost Of Revenue", "CostOfRevenue",
+                     "Cost Of Goods Sold", "Total Cost Of Revenue"])
+            if cogs is not None and rev_latest:
+                out["gross_margin"] = (rev_latest - cogs) / rev_latest
+                out["gross_margin_source"] = "stmt_derived_from_cogs"
+            else:
+                vendor = safe_float(info.get("grossMargins"))
+                if vendor is not None:
+                    # NOTE: gate2_pass forbids info['grossMargins'] as a GATE source, and that
+                    # prohibition stands. It is admissible as a labelled MEASUREMENT of last
+                    # resort, which is a different question.
+                    out["gross_margin"], out["gross_margin_source"] = vendor, "info_vendor"
+                else:
+                    out["gross_margin_source"] = "unresolved"
+                    notes.append(f"gross_margin: {_r2 or 'unresolved'} (no COGS, no vendor margin)")
+    except Exception as e:
+        notes.append(f"gross_margin: {e}")
+
+    # Gate 3 variables — positive-FCF year COUNT and years available
+    try:
+        _g3, _r3, _c3, fcf_pos, avail = gate3_pass(cashflow)
+        out["fcf_avail_years"] = avail
+        # A GATE_DATA_UNRESOLVED verdict returns pos=0 because it never counted; that 0 is not
+        # a measurement and must not masquerade as one.
+        out["fcf_pos_years"] = fcf_pos if _g3 is not None else None
+        if _g3 is None:
+            notes.append(f"fcf_pos_years: {_r3 or 'unresolved'}")
+    except Exception as e:
+        notes.append(f"fcf_pos_years: {e}")
+
+    # Gate 4 variable — 3yr revenue CAGR LEVEL (never the distance below the 5% floor).
+    #
+    # `rev_cagr_3yr_status` separates two things that a bare NULL conflates, and the difference
+    # decides whether a coverage shortfall is a bug or a fact:
+    #   measured                  — a number was computed.
+    #   undefined_no_revenue_base — the company reports zero revenue in the base year, so a
+    #                               growth rate does not exist. We looked; the quantity is not
+    #                               defined. Abivax/ABVX reports 0.0 revenue in all four years.
+    #   unresolved_no_data        — we could not look. THIS is the one that counts against
+    #                               coverage, because it is the only one that is our failure.
+    try:
+        _g4, _r4, _c4, cagr = gate4_pass(income_stmt, sector_bucket=out["sector_bucket"] or "default")
+        out["rev_cagr_3yr"] = cagr
+        if cagr is not None:
+            out["rev_cagr_3yr_status"] = "measured"
+        else:
+            rev_series = []
+            if income_stmt is not None and not income_stmt.empty:
+                rev_series = get_stmt_series(income_stmt,
+                    ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"],
+                    max_periods=5)
+            vals = [v for _, v in rev_series if v is not None]
+            if len(vals) >= 2 and all((v or 0) <= 0 for v in vals):
+                out["rev_cagr_3yr_status"] = "undefined_no_revenue_base"
+                notes.append("rev_cagr_3yr: undefined — zero/negative revenue in every period")
+            else:
+                out["rev_cagr_3yr_status"] = "unresolved_no_data"
+                notes.append(f"rev_cagr_3yr: {_r4 or 'unresolved'}")
+    except Exception as e:
+        out["rev_cagr_3yr_status"] = "unresolved_no_data"
+        notes.append(f"rev_cagr_3yr: {e}")
+
+    # 5yr CAGR — the 2C-1 override input. Computed for EVERY name, not only for the
+    # semiconductor_equipment bucket that can use it, so the question "would the override have
+    # rescued names in other buckets?" becomes answerable.
+    try:
+        rev_series = get_stmt_series(income_stmt,
+            ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], max_periods=5) \
+            if income_stmt is not None and not income_stmt.empty else []
+        if len(rev_series) >= 5:
+            out["rev_cagr_5yr"] = compute_cagr(rev_series[4][1], rev_series[0][1], 4)
+    except Exception as e:
+        notes.append(f"rev_cagr_5yr: {e}")
+
+    # Operating margin — not itself a gate, but the variable every post-hoc "should this have
+    # been blocked?" question reaches for. Same derivation as _score_ticker (op income / revenue,
+    # info.operatingMargins as fallback) so the two never disagree.
+    try:
+        op_income = get_stmt_value(income_stmt, ["Operating Income", "OperatingIncome"]) \
+            if income_stmt is not None and not income_stmt.empty else None
+        om = (op_income / rev_latest) if (op_income is not None and rev_latest) else None
+        if om is None:
+            om = safe_float(info.get("operatingMargins"))
+        out["op_margin"] = om
+        out["op_margin_source"] = ("stmt_operating_income" if (op_income is not None and rev_latest)
+                                   else ("info_vendor" if om is not None else "unresolved"))
+        if om is None:
+            notes.append("op_margin: no operating income or revenue")
+    except Exception as e:
+        notes.append(f"op_margin: {e}")
+
+    out["measure_notes"] = "; ".join(notes)[:400]
+    return out
+
+
+def build_gate_variable_records(constituents_df, info_map, stmt_map, gate_data,
+                                group, run_date):
+    """One gate_variables record per FETCHED CONSTITUENT — passers and rejects alike.
+
+    Merges the unconditional measurement with the gate's actual verdict. A name whose info
+    fetch failed still gets a row (with gate_code TECHNICAL_SOURCE_FAILURE and null levels), so
+    the store's row count always equals the constituent count and a coverage collapse is
+    visible rather than invisible.
+    """
+    recs = []
+    for _, row in constituents_df.iterrows():
+        sym = row.get("ticker")
+        if not sym:
+            continue
+        info  = info_map.get(sym)
+        stmts = stmt_map.get(sym, {}) or {}
+        gd    = (gate_data or {}).get(sym) or {}
+        if info is None:
+            # Null-filled but SCHEMA-COMPLETE: a fetch failure must be distinguishable from a
+            # measurement of zero, and it must not produce a ragged row that quietly changes
+            # the store's column set.
+            rec = {k: None for k in ("sector", "industry", "sector_bucket", "mkt_cap",
+                                     "gross_margin", "gm_threshold", "fcf_pos_years",
+                                     "fcf_avail_years", "rev_cagr_3yr", "rev_cagr_5yr",
+                                     "rev_cagr_threshold", "op_margin", "capex_intensity",
+                                     "revenue_latest", "gross_margin_source", "mkt_cap_source",
+                                     "op_margin_source", "rev_cagr_3yr_status")}
+            rec.update({"ticker": sym, "measured_unconditionally": False,
+                        "fcf_years_required": 3,
+                        "measure_notes": "info fetch failed — nothing measurable",
+                        "gate_code": gd.get("gate_code") or "TECHNICAL_SOURCE_FAILURE",
+                        "gate_reason": gd.get("gate_reason") or "info fetch failed",
+                        "passed": False})
+        else:
+            rec = measure_gate_variables(sym, info, stmts.get("income_stmt"), stmts.get("cashflow"))
+            rec["gate_code"]   = gd.get("gate_code", "")
+            rec["gate_reason"] = gd.get("gate_reason", "")
+            gp = gd.get("gate_pass")
+            # True / False / None(unresolved) preserved distinctly — an unresolved name is not
+            # a rejected one, and collapsing them is how data-coverage problems get read as
+            # quality problems.
+            rec["passed"] = gp if gp is not None else None
+        rec["group"] = group
+        rec["run_date"] = run_date
+        rec["company"] = row.get("company")
+        rec["security_type"] = classify_security_type(row.get("company"), sym)
+        recs.append(rec)
+    return recs
+
+
+def emit_gate_variables(constituents_df, info_map, stmt_map, gate_data, group, run_date):
+    """Best-effort write of the gate-variable store. A capture failure must never break a
+    screen (same contract as score_panel_logger), but unlike the old silent-warn default it
+    reports loudly enough for the run manifest to record a DEGRADED step."""
+    try:
+        import gate_variables as _gv
+        recs = build_gate_variable_records(constituents_df, info_map, stmt_map, gate_data,
+                                           group, run_date)
+        n_in, n_tot = _gv.log_gate_variables(recs, group=group, run_date=run_date)
+        cov = _gv.coverage_report(group=group, run_date=run_date)
+        log.info(f"GATE_VARS_LOGGED group={group} run_date={run_date} rows_in={n_in} "
+                 f"store_total={n_tot} coverage={cov.get('coverage')} "
+                 f"acceptance={cov.get('acceptance')}")
+        return {"rows_in": n_in, "store_total": n_tot, "coverage": cov}
+    except Exception as e:
+        log.error(f"GATE_VARS_FAILED group={group} run_date={run_date}: {e}")
+        return {"error": str(e)}
+
+
 def screen_group_standard(constituents_df, info_map, stmt_map, save_csv_fn=None):
     """
     Run Gates 1–4 for all tickers in a standard (non-Nasdaq) group.
@@ -2965,8 +3261,39 @@ def compute_val_hist(ticker_sym, info, scoring_data, income_stmt, cashflow):
         except Exception:
             continue
 
+    # C2 (02-Aug-2026). `hist_pe` holds every annual period the statements provide - 4 to 5 -
+    # and this line threw the oldest away and took a MEAN of the remaining 3. expected_return
+    # then consumed the result under the parameter name `median_5y_multiple`, documented as a
+    # "5y median". The 13.6-year study measured the cost: a 5-year MEDIAN anchor dominates the
+    # 3-year MEAN at every horizon (rank IC 52w +0.069 vs +0.050).
+    #
+    # A mean over 3 points is also dominated by any single outlier year, which is precisely
+    # what happens to a business that re-rated 18-24 months ago - the window is half-
+    # contaminated by the old regime, dragging the anchor down and the de-rate penalty up.
+    #
+    # The legacy keys are computed UNCHANGED so nothing that reads them shifts underneath.
+    # The new anchor is emitted alongside, and E[r] consumes the new one.
+    _all_pe    = [v for v in hist_pe.values() if v and not math.isnan(v)]
     valid_pe   = [v for v in list(hist_pe.values())[-3:]   if v and not math.isnan(v)]
     valid_pfcf = [v for v in list(hist_pfcf.values())[-3:] if v and not math.isnan(v)]
+
+    _anchor_pe = sorted(_all_pe)[-5:] if _all_pe else []
+    if len(_anchor_pe) >= 2:
+        _sorted = sorted(_anchor_pe)
+        _n = len(_sorted)
+        _median = (_sorted[_n // 2] if _n % 2 else (_sorted[_n // 2 - 1] + _sorted[_n // 2]) / 2)
+        _cur = safe_float(info.get("trailingPE"))
+        out.update({
+            "val_hist_pe_anchor": round(_median, 1),
+            "val_hist_pe_anchor_periods": _n,
+            "val_hist_pe_anchor_basis": f"median_{_n}y",
+            "val_hist_pe_premium_disc_anchor": (
+                round(((_cur / _median) - 1) * 100, 1) if (_cur and _median) else None),
+        })
+    else:
+        out.update({"val_hist_pe_anchor": None, "val_hist_pe_anchor_periods": len(_anchor_pe),
+                    "val_hist_pe_anchor_basis": "insufficient_periods",
+                    "val_hist_pe_premium_disc_anchor": None})
 
     if len(valid_pe) >= 2:
         pe_3yr_avg  = sum(valid_pe) / len(valid_pe)
@@ -3085,6 +3412,8 @@ FIELD_MAP = [
     # dropped here), unified Source-Score anatomy, and the E[r] block. Stamped post-overlay
     # by the run flow via source_score.source_score_components_for_row + expected_return.
     "val_hist_pe_3yr_avg", "val_hist_current_pe", "val_hist_pfcf_3yr_avg", "val_hist_current_pfcf",
+    "val_hist_pe_anchor", "val_hist_pe_anchor_periods", "val_hist_pe_anchor_basis",
+    "val_hist_pe_premium_disc_anchor",
     "screen_source", "src_fwd_raw", "src_fwd_w", "src_rev_raw", "src_rev_w",
     "src_deploy_raw", "src_deploy_w", "src_qual_raw", "src_qual_w", "src_analyst_raw", "src_analyst_w",
     "implied_upside_fv", "display_target_gap", "fv_basis", "fv_conf", "source_input_missing",
@@ -3722,6 +4051,11 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
             outputs_dir, run_date, group,
         )
 
+        # CAPTURE LAYER ITEM 1 — persist EVERY gate variable for EVERY fetched constituent,
+        # not just the variable belonging to the gate that rejected each name.
+        run_qa["gate_variables"] = emit_gate_variables(
+            constituents_df, info_map, stmt_map, gate_data, group, run_date)
+
         # Phase 3 — scoring data for gate passers
         passers = passers_df["ticker"].tolist() if not passers_df.empty else []
         phase3_results, phase3_errors = fetch_phase3_scoring(passers, group)
@@ -3775,6 +4109,10 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
 
         # Save gate results
         save_gate_results(passers_df, exclusions_df, outputs_dir, run_date, group)
+
+        # CAPTURE LAYER ITEM 1 — see the Nasdaq branch above.
+        run_qa["gate_variables"] = emit_gate_variables(
+            constituents_df, info_map, stmt_map, gate_data, group, run_date)
 
         # Phase 3 — incremental scoring data
         passers = passers_df["ticker"].tolist() if not passers_df.empty else []

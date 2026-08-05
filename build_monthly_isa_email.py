@@ -40,6 +40,7 @@ JSON schema: see email_data_monthly_isa_TEMPLATE.json in the same folder.
 """
 
 import argparse
+import re
 import json
 import os
 import sys
@@ -394,7 +395,12 @@ def build_legend():
         f'(0&ndash;100, unified screen=deploy &mdash; orders the watchlist and the deployment '
         f'stack). <strong>Conviction</strong> (bands above) = decision readiness, secondary. '
         f'<strong>ACS</strong> = asymmetric-sleeve (VCI) track &mdash; its own table and rank. '
-        f'Entry levels are display-only (&ldquo;Target buy&rdquo;) and never reorder anything.</p>\n'
+        f'Entry levels are display-only (&ldquo;Target buy&rdquo;) and never reorder anything. '
+        f'<b>Reachability (M2, 03-Aug-26):</b> a level marked &ldquo;NOT REACHABLE&rdquo; is the '
+        f'return-hurdle floor &mdash; the price at which the required return becomes arithmetically '
+        f'guaranteed &mdash; not a price the market is offering; &ldquo;drawdown only&rdquo; is reachable '
+        f'but requires a material fall. Classified on the worse of an absolute test (&gt;50%% / &gt;25%% '
+        f'required fall) and a volatility-relative one (&gt;2.0&sigma; / &gt;1.0&sigma;).</p>\n'
     )
     html += "</div>\n"
     return html
@@ -1098,6 +1104,42 @@ SECTION_BUILDERS = {
 
 
 # ---------------------------------------------------------------------------
+# Run manifest block (Capture Layer Item 2)
+# ---------------------------------------------------------------------------
+def build_manifest_block(data):
+    """Render the pre-run's own vital signs.
+
+    Source order: an inline `run_manifest` object in the email data (what the review session
+    passes through), else the manifest file named by meta.run_manifest_path. Absence renders
+    NOTHING rather than a reassuring green bar -- a month with no manifest is a month with no
+    evidence, and the two must never look alike.
+    """
+    mf = data.get("run_manifest")
+    if not mf:
+        path = (data.get("meta", {}) or {}).get("run_manifest_path")
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    mf = json.load(f)
+            except Exception:
+                mf = None
+    if not mf:
+        return ""
+    try:
+        import run_manifest as _rm
+        return _rm.email_block_html(mf)
+    except Exception:
+        # Never let a diagnostics panel break the email it is diagnosing.
+        st = mf.get("run_status", "UNKNOWN")
+        c = mf.get("counts", {}) or {}
+        return (f'<div style="font-family:Arial,sans-serif;font-size:13px;color:#e2e8f0;'
+                f'border-left:4px solid #d97706;padding:8px 12px;margin:12px 0;'
+                f'background:#0f172a"><b>RUN {st}</b> &mdash; '
+                f'{c.get("OK",0)} ok / {c.get("DEGRADED",0)} degraded / '
+                f'{c.get("ERROR",0)} error</div>')
+
+
+# ---------------------------------------------------------------------------
 # Assembler
 # ---------------------------------------------------------------------------
 def build_email_body(data):
@@ -1113,6 +1155,15 @@ def build_email_body(data):
 
     # Header
     parts.append(build_header(meta))
+
+    # CAPTURE LAYER ITEM 2 (Dashboard Spec 7.6A) — machine vital signs, readable in fifteen
+    # seconds, directly under the header. Deliberately NOT a numbered section: SECTION_ORDER
+    # is asserted against the Run_Context "Email Structure -- N Mandatory Sections" heading by
+    # consistency_check pair M2, and a diagnostics panel is not a review section.
+    #
+    # It reads whatever the pre-run wrote. Absent manifest => nothing rendered, because a
+    # month that predates capture must say so rather than imply health.
+    parts.append(build_manifest_block(data))
 
     # Conviction legend
     parts.append(build_legend())
@@ -1146,6 +1197,13 @@ def main():
                         help="Path to email_data_mmm_yyyy.json produced during the run")
     parser.add_argument("--output", required=True,
                         help="Output path for HTML body file e.g. email_body_jun2026.html")
+    parser.add_argument("--month", help="Month label e.g. sep_2026, for the §7.6.2 "
+                                        "conviction gate. Inferred from --data when omitted.")
+    parser.add_argument("--allow-unrecorded-conviction", action="store_true",
+                        help="Build anyway with Step 9 judgements unrecorded. Requires a "
+                             "reason via --gate-override-reason, and is stamped into the "
+                             "email footer so the gap is visible in the artefact itself.")
+    parser.add_argument("--gate-override-reason", default="")
     args = parser.parse_args()
 
     # Load JSON
@@ -1154,6 +1212,57 @@ def main():
         sys.exit(1)
     with open(args.data, encoding="utf-8") as f:
         data = json.load(f)
+
+    # ── §7.6.2 CONVICTION GATE ───────────────────────────────────────────────────────
+    # Steps 9B-9E are session JUDGEMENTS. Before this gate they were written ONLY as prose
+    # in the email, so the reasoning behind the month's most consequential decision was
+    # unreconstructable the moment the email was read — acceptance criterion #19 could never
+    # be met. The gate makes the record a PRECONDITION of the report rather than a by-product
+    # of it. Overriding is possible, but it is dated, reasoned and stamped into the email.
+    _month = args.month
+    if not _month:
+        _m = re.search(r"email_data_([a-z]{3}_\d{4})", os.path.basename(args.data))
+        _month = _m.group(1) if _m else None
+    _gate_note = None
+    if _month:
+        _cpath = os.path.join(os.path.dirname(os.path.abspath(args.data)),
+                              f"step9_conviction_{_month}.json")
+        try:
+            import conviction_capture as _cc
+            with open(_cpath, encoding="utf-8") as _cf:
+                _cdoc = json.load(_cf)
+            _errs = _cc.gate(_cdoc)
+        except FileNotFoundError:
+            _errs = [f"step9_conviction_{_month}.json does not exist — the Step 9 judgement "
+                     f"record was never written"]
+        except Exception as _ge:
+            _errs = [f"conviction gate could not run: {_ge}"]
+        if _errs:
+            if not args.allow_unrecorded_conviction:
+                print(f"ERROR: §7.6.2 conviction gate FAILED — {len(_errs)} blocking issue(s).")
+                for _e in _errs[:10]:
+                    print(f"  BLOCK: {_e}")
+                if len(_errs) > 10:
+                    print(f"  ... and {len(_errs) - 10} more")
+                print("\nThe month's Step 9 judgements are not recorded. Fill them via")
+                print("  python3 conviction_capture.py --apply <judgements.json> --month "
+                      f"{_month}")
+                print("or, if you accept the gap, re-run with --allow-unrecorded-conviction")
+                print("and --gate-override-reason \"...\" (recorded in the email footer).")
+                sys.exit(2)
+            if not str(args.gate_override_reason).strip():
+                print("ERROR: --allow-unrecorded-conviction requires --gate-override-reason.")
+                print("An override without a stated reason is indistinguishable from a mistake.")
+                sys.exit(2)
+            _gate_note = (f"Step 9 conviction record INCOMPLETE ({len(_errs)} unrecorded) — "
+                          f"overridden: {args.gate_override_reason.strip()}")
+            print(f"WARNING: {_gate_note}")
+            data.setdefault("meta", {})["conviction_gate_override"] = _gate_note
+        else:
+            print(f"  §7.6.2 conviction gate: PASS ({_month})")
+    else:
+        print("  §7.6.2 conviction gate: SKIPPED — month label could not be inferred; "
+              "pass --month to enforce it.")
 
     print("Building email body...")
     body = build_email_body(data)
