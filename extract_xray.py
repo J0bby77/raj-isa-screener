@@ -303,6 +303,62 @@ def parse_trailing_returns(text: str) -> dict:
     return returns
 
 
+
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"], 1)}
+
+
+def _parse_fund_as_of(raw):
+    """'30 Jun 2026' -> '2026-06-30'. D1: this date is the ONLY honest statement
+    of when a per-fund return was struck, and it is routinely a month behind the
+    report header. Returning None is fine -- the caller flags it -- but silently
+    inheriting the header date is not."""
+    if not raw:
+        return None
+    parts = raw.split()
+    if len(parts) != 3:
+        return None
+    try:
+        day = int(parts[0]); mon = _MONTHS.get(parts[1][:3].lower()); yr = int(parts[2])
+        return f"{yr:04d}-{mon:02d}-{day:02d}" if mon else None
+    except (ValueError, TypeError):
+        return None
+
+
+def stamp_fund_staleness(funds, report_date):
+    """I4 -- every per-fund figure must declare how stale it is vs the report
+    header. Returns (funds, warnings). A gap is NOT an error (Morningstar lags
+    by design); publishing it undated IS."""
+    import datetime as _dt
+    warnings = []
+    try:
+        rep = _dt.date.fromisoformat((report_date or "")[:10])
+    except (ValueError, TypeError):
+        rep = None
+    worst = 0
+    for f in funds:
+        if f.get("as_of") and rep:
+            try:
+                d = (rep - _dt.date.fromisoformat(f["as_of"])).days
+            except ValueError:
+                d = None
+            f["stale_days"] = d
+            f["as_of_basis"] = "per-fund Date column (NOT the report header)"
+            if d and d > 5:
+                worst = max(worst, d)
+        else:
+            f["stale_days"] = None
+            f["as_of_basis"] = "UNKNOWN -- no per-fund date parsed"
+            warnings.append(f"I4: '{f.get('name','?')}' has no per-fund as_of; "
+                            "its returns must NOT be presented as current")
+    if worst:
+        warnings.append(
+            f"I4: X-Ray per-fund performance is {worst} days older than the report "
+            f"date {report_date}. These are CORROBORATORS only -- fund_performance.py "
+            f"is the golden source. Render as 'x.xx% (as at <date>)', never bare.")
+    return funds, warnings
+
+
 def parse_fund_holdings(text: str) -> list:
     """
     Extract Portfolio Holdings table (page 4 of PDF).
@@ -326,7 +382,11 @@ def parse_fund_holdings(text: str) -> list:
         r"([A-Z][A-Z &\-\.\'()]+)\s+"           # Fund name (caps)
         r"(?:Fund|Mutual Fund|ETF|Cash)\s*"      # Type
         r"(?:-|ETF)?\s*"
-        r"(?:\d+ \w+ \d{4})?\s*"                # Optional holding date
+        r"(\d+ \w+ \d{4})?\s*"                  # D1 FIX: the per-fund AS-AT DATE.
+                                                 # This was NON-capturing -- the date the
+                                                 # figures are actually struck at was parsed
+                                                 # and DISCARDED, so month-old returns were
+                                                 # published under the report header date.
         r"(Q{1,5}|-)\s*"                         # MS Rating (Q's or dash)
         r"([\d.]+|-)\s+"                          # 1yr
         r"([\d.]+|-)?\s*"                        # 3yr
@@ -341,17 +401,20 @@ def parse_fund_holdings(text: str) -> list:
         name = m.group(1).strip()
         if len(name) < 5 or name.upper().startswith("NAME"):
             continue
-        ms_str = m.group(2).strip()
+        as_at_raw = (m.group(2) or "").strip()
+        ms_str = m.group(3).strip()
         ms_rating = MS_RATING_MAP.get(ms_str) if ms_str != "-" else None
 
         fund_rec = {
             "name":         name,
+            "as_of":        _parse_fund_as_of(as_at_raw),
+            "as_of_raw":    as_at_raw or None,
             "ms_rating":    ms_rating,
-            "return_1yr":   safe_float(m.group(3)),
-            "return_3yr":   safe_float(m.group(4)),
-            "return_5yr":   safe_float(m.group(5)),
-            "weight_pct":   safe_float(m.group(6)),
-            "ongoing_cost": safe_float(m.group(8)),
+            "return_1yr":   safe_float(m.group(4)),
+            "return_3yr":   safe_float(m.group(5)),
+            "return_5yr":   safe_float(m.group(6)),
+            "weight_pct":   safe_float(m.group(7)),
+            "ongoing_cost": safe_float(m.group(9)),
         }
         funds.append(fund_rec)
 
