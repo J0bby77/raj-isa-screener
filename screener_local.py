@@ -12,11 +12,11 @@ runs --constituents PATH (so metrics+scoring stay local even when the constituen
 source is IP-blocked e.g. iShares MidCap400/SPI or slow e.g. STOXX600/FTSE250).
 Call repeatedly until ALL_DONE.
 """
-import argparse
+import argparse, json, os, sys, math, time, importlib.util, datetime, urllib.request
 try:
     import fetch_guard as _fg   # H-5 (26-Jul-26)
 except Exception:
-    _fg = None, json, os, sys, math, time, importlib.util, datetime, urllib.request
+    _fg = None
 
 
 def preflight(shm, min_shm_mb=80):
@@ -66,8 +66,23 @@ def load_core(inv_dir):
         fh.write(code)
     spec = importlib.util.spec_from_file_location("screener_core", staged)
     m = importlib.util.module_from_spec(spec)
+    # 07-Aug-26 ROOT-CAUSE FIX. The staging above protects against a truncated mount read, but it
+    # also made screener_core believe it LIVES in /dev/shm: every sibling path it derives from
+    # __file__ (sys.path seed, supplementary_constituents.json, drawdown_state.json, score_panel.csv,
+    # the calibration pool store, and the SS-Q capture destination) resolved to tmpfs, which is wiped
+    # between bash calls. The code ran, reported success, and wrote its artefacts into a directory
+    # that ceased to exist -- including screen_capture_status.json, the receipt that was supposed to
+    # make such a failure visible. Point __file__ at the REAL module home before exec: the bytes
+    # still come from the staged tmpfs copy (truncation protection intact), but every path the module
+    # derives now resolves to the Investment Analysis folder, which is the one thing that was wrong.
+    m.__file__ = src
     sys.modules["screener_core"] = m
     spec.loader.exec_module(m)
+    if os.path.dirname(os.path.abspath(m.__file__)) != os.path.abspath(inv_dir):
+        raise RuntimeError(
+            "screener_core.__file__ does not resolve to --inv-dir after staging "
+            f"({m.__file__!r} vs {inv_dir!r}); sibling artefacts would be written to tmpfs and lost."
+        )
     return m
 
 
