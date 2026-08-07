@@ -130,6 +130,36 @@ def select_summary(rows, get=None):
     Returns (selected, qa): selected = list of (row, score); qa = {summary_count,
     summary_eligible_count, summary_floor, summary_cap, summary_thin_warning}."""
     g = get or (lambda r, k: r.get(k))
+
+    # ── M3 / listing policy (05-Aug-2026) ────────────────────────────────────────────
+    # Applied HERE and nowhere else, because this is the single point at which the framework
+    # decides what is ranked — the two screener paths (core and local) both funnel through it,
+    # and putting the rule at either call site would have created the two-sources-of-truth
+    # defect this project keeps paying for. It mutates `final_status` in place, so the
+    # exclusions also travel into full_data and screen_history rather than existing only in a
+    # selection that is thrown away.
+    #
+    # Removes (a) non-common instruments — a tangible equity unit outranked its own company by
+    # 15.5 points on the 24-Jul-2026 NASDAQ frame — and (b) all but one line per issuer, keeping
+    # the one that can actually be dealt in. Idempotent, so repeated calls from build_excel /
+    # build_email are harmless. Reversible via LISTING_POLICY_ACTIVE=False.
+    if getattr(cfg, "LISTING_POLICY_ACTIVE", True) and get is None:
+        try:
+            import listing_policy as _lp
+            _lp_rep = _lp.apply(rows)
+            if _lp_rep["non_common_excluded"] or _lp_rep["duplicates_excluded"]:
+                print(f"LISTING_POLICY non_common_excluded={len(_lp_rep['non_common_excluded'])} "
+                      f"duplicate_lines_excluded={len(_lp_rep['duplicates_excluded'])} "
+                      f"issuers_resolved={_lp_rep['issuers_resolved']}"
+                      + (f" UNINFORMED_TIES={len(_lp_rep['unresolved_ties'])}"
+                         if _lp_rep.get("unresolved_ties") else ""))
+        except Exception as _lpe:
+            # Loud, not silent: if the policy cannot run, duplicate and non-equity lines are
+            # back in the ranking and the reader must know that, not discover it later.
+            print(f"LISTING_POLICY FAILED TO RUN ({type(_lpe).__name__}: {_lpe}) — "
+                  f"non-common instruments and duplicate share classes are NOT excluded "
+                  f"from this ranking")
+
     floor = float(getattr(cfg, "SUMMARY_SOURCE_FLOOR", 70.0))
     cap = int(getattr(cfg, "SUMMARY_MAX_COUNT", 40))
     warn_below = int(getattr(cfg, "SUMMARY_MIN_WARN", 10))

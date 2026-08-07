@@ -182,7 +182,11 @@ VCI_ASYM_ELIG_PCTILE       = "p25"    # LIVE — conservative P25 eligibility (r
 # E4 — sleeve-level binary risk budget (replaces the count cap as primary control)
 VCI_SLEEVE_BINARY_RISK_BUDGET = 1.5   # % ISA expected-loss across open+proposed binaries (None disables)
 VCI_BINARY_CORR_RIDER         = 1.5   # shared catalyst-domain risk inflation
-VCI_BINARY_MAX_CONCURRENT     = 3     # loosened secondary guard; budget is primary
+# VCI_BINARY_MAX_CONCURRENT: E4's original design loosened this to 3 ("budget is primary, count cap
+# secondary"). Superseded 31-Jul-2026 by the prose/code reconciliation (Run_Context_VCI_Task.md §9.4,
+# Run_Context_Monthly_ISA_Review.md Checkpoint D), which re-tightened it to 2 for an unrelated reason
+# (Step 8 Sub-decision B policy). That later, more specific value is authoritative; single assignment
+# now lives below with §9.4 so there is one source of truth, not two silently disagreeing ones.
 # E5 — liquidity-aware eligibility & sizing. FLIPPED LIVE 6-Jul-2026 (Raj). Min-ADV gate armed;
 # inert until adv_usd is supplied to evaluate_candidate (None -> gate skipped), so it bites only once
 # ADV data flows. Rollback: 0.
@@ -192,7 +196,7 @@ VCI_MAX_SPREAD_BPS = 100
 # E7 — asymmetry-compression cause split
 VCI_FV_EROSION_THRESHOLD = 0.15       # FV revised down >15% run-over-run = thesis erosion (not harvest)
 VCI_RANK_MODE                 = "advisory"          # §11.6
-VCI_BINARY_MAX_CONCURRENT     = 2                    # §9.4
+VCI_BINARY_MAX_CONCURRENT     = 2                    # §9.4 — authoritative (31-Jul-2026 reconciliation; see comment above)
 VCI_BINARY_CORRELATION_RIDER  = True                 # §9.4
 VCI_ENTRY_LEVEL_DISPLAY_ONLY  = True                 # §8 rollback flag
 import os as _os  # stdlib-only; keeps the "no heavy imports" guarantee
@@ -224,21 +228,18 @@ SOURCE_UPSIDE_CAP   = 0.60    # A6 — upside normalisation cap in the deployabi
                               #      (was rerank_watchlist.UPSIDE_CAP; one home now)
 CONSENSUS_UPSIDE_CAP_MULT = 1.15  # A6 — composite FV <= consensus target x this (was getattr-only)
 ER_RERATE_CAP       = 0.10    # A2 — per-year multiple-drift clamp in expected_return.py
-
-
-# ── C1 (02-Aug-2026): re-rating SHAPE and REGIME ────────────────────────────────────────
-# Measured over 13.6 years / 1,680 names / multi-market (ISA_Rerating_Calibration_Study_02Aug2026.md).
-# Forward excess return by own-history extension decile is U-SHAPED (D1 +2.4%, middle -2 to -3%,
-# D10 +6.8%), so a monotonic penalty punishes the best decile and rewards the worst. The effect
-# is regime-conditional (D10-D1 +8.5pp in Bull, -10.2pp in Bear) and flips by era.
-# The sign is NOT flipped - survivorship in the study is total and the effective sample is ~9
-# independent observations. Set to "legacy" to restore the raw monotonic term.
-ER_RERATE_MODE = "regime_aware"       # "regime_aware" | "legacy"
-ER_RERATE_NEUTRAL_BAND = 0.05         # |raw| within this -> scored 0 (the middle carries no info)
-ER_RERATE_REGIME_DAMPING = {          # applied to the DE-RATE side only; re-rate credit is never damped
+# ⚑ ADDED 06-Aug-2026. The C1 build record and `expected_return`'s own docstring both state the
+# change is "reversible via ER_RERATE_MODE='legacy'" — and the constant did not exist here.
+# `expected_return` read it with a getattr default, so the code worked and the ESCAPE HATCH DID
+# NOT: setting it anywhere would have had no effect, and nothing checked. A documented rollback
+# that is not wired is the same class of defect as a stored value that says one thing and is
+# another. `test_session_02aug2026` has been failing on exactly this assertion.
+ER_RERATE_MODE      = "regime_aware"   # "regime_aware" (C1, live) | "legacy" (raw monotonic)
+ER_RERATE_NEUTRAL_BAND = 0.05          # C1 — deciles 2-7 measured -2 to -3%: scored ZERO, not
+                                       #      given a confident penalty
+ER_RERATE_REGIME_DAMPING = {           # C1 — DE-RATE side only; a cheap name is never damped
     "RISK_ON": 0.25, "LATE_CYCLE": 0.50, "RISK_OFF": 1.00, "RECOVERY": 1.00,
-}
-
+}                                      # an UNKNOWN regime is UNDAMPED — conservative, not a guess
 ER_GATE_ACTIVE      = True    # A2 — E[r] T1-deploy gate; FLIPPED LIVE 13-Jul-26 (P2) — consumed 1-Aug pre-run
 STAGE_GATE_ACTIVE   = True    # A3 — stage gate; FLIPPED LIVE 13-Jul-26 (P2)
 T1_QUALIFICATION_MODE = True  # A4 — T1 = QUALIFICATION; FLIPPED LIVE 13-Jul-26 (P2); False = legacy rank-band rollback
@@ -682,3 +683,10 @@ KNOWN_STORE_PATTERNS = (
 # --- H-8 (audit item #8, 26-Jul-26): semis-complex look-through ---
 SEMIS_TICKERS = ("MU", "AVGO", "NVDA", "AMD", "TSM", "ASML", "SMCI", "ANET", "MRVL")
 SEMIS_WATCH_PCT = 18.0   # report-only WATCH marker; hard cap is a Raj decision (Oct run)
+
+
+# M3 listing policy (05-Aug-2026, Raj): exclude non-common instruments (preferred
+# depositary shares, tangible equity units, notes) from the rankable universe, and rank
+# ONE line per issuer — the most liquid. Set False to revert to the pre-05-Aug behaviour
+# in which GOOGM, SMCIP and NOVTU were all independently rankable.
+LISTING_POLICY_ACTIVE = True

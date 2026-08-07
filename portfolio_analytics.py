@@ -56,7 +56,16 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STANDING_ORDER = 1250.0
 CASH_BUFFER_MIN = 150.0
 AJ_BELL_DEALING_COST = 5.0       # £5 per trade
-FX_COST_PCT = 0.0075             # 0.75% for USD purchases
+# ⚑ CORRECTED 05-Aug-2026 (register H13). This read 0.0075 and was wrong: AJ Bell's own cash
+# statement carries literal `FX Charge (0.50%)` rows, and the COCO purchase executed at
+# £1,354.99 against a £1,384.75 estimate built on 0.75% — the difference IS the overstatement.
+# Every trade-cost estimate the framework has produced has overstated FX by a third.
+# `extract_cash_statement.FX_RATE_FRACTION` is the single home; this reads it and only falls
+# back if that import fails, in which case it uses the CORRECTED value and says so.
+try:
+    from extract_cash_statement import FX_RATE_FRACTION as FX_COST_PCT   # 0.005
+except Exception:                                                        # pragma: no cover
+    FX_COST_PCT = 0.005          # AJ Bell 0.50% — NOT 0.75%; see register H13
 
 # Minimum trade size (below this dealing costs make trade uneconomical)
 MIN_ECONOMIC_TRADE = 500.0
@@ -310,42 +319,37 @@ def calc_stock_sleeve_return(
 # ---------------------------------------------------------------------------
 # Overlap check structure
 # ---------------------------------------------------------------------------
-def build_overlap_check_structure(stocks: list, funds: list) -> dict:
-    """
-    Produces the overlap check input for Claude to execute at Step 8A.
-    Lists each stock in the stock sleeve with instructions to check
-    its presence in each fund's top-10 holdings.
-    Claude runs the actual lookup; this pre-structures the check.
-    """
-    stock_tickers = [s["ticker"] for s in stocks]
-    fund_names    = [f["name"] for f in funds]
+def build_overlap_check_structure(stocks: list, funds: list, xray: dict = None) -> dict:
+    """H10 — RETIRED AS A HAND-CALCULATION, 06-Aug-2026.
 
-    checks = []
-    for s in stocks:
-        checks.append({
-            "stock_ticker": s["ticker"],
-            "stock_name":   s["name"],
-            "stock_weight_pct": s.get("weight_pct", 0),
-            "instruction":  (
-                f"Check whether {s['ticker']} appears in the top-10 holdings of any fund. "
-                f"If found: compute combined effective weight = direct {s.get('weight_pct',0):.2f}% "
-                f"+ (fund weight × fund's allocation to {s['ticker']}). "
-                f"Flag if combined effective weight > 5.0%."
-            ),
-            "flag_threshold_pct": 5.0,
-        })
+    This used to hand Claude an instruction ("look each stock up in each fund's top ten,
+    multiply, add to the direct weight, flag over 5%"). It produced **AVGO 4.04%** on the August
+    run by missing MI Thornbridge's 3.84% position, while the X-Ray published **4.31%** — the
+    same quantity, computed by Morningstar across every fund's actual holdings, sitting in a
+    table nothing read.
 
-    return {
-        "stock_tickers":    stock_tickers,
-        "fund_names":       fund_names,
-        "checks":           checks,
-        "instruction":      (
-            "Use AJ Bell or Morningstar fund holdings data to check each stock in the table. "
-            "Only check top-10 holdings per fund — marginal positions not worth retrieval time. "
-            "Format result as: OVERLAP: [Stock] — direct [X.X%] + [Fund] est. [Y.Y%] = combined [N.N%] — [WITHIN LIMIT / FLAG >5%]. "
-            "If no stock sleeve names appear in any fund top-10, state: No material overlap detected."
-        ),
-    }
+    The instruction is gone. `lookthrough.overlap_check()` now reads the published table, and a
+    name absent from the top ten is bounded by the tenth entry rather than guessed. If the table
+    is unavailable the check reports ABSENT — it does NOT fall back to the hand-calc, because a
+    silent fallback to a method known to be wrong is worse than a stated gap.
+    """
+    try:
+        import lookthrough
+        if xray:
+            r = lookthrough.overlap_check({"stocks": stocks, "funds": funds}, xray)
+            r["method"] = "published_xray_lookthrough_top10"
+            r["retired"] = ("hand-computed stock-vs-fund-top10 estimate — produced AVGO 4.04% "
+                            "against a published 4.31%")
+            return r
+    except Exception as e:                                        # noqa: BLE001
+        return {"status": "ERROR", "method": "none",
+                "note": f"lookthrough.overlap_check failed: {type(e).__name__}: {e}. The check is "
+                        f"reported as failed, NOT replaced by the retired hand-calculation."}
+    return {"status": "UNAVAILABLE", "method": "none",
+            "stock_tickers": [s.get("ticker") for s in stocks],
+            "note": ("no X-Ray supplied, so the published look-through table is unavailable. "
+                     "The hand-calculated fallback has been RETIRED (it was wrong by 0.27pp on "
+                     "AVGO); this check is absent this run and says so.")}
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +411,7 @@ def run_analytics(
     prior_portfolio: dict = None,
     trades_log_path: str = None,
     run_date: date = None,
+    xray: dict = None,
 ) -> dict:
     if run_date is None:
         run_date = date.today()
@@ -655,7 +660,7 @@ def run_analytics(
     # ---------------------------------------------------------------------------
     # Overlap check structure
     # ---------------------------------------------------------------------------
-    overlap_check = build_overlap_check_structure(stocks_list, funds_list)
+    overlap_check = build_overlap_check_structure(stocks_list, funds_list, xray)
 
     # ---------------------------------------------------------------------------
     # Capital summary
@@ -753,6 +758,9 @@ def main():
                         help="Path to prior month portfolio_data JSON (for phase transition check).")
     parser.add_argument("--trades-log",    default=None,
                         help="Path to project_isa_trades_log.md (for stock sleeve return calc).")
+    parser.add_argument("--xray",          default=None,
+                        help="xray_data_mmm_yyyy.json — supplies the PUBLISHED look-through "
+                             "table that retired the hand-calculated overlap check (H10)")
     parser.add_argument("--out",           default=None,
                         help="Output path. Defaults to analytics_data_mmm_yyyy.json.")
     args = parser.parse_args()
@@ -779,11 +787,17 @@ def main():
             prior_portfolio = json.load(f)
 
     # Run
+    xray = None
+    if args.xray and os.path.exists(args.xray):
+        with open(args.xray, encoding="utf-8") as f:
+            xray = json.load(f)
+
     analytics = run_analytics(
         portfolio, target_weights,
         prior_portfolio=prior_portfolio,
         trades_log_path=args.trades_log,
         run_date=date.today(),
+        xray=xray,
     )
 
     # Output

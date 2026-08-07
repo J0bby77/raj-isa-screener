@@ -40,6 +40,7 @@ Outputs (all to Investment Analysis folder):
     run_context_mmm_yyyy.json   <- review task reads this first
 """
 
+from datetime import date as dt_date
 import argparse
 try:
     import isa_env_guard  # noqa  (disk guardrail: forces temp + yfinance cache onto tmpfs /dev/shm)
@@ -65,6 +66,12 @@ SCRIPTS = {
     "extract_portfolio":      os.path.join(SCRIPT_DIR, "extract_portfolio.py"),
     "extract_xray":           os.path.join(SCRIPT_DIR, "extract_xray.py"),
     "extract_transactions":   os.path.join(SCRIPT_DIR, "extract_transactions.py"),  # Step 1b (26-Jul-26)
+    "extract_cash_statement": os.path.join(SCRIPT_DIR, "extract_cash_statement.py"),  # Step 1b-2 (05-Aug-26)
+    "fund_action_stack":      os.path.join(SCRIPT_DIR, "fund_action_stack.py"),      # Step 6.05 (05-Aug-26)
+    "lookthrough":            os.path.join(SCRIPT_DIR, "lookthrough.py"),            # Step 6.06 (06-Aug-26)
+    "concentration_clusters": os.path.join(SCRIPT_DIR, "concentration_clusters.py"),  # Step 6.07 (06-Aug-26)
+    "return_architecture":    os.path.join(SCRIPT_DIR, "return_architecture.py"),     # Step 6.08 (06-Aug-26)
+    "holding_period_return":  os.path.join(SCRIPT_DIR, "holding_period_return.py"),  # Tier-1 item 1
     "derive_required_return": os.path.join(SCRIPT_DIR, "derive_required_return.py"),
     "analytics":              os.path.join(SCRIPT_DIR, "portfolio_analytics.py"),
     "update_watchlist_py":    os.path.join(SCRIPT_DIR, "update_watchlist.py"),
@@ -691,6 +698,360 @@ def main():
     txn_data = {}
     _mf_probe_json(portfolio_path, "stocks", "value_gbp", "stocks extracted")
     _mf_probe_json(portfolio_path, "funds", "value_gbp", "funds extracted", add=True)
+    # ── Step 1b-2 — cash statement (05-Aug-2026, register H13) ───────────────────────
+    # The ISA allowance was wrong by GBP5,000 for four months because contributions were being
+    # read from the Transaction History, which is a DEALING record and contains no cash
+    # deposits. This stage reads the document that does. Missing file = WARN, never ERROR,
+    # exactly as for 1b -- the allowance then degrades to UNRECONCILED rather than to a guess.
+    print("\n[1b-2] Reading cash statement (allowance + fees + FX, golden source)...")
+    _mf_begin("1b-2", "extract_cash_statement")
+    try:
+        import extract_cash_statement as _ecs
+        _cs = _ecs.parse(folder=isa_folder)
+        _cs["ledger_reconciliation"] = _ecs.reconcile_with_ledger(_cs, txn_ledger_path)
+        _cs_path = os.path.join(SCRIPT_DIR, f"cash_statement_{month_label}.json")
+        with open(_cs_path, "w", encoding="utf-8") as _f:
+            json.dump(_cs, _f, indent=2, default=str)
+        _al = _cs.get("allowance")
+        if not _cs.get("source_files"):
+            _mf_measure(status="SKIPPED",
+                        note="no 'Cash Statement*.xlsx' saved this month -- ISA allowance "
+                             "degrades to UNRECONCILED (policy, not degradation)")
+            warnings.append("Step 1b-2: no Cash Statement export found -- the ISA allowance "
+                            "cannot be reconciled. The Transaction History CANNOT substitute: "
+                            "it is a dealing record with no cash-deposit rows.")
+        else:
+            _bad = [k for k, v in (_cs.get("invariants") or {}).items() if not v.get("ok")]
+            _mf_measure(status="OK" if _cs.get("reconciled") else "WARN",
+                        note=f"allowance used GBP{(_al or {}).get('used_gbp')} / remaining "
+                             f"GBP{(_al or {}).get('remaining_gbp')}; invariants "
+                             f"{'all green' if not _bad else 'FAILED: ' + ','.join(_bad)}")
+            summary["cash_statement"] = {
+                "source_files": _cs.get("source_files"),
+                "allowance_used_gbp": (_al or {}).get("used_gbp"),
+                "allowance_remaining_gbp": (_al or {}).get("remaining_gbp"),
+                "opening_balance_gbp": _cs.get("opening_balance_gbp"),
+                "closing_balance_gbp": _cs.get("closing_balance_gbp"),
+                "fx_rate_pct": _cs.get("fx_rate_pct"),
+                "invariants_failed": _bad,
+                "ledger_unmatched": len((_cs.get("ledger_reconciliation") or {}).get("unmatched") or []),
+                "ledger_pending": len((_cs.get("ledger_reconciliation") or {}).get("pending_ledger_update") or []),
+            }
+            for _b in _bad:
+                warnings.append(f"Step 1b-2: cash-statement invariant {_b} FAILED -- the "
+                                f"allowance figure is not trustworthy this month")
+            _lr = _cs.get("ledger_reconciliation") or {}
+            for _u in (_lr.get("unmatched") or []):
+                warnings.append(f"Step 1b-2 (I10): cash-statement trade not in the dealing "
+                                f"ledger: {_u['date']} GBP{_u['amount_gbp']} "
+                                f"{_u['description']}")
+            print(f"  allowance GBP{(_al or {}).get('used_gbp')} used / "
+                  f"GBP{(_al or {}).get('remaining_gbp')} remaining | FX "
+                  f"{_cs.get('fx_rate_pct')}% | invariants "
+                  f"{'green' if not _bad else 'FAILED ' + ','.join(_bad)}")
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        warnings.append(f"Step 1b-2 (extract_cash_statement): {type(_e).__name__}: {_e}")
+        print(f"  FAILED (non-fatal): {_e}")
+
+    # ── Step 6.05 — Fund Action Stack (register C4 + C5, 05-Aug-2026) ────────────────
+    # The fund sleeve is 85.1% of the ISA and had no ownership floor and no opportunity-cost
+    # test, while the 7.9% stock sleeve had both. This stage produces the fund analogue: a
+    # Fund Retention Score, a binary dominance test, and the anchor rule ("every holding clears
+    # its bucket minimum on REALISED evidence or is dead money"). It ranks and recommends; it
+    # never trades.
+    print("\n[6.05] Fund action stack (FRS + dominance + anchor rule)...")
+    _mf_begin("6.05", "fund_action_stack")
+    try:
+        import fund_action_stack as _fas
+        _port = None
+        try:
+            with open(portfolio_path, encoding="utf-8") as _pf:
+                _port = json.load(_pf)
+        except Exception:
+            pass
+        _fa = _fas.build(as_of=run_date if isinstance(run_date, dt_date) else None,
+                         portfolio=_port)
+        _fa_path = os.path.join(SCRIPT_DIR, f"fund_action_stack_{month_label}.json")
+        with open(_fa_path, "w", encoding="utf-8") as _f:
+            json.dump(_fa, _f, indent=2, default=str)
+        _s = _fa["summary"]
+        _mf_measure(status="OK",
+                    note=f"{_s['n_funds']} funds: HOLD/ADD {_s['hold_add']}, RETAIN-ONLY "
+                         f"{_s['retain_only']}, DEAD MONEY {_s['dead_money']} "
+                         f"(GBP{_s['dead_money_value_gbp']:,.0f}), UNSCORED {_s['unscored']}")
+        summary["fund_action_stack"] = _s
+        for f in _fa.get("anchor_rule_failures", []):
+            warnings.append(
+                f"Step 6.05 ANCHOR RULE: {f['name']} realised 5y {f['realised_5y_ann']:.2f}% is "
+                f"{f['shortfall_pp']}pp BELOW its {f['bucket']} minimum of "
+                f"{f['bucket_minimum_pct']:.1f}% — Category 7 agenda item, not a silent hold.")
+        for d in _fa.get("fund_dominance", []):
+            _tag = ("ESCALATE" if d.get("escalate")
+                    else "review only — second source unavailable or contradicting")
+            warnings.append(f"Step 6.05 DOMINANCE ({_tag}): {d['statement']}")
+        _xc = _fa.get("xray_cross_check", {})
+        for nm in _xc.get("disputed", []):
+            warnings.append(
+                f"Step 6.05 DISPUTED: {nm} — the golden source and the X-Ray fall on OPPOSITE "
+                f"sides of its bucket minimum. No verdict published; do not act on either "
+                f"figure alone.")
+        # ── a DECLARED window that produced nothing for the whole universe is a build fault ──
+        for _w, _c in (_fa.get("window_coverage") or {}).items():
+            if _c.get("alarm"):
+                warnings.append(f"Step 6.05 WINDOW COVERAGE: {_c['note']}")
+        # ── Tier-1 item 5: publish what the basis choice would change ───────────────────
+        _bs = _fa.get("return_adequacy_basis_study") or {}
+        for _b in _bs.get("basis_sensitive", []):
+            warnings.append(
+                f"Step 6.05 BASIS-SENSITIVE: {_b['name']} (GBP{_b['value_gbp']:,.0f}) bands "
+                f"differently depending on the return statistic — "
+                + ", ".join(f"{k}={v}" for k, v in _b["bands"].items())
+                + ". This is Raj's calibration decision, not the code's.")
+        # ── Tier-1 item 1: the money-weighted overlay ───────────────────────────────────
+        _mw = _fa.get("money_weighted_returns") or {}
+        if (_mw.get("summary") or {}).get("usable_as_anchor") == 0:
+            warnings.append(
+                "Step 6.05 MWR: every holding's money-weighted span is below the "
+                f"{(_fa.get('return_adequacy_config') or {}).get('mwr_min_span_years')}y anchor "
+                "minimum, so return adequacy is still scored on trailing windows. The "
+                "money-weighted figures are REPORTED for every holding.")
+        print(f"  HOLD/ADD {_s['hold_add']} | RETAIN-ONLY {_s['retain_only']} | DEAD MONEY "
+              f"{_s['dead_money']} (GBP{_s['dead_money_value_gbp']:,.0f}) | anchor failures "
+              f"{_s['anchor_failures']} | disputed {len(_xc.get('disputed', []))} | "
+              f"basis-sensitive {_bs.get('n_basis_sensitive', 0)}")
+        # ── L2: declared peer-group blocks (06-Aug-2026) ─────────────────────────────
+        try:
+            import fund_pair_test as _fpt
+            _cds = _fpt.category_declaration_status()
+            summary["fund_categories"] = {"declared": _cds["n_declared"], "of": _cds["of"]}
+            if _cds["n_outstanding"]:
+                warnings.append(
+                    f"Step 6.05 PEER GROUPS: {_cds['n_declared']} of {_cds['of']} funds carry a "
+                    f"usable declared category. {_cds['consequence']} Outstanding: "
+                    + "; ".join(f"{r['sedol']} ({r['category_name'] or 'no name'}, "
+                                f"{r['status']})" for r in _cds["rows"]
+                                if not r["usable_for_verdict"]))
+        except Exception as _e:                                # noqa: BLE001
+            warnings.append(f"Step 6.05 peer-group status unavailable: {type(_e).__name__}: {_e}")
+
+        # ── trust NAV observation cadence (06-Aug-2026) ──────────────────────────────
+        # ⚑ The discount series has ONE point and needs twelve. The NAV is not in any feed
+        # this framework has, so the only mechanism available is a run that REFUSES TO BE
+        # SILENT about the gap. Without this the clock simply never starts.
+        for _c in (_fa.get("trust_capture_status") or []):
+            if _c.get("capture_due"):
+                warnings.append(f"Step 6.05 TRUST NAV CAPTURE DUE: {_c['request']}")
+            elif _c.get("remaining"):
+                warnings.append(
+                    f"Step 6.05 TRUST NAV: {_c['sedol']} has {_c['observations']} of "
+                    f"{_c['target']} observations; no percentile or z-score can be published "
+                    f"until then (projected {_c.get('projected_complete')}). Latest "
+                    f"{_c.get('latest_observation')}.")
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        warnings.append(f"Step 6.05 (fund_action_stack): {type(_e).__name__}: {_e}")
+        print(f"  FAILED (non-fatal): {_e}")
+
+    # ── Step 6.06 — look-through (register H9 + H10, 06-Aug-2026) ────────────────────
+    # H10: the overlap check is now READ from the X-Ray's published Top 10 Underlying Holdings
+    # instead of hand-computed (the hand-calc reported AVGO 4.04% against a published 4.31%).
+    # H9: the marginal test that did not exist — what putting money INTO a fund does to the
+    # portfolio's factor concentration. It runs BEFORE Step 8 writes any recommendation,
+    # because a gate consulted afterwards is a rationalisation.
+    print("\n[6.06] Look-through (H10 published overlap + H9 marginal allocation gate)...")
+    _mf_begin("6.06", "lookthrough")
+    try:
+        import lookthrough as _lt
+        _lt_path = os.path.join(SCRIPT_DIR, f"lookthrough_{month_label}.json")
+        _ltr = _lt.build(portfolio_path=portfolio_path, xray_path=xray_path,
+                         stack_path=os.path.join(SCRIPT_DIR,
+                                                 f"fund_action_stack_{month_label}.json"),
+                         out_path=_lt_path)
+        _h10, _h9 = _ltr["h10_overlap_check"], _ltr["h9_marginal_allocation"]
+        summary["lookthrough"] = {"h10_status": _h10.get("status"),
+                                  "h10_flags": len(_h10.get("flags", [])),
+                                  "h9_block": _h9.get("blocked"), "h9_flag": _h9.get("flagged"),
+                                  "h9_unknown": _h9.get("unknown")}
+        _mf_measure(status="OK" if _h10.get("status") == "OK" else "DEGRADED",
+                    note=f"H10 {_h10.get('status')} ({len(_h10.get('flags', []))} flags); "
+                         f"H9 block={_h9.get('blocked')} flag={_h9.get('flagged')} "
+                         f"unknown={_h9.get('unknown')}")
+        if _h10.get("status") != "OK":
+            warnings.append(f"Step 6.06 H10: overlap check {_h10.get('status')} — "
+                            f"{_h10.get('note', '')}")
+        for _f in _h10.get("flags", []):
+            warnings.append(
+                f"Step 6.06 OVERLAP: {_f['ticker']} effective look-through weight "
+                f"{_f.get('lookthrough_total_pct') or ('<=' + str(_f.get('upper_bound_pct')))}% "
+                f"exceeds the {_h10['flag_threshold_pct']}% flag.")
+        for _a in _h9.get("assessments", []):
+            if _a["verdict"] in ("BLOCK", "FLAG", "UNKNOWN"):
+                warnings.append(f"Step 6.06 H9 {_a['verdict']}: new money into {_a['name']} — "
+                                f"{_a['reason']}")
+        print(f"  H10 {_h10.get('status')} | flags {len(_h10.get('flags', []))} | "
+              f"H9 BLOCK {_h9.get('blocked')} FLAG {_h9.get('flagged')} "
+              f"UNKNOWN {_h9.get('unknown')}")
+        # ── H9 name-level store (06-Aug-2026) ────────────────────────────────────────
+        # The name-level test was UNKNOWN by design because no per-fund holdings existed.
+        # `fund_holdings_declared.json` now exists; what is still missing is DATA, and the
+        # difference between "cannot be built" and "has not been filled in" only stays visible
+        # if the run says so every month.
+        try:
+            _ds = _lt.declaration_status()
+            summary["fund_holdings_declared"] = {"absent": _ds["n_absent"],
+                                                 "partial": _ds["n_partial"], "of": _ds["of"]}
+            if _ds["n_absent"]:
+                warnings.append(
+                    f"Step 6.06 H9 NAME-LEVEL: {_ds['n_absent']} of {_ds['of']} funds have NO "
+                    f"declared holdings and {_ds['n_partial']} are partial, so the name-level "
+                    f"look-through cannot run for them. {_ds['request']} Absent: "
+                    + ", ".join(r["sedol"] for r in _ds["rows"] if r["status"] == "ABSENT"))
+        except Exception as _e:                                # noqa: BLE001
+            warnings.append(f"Step 6.06 H9 store status unavailable: {type(_e).__name__}: {_e}")
+
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        warnings.append(f"Step 6.06 (lookthrough): {type(_e).__name__}: {_e}")
+        print(f"  FAILED (non-fatal): {_e}")
+
+    # ── Step 6.07 — concentration clusters (register M7 + L1, 06-Aug-2026) ───────────
+    # Raj asked whether the single-fund cap should rise to ~20% "as long as the overall
+    # portfolio remains diversified". Nothing measured whether it does. This measures it and
+    # SETS NO LIMIT — his instruction was to build the measurement first and set the number
+    # against two runs of real data. Grouping is by CORRELATION CLUSTER, not by manager name:
+    # Artemis European and Artemis UK correlate across different geographies (one process), while
+    # JPM UK and Artemis UK correlate 0.917 (the same factor bet, different implementations).
+    print("\n[6.07] Concentration clusters (effective bets + risk contribution)...")
+    _mf_begin("6.07", "concentration_clusters")
+    try:
+        import concentration_clusters as _cc
+        _cc_path = os.path.join(SCRIPT_DIR, f"concentration_{month_label}.json")
+        _ccr = _cc.build(_port, None, run_date if isinstance(run_date, dt_date) else None,
+                         _cc_path, True)
+        if _ccr.get("status") != "OK":
+            _mf_measure(status="DEGRADED", note=_ccr.get("reason", "insufficient"))
+            warnings.append(f"Step 6.07: concentration not measured — {_ccr.get('reason')}")
+        else:
+            _eb = _ccr["effective_bets"]; _cv = _ccr["coverage"]
+            summary["concentration"] = {
+                "coverage_pct": _cv["measured_pct_of_isa"], "n_clusters": _ccr["n_clusters"],
+                "largest_cluster_pct": _ccr["largest_cluster_pct_of_isa"],
+                "effective_bets_by_risk": _eb["by_risk_principal_portfolios"],
+                "pc1_variance_pct": _eb["pc1_share_of_variance_pct"]}
+            _mf_measure(status="OK",
+                        note=f"{_cv['n_measured']} holdings / {_ccr['n_clusters']} clusters over "
+                             f"{_cv['measured_pct_of_isa']}% of the ISA; effective bets by risk "
+                             f"{_eb['by_risk_principal_portfolios']}, PC1 "
+                             f"{_eb['pc1_share_of_variance_pct']}% of variance")
+            # ⚑ the finding that reframes the whole question, surfaced every run
+            if (_eb.get("by_risk_principal_portfolios") or 99) < 2.0:
+                warnings.append(
+                    f"Step 6.07 CONCENTRATION: {_cv['n_measured']} holdings in "
+                    f"{_ccr['n_clusters']} correlation clusters, but an effective number of bets "
+                    f"BY RISK of {_eb['by_risk_principal_portfolios']} and PC1 carrying "
+                    f"{_eb['pc1_share_of_variance_pct']}% of portfolio variance. On a risk basis "
+                    f"the measured sleeve is close to a SINGLE bet, so a per-fund or per-cluster "
+                    f"weight cap would regulate something that is not the risk.")
+            if _cv["excluded_pct_of_isa"] > 5:
+                warnings.append(
+                    f"Step 6.07 COVERAGE: {_cv['excluded_pct_of_isa']}% of the ISA has no usable "
+                    f"return series (" + ", ".join(
+                        f"{e['sedol']} {e['weight_pct']}%" for e in _ccr["excluded"][:4])
+                    + "). Their contribution to concentration is UNKNOWN, not zero.")
+            _h = _ccr.get("history_rows") or {}
+            if not _h.get("ready"):
+                warnings.append(
+                    f"Step 6.07 HISTORY: {_h.get('total_runs')} run(s) recorded; "
+                    f"{_h.get('runs_needed_before_setting_a_limit')} needed before a "
+                    f"concentration limit is set against observed data (register L1).")
+            print(f"  clusters {_ccr['n_clusters']} | effective bets by risk "
+                  f"{_eb['by_risk_principal_portfolios']} | PC1 "
+                  f"{_eb['pc1_share_of_variance_pct']}% | coverage {_cv['measured_pct_of_isa']}%")
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        warnings.append(f"Step 6.07 (concentration_clusters): {type(_e).__name__}: {_e}")
+        print(f"  FAILED (non-fatal): {_e}")
+
+    # ── Step 6.08 — return architecture (ranked build item #1, 06-Aug-2026) ──────────
+    # ⚑ Section C — the one number that answers "is this on track for £1m" — has NEVER been
+    # computed. It shipped as `total_return: null, status: "pending_section_a"` and rendered as
+    # "[Claude fills]". Section A was computed, but from `est_return`: prose typed by hand a
+    # month earlier, which scores Scottish Mortgage 14.0% on a realised 5y of 0.22% (register
+    # C4). This step replaces both with arithmetic, against ONE declared expected-return input
+    # per holding, gated on thresholds DERIVED from the A19 anchor.
+    print("\n[6.08] Return architecture (Section A/B/C + shortfall + levers)...")
+    _mf_begin("6.08", "return_architecture")
+    try:
+        import return_architecture as _ra
+        _ra_path = os.path.join(SCRIPT_DIR, f"return_architecture_{month_label}.json")
+        _fas_json = None
+        try:
+            with open(os.path.join(SCRIPT_DIR, f"fund_action_stack_{month_label}.json"),
+                      encoding="utf-8") as _f:
+                _fas_json = json.load(_f)
+        except Exception:                                      # noqa: BLE001
+            _fas_json = None
+        _met_json = None
+        try:
+            with open(os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json"),
+                      encoding="utf-8") as _f:
+                _met_json = json.load(_f)
+        except Exception:                                      # noqa: BLE001
+            _met_json = None
+        _rar = _ra.build(run_date if isinstance(run_date, dt_date) else None,
+                         _port, _fas_json, None, _met_json, _ra_path)
+        _sa, _sb, _sc = _rar["section_a"], _rar["section_b"], _rar["section_c"]
+        summary["return_architecture"] = {
+            "basis": _rar["operative_basis"], "anchor_pct": _rar["anchor"]["operative_pct"],
+            "section_a_pct": _sa["value_pct"], "section_a_verdict": _sa.get("verdict"),
+            "section_b_pct": _sb["value_pct"], "section_b_verdict": _sb.get("verdict"),
+            "section_c_pct": _sc["value_pct"], "section_c_verdict": _sc.get("verdict"),
+            "shortfall_pp": _sc.get("shortfall_pp"), "coverage": _sc.get("coverage")}
+        _bad = [i for i in _rar["invariants"] if not i["holds"]]
+        _mf_measure(status="OK" if not _bad else "DEGRADED",
+                    note=(f"Section C {_sc['value_pct']}% vs anchor "
+                          f"{_rar['anchor']['operative_pct']}% -> {_sc.get('verdict')} "
+                          f"(shortfall {_sc.get('shortfall_pp')}pp); "
+                          f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])} "
+                          f"invariants hold"))
+        for _i in _bad:
+            errors.append(f"Step 6.08 INVARIANT {_i['invariant']} FAILED: {_i['detail']}")
+        if _sc.get("verdict") in ("Flag", "Watch"):
+            _top = (_rar["shortfall_attribution"]["rows"] or [])[:3]
+            warnings.append(
+                f"Step 6.08 SECTION C {str(_sc.get('verdict')).upper()}: total ISA expected "
+                f"return {_sc['value_pct']}% against a required {_rar['anchor']['operative_pct']}% "
+                f"— short by {_sc.get('shortfall_pp')}pp on the '{_rar['operative_basis']}' basis. "
+                f"Largest drags: " + "; ".join(
+                    f"{r['asset_id']} {r['contribution_to_shortfall_pp']:+.2f}pp" for r in _top))
+        for _l in _rar["levers"]:
+            if not _l["feasible"] and _l["lever"] == "deploy_idle_cash":
+                warnings.append(f"Step 6.08 CASH: {_l['blocked_reason']}")
+        if _rar["thresholds"]["divergences"]:
+            for _d in _rar["thresholds"]["divergences"]:
+                warnings.append(
+                    f"Step 6.08 THRESHOLD DRIFT: {_d['threshold']} derived {_d['derived_pct']}% "
+                    f"vs the frozen constant {_d['legacy_pct']}% ({_d['delta_pp']:+}pp) — the "
+                    f"derived value is operative; target_weights.json is now stale prose")
+        _bmd = _rar.get("bucket_minimum_divergence") or {}
+        for _r in (_bmd.get("rows") or []):
+            if _r.get("agree") is False:
+                warnings.append(
+                    f"Step 6.08 BUCKET MINIMUM {_r['bucket']}: policy file says "
+                    f"{_r['policy_pct']}%, fund_action_stack uses {_r['in_force_pct']}%. "
+                    f"{_bmd.get('diagnosis')} Left in force pending Raj (one constant).")
+        for _d in (_rar.get("defects_observed") or []):
+            warnings.append(f"Step 6.08 {_d['code']}: {_d['detail']}")
+        print(f"  A {_sa['value_pct']}% {_sa.get('verdict')} | B {_sb['value_pct']}% "
+              f"{_sb.get('verdict')} | C {_sc['value_pct']}% {_sc.get('verdict')} "
+              f"(short {_sc.get('shortfall_pp')}pp) | invariants "
+              f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])}")
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        errors.append(f"Step 6.08 (return_architecture): {type(_e).__name__}: {_e}")
+        print(f"  FAILED: {_e}")
+
     print("\n[1b] Importing transaction history...")
     _mf_begin("1b", "extract_transactions")
     rc, stdout, stderr = run_script_rc(
@@ -920,6 +1281,17 @@ def main():
             "--portfolio", portfolio_path,
             "--out",       analytics_path,
         ]
+        # H10 (06-Aug-2026): the overlap check now reads the PUBLISHED X-Ray look-through table
+        # instead of asking for a hand calculation. Passed here rather than defaulted inside
+        # portfolio_analytics so that an absent X-Ray shows up as a stated absence in the run
+        # output rather than as a quietly missing section.
+        if xray_path and os.path.exists(xray_path):
+            analytics_args += ["--xray", xray_path]
+        else:
+            warnings.append(
+                "Step 3 (analytics): X-Ray JSON not available, so the H10 look-through overlap "
+                "check is ABSENT this run. It is NOT falling back to the retired hand-calc, "
+                "which reported AVGO 4.04% against a published 4.31%.")
         if prior_port_path:
             analytics_args += ["--prior-portfolio", prior_port_path]
         if trades_log_path:
@@ -2112,6 +2484,108 @@ def main():
                     "fund_cache_status": fund_cache_status,
                 })
                 _ana["fund_cache_status"] = fund_cache_status
+
+                # ── Step 6.08 OVERRIDE — the return architecture is the authority ─────────
+                # ⚑ Everything above computes Section A from `est_return`, which register C4
+                # proved is not merely noisy but INVERTED (Scottish Mortgage: 14.0% est on a
+                # 0.22% realised 5y, the highest score in its bucket). It is retained because
+                # the C4 evidence must keep accumulating and because `below_threshold` still
+                # drives the drift-table signal — but it no longer decides anything.
+                # Section A/B/C now come from return_architecture (Step 6.08): ONE declared
+                # expected-return input per holding, thresholds derived from the A19 anchor,
+                # and the arithmetic asserted by six invariants. The est-based figure is kept
+                # beside it as `est_basis_corroborator` so the two can visibly disagree.
+                try:
+                    _rap = os.path.join(SCRIPT_DIR, f"return_architecture_{month_label}.json")
+                    with open(_rap, encoding="utf-8") as _f:
+                        _rar = json.load(_f)
+                    _bad_inv = [i for i in _rar.get("invariants", []) if not i.get("holds")]
+                    if _bad_inv:
+                        warnings.append(
+                            "A11/6.08: return_architecture invariants FAILED — Section A/B/C "
+                            "left on the est_return basis rather than adopting arithmetic that "
+                            "does not reconcile: "
+                            + "; ".join(i["invariant"] for i in _bad_inv))
+                    else:
+                        _sa_new, _sb_new = _rar["section_a"], _rar["section_b"]
+                        _sc_new = _rar["section_c"]
+                        _prev = dict(_ana.get("section_a") or {})
+                        _ana["section_a"].update({
+                            "est_basis_corroborator": {
+                                "weighted_avg_return": _prev.get("weighted_avg_return"),
+                                "verdict": _prev.get("verdict"),
+                                "role": ("RETIRED as a decision input (register C4) — retained "
+                                         "so the evidence keeps accumulating"),
+                            },
+                            "weighted_avg_return": _sa_new["value_pct"],
+                            "verdict": _sa_new.get("verdict"),
+                            "verdict_bands": _sa_new.get("bands"),
+                            "coverage_pct": (None if _sa_new.get("coverage") is None
+                                             else round(100 * _sa_new["coverage"], 2)),
+                            "basis": _rar["operative_basis"],
+                            "basis_note": _rar["basis_study"]["definitions"][_rar["operative_basis"]],
+                            "source": "return_architecture (Step 6.08)",
+                        })
+                        _ana["section_b"].update({
+                            "value_pct": _sb_new["value_pct"], "verdict": _sb_new.get("verdict"),
+                            "bands": _sb_new.get("bands"),
+                            "basis": _rar["operative_basis"],
+                            "source": "return_architecture (Step 6.08)",
+                            "realised_indicative": {
+                                "result": _ana["section_b"].get("result"),
+                                "note": ("the realised sleeve gain is a MEASUREMENT OF THE PAST "
+                                         "and was previously fed into Section C as if it were a "
+                                         "forward annual rate; it is kept here as context only"),
+                            },
+                        })
+                        _ana["section_c"] = {
+                            **(_ana.get("section_c") or {}),
+                            "total_return": _sc_new["value_pct"],
+                            "verdict": _sc_new.get("verdict"),
+                            "bands": _sc_new.get("bands"),
+                            "anchor_pct": _sc_new.get("anchor_pct"),
+                            "shortfall_pp": _sc_new.get("shortfall_pp"),
+                            "coverage_pct": (None if _sc_new.get("coverage") is None
+                                             else round(100 * _sc_new["coverage"], 2)),
+                            "basis": _rar["operative_basis"],
+                            "status": "computed",
+                            "source": "return_architecture (Step 6.08)",
+                            "shortfall_attribution": _rar["shortfall_attribution"]["rows"][:8],
+                            "levers": _rar["levers"],
+                            "levers_note": _rar["not_summable_note"],
+                        }
+                        # ⚑ ONE DOCUMENT. `return_architecture_{month}.json` is keyed on the
+                        # PRE-RUN's month_label ("aug_2026"), while portfolio_data's
+                        # `_meta.month_label` is the DATA month ("jul_2026" for a 31-Jul
+                        # valuation). Two variables with the same name meaning different
+                        # things — so downstream consumers must never resolve this file by
+                        # guessing a label. The payload is carried inside analytics instead.
+                        _ana["return_architecture"] = {
+                            "as_of": _rar["as_of"],
+                            "operative_basis": _rar["operative_basis"],
+                            "anchor": _rar["anchor"],
+                            "thresholds": _rar["thresholds"],
+                            "expected_return_inputs": _rar["expected_return_inputs"],
+                            "basis_study": _rar["basis_study"],
+                            "bucket_minimum_divergence": _rar.get("bucket_minimum_divergence"),
+                            "invariants": _rar["invariants"],
+                            "source_file": os.path.basename(_rap),
+                        }
+                        summary["section_c_verdict"] = _sc_new.get("verdict")
+                        summary["section_c_pct"] = _sc_new["value_pct"]
+                        _verdict = _sa_new.get("verdict") or _verdict
+                        print(f"  A11/6.08: Section A/B/C adopted from return_architecture "
+                              f"(A {_sa_new['value_pct']}% {_sa_new.get('verdict')} | "
+                              f"C {_sc_new['value_pct']}% {_sc_new.get('verdict')}); est-based "
+                              f"figure retained as a corroborator")
+                except FileNotFoundError:
+                    warnings.append(
+                        "A11/6.08: return_architecture output missing — Section A stays on the "
+                        "est_return basis, which register C4 shows is inverted. Section C will "
+                        "again be uncomputed. Investigate Step 6.08.")
+                except Exception as _e608:                     # noqa: BLE001
+                    warnings.append(f"A11/6.08 adoption FAILED: {type(_e608).__name__}: {_e608}")
+
                 with open(analytics_path, "w", encoding="utf-8") as f:
                     json.dump(_ana, f, indent=2, ensure_ascii=False)
                 summary["fund_cache_status"] = fund_cache_status

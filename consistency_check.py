@@ -312,6 +312,83 @@ def pair_monthly_capture_retention(ctx_text, exists=os.path.exists):
     return errs
 
 
+def pair_monthly_lean_email(ctx_text, builder_text):
+    """H11 (05-Aug-2026). The email format has desynced between `build_*_email.py` and the
+    Run_Context prose before — that is a recorded, named defect in this project. `--lean` is
+    now load-bearing (September cannot be delivered without it), so it gets a pair on day one
+    rather than after it drifts.
+
+    Four assertions, because dropping any one re-opens a distinct hole:
+      (a) the builder actually implements --lean;
+      (b) the monthly contract instructs it — a capability nobody invokes is not a fix;
+      (c) the never-omit guarantee exists in code, so 'lean' can never mean 'no decisions';
+      (d) the full report is still written, so lean is a delivery choice and not a data loss.
+    """
+    errs = []
+    if '"--lean"' not in builder_text:
+        errs.append("A18/H11: build_monthly_isa_email.py does not implement --lean, but the "
+                    "August send failed on size and September will too")
+    if "--lean" not in ctx_text:
+        errs.append("A18/H11: the monthly Run_Context email command does not pass --lean — "
+                    "the capability exists but the contract does not invoke it")
+    if "LEAN_NEVER_OMIT" not in builder_text:
+        errs.append("A18/H11: no LEAN_NEVER_OMIT guarantee — lean triage could omit the "
+                    "Decision Summary, i.e. the only part that is acted on")
+    if "_full.html" not in ctx_text and "full-output" not in builder_text:
+        errs.append("A18/H11: the complete report destination is not stated — an omitted "
+                    "section would have nowhere to be read in full")
+    return errs
+
+
+def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
+    """§Q/M1 (05-Aug-2026). Two INDEPENDENT derivations of "a screen ran for (run_date, group)"
+    must agree:
+
+        (a) score_panel.csv          — written by score_panel_logger from the scored frame
+        (b) screen_history/*.csv     — written by capture_screen_artefacts from the same frame
+
+    They are produced by different modules from the same source, so a disagreement means one of
+    them silently did not happen. Before 05-Aug-2026 the capture step was PROSE ONLY (Run_Context
+    16c-2, the 17th of 19 steps, and absent from step 16b's own degradation ladder) — so the
+    failure mode was not hypothetical, it was the default under session pressure. Capture is now
+    a side-effect of save_full_data(); this pair is what proves that claim every month rather
+    than assuming it.
+
+    A missing capture is PERMANENT — outputs/ clears between sessions — so this is reported as an
+    error, not a warning. Nothing is asserted before CAPTURE_ENFORCED_FROM: those frames are the
+    closed, confirmed-irrecoverable M1 wound, and re-reporting them forever would train the
+    reader to ignore this check.
+
+    The regime side is reported SEPARATELY and as a warning-grade error string: a row that exists
+    but is not `stamp_basis == "live"` is still useful for everything except regime-conditional
+    analysis, and is upgradeable by re-running capture after drawdown_monitor.py.
+    """
+    errs = []
+    root = dest_root or HERE
+    try:
+        sys.path.insert(0, root)
+        import capture_screen_artefacts as _csa
+    except Exception as e:
+        return [f"A18/\u00a7Q: capture_screen_artefacts not importable ({e}) \u2014 the weekly "
+                f"139/151-column frame, PIT constituents and PIT regime are being destroyed"]
+    if not exists(os.path.join(root, "score_panel.csv")):
+        return []                      # nothing to reconcile against yet; not a defect
+    try:
+        v = _csa.verify(root)
+    except Exception as e:
+        return [f"A18/\u00a7Q: capture verification failed to run ({e})"]
+    for miss in v.get("missing", []):
+        errs.append(f"A18/\u00a7Q: score_panel records a screen for {miss} but "
+                    f"screen_history holds no frame for it \u2014 that week's full-width frame is "
+                    f"PERMANENTLY LOST unless outputs/ still holds it this session")
+    for np_ in v.get("not_pit", []):
+        rd, _, basis = np_.partition(":")
+        errs.append(f"A18/\u00a7Q: regime row for {rd} is stamp_basis={basis}, not 'live' \u2014 "
+                    f"not admissible as point-in-time evidence; re-run "
+                    f"capture_screen_artefacts.py after drawdown_monitor.py to upgrade it")
+    return errs
+
+
 def pair_monthly_two_regimes(ctx_text, exists=os.path.exists):
     """M10 (02-Aug-2026). The framework carries TWO four-state regime variables:
 
@@ -345,6 +422,52 @@ def pair_monthly_two_regimes(ctx_text, exists=os.path.exists):
     return errs
 
 
+def pair_monthly_return_architecture(ctx_text, prefill_text, ra_text):
+    """A18 (golden-source steps 7+9 / build item #1): the Section A/B/C prose contract.
+
+    Four things that must agree and, until 06-Aug-2026, did not:
+      1. Run_Context must say Section C is READ from Step 6.08, not computed by hand. The old
+         prose said "Claude computes after Section A is complete" while the artefact shipped
+         `total_return: null` — a documented instruction to do arithmetic nobody ever did.
+      2. `email_prefill` must not carry a "[Claude fills]" placeholder for Section C or the
+         fund expected-return column.
+      3. Run_Context must state that fund returns are DATED and name both sources.
+      4. The operative basis constant must be one the module actually recognises.
+    """
+    errs = []
+    if "Step 6.08" not in ctx_text or "read it; do not compute it" not in ctx_text.lower():
+        errs.append("A18/6.08: Run_Context must state that Section C is READ from Step 6.08, "
+                    "not computed by hand — the old prose told Claude to compute a number the "
+                    "pre-run had already been shipping as null")
+    # ⚑ Test the STRING LITERALS, not the file text. The first version grepped and fired on
+    # `email_prefill`'s own comment recording what the placeholder USED to be — a check that
+    # cannot tell a mention from a use is a check that gets deleted rather than fixed.
+    try:
+        import ast as _ast
+        _lits = [n.value for n in _ast.walk(_ast.parse(prefill_text))
+                 if isinstance(n, _ast.Constant) and isinstance(n.value, str)]
+    except SyntaxError:
+        _lits = []
+        errs.append("A18/6.08: email_prefill.py does not parse")
+    for bad in ("[Claude fills after Section A complete",):
+        if any(bad in l for l in _lits):
+            errs.append(f"A18/6.08: email_prefill still EMITS the placeholder {bad!r} — "
+                        f"Section C is mechanical now")
+    if "_perf_cell(" not in prefill_text:
+        errs.append("A18/step7: email_prefill must render fund returns through _perf_cell "
+                    "(dated, two named sources) — a bare figure cannot be reconciled")
+    if "carries its OWN `as_of`" not in ctx_text:
+        errs.append("A18/step7: Run_Context §8 compliance must require a dated return per fund")
+    m = re.search(r'ER_BASIS_OPERATIVE\s*=\s*"([a-z_]+)"', ra_text)
+    bases = re.search(r'ER_BASES\s*=\s*\(([^)]*)\)', ra_text)
+    if not m or not bases:
+        errs.append("A18/6.08: return_architecture must declare ER_BASIS_OPERATIVE and ER_BASES")
+    elif m.group(1) not in bases.group(1):
+        errs.append(f"A18/6.08: operative basis {m.group(1)!r} is not one of ER_BASES — a basis "
+                    f"the module does not recognise would silently produce no sections")
+    return errs
+
+
 def pair_monthly_prerun_stages(ctx_text, prerun_text):
     """Every stage the orchestrator PRINTS must have a row in the Run_Context stage table.
     The 31-Jul-26 defect: Steps 1.5, 6.5, 9b.5, 9c and 9d all executed undocumented — 9d alone
@@ -357,8 +480,24 @@ def pair_monthly_prerun_stages(ctx_text, prerun_text):
     table = ctx_text.split("**Pre-run scripts (Investment Analysis folder):**", 1)
     if len(table) < 2:
         return ["A18/M5: Run_Context pre-run script table not found"]
-    seg = table[1].split("\n\n", 2)[0] + table[1][:6000]
-    documented = set(re.findall(r"^\|\s*\*{0,2}([0-9][0-9a-z.]*)\*{0,2}\s*\|", seg, re.M))
+    # ⚑ FIXED 05-Aug-2026. This read a fixed 6,000-CHARACTER window after the marker. Adding one
+    # long stage row (1b-2, the cash-statement stage) pushed stages 9c, 9d and 8c beyond the
+    # window, and the pair reported three DOCUMENTED stages as undocumented. A verifier whose
+    # coverage silently shrinks as the document grows is worse than no verifier, because it
+    # fails in the direction of a false alarm today and a false PASS tomorrow — a row moved just
+    # inside the window by an unrelated edit would be "checked" without being read.
+    # It now walks the actual markdown table: every contiguous run of table lines after the
+    # marker, stopping only at the next heading.
+    rest = table[1]
+    rows, started = [], False
+    for ln in rest.splitlines():
+        st = ln.strip()
+        if st.startswith("|"):
+            rows.append(st); started = True
+        elif st.startswith("#") and started:
+            break                       # next section — the table is over
+    documented = set(re.findall(r"^\|\s*\*{0,2}([0-9][0-9a-z.]*)\*{0,2}\s*\|",
+                                "\n".join(rows), re.M))
     missing = sorted(stages - documented, key=lambda s: (len(s), s))
     if missing:
         return [f"A18/M5: pre-run stages executed but NOT in the Run_Context stage table: "
@@ -391,9 +530,14 @@ def pair_referenced_scripts_exist(texts, exists=os.path.exists):
         # line in the monthly Run_Context).
         live = "\n".join(_live_lines(txt))
         for name in sorted(set(re.findall(r"\b([a-z_][a-z0-9_]*\.py)\b", live))):
-            if not exists(os.path.join(HERE, name)):
+            # Test scripts legitimately live in tests_jul2026/, and the regex deliberately
+            # captures the bare filename so a path prefix in the prose does not defeat the
+            # check. Searching both roots keeps the invariant honest without weakening it:
+            # a script that exists NOWHERE is still an error. (Extended 05-Aug-2026 when the
+            # pair correctly flagged tests_jul2026/test_email_lean.py on its first run.)
+            if not any(exists(os.path.join(HERE, d, name)) for d in ("", "tests_jul2026")):
                 errs.append(f"A18/M7: {label} references {name}, which does not exist in the "
-                            f"Investment Analysis folder")
+                            f"Investment Analysis folder or tests_jul2026/")
     return errs
 
 
@@ -461,6 +605,12 @@ def check_all():
     errs += pair_summary_floor_prose(run_ctx)
     errs += pair_top10_columns(run_ctx, bem)
     errs += pair_email_sections(run_ctx, bem)
+    try:
+        errs += pair_monthly_return_architecture(
+            _read("Run_Context_Monthly_ISA_Review.md"), _read("email_prefill.py"),
+            _read("return_architecture.py"))
+    except Exception as _e:                                    # noqa: BLE001
+        errs.append(f"A18/6.08 pair could not run: {type(_e).__name__}: {_e}")
     errs += pair_retired_constants({fn: _read(fn) for fn in
                                     ("build_excel.py", "build_email.py", "update_watchlist.py",
                                      "screener_core.py", "rerank_watchlist.py", "scoring_config.py")})
@@ -487,6 +637,8 @@ def check_all():
         errs += pair_monthly_prerun_reads(mctx)
         errs += pair_monthly_capture_retention(mctx)
         errs += pair_monthly_two_regimes(mctx)
+        errs += pair_monthly_lean_email(mctx, mbuild)
+        errs += pair_screen_capture_coverage()
         if cfg is not None:
             errs += pair_monthly_t1_mode(mctx, bool(getattr(cfg, "T1_QUALIFICATION_MODE", False)))
         # Contracts that name executables: a missing script is a silent monthly failure.
@@ -521,6 +673,22 @@ def _selftest():
     assert pair_anchor({**ok_state, "schedule_updated_at": "2026-08-01"})
     assert pair_anchor({**ok_state, "guardrail_state": "FALLBACK"})
     assert pair_anchor(ok_state, 14.0)
+
+    # ---- build item #1: Section A/B/C prose contract ---------------------------------------
+    _gctx = ("Step 6.08 ... **Read it; do not compute it.** ... carries its OWN `as_of` ...")
+    _gpre = "x = _perf_cell(a, b, c, d)\n# mention only: [Claude fills after Section A complete]"
+    _gra = 'ER_BASIS_OPERATIVE = "declared_prior"\nER_BASES = ("declared_prior", "realised")'
+    assert not pair_monthly_return_architecture(_gctx, _gpre, _gra)
+    # each mutation is the real-world defect it was written for
+    assert pair_monthly_return_architecture(_gctx.replace("Step 6.08", "Step 6"), _gpre, _gra)
+    # a MENTION in a comment must NOT fire; an emitted LITERAL must
+    assert not pair_monthly_return_architecture(_gctx, _gpre, _gra)
+    assert pair_monthly_return_architecture(
+        _gctx, _gpre + "\ny = '[Claude fills after Section A complete]'", _gra)
+    assert pair_monthly_return_architecture(_gctx, "no perf cell here", _gra)
+    assert pair_monthly_return_architecture(_gctx.replace("carries its OWN `as_of`", "x"), _gpre, _gra)
+    assert pair_monthly_return_architecture(
+        _gctx, _gpre, _gra.replace('"declared_prior"', '"typo_basis"', 1))
 
     # ---- MONTHLY pairs (31-Jul-2026): each must be GREEN on a good fixture and FIRE on the
     # exact mutation that caused the real-world defect it was written for. --------------------

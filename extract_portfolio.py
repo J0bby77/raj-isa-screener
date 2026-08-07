@@ -249,6 +249,50 @@ _DEPOSIT_TYPES = ("deposit", "subscription", "regular investment", "direct debit
                   "cash in", "transfer in", "credit")
 
 
+# ⚑ A22 GLOB DEFECT — fixed 05-Aug-2026, and it cost £5,000 of stated allowance.
+# The original pattern was the literal `ISA Transaction History*.xlsx`. Of the three transaction
+# files Raj actually keeps, it matched exactly ONE:
+#     "ISA Transaction History 1st Week May 2026.xlsx"      matched  — ONE WEEK of May
+#     "Transaction History 07-2026.xlsx"                    missed   — no "ISA " prefix
+#     "transactionhistory 1st April 2025 to 26th July 2026.xlsx"  missed — lowercase, no spaces
+# So the allowance was "broker-reconciled" against a single week of one month, and reported
+# ~£3,750 used against a true £8,750 — a £5,000 Faster Payment In on 06-Apr-2026 that no input
+# ever saw. The failure was silent because a non-matching glob returns [] and one matching file
+# returns a plausible number; nothing anywhere asserted the files COVERED the tax year.
+#
+# Two changes, and the second matters more than the first:
+#   1. match all three conventions, case-insensitively;
+#   2. `parse_contributions` already computes coverage — it is now compared against the tax-year
+#      window and `allowance_reconciled` is False whenever coverage falls short, so a partial
+#      file set can no longer masquerade as a reconciliation.
+_TXN_FILE_PATTERNS = ("ISA Transaction History*.xlsx", "Transaction History*.xlsx",
+                      "transactionhistory*.xlsx", "*ransaction*istory*.xlsx")
+
+
+def _find_transaction_files(folder):
+    """Every transaction-history export in `folder`, under any of Raj's naming conventions.
+    Case-insensitive, de-duplicated by real path. Temporary Office lock files (~$...) excluded."""
+    import glob as _glob
+    found = {}
+    for pat in _TXN_FILE_PATTERNS:
+        for fp in _glob.glob(os.path.join(folder, pat)):
+            base = os.path.basename(fp)
+            if base.startswith("~$"):
+                continue
+            found[os.path.realpath(fp)] = fp
+    # a case-insensitive sweep catches conventions not yet invented
+    try:
+        for base in os.listdir(folder):
+            b = base.lower()
+            if b.endswith(".xlsx") and not base.startswith("~$") \
+                    and "ransaction" in b and ("history" in b or "histry" in b):
+                fp = os.path.join(folder, base)
+                found[os.path.realpath(fp)] = fp
+    except OSError:
+        pass
+    return list(found.values())
+
+
 def _tax_year_start(ref: datetime) -> datetime:
     yr = ref.year if (ref.month, ref.day) >= (4, 6) else ref.year - 1
     return datetime(yr, 4, 6)
@@ -261,7 +305,7 @@ def parse_contributions(folder: str, data_dt: datetime | None) -> dict:
     import glob as _glob
     ref = data_dt or datetime.now()
     ty_start = _tax_year_start(ref)
-    files = sorted(_glob.glob(os.path.join(folder, "ISA Transaction History*.xlsx")))
+    files = sorted(_find_transaction_files(folder))
     detail, seen_refs = [], set()
     cover_min = cover_max = None
     for fp in files:
@@ -325,6 +369,72 @@ def parse_contributions(folder: str, data_dt: datetime | None) -> dict:
             "contributions_detail": sorted(detail, key=lambda d: d["date"] or ""),
             "allowance_reconciled": covered,
             "coverage_note": f"UNRECONCILED — verify AJ Bell ({note})" if not covered else note}
+
+
+def _contributions_golden(folder, data_dt):
+    """ISA contributions, from the document that actually contains them.
+
+    ⚑ THE STRUCTURAL DEFECT THIS REPLACES (register H13, root-caused 05-Aug-2026).
+    `parse_contributions()` reads AJ Bell's **Transaction History**, which is a DEALING record:
+    Purchase, Sale, Transfer In, Equalisation, Fund Class Conversion. It has **no cash-deposit
+    rows of any kind**. Contributions appear only in the **Cash Statement**, a separate export.
+    So the allowance was being derived from a document that structurally cannot answer the
+    question — and the framework could not notice, because "found no deposits" and "there were
+    no deposits" produce the identical number. The £5,000 `Faster Payment In` of 06-Apr-2026
+    was invisible for four months for exactly that reason.
+
+    The cash statement is now the GOLDEN SOURCE. The dealing record is retained as an
+    independent cross-check and its disagreement is recorded rather than resolved silently —
+    two derivations, both reported, per the engineering standard.
+
+    Cash statement absent -> fall back to the dealing record and say so. Never a silent
+    substitution, and never a confident figure from a source that cannot hold one.
+    """
+    dealing = parse_contributions(folder, data_dt)
+    try:
+        import extract_cash_statement as _ecs
+        cs = _ecs.parse(folder=folder,
+                        as_of=(data_dt.date() if hasattr(data_dt, "date") else data_dt) or None)
+    except Exception as e:
+        dealing["golden_source"] = "dealing_record_only"
+        dealing["golden_source_note"] = (
+            f"cash statement unavailable ({type(e).__name__}: {e}) — the DEALING record cannot "
+            f"contain cash deposits, so this figure is a floor, not the allowance")
+        return dealing
+    al = cs.get("allowance")
+    if not al or not cs.get("reconciled"):
+        dealing["golden_source"] = "dealing_record_only"
+        dealing["golden_source_note"] = (
+            "cash statement present but not reconciled (" +
+            "; ".join(cs.get("warnings") or ["reason unstated"]) + ")")
+        dealing["cash_statement_warnings"] = cs.get("warnings")
+        return dealing
+    return {
+        "allowance_used_gbp": al["used_gbp"],
+        "allowance_remaining_gbp": al["remaining_gbp"],
+        "allowance_used_partial_gbp": al["used_gbp"],
+        "allowance_reconciled": True,
+        "golden_source": "cash_statement",
+        "coverage_note": (f"reconciled from the AJ Bell cash statement "
+                          f"({', '.join(cs['source_files'])}); tax year from "
+                          f"{al['tax_year_start']}"),
+        "contributions_detail": [
+            {"date": r["date"], "transaction": r["description"],
+             "amount_gbp": r["receipt_gbp"], "type": "CONTRIBUTION",
+             "reference": r["reference"]} for r in al["contribution_rows"]],
+        "opening_balance_gbp": cs.get("opening_balance_gbp"),
+        "closing_balance_gbp": cs.get("closing_balance_gbp"),
+        "fx_rate_pct": cs.get("fx_rate_pct"),
+        "invariants": cs.get("invariants"),
+        # the dealing record's own view, retained so a future disagreement is visible rather
+        # than lost — it will normally be LOWER, because it cannot see deposits at all
+        "cross_check_dealing_record": {
+            "allowance_used_gbp": dealing.get("allowance_used_gbp"),
+            "allowance_reconciled": dealing.get("allowance_reconciled"),
+            "coverage_note": dealing.get("coverage_note"),
+            "note": "a dealing record contains no cash deposits; a LOWER figure here is "
+                    "expected and is not a break"},
+    }
 
 
 def parse_portfolio(xlsx_path: str) -> dict:
@@ -561,7 +671,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
         },
         # Fix Pack A22: broker-reconciled allowance (S/O + lump sums) — feeds email §10 and
         # the A19 contribution-history cross-check; UNRECONCILED prints as such, never assumed.
-        "contributions": parse_contributions(os.path.dirname(os.path.abspath(xlsx_path)), data_dt),
+        "contributions": _contributions_golden(os.path.dirname(os.path.abspath(xlsx_path)), data_dt),
         "stocks": sorted(stocks, key=lambda h: h["value_gbp"], reverse=True),
         "funds":  sorted(funds,  key=lambda h: h["value_gbp"], reverse=True),
         "cash": {

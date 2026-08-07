@@ -612,11 +612,15 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             _sleeve_paths[_tk_] = classify_holding_path(_s, vci_watchlist=wt.get("vci_watchlist"))
     held = {t for t, cls in _sleeve_paths.items() if cls == "A"}
     _excluded_non_a = {t: cls for t, cls in _sleeve_paths.items() if cls != "A"}
-    if _excluded_non_a:
-        try:
-            log["action_stack_path_exclusions"] = _excluded_non_a
-        except Exception:
-            pass
+    # ⚑ FIXED 05-Aug-2026. This wrote `log["action_stack_path_exclusions"]` ~350 characters
+    # BEFORE `log` was defined, inside a bare `except Exception: pass`. Every run therefore
+    # raised NameError and swallowed it, and the record of which holdings were excluded from
+    # the growth stack — the audit trail for the ABCL fix itself — was never written once.
+    #
+    # The fix that repaired the ABCL #1-SELL defect was therefore UNVERIFIABLE from the run
+    # output: it worked, but nothing downstream could show that it had. Deferred to just after
+    # `log` exists, and the `except` narrowed so a future failure here is visible rather than
+    # absorbed. A bare except around a dictionary write hides the one thing it cannot survive.
     vci = {e.get("ticker") for e in wt.get("vci_watchlist", [])}
     registry = {}
     for e in wt.get("watchlist", []):
@@ -627,6 +631,15 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
            "below_hurdle_in_pool": [], "no_live_score": [], "rescored": 0,
            "selection_method": "source_score_v2",   # Jul-26: single forward-led compute_source_score
            "weights": dict(getattr(_cfg, "SOURCE_WEIGHTS", {}))}
+    # (see the note above — this is the deferred write, now after `log` exists)
+    log["action_stack_path_classification"] = dict(_sleeve_paths)
+    if _excluded_non_a:
+        log["action_stack_path_exclusions"] = _excluded_non_a
+        log["action_stack_path_exclusion_note"] = (
+            "Path-B/VCI and unclassifiable holdings are excluded from the Path-A growth action "
+            "stack. Scoring an option-like pre-revenue platform on a quality-compounder forward "
+            "score always returns dead-money, so including one would recommend selling the "
+            "asymmetric sleeve every month. UNKNOWN never resolves to Path A.")
     for t, e in registry.items():
         pipeline = e.get("source_pipeline", "growth_stock")
         live = cr.get(t)

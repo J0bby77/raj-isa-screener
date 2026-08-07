@@ -359,6 +359,203 @@ def stamp_fund_staleness(funds, report_date):
     return funds, warnings
 
 
+
+def parse_holdings_statistics(text: str) -> dict:
+    """Per-fund **Mean** and **Std Dev** from the `Portfolio Holdings Statistics` table.
+
+    ⚑ NOT PARSED AT ALL BEFORE 05-Aug-2026, and it is the table register item H7 is built on
+    ("RLGES 17.73/13.77 vs VUAG 18.01/13.37"). Without it the framework could quote H7 but not
+    reproduce, re-test or refresh it.
+
+    ⚑ AND ITS WINDOW IS UNSTATED. The columns are headed only `Name Assets Mean Std Dev` — no
+    period. The window was identified as **3 YEARS** by reconciling the published std devs
+    against NAV-derived figures (VUAG 13.37 vs a 3y 13.24-13.43 and a 5y 13.09; RLGES 13.77 vs
+    a 3y 13.62 and a 5y 13.04; same conclusion on Ranmore and Thornbridge). It is recorded as
+    `window_basis: "inferred_3y"` — inferred, and labelled as inferred, because a number whose
+    period is assumed is exactly the semantic-drift class this framework keeps paying for.
+    **This matters: the VUAG-vs-RLGES dominance verdict REVERSES between the 3y and 5y windows.**
+    """
+    out = {"funds": {}, "order": [], "by_index": {}, "missing_indices": [],
+           "window_basis": "inferred_3y",
+           "window_note": ("the source table states no period; 3 years identified by "
+                           "reconciling published std devs against NAV-derived 3y and 5y "
+                           "figures across four funds")}
+    i = text.find("Portfolio Holdings Statistics")
+    if i == -1:
+        return out
+    seg = text[i:i + 4000]
+    # The RIGHT-HAND statistics panel bleeds onto the same physical line for several rows
+    # ("... 11.75 18.01 13.37 Standard Deviation 12.99 12.75"), so anchoring at end-of-line
+    # dropped 7 of 13 funds — including, again, VUAG.
+    row = re.compile(r"^\s*(\d+)\s+([A-Za-z][A-Za-z0-9 &\-\.\'()\u00a3/]+?)\s+"
+                     r"([\d.]+)\s+([\d.]+|-)\s+([\d.]+|-)(?:\s|$)", re.M)
+    for m in row.finditer(seg):
+        idx = int(m.group(1))
+        name = m.group(2).strip()
+        if len(name) < 4:
+            continue
+        out["funds"][name] = {
+            "row_index": idx,
+            "assets_pct": safe_float(m.group(3)),
+            "mean": safe_float(m.group(4)),
+            "std_dev": safe_float(m.group(5)),
+        }
+        out["by_index"][idx] = name
+        out["order"].append(name)
+    # ⚑ THE PRINTED ROW NUMBER IS THE KEY, NOT THE POSITION IN THIS LIST. The Correlation Matrix
+    # is indexed against THESE row numbers and carries no fund names of its own. Row 6 is
+    # "Cash GBP", whose lowercase letters the original all-caps name pattern rejected — so a
+    # positional mapping silently closed the gap and shifted rows 7-10 up by one, handing Royal
+    # London's 0.91 correlation with VUAG to MI Thornbridge. That single number is the entire
+    # basis of register H7's fee argument. Any missing index is now RECORDED, and the correlation
+    # mapping refuses the affected rows rather than sliding.
+    seen = sorted(out["by_index"])
+    if seen:
+        out["missing_indices"] = [i for i in range(1, max(seen) + 1) if i not in out["by_index"]]
+        if out["missing_indices"]:
+            PARSE_WARNINGS.append(
+                f"holdings_statistics: row indices {out['missing_indices']} did not parse "
+                f"(typically the 'Cash GBP' row). Recorded, so the correlation matrix cannot "
+                f"map across the gap.")
+    return out
+
+
+def parse_lookthrough_top10(text: str) -> dict:
+    """H10 — the `Top 10 Underlying Holdings` table: portfolio-level LOOK-THROUGH exposure.
+
+    ⚑ NEVER PARSED BEFORE (06-Aug-2026), and the framework was hand-computing the same numbers
+    and getting them wrong. `portfolio_analytics.build_overlap_check_structure` asked Claude to
+    look up each stock in each fund's top ten and add it to the direct weight by hand. On the
+    August run that produced **AVGO 4.04%**, missing MI Thornbridge's 3.84% position. The X-Ray
+    publishes the answer — **4.31%** — as a table, computed by Morningstar across the actual
+    underlying holdings of every fund, which is a source the hand-calc could never match.
+
+    A hand-computed figure that a machine-readable source already publishes is not a fallback,
+    it is a second source of truth that will drift. Standard rule 5: one home per rule.
+
+    ⚑ COVERAGE IS EXPLICIT. This is the top TEN only, so a name below the tenth is UNKNOWN, not
+    zero. `covered_pct` is reported so the difference is impossible to overlook: on August data
+    the ten names cover 18.12% of the portfolio and the other ~82% is simply not in this table.
+    """
+    out = {"holdings": [], "covered_pct": None, "source_table": "Top 10 Underlying Holdings",
+           "coverage_note": ("TOP TEN ONLY. A name absent from this table is UNRANKED, not "
+                             "absent from the portfolio — treating absence as zero exposure is "
+                             "the single easiest way to under-read a concentration.")}
+    i = text.find("Top 10 Underlying Holdings")
+    if i == -1:
+        PARSE_WARNINGS.append("lookthrough_top10: section header not found")
+        return out
+    seg = text[i:i + 2500]
+    # "4.31 Broadcom Inc Stock Technology United States"
+    # ⚑ SECTOR IS MATCHED AGAINST A CLOSED VOCABULARY, not "everything up to the last words".
+    # A greedy split read "Communication Services United States" as sector "Communication" and
+    # country "Services United States", and "Consumer Cyclical United States" the same way — two
+    # of the ten rows silently mangled, in a table whose entire purpose is naming exposures.
+    sectors = sorted(set(SECTOR_MAP.values()) | {
+        "Technology", "Communication Services", "Financial Services", "Consumer Cyclical",
+        "Consumer Defensive", "Healthcare", "Industrials", "Basic Materials", "Energy",
+        "Utilities", "Real Estate"}, key=len, reverse=True)
+    row = re.compile(r"^\s*(\d+\.\d+)\s+(.+?)\s+(Stock|Equity|Bond|Cash|Fund|Other)\s+"
+                     r"(" + "|".join(re.escape(x) for x in sectors) + r")\s+"
+                     r"([A-Z][A-Za-z .'\-]+?)\s*$", re.M)
+    for m in row.finditer(seg):
+        pct = safe_float(m.group(1))
+        name = m.group(2).strip()
+        if pct is None or not name or len(name) < 2:
+            continue
+        out["holdings"].append({
+            "name": name, "weight_pct": pct, "security_type": m.group(3).strip(),
+            "sector": m.group(4).strip(), "country": m.group(5).strip()})
+        if len(out["holdings"]) == 10:
+            break
+    if out["holdings"]:
+        out["covered_pct"] = round(sum(h["weight_pct"] for h in out["holdings"]), 2)
+        # ⚑ a monotonicity check, because a mis-parsed row is far more likely to break the
+        # ordering than to look plausible: the table is published in descending weight.
+        w = [h["weight_pct"] for h in out["holdings"]]
+        if w != sorted(w, reverse=True):
+            PARSE_WARNINGS.append(
+                f"lookthrough_top10: rows are NOT in descending weight order {w} — the parse "
+                f"has picked up something that is not a holdings row")
+            out["order_warning"] = w
+    else:
+        PARSE_WARNINGS.append("lookthrough_top10: header found but NO rows parsed")
+    if len(out["holdings"]) not in (0, 10):
+        PARSE_WARNINGS.append(
+            f"lookthrough_top10: parsed {len(out['holdings'])} rows from a table titled TOP 10 — "
+            f"a partial parse of a fixed-size table is a parser fault, not a short table")
+    return out
+
+
+def parse_correlation_matrix(text: str, stats_names=None) -> dict:
+    """The `Correlation Matrix` — a SECOND, INDEPENDENT derivation of the fund-fund correlations
+    `fund_action_stack` computes from monthly NAV returns.
+
+    Standard rule 4 asks for two derivations that must agree, and this is the only other one
+    available. It matters immediately: the RLGES-vs-VUAG fee argument in register H7 rests on a
+    correlation of **0.91**, which until now was a number quoted from a PDF nobody had parsed.
+
+    ⚑ THE ROW LABELS ARE NUMBERS, NOT NAMES. The matrix is indexed 1..10 and the mapping to funds
+    lives in the SEPARATE `Top 10 Portfolio Holdings Statistics` table, which is numbered the same
+    way. So this parser REQUIRES that table's ordered names to be handed in; without them it
+    returns the numeric matrix and NO fund mapping rather than assuming the order. Guessing an
+    index-to-fund mapping is exactly how a correlation gets attached to the wrong pair — the same
+    wrong-fund join that produced a false DISPUTED verdict in August.
+    """
+    out = {"matrix": {}, "index_to_fund": {}, "pairs": {}, "window_basis": "inferred_3y",
+           "window_note": ("the matrix is printed beside a 3-Yr Mean / 3-Yr Standard Deviation "
+                           "scatter and states no period of its own; 3 years is inferred from "
+                           "that adjacency and labelled as inferred")}
+    i = text.find("Correlation Matrix")
+    if i == -1:
+        return out
+    seg = text[i:i + 2500]
+    # ⚑ THE MATRIX SHARES ITS LINES WITH A SCATTER PLOT. Extracted text interleaves axis labels
+    # and point markers with the matrix rows — row 3 arrives as "46 3 0.43 0.80 1.00" and row 8 as
+    # "3 10 8 0.83 0.57 0.66 0.61 0.73 - 0.85 1.00". Anchoring the index at line start found only
+    # rows 1, 2, 4, 7 and 10 and reported the rest as absent. The index is therefore the LAST
+    # integer before the run of decimals, and the parse is validated structurally rather than
+    # positionally: row n of a lower-triangular matrix has exactly n entries and its last is its
+    # own diagonal. A mis-parse cannot satisfy that.
+    row = re.compile(r"(\d{1,2})\s+((?:(?:-?\d\.\d{2}|-)\s+)*(?:-?\d\.\d{2}|-))\s*$", re.M)
+    rejected = []
+    for m in row.finditer(seg):
+        idx = int(m.group(1))
+        vals = [None if v == "-" else float(v) for v in m.group(2).split()]
+        if len(vals) != idx:
+            rejected.append({"index": idx, "n_values": len(vals)})
+            continue
+        if vals[-1] is not None and abs(vals[-1] - 1.00) > 1e-9:
+            rejected.append({"index": idx, "diagonal": vals[-1]})
+            continue
+        out["matrix"][idx] = vals
+    out["rejected_rows"] = rejected
+    if out["matrix"]:
+        got = sorted(out["matrix"])
+        out["missing_rows"] = [i for i in range(1, max(got) + 1) if i not in out["matrix"]]
+    if stats_names:
+        # `stats_names` is an INDEX->NAME map from the statistics table's printed row numbers.
+        # A plain ordered list is refused: it is the shape that produced the off-by-one above.
+        if not isinstance(stats_names, dict):
+            out["mapping_note"] = ("refused: an ordered LIST was supplied. The mapping must be "
+                                   "keyed on the table's printed row numbers, because a dropped "
+                                   "row (Cash GBP) shifts every fund after it.")
+            return out
+        out["index_to_fund"] = {int(k): v for k, v in stats_names.items()}
+        for idx, vals in out["matrix"].items():
+            for j, v in enumerate(vals, start=1):
+                if v is None or j >= idx:
+                    continue
+                a, b = out["index_to_fund"].get(idx), out["index_to_fund"].get(j)
+                if a and b:
+                    out["pairs"][f"{a} | {b}"] = v
+    else:
+        out["mapping_note"] = ("no ordered fund list supplied, so the numeric indices are NOT "
+                               "mapped to funds. An assumed order would attach a correlation to "
+                               "the wrong pair, which is worse than having none.")
+    return out
+
+
 def parse_fund_holdings(text: str) -> list:
     """
     Extract Portfolio Holdings table (page 4 of PDF).
@@ -378,10 +575,24 @@ def parse_fund_holdings(text: str) -> list:
     # Each fund line (approximate):
     # "FUND NAME Type Date MS_RATING 1yr 3yr 5yr weight% TER OC"
     # Use a flexible pattern
+    # ⚑ FIXED 05-Aug-2026. The name class excluded DIGITS and the POUND SIGN, and the type
+    # alternation could not match a three-part type. Two holdings were therefore dropped
+    # silently on every run:
+    #     VANGUARD S&P 500 ETF USD ACC GBP     name contains "500"; type is "Mutual Fund - ETF"
+    #     VANGUARD JPN STK IDX £ ACC           name contains "£"
+    # Between them that is **16.2% of the portfolio, including the single largest holding at
+    # 11.62%**, invisible to every X-Ray-derived check — which is precisely why the dominance
+    # test could not adjudicate VUAG and reported it as having no second source.
+    # A parser that drops a row it cannot match, without counting it, produces a table that
+    # looks complete and is not.
     fund_pattern = re.compile(
-        r"([A-Z][A-Z &\-\.\'()]+)\s+"           # Fund name (caps)
-        r"(?:Fund|Mutual Fund|ETF|Cash)\s*"      # Type
-        r"(?:-|ETF)?\s*"
+        r"([A-Z][A-Z0-9 &\-\.\'()\u00a3/]+?)\s+"   # Fund name (caps, digits, GBP sign)
+        # ⚑ The type cell WRAPS. VUAG's row reads "... GBP Mutual 30 Jun 2026 QQQQ ..." with
+        # "Fund -" and "ETF" on the two FOLLOWING lines, so the type token on the data line is
+        # the bare word "Mutual". Requiring "Mutual Fund" contiguous is why the largest holding
+        # was dropped.
+        r"(?:Mutual\s+Fund|Mutual|Fund|ETF|Cash)\s*"
+        r"(?:\s*-\s*)?(?:ETF)?\s*"                 # optional " - ETF" continuation
         r"(\d+ \w+ \d{4})?\s*"                  # D1 FIX: the per-fund AS-AT DATE.
                                                  # This was NON-capturing -- the date the
                                                  # figures are actually struck at was parsed
@@ -502,7 +713,11 @@ def parse_xray(pdf_path: str) -> dict:
         "trailing_returns":  parse_trailing_returns(text),
         "risk_statistics":   parse_rstat(text),
         "fund_holdings":     parse_fund_holdings(text),
+        "holdings_statistics": parse_holdings_statistics(text),
+        "lookthrough_top10": parse_lookthrough_top10(text),
     }
+    result["correlation_matrix"] = parse_correlation_matrix(
+        text, (result["holdings_statistics"] or {}).get("by_index"))
     result["_meta"]["parse_warnings"] = list(PARSE_WARNINGS)   # Fix Pack A10
 
     # Validation
@@ -513,6 +728,10 @@ def parse_xray(pdf_path: str) -> dict:
         warnings.append("trailing_returns: no data extracted")
     if not result["fund_holdings"]:
         warnings.append("fund_holdings: no data extracted — check PDF format")
+    if not (result.get("lookthrough_top10") or {}).get("holdings"):
+        warnings.append("lookthrough_top10: no data extracted — the hand-calculated overlap it "
+                        "replaces is WRONG (AVGO 4.04% vs the published 4.31%), so an absent "
+                        "parse must be loud, not a quiet fallback")
     if warnings:
         result["_warnings"] = warnings
 

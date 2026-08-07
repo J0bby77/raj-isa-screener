@@ -6,7 +6,8 @@ THE PROBLEM
 -----------
 Three point-in-time facts are produced by every weekly screen and then destroyed:
 
-1. **The 139-column `full_data` frame.** Written to the session `outputs/` dir, which
+1. **The full-width `full_data` frame** (139 columns when this was written, 151 as at
+   05-Aug-2026 — the width is RECORDED per capture, never asserted from prose). Written to the session `outputs/` dir, which
    "clears automatically between sessions" (Run_Context §19 of the growth-screen context).
    The LOSSY 7-sheet workbook is retained; the rich frame is not. Register item M1.
 2. **Point-in-time index membership.** Constituent lists are fetched live each run and never
@@ -44,9 +45,19 @@ REGIME         = "regime_history.csv"        # regime in force per formation dat
 
 FULL_DATA_RE = re.compile(r"(?P<run_date>\d{8})_(?P<group>[A-Za-z0-9\-]+)_full_data\.csv$")
 
-CONSTITUENT_COLS = ["run_date", "group", "ticker", "company", "sector", "in_index", "scored", "gate_code"]
+CONSTITUENT_COLS = ["run_date", "group", "ticker", "company", "sector", "in_index", "scored",
+                    "gate_code", "security_type"]
 REGIME_COLS = ["run_date", "market_regime", "regime_basis", "drawdown_pct", "tranches_fired",
-               "macro_regime", "resolver_state", "captured_at", "source", "stamp_basis"]
+               "macro_regime", "resolver_state", "captured_at", "source", "stamp_basis",
+               "source_as_of", "source_lag_days"]
+
+# A regime row is admissible as point-in-time evidence ONLY at this stamp_basis.
+PIT_STAMP = "live"
+# The date from which capture is mechanically enforced inside screener_core.save_full_data().
+# Before it, absence of a screen_history file is expected (the frame was destroyed weekly by
+# design) and must not be reported as a defect. See ISA_OPEN_ITEMS_REGISTER M1 — CLOSED,
+# CONFIRMED IRRECOVERABLE.
+CAPTURE_ENFORCED_FROM = "2026-08-05"
 
 
 # ---------------------------------------------------------------- helpers
@@ -102,8 +113,33 @@ def capture_full_data(src_path, dest_root, run_date=None, group=None):
     if os.path.exists(dest) and os.path.getsize(dest) >= os.path.getsize(src_path):
         return {"ok": True, "action": "already_captured", "dest": dest, "run_date": run_date, "group": group}
     shutil.copy2(src_path, dest)
+    ncols = None
+    try:
+        with open(dest, encoding="utf-8", errors="ignore") as _f:
+            ncols = len(_f.readline().split(","))
+    except Exception:
+        pass
     return {"ok": True, "action": "captured", "dest": dest, "bytes": os.path.getsize(dest),
-            "run_date": run_date, "group": group}
+            "columns": ncols, "run_date": run_date, "group": group}
+
+
+def _sec_type(company, ticker=None):
+    """What INSTRUMENT was this line? Recorded per constituent from 05-Aug-2026.
+
+    Consulted by nothing that decides — see the domain contract in `security_type.py`. It is
+    here because the capture layer's whole job is to write down facts that cannot be recovered
+    later, and "GOOGM was a mandatory convertible preferred depositary share, and the screen
+    ranked it" is exactly such a fact. Without it, a future study of why an odd name scored
+    well has no way to ask whether it was even a company.
+
+    Import failure yields None (unknown), never a guess and never a default of 'common'.
+    """
+    try:
+        sys.path.insert(0, HERE)
+        from security_type import classify_security_type
+        return classify_security_type(company, ticker)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- 2. PIT constituents
@@ -125,7 +161,8 @@ def capture_constituents(full_data_path, dest_root, run_date, group, gate_vars_p
         seen.add(tk)
         rows.append({"run_date": run_date, "group": group, "ticker": tk,
                      "company": r.get("company"), "sector": r.get("sector"),
-                     "in_index": True, "scored": True, "gate_code": "pass"})
+                     "in_index": True, "scored": True, "gate_code": "pass",
+                     "security_type": _sec_type(r.get("company"), tk)})
     if gate_vars_path and os.path.exists(gate_vars_path):
         try:
             gv = pd.read_csv(gate_vars_path, low_memory=False)
@@ -138,7 +175,8 @@ def capture_constituents(full_data_path, dest_root, run_date, group, gate_vars_p
                 seen.add(tk)
                 rows.append({"run_date": run_date, "group": group, "ticker": tk,
                              "company": r.get("company"), "sector": r.get("sector"),
-                             "in_index": True, "scored": False, "gate_code": r.get("gate_code")})
+                             "in_index": True, "scored": False, "gate_code": r.get("gate_code"),
+                             "security_type": _sec_type(r.get("company"), tk)})
         except Exception as e:
             print(f"  WARN constituents: gate_variables join skipped — {e}", file=sys.stderr)
     n_new, n_tot = _merge_csv(os.path.join(dest_root, CONSTITUENTS), rows,
@@ -182,6 +220,24 @@ def capture_regime(dest_root, run_date, state_path=None, allow_backfill=False):
         rec["drawdown_pct"] = st.get("drawdown_pct") or st.get("pct_from_high")
         rec["tranches_fired"] = st.get("tranches_fired")
         rec["source"] = "drawdown_state.regime_state"
+        # ⚑ SECOND, INDEPENDENT DATE. run_date == today says the CAPTURE is live; it says
+        # nothing about whether the SOURCE is. drawdown_state carries its own `last_check`,
+        # and on 03-Aug-2026 that was 01-Aug — so a row stamped "live" would have asserted
+        # "the regime on 03-Aug" while holding "the regime on 01-Aug". Same defect class as
+        # median_5y-that-is-a-3y-mean. The two dates are now both recorded and reconciled.
+        rec["source_as_of"] = st.get("last_check")
+        if rec["source_as_of"]:
+            try:
+                _lag = (_d.date.fromisoformat(str(run_date))
+                        - _d.date.fromisoformat(str(rec["source_as_of"]))).days
+                rec["source_lag_days"] = _lag
+                if live and _lag != 0:
+                    rec["stamp_basis"] = "live_stale_source"
+            except Exception:
+                rec["source_lag_days"] = None
+        elif live:
+            # No source date at all: we cannot assert point-in-time, so we do not claim it.
+            rec["stamp_basis"] = "live_undated_source"
     except Exception as e:
         rec["source"] = f"UNAVAILABLE: {e}"
     try:
@@ -196,9 +252,16 @@ def capture_regime(dest_root, run_date, state_path=None, allow_backfill=False):
     if not rec["market_regime"]:
         print("  WARN regime: market_regime UNRESOLVED — stamped as null with reason, "
               "never as a guess", file=sys.stderr)
+    if rec["stamp_basis"] != PIT_STAMP:
+        print(f"  WARN regime {run_date}: stamp_basis={rec['stamp_basis']} "
+              f"(source_as_of={rec['source_as_of'] or 'ABSENT'}, "
+              f"lag={'unknown' if rec['source_lag_days'] is None else str(rec['source_lag_days']) + 'd'}) — "
+              f"NOT admissible as point-in-time evidence. Re-run capture after drawdown_monitor.py "
+              f"refreshes drawdown_state.json to upgrade it to '{PIT_STAMP}'.", file=sys.stderr)
     n_new, n_tot = _merge_csv(os.path.join(dest_root, REGIME), [rec], ["run_date"], REGIME_COLS)
     return {"ok": True, "market_regime": rec["market_regime"], "stamp_basis": rec["stamp_basis"],
-            "rows_in": n_new, "store_total": n_tot}
+            "source_as_of": rec["source_as_of"], "source_lag_days": rec["source_lag_days"],
+            "pit": rec["stamp_basis"] == PIT_STAMP, "rows_in": n_new, "store_total": n_tot}
 
 
 # ---------------------------------------------------------------- orchestration
@@ -212,6 +275,17 @@ def capture_one(full_data_path, dest_root, run_date=None, group=None):
     out["constituents"] = capture_constituents(
         full_data_path, dest_root, rd, gp, os.path.join(dest_root, "gate_variables.csv"))
     out["regime"] = capture_regime(dest_root, rd)   # PIT-guarded; skips non-today dates
+    # §Q2 survivorship — runs off the constituent history just written, so it always sees the
+    # newest run. Acquired names are disproportionately WINNERS; without this a ticker that
+    # stops appearing is indistinguishable from a fetch failure, and every study inherits the
+    # downward bias. Best-effort with a STATED reason on failure, never a silent pass.
+    try:
+        sys.path.insert(0, dest_root)
+        import delisting_registry as _dr
+        out["survivorship"] = _dr.update(os.path.join(dest_root, CONSTITUENTS),
+                                         os.path.join(dest_root, "delisting_registry.json"))
+    except Exception as e:
+        out["survivorship"] = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
     return out
 
 
@@ -225,6 +299,62 @@ def sweep(src_dirs, dest_root):
               "WARN, not an error: outputs/ clears between sessions by design")
         return []
     return [capture_one(p, dest_root) for p in found]
+
+
+# ---------------------------------------------------------------- verification
+def verify(dest_root, run_date=None, group=None, panel_path=None):
+    """Independent check that what the screen CLAIMS to have scored is what capture RETAINED.
+
+    Two derivations of the same fact — "a screen ran for (run_date, group)":
+      (a) `score_panel.csv`, written by score_panel_logger from the scored frame;
+      (b) `screen_history/{run_date}_{group}_full_data.csv`, written by this module.
+    They must agree. Disagreement is a MISS: a week of 139-column data that no longer exists.
+
+    Returns {"ok": bool, "missing": [...], "not_pit": [...], "checked": n}. Nothing is inferred
+    for run_dates before CAPTURE_ENFORCED_FROM — those frames were destroyed by design and their
+    absence is a closed historical wound, not an ongoing defect.
+    """
+    import pandas as pd
+    panel = panel_path or os.path.join(dest_root, "score_panel.csv")
+    out = {"ok": True, "missing": [], "not_pit": [], "checked": 0,
+           "enforced_from": CAPTURE_ENFORCED_FROM}
+    if not os.path.exists(panel):
+        out.update(ok=False, reason=f"score_panel not found at {panel}")
+        return out
+
+    pairs = set()
+    try:
+        pn = pd.read_csv(panel, usecols=lambda c: c in ("run_date", "group"), low_memory=False)
+        for rd, gp in pn.drop_duplicates().itertuples(index=False):
+            rd = _norm_date(rd)
+            if str(rd) < CAPTURE_ENFORCED_FROM:
+                continue                       # pre-enforcement: absence is expected
+            if str(gp).upper() in ("WATCHLIST_RERANK", "ADHOC"):
+                continue                       # monthly/ad-hoc paths write no full_data frame
+            pairs.add((str(rd), str(gp)))
+    except Exception as e:
+        out.update(ok=False, reason=f"score_panel unreadable: {e}")
+        return out
+    if run_date and group:
+        pairs.add((_norm_date(run_date), group))
+
+    reg = {}
+    rpath = os.path.join(dest_root, REGIME)
+    if os.path.exists(rpath):
+        try:
+            rr = pd.read_csv(rpath)
+            reg = dict(zip(rr["run_date"].astype(str), rr["stamp_basis"].astype(str)))
+        except Exception:
+            reg = {}
+
+    for rd, gp in sorted(pairs):
+        out["checked"] += 1
+        if not os.path.exists(os.path.join(dest_root, SCREEN_HISTORY, f"{rd}_{gp}_full_data.csv")):
+            out["missing"].append(f"{rd}/{gp}")
+            out["ok"] = False
+        if reg.get(rd, "ABSENT") != PIT_STAMP:
+            out["not_pit"].append(f"{rd}:{reg.get(rd, 'ABSENT')}")
+    return out
 
 
 # ---------------------------------------------------------------- selftest
@@ -258,6 +388,7 @@ def _selftest():
         c = pd.read_csv(os.path.join(dest, CONSTITUENTS))
         assert len(c) == 3, f"expected 3 constituents (2 scored + 1 rejected), got {len(c)}"
         assert set(c[~c.scored].ticker) == {"ZZZ"}, "gate-rejected name not captured"
+        assert "security_type" in c.columns, "security_type not captured per constituent"
         g = pd.read_csv(os.path.join(dest, REGIME))
         assert g.iloc[0].market_regime == "RISK_ON", "regime not stamped"
 
@@ -284,9 +415,47 @@ def _selftest():
             "backfilling a past date from CURRENT state must be refused"
         bf = capture_regime(dest, "2019-01-01", allow_backfill=True)
         assert bf["stamp_basis"] == "backfilled_not_pit", "backfill must be marked not-PIT"
-    print("SELFTEST PASS — 11 assertions (capture, 139-col preservation, gate-rejected union, "
-          "regime stamp, idempotency ×3, history retention, absent-source null, "
-          "PIT refusal, backfill marking)")
+
+        # --- source-freshness contract (added 05-Aug-2026) ------------------
+        # A source dated BEFORE the run_date must never be stamped as point-in-time.
+        json.dump({"regime_state": "RISK_ON", "last_check": "2026-08-01"},
+                  open(os.path.join(dest, "drawdown_state.json"), "w"))
+        stale = capture_regime(dest, D1N)
+        assert stale["stamp_basis"] == "live_stale_source", \
+            f"stale source must not be stamped live, got {stale['stamp_basis']}"
+        assert stale["source_lag_days"] and stale["source_lag_days"] > 0, "lag not recorded"
+        assert stale["pit"] is False, "stale source must not be admissible as PIT"
+
+        json.dump({"regime_state": "RISK_ON", "last_check": D1N},
+                  open(os.path.join(dest, "drawdown_state.json"), "w"))
+        fresh = capture_regime(dest, D1N)
+        assert fresh["stamp_basis"] == PIT_STAMP and fresh["source_lag_days"] == 0, \
+            "same-day source must upgrade to live"
+        assert fresh["pit"] is True, "same-day source must be admissible as PIT"
+
+        json.dump({"regime_state": "RISK_ON"}, open(os.path.join(dest, "drawdown_state.json"), "w"))
+        undated = capture_regime(dest, D1N)
+        assert undated["stamp_basis"] == "live_undated_source", \
+            "an undated source must not claim point-in-time"
+
+        # --- verify() contract ---------------------------------------------
+        pd.DataFrame({"run_date": [D1N, D1N, "2026-01-01"],
+                      "group": ["NASDAQ", "MISSINGGRP", "OLDGRP"],
+                      "ticker": ["AAA", "BBB", "CCC"]}
+                     ).to_csv(os.path.join(dest, "score_panel.csv"), index=False)
+        json.dump({"regime_state": "RISK_ON", "last_check": D1N},
+                  open(os.path.join(dest, "drawdown_state.json"), "w"))
+        capture_regime(dest, D1N)
+        v = verify(dest)
+        assert v["checked"] == 2, f"pre-enforcement run_date must be excluded, checked={v['checked']}"
+        assert v["missing"] == [f"{D1N}/MISSINGGRP"], f"miss not detected: {v['missing']}"
+        assert v["ok"] is False, "a missing capture must fail verification"
+        assert v["not_pit"] == [], f"live regime wrongly flagged: {v['not_pit']}"
+
+    print("SELFTEST PASS \u2014 19 assertions (capture, 139-col preservation, gate-rejected union, "
+          "regime stamp, idempotency \u00d73, history retention, absent-source null, PIT refusal, "
+          "backfill marking, stale-source refusal \u00d73, same-day upgrade \u00d72, undated source, "
+          "verify miss-detection \u00d74)")
     return ok
 
 
@@ -296,10 +465,21 @@ def main():
     ap.add_argument("--dest", default=HERE)
     ap.add_argument("--run_date"); ap.add_argument("--group")
     ap.add_argument("--sweep", action="store_true")
+    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--allow-backfill", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(0 if _selftest() else 1)
+    if a.verify:
+        v = verify(a.dest, a.run_date, a.group)
+        print(f"CAPTURE_VERIFY ok={v['ok']} checked={v['checked']} "
+              f"missing={v['missing'] or 'none'} not_pit={v['not_pit'] or 'none'} "
+              f"(enforced from {v.get('enforced_from')})")
+        if v["missing"]:
+            print("  \u26d1 A missing capture is PERMANENT — the 139-column frame for that run "
+                  "no longer exists anywhere. Re-run capture only if outputs/ still holds it.")
+        sys.exit(0 if v["ok"] else 1)
     srcs = a.src or [os.environ.get("ISA_OUTPUTS_DIR"), os.path.join(a.dest, "outputs"),
                      "/mnt/user-data/outputs", os.getcwd()]
     res = sweep(srcs, a.dest) if (a.sweep or not a.run_date) else \
@@ -309,7 +489,9 @@ def main():
         print(f"CAPTURED {fd.get('run_date')} {fd.get('group')} -> {fd.get('action')} | "
               f"constituents {r.get('constituents', {}).get('rows_in')} rows "
               f"({r.get('constituents', {}).get('rejected')} gate-rejected) | "
-              f"regime {r.get('regime', {}).get('market_regime')}")
+              f"regime {r.get('regime', {}).get('market_regime')} | "
+              f"survivorship gone={r.get('survivorship', {}).get('gone')} "
+              f"(reason UNKNOWN {r.get('survivorship', {}).get('unknown_reason')})")
     print(f"DONE files={len(res)}")
 
 

@@ -787,9 +787,68 @@ def build_s7(data):
 
 
 def build_s8(data):
-    """Section 8 — Fund Portfolio Review (incl. Step 8A)"""
+    """Section 8 — Fund Portfolio Review (incl. Step 8A and the Fund Action Stack)"""
     d = data.get("s8_fund_review", {})
     inner = ""
+
+    # ── Fund Action Stack (C4/C5) — rendered FIRST, above the drift table ─────────────
+    # The fund sleeve is 85% of the ISA. Until 05-Aug-2026 this section showed band drift and
+    # an `est_return` that had no discriminating power — it scored Scottish Mortgage 14.0%, the
+    # highest in its bucket, on a realised 5-year return of 0.2%. The retention score, the
+    # anchor rule and the ranked agenda now lead the section, because the first question about
+    # 85% of a portfolio should be "does each holding still earn its place", not "has it drifted".
+    fas = d.get("action_stack") or {}
+    if fas.get("available"):
+        inner += h3("Fund Action Stack &mdash; retention, anchor rule and agenda")
+        inner += para(f"<strong>{se(fas.get('headline', ''))}</strong>"
+                      + (f" &nbsp;|&nbsp; as at {se(fas.get('as_of', ''))}" if fas.get("as_of") else ""))
+        band_pill = {"HOLD/ADD": "buy", "RETAIN-ONLY": "mon", "WINDOW_SPLIT": "warn",
+                     "DEAD MONEY": "sell", "UNSCORED": "grey"}
+        inner += table_start(["#", "Fund", "Band", "FRS", "Realised by window",
+                              "Anchor", "Action"],
+                             ["4%", "26%", "12%", "6%", "24%", "8%", "20%"])
+        rows = fas.get("rows", [])
+        for i, r in enumerate(rows):
+            anchor = ("PASS" if r.get("anchor_rule_pass") is True else
+                      "FAIL" if r.get("anchor_rule_pass") is False else "&mdash;")
+            inner += table_row([
+                str(r.get("rank", "")),
+                f"<strong>{se(str(r.get('name'))[:40])}</strong>",
+                pill(str(r.get("band", "")).replace("_", " "),
+                     band_pill.get(r.get("band"), "grey")),
+                ("&mdash;" if r.get("frs") is None else f"{r['frs']:.1f}"),
+                se(r.get("windows") or "&mdash;")
+                + ("<br><span style=\"font-size:11px;color:#fbbf24\">windows disagree</span>"
+                   if r.get("window_split") else ""),
+                anchor,
+                se(str(r.get("action", ""))[:70]),
+            ], last=(i == len(rows) - 1))
+        inner += table_end()
+
+        for f in fas.get("anchor_failures", []):
+            inner += para(
+                f"<strong>Anchor rule:</strong> {se(str(f.get('name')))} realised 5y "
+                f"{f.get('realised_5y_ann'):.2f}% is {f.get('shortfall_pp')}pp below its "
+                f"{se(str(f.get('bucket')))} minimum of {f.get('bucket_minimum_pct'):.1f}% "
+                f"&mdash; a Category 7 agenda item, not a silent hold.")
+        for nm in fas.get("disputed", []):
+            inner += para(f"<strong>Disputed:</strong> {se(str(nm))} &mdash; the golden source "
+                          f"and the X-Ray fall on opposite sides of its bucket minimum at the "
+                          f"same date. No verdict published; do not act on either figure alone.",
+                          muted=True, small=True)
+        for w in fas.get("window_conflicts", []):
+            inner += para(
+                f"<strong>Dominance not issued:</strong> {se(str(w.get('fund_name'))[:34])} vs "
+                f"{se(str(w.get('versus_name'))[:34])} &mdash; the verdict flips between the "
+                f"3-year and 5-year windows, so none is published. The difference is WHEN the "
+                f"outperformance happened, which is a fact about the funds and not a tie to break.",
+                muted=True, small=True)
+        inner += para(se(fas.get("method_note", "")), muted=True, small=True)
+        inner += hr()
+    elif fas:
+        inner += para(f"<strong>Fund Action Stack unavailable.</strong> "
+                      f"{se(str(fas.get('note', '')))}", muted=True)
+        inner += hr()
 
     # Main fund table
     funds = d.get("funds", [])
@@ -875,14 +934,66 @@ def build_s8(data):
                 f'({se(sb.get("value",""))})</span> vs 18% target'
             )
         if sc:
-            st_col = {"on_track": C["green"], "watch": C["amber"], "flag": C["red"]}.get(
-                sc.get("status",""), C["text"])
+            _r = str(sc.get("result", ""))
+            st_col = ({"On track": C["green"], "Watch": C["amber"], "Flag": C["red"]}.get(_r)
+                      or {"on_track": C["green"], "watch": C["amber"], "flag": C["red"]}.get(
+                          sc.get("status", ""), C["text"]))
             inner += para(
-                f'<strong>Section C &mdash; Total ISA estimated return:</strong> '
-                f'<span style="color:{st_col}">{se(sc.get("result",""))} '
+                f'<strong>Section C &mdash; Total ISA expected return:</strong> '
+                f'<span style="color:{st_col}">{se(_r)} '
                 f'({se(sc.get("value",""))})</span> vs the required-return anchor '
                 f'({se(sc.get("anchor_note", "see target_state.json, A19"))})'
             )
+            # ── build item #1 (06-Aug-2026): the shortfall, per pound, and what closes it ──
+            # ⚑ Run_Context has always required Section C to "state explicitly which sleeve is
+            # the source of the shortfall". That was a judgement call made in prose. It is now
+            # an exact decomposition: every holding's weight x its gap to the anchor, summing
+            # to the shortfall. This is "every pound must earn its place" as arithmetic.
+            _att = sc.get("attribution") or []
+            if _att:
+                _rows = "".join(
+                    f'<tr><td>{se(a.get("asset_id"))}</td>'
+                    f'<td align="right">{a.get("weight_of_covered_pct"):.2f}%</td>'
+                    f'<td align="right">{a.get("er_pct"):.1f}%</td>'
+                    f'<td align="right"><span style="color:'
+                    f'{C["red"] if (a.get("contribution_to_shortfall_pp") or 0) > 0 else C["green"]}">'
+                    f'{a.get("contribution_to_shortfall_pp"):+.2f}pp</span></td></tr>'
+                    for a in _att)
+                inner += (
+                    '<table cellpadding="4" cellspacing="0" border="0" width="100%" '
+                    'style="border-collapse:collapse;font-size:13px;margin:6px 0 10px 0">'
+                    '<tr><th align="left">Holding</th><th align="right">Weight</th>'
+                    '<th align="right">Expected</th>'
+                    '<th align="right">Drag on the required return</th></tr>'
+                    + _rows + '</table>')
+                inner += para(
+                    'Positive = this holding is pulling the portfolio below the required '
+                    'return; negative = it is carrying the others. Contributions sum exactly '
+                    'to the Section C shortfall.', small=True)
+            _lev = sc.get("levers") or []
+            if _lev:
+                inner += para('<strong>What would close it</strong> &mdash; each priced '
+                              'independently, in pp of total portfolio return:')
+                for l in _lev:
+                    _d = l.get("delta_pp")
+                    _mv = (' <em>(moves the required return DOWN, not the expected return up)</em>'
+                           if l.get("moves") else '')
+                    inner += para(
+                        f'&bull; <strong>{se(l.get("lever"))}</strong>: '
+                        f'<span style="color:{C["green"]}">{_d:+.2f}pp</span>{_mv} '
+                        f'&mdash; {se(l.get("mechanism",""))}', small=True)
+            for l in (sc.get("levers_blocked") or []):
+                inner += para(
+                    f'&bull; <strong>{se(l.get("lever"))}</strong>: '
+                    f'<span style="color:{C["amber"]}">BLOCKED</span> &mdash; '
+                    f'{se(l.get("blocked_reason",""))}', small=True)
+            if sc.get("levers_note"):
+                inner += para(se(sc["levers_note"]), small=True)
+            if sc.get("basis"):
+                inner += para(
+                    f'Basis: <strong>{se(sc["basis"])}</strong>. The verdict is '
+                    f'basis-dependent and the alternatives are computed every run &mdash; see '
+                    f'<code>return_architecture_*.json &rarr; basis_study</code>.', small=True)
         if s8a.get("overlap_check"):
             inner += para(
                 f'<strong>Overlap check:</strong> {se(s8a["overlap_check"])}'
@@ -1142,7 +1253,187 @@ def build_manifest_block(data):
 # ---------------------------------------------------------------------------
 # Assembler
 # ---------------------------------------------------------------------------
-def build_email_body(data):
+# ---------------------------------------------------------------------------
+# H11 — LEAN RENDERING (05-Aug-2026)
+# ---------------------------------------------------------------------------
+# THE PROBLEM: the August-2026 report built completely clean — entity check PASS, no
+# placeholders, gate satisfied — and then **could not be sent at all**. 195,926 bytes against a
+# transport limit roughly a third of that. It was delivered as a file instead. Reports grew
+# 136KB -> 196KB in a single month, so this gets worse every month, not better.
+#
+# MEASURED COMPOSITION of that body, before designing anything:
+#     style="..." attributes      1,057 occurrences   120,246 bytes   61.4% of the email
+#     ONE td style string           547 occurrences    72,751 bytes   37.1% of the email
+#     font-family:Arial,sans-serif  827 occurrences     23,156 bytes  (already inherited from
+#                                                                      the outer wrapper)
+# The content is not the problem. The *repetition of presentation* is.
+#
+# THE FIX, IN TWO STAGES, IN THIS ORDER — the first is lossless and is nearly always enough:
+#
+#   Stage 1  STYLE COMPRESSION (lossless, no content change whatsoever). Every style string
+#            used more than once becomes a class in a single <style> block. This is a pure
+#            post-processing transform over the finished HTML: it does not touch any of the
+#            thirty builder functions, so it cannot change what any of them decides to say.
+#            Verified by extracting the visible text of both renderings and asserting they are
+#            byte-identical (`test_email_lean.py`).
+#
+#   Stage 2  DECLARED TRUNCATION (lossy — only if Stage 1 leaves the body over budget). The
+#            longest free-text cells are shortened, and every truncation is COUNTED, REPORTED
+#            and VISIBLY MARKED in the email itself. It is never silent, and it never touches
+#            a number — only prose. The full report is always written to disk unchanged, and
+#            the lean email says so.
+#
+# What this deliberately does NOT do: drop sections, round numbers, or remove rows. A report
+# that is deliverable because it quietly says less is worse than one that cannot be sent,
+# because the second failure is loud.
+
+LEAN_DEFAULT_BUDGET = 65536          # bytes; the transport limit the Aug send hit
+_TRUNCATION_MARK = " &hellip; [truncated in the emailed copy &mdash; full text in the saved report]"
+
+
+def compress_styles(html, min_uses=2, min_len=24):
+    """Stage 1. Replace repeated inline styles with classes. LOSSLESS by construction: only the
+    value of `style` attributes moves, never any text between tags.
+
+    Styles used once, or shorter than `min_len`, are left inline — turning a 14-byte style into
+    a class plus a rule costs MORE bytes than it saves, and a transform that sometimes makes
+    the file bigger is a transform nobody can reason about.
+    """
+    import collections
+    found = re.findall(r'style="([^"]*)"', html)
+    counts = collections.Counter(found)
+    chosen = [st for st, n in counts.most_common()
+              if n >= min_uses and len(st) >= min_len]
+    if not chosen:
+        return html, {"classes": 0, "replaced": 0, "saved_bytes": 0}
+    mapping, rules, saved = {}, [], 0
+    for i, st in enumerate(chosen):
+        cls = f"z{i}"
+        mapping[st] = cls
+        rules.append(f".{cls}{{{st}}}")
+        # before: n * (len('style="') + len(st) + 1); after: n * (len('class="') + len(cls) + 1)
+        saved += counts[st] * (len(st) - len(cls)) - (len(cls) + len(st) + 3)
+    def _sub(m):
+        st = m.group(1)
+        return f'class="{mapping[st]}"' if st in mapping else m.group(0)
+    out = re.sub(r'style="([^"]*)"', _sub, html)
+    style_block = "<style>" + "".join(rules) + "</style>\n"
+    return style_block + out, {"classes": len(chosen),
+                               "replaced": sum(counts[st] for st in chosen),
+                               "saved_bytes": len(html) - len(out) - len(style_block)}
+
+
+def _text_of(html):
+    """Visible text, for proving two renderings say the same thing. Style/script contents are
+    presentation, not content, and are excluded — otherwise the compressed version would
+    trivially 'differ' by the rules it hoisted."""
+    t = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.S | re.I)
+    t = re.sub(r"<script[^>]*>.*?</script>", " ", t, flags=re.S | re.I)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+# ⛑ MEASURED, WHICH CHANGED THE DESIGN. After Stage 1 the August body is 94,353 bytes, of
+# which **59,631 is visible text** and ~30,600 is unavoidable tag structure. So a 65KB budget
+# cannot be reached by compressing presentation at all — the report simply contains 60KB of
+# words. The first draft of Stage 2 shortened the longest table cells; it was both buggy (it
+# recomputed offsets against a string it had already mutated, and grew the file by 8.7KB) and
+# WRONG IN KIND: it would have taken a bite out of twenty-one arbitrary paragraphs across every
+# section, leaving a report that is quietly less true everywhere.
+#
+# Stage 2 is therefore SECTION TRIAGE, not text mutilation. Sections are admitted in decision
+# order until the budget is spent; the rest are replaced by one line naming the section and
+# where to read it in full. Nothing is abridged — a section is either wholly present or
+# explicitly, visibly absent. The full report is always written to disk complete.
+#
+# The ordering is by decision value, NOT by section number: Section 1 is what Raj acts on,
+# Section 11 is the retrospective. Rendering order is unchanged — only inclusion is decided
+# here, so the email still reads 1, 2, 3...
+LEAN_SECTION_PRIORITY = [
+    "s1_decision_summary",     # never omitted — asserted below
+    "s2_capital_allocation",
+    # ⚑ RAISED 05-Aug-2026. §10 is ~4.9KB — the cheapest section in the report — and it now
+    # carries the CORRECTED allowance (£8,750 used / £11,250 remaining). When the Fund Action
+    # Stack was added to §8 the body grew and triage dropped §10, which would have removed the
+    # single figure that says how much capital is still deployable this tax year. Cost-to-value
+    # is the best in the report; it belongs above the narrative sections.
+    "s10_tax_tracker",
+    "s3_investment_cases",
+    "s8_fund_review",          # 85% of the ISA, and now carries the retention agenda
+    "s7_stock_sleeve",
+    "s4_liquidation_tracker",
+    "s5_watchlist",
+    "s6_portfolio_snapshot",
+    "s9_macro",
+    "s11_retrospective",
+]
+LEAN_NEVER_OMIT = ("s1_decision_summary",)
+
+
+def _omitted_notice(key, num, title, nbytes, full_path):
+    return para(
+        f'<strong>Omitted from the emailed copy.</strong> This section is '
+        f'{nbytes:,} bytes and the email is held under a transport limit that the '
+        f'August-2026 report exceeded outright. It is present in full, unchanged, in '
+        f'{se(os.path.basename(full_path)) if full_path else "the saved report"}. '
+        f'Nothing in it has been shortened or summarised &mdash; it is simply not here.',
+        muted=True, small=True)
+
+
+def apply_lean(html, budget=LEAN_DEFAULT_BUDGET):
+    """Stage 1 only — lossless style compression. Section triage happens inside
+    build_email_body(), because deciding what to include is a build decision, not a
+    string-surgery decision on finished HTML."""
+    before = len(html.encode())
+    html, s1 = compress_styles(html)
+    after = len(html.encode())
+    return html, {"bytes_before": before, "bytes_final": after, "budget": budget,
+                  "within_budget": after <= budget, "style_classes": s1["classes"],
+                  "style_attrs_replaced": s1["replaced"],
+                  "pct_saved": round(100.0 * (before - after) / max(1, before), 1)}
+
+
+def build_lean_body(data, budget=LEAN_DEFAULT_BUDGET, full_path=None, max_rounds=len(SECTION_ORDER) + 1):
+    """Build a body that ACTUALLY fits, by measuring rather than estimating.
+
+    The first implementation guessed an allowance (`budget / 0.48` for expected compression) and
+    took one pass. It landed 7,115 bytes over on the August data — because the compression ratio
+    is a property of THIS month's content, not a constant, and a size prediction that is wrong in
+    the unsafe direction is exactly as useless as no prediction. So: build, compress, MEASURE,
+    and if it is still over, drop the lowest-priority remaining section and measure again.
+
+    Terminates on one of three outcomes, all reported honestly:
+      * fits with every section              -> no triage happened
+      * fits after N sections were dropped   -> each named, in the email and in the report
+      * does not fit even at the never-omit minimum -> `within_budget: False`, and the caller
+        is told plainly not to assume the send will work. It does not pretend by shrinking
+        something else.
+    """
+    order = [k for k in LEAN_SECTION_PRIORITY if k in SECTION_BUILDERS]
+    order += [k for k in SECTION_ORDER if k in SECTION_BUILDERS and k not in order]
+    include = list(order)
+    rounds = []
+    for _ in range(max_rounds):
+        rep = {}
+        body = build_email_body(data, lean=True, budget=budget, full_path=full_path,
+                                lean_report=rep, include_sections=set(include))
+        body, comp = apply_lean(body, budget=budget)
+        rep.update(comp)
+        rounds.append({"included": len(include), "bytes": comp["bytes_final"]})
+        if comp["within_budget"] or len(include) <= len(LEAN_NEVER_OMIT):
+            rep["rounds"] = rounds
+            return body, rep
+        droppable = [k for k in reversed(include) if k not in LEAN_NEVER_OMIT]
+        if not droppable:
+            rep["rounds"] = rounds
+            return body, rep
+        include.remove(droppable[0])
+    rep["rounds"] = rounds
+    return body, rep
+
+
+def build_email_body(data, lean=False, budget=LEAN_DEFAULT_BUDGET, full_path=None,
+                     lean_report=None, include_sections=None):
     meta   = data.get("meta", {})
     parts  = []
 
@@ -1168,16 +1459,35 @@ def build_email_body(data):
     # Conviction legend
     parts.append(build_legend())
 
-    # Sections in order
+    # Build every section first, so triage decides on MEASURED sizes rather than guesses.
+    built = {}
     for section_key in SECTION_ORDER:
+        builder = SECTION_BUILDERS.get(section_key)
+        if builder is not None:
+            built[section_key] = builder(data)
+
+    include, omitted = set(built), []
+    if lean:
+        include = set(built) if include_sections is None else (set(include_sections) & set(built))
+        include |= {k for k in LEAN_NEVER_OMIT if k in built}
+        omitted = [(k, len(built[k].encode())) for k in built if k not in include]
+        assert set(k for k in LEAN_NEVER_OMIT if k in built) <= include, \
+            "lean rendering attempted to omit a section that must never be omitted"
+
+    for section_key in SECTION_ORDER:
+        if section_key not in built:
+            continue
         num   = SECTION_NUMBERS.get(section_key, "?")
         title = SECTION_TITLES.get(section_key, section_key)
-        builder = SECTION_BUILDERS.get(section_key)
-        if builder is None:
-            continue
-        content = builder(data)
         parts.append(h2(num, title))
-        parts.append(section_wrap(content))
+        if section_key in include:
+            parts.append(section_wrap(built[section_key]))
+        else:
+            nb = dict(omitted).get(section_key, len(built[section_key].encode()))
+            parts.append(section_wrap(_omitted_notice(section_key, num, title, nb, full_path)))
+    if lean_report is not None:
+        lean_report["sections_included"] = sorted(include)
+        lean_report["sections_omitted"] = [{"section": k, "bytes": b} for k, b in omitted]
 
     # Footer
     parts.append(build_footer(meta))
@@ -1204,6 +1514,19 @@ def main():
                              "reason via --gate-override-reason, and is stamped into the "
                              "email footer so the gap is visible in the artefact itself.")
     parser.add_argument("--gate-override-reason", default="")
+    # H11 (05-Aug-2026) — the August report built clean and could not be SENT. --lean makes the
+    # emailed copy deliverable; the full report is written regardless, so nothing is ever lost.
+    parser.add_argument("--lean", action="store_true",
+                        help="Emit a transport-safe email body: lossless style compression "
+                             "(~52%% smaller) and, only if still over budget, explicit "
+                             "section triage with every omission named in the email itself.")
+    parser.add_argument("--max-bytes", type=int, default=LEAN_DEFAULT_BUDGET,
+                        help=f"Lean byte budget (default {LEAN_DEFAULT_BUDGET}). The August "
+                             f"send failed at 195,926 bytes.")
+    parser.add_argument("--full-output", default=None,
+                        help="Where the COMPLETE report is written when --lean is used. "
+                             "Defaults to <output stem>_full.html. The lean email names this "
+                             "file, so an omitted section is always traceable.")
     args = parser.parse_args()
 
     # Load JSON
@@ -1265,7 +1588,22 @@ def main():
               "pass --month to enforce it.")
 
     print("Building email body...")
-    body = build_email_body(data)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+    # The COMPLETE report is built first and ALWAYS written, whether or not --lean is used.
+    # Lean is a delivery constraint on the email, never on the record: the artefact on disk is
+    # the record, and it must not depend on what fitted in a mail transport.
+    full_body = build_email_body(data)
+    full_path = args.full_output or (os.path.splitext(args.output)[0] + "_full.html")
+    lean_rep = {}
+    if args.lean:
+        with open(full_path, "w", encoding="ascii", errors="xmlcharrefreplace") as f:
+            f.write(full_body)
+        body, lean_rep = build_lean_body(data, budget=args.max_bytes, full_path=full_path)
+        lean_rep["full_report"] = full_path
+        lean_rep["full_bytes"] = len(full_body.encode())
+    else:
+        body = full_body
 
     # Verify no non-ASCII remains
     ok = verify_entities(body)
@@ -1273,10 +1611,25 @@ def main():
         print("ERROR: Non-ASCII characters detected. Fix before sending.")
         sys.exit(1)
 
-    # Write output
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="ascii", errors="xmlcharrefreplace") as f:
         f.write(body)
+
+    if args.lean:
+        json.dump(lean_rep, open(os.path.splitext(args.output)[0] + "_lean_report.json", "w"),
+                  indent=2)
+        print(f"  LEAN: {lean_rep['full_bytes']:,} -> {lean_rep['bytes_final']:,} bytes "
+              f"({lean_rep['pct_saved']}% from style compression alone, "
+              f"{lean_rep['style_classes']} classes over {lean_rep['style_attrs_replaced']} "
+              f"attributes)")
+        print(f"  LEAN: budget {args.max_bytes:,} -> "
+              f"{'WITHIN' if lean_rep['within_budget'] else 'STILL OVER'}")
+        om = lean_rep.get("sections_omitted", [])
+        print(f"  LEAN: sections included {len(lean_rep.get('sections_included', []))}, "
+              f"omitted {len(om)}" + (f" -> {[x['section'] for x in om]}" if om else ""))
+        print(f"  LEAN: complete report written to {full_path}")
+        if not lean_rep["within_budget"]:
+            print("  ⚑ STILL OVER BUDGET after triage — do not assume the send will succeed. "
+                  "Lower --max-bytes or send the full report as a file, as in August.")
 
     meta       = data.get("meta", {})
     run_month  = meta.get("run_month_label", "Mmm YYYY")

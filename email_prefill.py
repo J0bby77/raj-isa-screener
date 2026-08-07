@@ -127,16 +127,27 @@ def calc_tax_year_month(run_date: date) -> str:
     return f"Month {min(months, 12)}"
 
 
-def calc_allowance_used(portfolio: dict) -> float:
+def calc_allowance_used(portfolio: dict):
+    """RETIRED 05-Aug-2026 — it returned a number that was never an allowance.
+
+    `total_value - cash` is the value of the invested holdings. The ISA allowance used is the
+    sum of MONEY PAID IN during the tax year. Those two quantities are unrelated: the first
+    moves with markets, includes every prior year's contributions, and would report an
+    "allowance" of six figures on a £139k portfolio against a £20,000 annual limit.
+
+    It was never wired into the email (Fix Pack A22 routes §10 through broker-reconciled
+    contributions, and the dashboard explicitly refuses this function by name) — but it sat
+    here returning a plausible float to anyone who called it, which is precisely the Class-B
+    defect the engineering standard names. A function whose value cannot be right does not get
+    to keep returning one.
+
+    The real figure comes from `extract_cash_statement.parse()["allowance"]`, which reads the
+    only document that contains contributions at all.
     """
-    Estimate total ISA allowance used in tax year 26/27.
-    This is the total cost basis added since 6 Apr 2026 — we approximate
-    from the portfolio total cost minus prior-year cost.
-    Conservative approach: use portfolio summary total_value minus cash as proxy.
-    Claude should verify the exact figure from AJ Bell at runtime.
-    """
-    # Best proxy: total invested value - cash
-    return portfolio["summary"]["total_value_gbp"] - portfolio["summary"]["cash_effective_gbp"]
+    raise NotImplementedError(
+        "calc_allowance_used() has been retired: total_value - cash is not an allowance. "
+        "Use extract_cash_statement.parse()['allowance'] (broker cash statement), or "
+        "extract_portfolio.parse_contributions() for the dealing-record cross-check.")
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +550,131 @@ def build_s7(portfolio: dict) -> dict:
     return {"kpis": kpis, "holdings": holdings, "notes": notes}
 
 
+def _fas_bands():
+    """Read the FRS band thresholds from their ONE HOME. They were rebased 06-Aug-2026 and a
+    hard-coded copy in the email prose would have gone on stating the old numbers."""
+    try:
+        import fund_action_stack as _f
+        return _f.FRS_HOLD_ADD, _f.FRS_RETAIN_ONLY
+    except Exception:
+        return 58.0, 43.0
+
+
+def _overlap_line(analytics):
+    """Render the PUBLISHED look-through overlap check (H10). Absence is stated, not estimated."""
+    oc = (analytics or {}).get("overlap_check") or {}
+    if oc.get("status") != "OK":
+        return (f"Overlap check UNAVAILABLE this run ({oc.get('status', 'missing')}) — "
+                f"{oc.get('note', 'no detail recorded')}")
+    parts = []
+    for c in oc.get("checks", []):
+        if c.get("basis") == "published":
+            parts.append(f"{c['ticker']} {c['lookthrough_total_pct']:.2f}% effective "
+                         f"(direct {c['direct_weight_pct']:.2f}% + funds "
+                         f"{c['via_funds_pct']:.2f}%)"
+                         + (" — FLAG >5%" if c["exceeds_flag"] else ""))
+        else:
+            parts.append(f"{c['ticker']} <={c['upper_bound_pct']:.2f}% "
+                         f"(direct {c['direct_weight_pct']:.2f}%; absent from the top ten, whose "
+                         f"floor is {oc['table_floor_pct']:.2f}%)"
+                         + (" — FLAG >5%" if c["exceeds_flag"] else ""))
+    n = (oc.get("summary") or {}).get("flags", 0)
+    return ("OVERLAP (AJ Bell / Morningstar published look-through, as at "
+            f"{oc.get('as_of')}): " + " \u00b7 ".join(parts)
+            + (f" — {n} above the 5% flag" if n else " — none above the 5% flag")
+            + ". Source: X-Ray Top 10 Underlying Holdings. The hand-calculated estimate this "
+              "replaces reported AVGO 4.04% against the published 4.31%.")
+
+
+# ── return architecture (Step 6.08) helpers — module level, because the fund table and the
+# Step 8A summary are built by DIFFERENT functions and both must read ONE document. ───────
+def _ra_load(analytics):
+    """⚑ Read the architecture from the ANALYTICS document, which the pre-run wrote it into.
+
+    The obvious implementation — open `return_architecture_{month_label}.json` — is wrong, and
+    wrong in a way that would have been invisible: the pre-run keys that file on the RUN month
+    ("aug_2026") while `portfolio_data._meta.month_label` is the DATA month ("jul_2026", from a
+    31-Jul valuation). Two variables with the same name meaning different things. Resolving by
+    label silently returned `{}`, and every consumer degraded to the retired `est_return`
+    basis while reporting nothing wrong.
+    """
+    ra = (analytics or {}).get("return_architecture") or {}
+    sc = (analytics or {}).get("section_c") or {}
+    if ra or sc.get("source"):
+        return {"as_of": ra.get("as_of"),
+                "operative_basis": ra.get("operative_basis") or sc.get("basis"),
+                "anchor": ra.get("anchor"), "thresholds": ra.get("thresholds"),
+                "expected_return_inputs": ra.get("expected_return_inputs") or [],
+                "basis_study": ra.get("basis_study"),
+                "section_c": {"value_pct": sc.get("total_return"),
+                              "anchor_pct": sc.get("anchor_pct"),
+                              "verdict": sc.get("verdict"),
+                              "shortfall_pp": sc.get("shortfall_pp"),
+                              "coverage": (None if sc.get("coverage_pct") is None
+                                           else sc["coverage_pct"] / 100.0)},
+                "shortfall_attribution": {"rows": sc.get("shortfall_attribution") or []},
+                "levers": sc.get("levers") or [],
+                "not_summable_note": sc.get("levers_note")}
+    return {}
+
+
+def _er_cell(dr, ra):
+    """The DECLARED long-run expectation Section A is computed from, with the REALISED figure
+    the FRS uses beside it. Two numbers, both named — the column previously held one unnamed
+    number that had been typed by hand a month earlier."""
+    row = {i.get("asset_id"): i for i in ((ra or {}).get("expected_return_inputs") or [])}.get(
+        dr.get("ticker"))
+    if not row:
+        v = dr.get("est_return_pct")
+        return ("\u2014" if v is None else
+                f"{v:.1f}% (est \u2014 RETIRED basis, register C4; continuity only)")
+    p, r = row.get("prior_pct"), row.get("realised_pct")
+    if p is None:
+        return f"UNMEASURED \u2014 {row.get('unmeasured_reason') or 'no declared expectation'}"
+    out = f"{p:.1f}% declared"
+    if r is not None:
+        out += f" \u00b7 {r:.1f}% realised"
+    return out
+
+
+def _section_c_value(ra, ana):
+    sc = (ra.get("section_c") or {})
+    v, a = sc.get("value_pct"), sc.get("anchor_pct")
+    if v is None or a is None:
+        return "[X.X%] vs required-return anchor (target_state.json, A19)"
+    gap, cov = sc.get("shortfall_pp"), sc.get("coverage")
+    return (f"{v:.2f}% vs a required {a:.1f}% \u2014 "
+            + (f"short by {gap:.2f}pp" if gap and gap > 0 else f"ahead by {abs(gap or 0):.2f}pp")
+            + f"; basis '{ra.get('operative_basis')}'"
+            + (f", coverage {cov:.0%}" if cov is not None else ""))
+
+
+def _perf_cell(golden_pct, golden_as_of, xray_pct, xray_as_of):
+    """⚑ NEVER A BARE FIGURE. Golden source first, X-Ray beside it, each with ITS OWN date."""
+    parts = []
+    if golden_pct is not None:
+        parts.append(f"{golden_pct:+.1f}%" + (f" ({_short_date(golden_as_of)})" if golden_as_of else ""))
+    if xray_pct is not None:
+        parts.append("X-Ray " + f"{xray_pct:+.1f}%"
+                     + (f" ({_short_date(xray_as_of)})" if xray_as_of else " (date not captured)"))
+    if not parts:
+        return "\u2014 no return on record from either source"
+    return " \u00b7 ".join(parts)
+
+
+def _short_date(v):
+    try:
+        from datetime import date as _d
+        y, m, dd = str(v)[:10].split("-")
+        return f"{int(dd):02d}-{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][int(m)-1]}-{y[2:]}"
+    except Exception:                                          # noqa: BLE001
+        return str(v)[:10] if v else ""
+
+
 def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
+    # ── return architecture (Step 6.08) — the authority for Section A/B/C ────────────
+    _ra_doc = _ra_load(analytics)
+
     """Section 8 — Fund Portfolio Review (incl. Step 8A pre-computed data)."""
     total_value = portfolio["summary"]["total_value_gbp"]
 
@@ -563,6 +698,20 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
         ms_rating = xf.get("ms_rating")
         perf_1yr  = xf.get("return_1yr")
         ongoing_cost = xf.get("ongoing_cost")
+        # ── golden-source step 7: DATED columns, never a bare figure ──────────────────────
+        # This cell read `xf.get("return_1yr")` — the X-Ray's 1-year number, rendered as a bare
+        # "+17.7%". Two things were wrong with that and both are register items: the X-Ray is
+        # struck at its OWN date, up to 61 days stale and NOT uniform across funds (M6), and it
+        # is the DEMOTED source — the golden NAV series is primary (FP1). A figure with no date
+        # is a figure that cannot be reconciled with anything, which is how a month-stale return
+        # came to be published as current (D1).
+        _ra_row = {i.get("asset_id"): i for i in (_ra_doc.get("expected_return_inputs") or [])}.get(ticker) or {}
+        _g1y = ((_ra_row.get("corroborators") or {}).get("realised_windows") or {}).get("1y")
+        # ⚑ The golden source's OWN evaluation date. The first cut read
+        # `_ra_doc["anchor"]["as_of"]`, a key that does not exist — it fell through to the run
+        # date and produced the right answer for the wrong reason. A date that is correct by
+        # accident is the same defect as a value that is: nothing would have caught it moving.
+        _g_asof = (_ra_doc.get("as_of") or (analytics.get("_meta") or {}).get("run_date"))
 
         signal = dr.get("signal", "—")
         signal_map = {
@@ -577,7 +726,10 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
             "ticker":       ticker,
             "value":        f"£{fund['value_gbp']:,.2f}",
             "weight_pct":   f"{fund.get('weight_pct', 0):.2f}%",
-            "perf_1yr":     f"{perf_1yr:+.1f}%" if perf_1yr is not None else "—",
+            "perf_1yr":     _perf_cell(_g1y, _g_asof, perf_1yr, xf.get("as_of")),
+            "perf_1yr_basis": ("golden NAV series (primary) with the X-Ray beside it as the "
+                               "independent second derivation; each carries its own strike date "
+                               "because they are NOT struck on the same day (register M6)"),
             "ms_rating":    str(ms_rating) if ms_rating else "—",
             "bucket":       dr.get("bucket", "—"),
             "target_pct":   f"{dr.get('target_pct', '—')}%" if dr.get("target_pct") is not None else "—",
@@ -586,7 +738,12 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
                 f"{dr.get('band_low_pct')}–{dr.get('band_high_pct')}%"
                 if dr.get("band_low_pct") is not None else "—"
             ),
-            "est_return":   "[Claude fills]",
+            # ⚑ NO LONGER A FILL-IN (build item #1, 06-Aug-2026). This column carried
+            # "[Claude fills]" and was filled with prose typed by hand — on the August run it
+            # still held July's strings. It now renders the DECLARED long-run expectation that
+            # Section A is actually computed from, with the realised figure beside it so the
+            # two can visibly disagree.
+            "est_return":   _er_cell(dr, _ra_doc),
             "signal":       signal,
             "status_level": "ok",
             "status_html":  (
@@ -620,8 +777,18 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
             "status":     analytics["section_b"].get("status", "indicative"),
         },
         "section_c": {
-            "result": "[Claude fills after Section A complete — On track / Watch / Flag]",
-            "value":  "[X.X%] vs required-return anchor (target_state.json, A19)",
+            # ⚑ WAS "[Claude fills after Section A complete]". Section C is the one number that
+            # answers whether the portfolio reaches £1m, and it was a hand-typed sentence.
+            "result": (_ra_doc.get("section_c", {}).get("verdict")
+                       or analytics.get("section_c", {}).get("verdict")
+                       or "[Claude fills — On track / Watch / Flag]"),
+            "value": _section_c_value(_ra_doc, analytics),
+            "shortfall_pp": (_ra_doc.get("section_c", {}) or {}).get("shortfall_pp"),
+            "basis": _ra_doc.get("operative_basis"),
+            "attribution": (_ra_doc.get("shortfall_attribution", {}) or {}).get("rows", [])[:6],
+            "levers": [l for l in (_ra_doc.get("levers") or []) if l.get("feasible")],
+            "levers_blocked": [l for l in (_ra_doc.get("levers") or []) if not l.get("feasible")],
+            "levers_note": _ra_doc.get("not_summable_note"),
             "anchor_note": build_b5_trajectory(load_json_optional(
                                os.path.join(SCRIPT_DIR, "target_state.json")),
                                date.today()).split(" | ")[2]
@@ -629,7 +796,10 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
                            else "see target_state.json (A19)",
             "status": "pending",
         },
-        "overlap_check": "[Claude fills at Step 8A — checks each stock vs fund top-10 holdings]",
+        # H10 (06-Aug-2026): no longer a fill-in. The PUBLISHED X-Ray look-through table is the
+        # source; the hand-calculation it replaced reported AVGO 4.04% against a published 4.31%.
+        # An absent table renders as a STATED absence, never as a request to estimate.
+        "overlap_check": _overlap_line(analytics),
         "regime":        "[Claude fills at Step 8A — REGIME: [X] — Watch: [factor] — Tilt effect: ...]",
         "alt_research":  "[Claude fills if triggered — Confirm hold / Recommend replacement / Watchlist]",
     }
@@ -647,10 +817,89 @@ def build_s8(portfolio: dict, analytics: dict, xray: dict) -> dict:
             parts.append(f"{v['name']}: {p:.1f}% ({sign}{vs:.1f}pp vs benchmark)")
         xray_summary = "Largest deviations: " + " | ".join(parts)
 
+    # ── FUND ACTION STACK (C4/C5) — 05-Aug-2026 ──────────────────────────────────────
+    # It was built, tested and running in the pre-run, and NONE of it reached the report.
+    # FRS bands, the anchor rule, window splits and the dead-money agenda existed only in
+    # fund_action_stack_[mmm].json. Analysis Raj cannot see cannot change a decision, and the
+    # fund sleeve is 85% of the ISA — so this is the step that makes C4/C5 real rather than
+    # merely correct.
+    fas_block = _fund_action_stack_block()
+
     return {
         "funds":          fund_rows,
         "step8a_summary": step8a_summary,
         "xray_summary":   xray_summary,
+        "action_stack":   fas_block,
+    }
+
+
+def _fund_action_stack_block(path=None):
+    """Read the pre-run's `fund_action_stack_[mmm].json` for the email.
+
+    Absent file -> a STATED absence, never silence: if the fund sleeve went unassessed this
+    month, the report says so rather than simply omitting the section, because an omitted
+    section reads as 'nothing to report'.
+    """
+    import glob as _g
+    try:
+        cands = sorted(_g.glob(os.path.join(SCRIPT_DIR, "fund_action_stack_*.json")),
+                       key=os.path.getmtime)
+        if path:
+            cands = [path]
+        if not cands:
+            return {"available": False,
+                    "note": ("Fund Action Stack not produced this month (pre-run Step 6.05 did "
+                             "not run or failed). The fund sleeve is 85% of the ISA and has "
+                             "NOT been assessed against the anchor rule this month.")}
+        with open(cands[-1], encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception as e:
+        return {"available": False, "note": f"Fund Action Stack unreadable: {type(e).__name__}: {e}"}
+
+    sm = d.get("summary", {})
+    rows = []
+    for x in d.get("fund_action_stack", []):
+        r = next((y for y in d.get("fund_retention_score", [])
+                  if y["sedol"] == x["sedol"]), {})
+        wins = r.get("windows") or {}
+        rows.append({
+            "rank": x["rank"], "name": x["name"], "band": x["band"],
+            "frs": x["frs"], "value_gbp": x.get("value_gbp"),
+            "windows": " · ".join(f"{k} {v:.1f}%" for k, v in
+                                  sorted(wins.items(), key=lambda kv: int(kv[0][:-1]))),
+            "window_split": bool(r.get("window_split")),
+            "bucket_minimum_pct": x.get("bucket_minimum_pct"),
+            "anchor_rule_pass": x.get("anchor_rule_pass"),
+            "action": x.get("action_required"),
+            "why": "; ".join((r.get("rationale") or [])[:2]),
+        })
+    return {
+        "available": True,
+        "as_of": d.get("as_of"),
+        "summary": sm,
+        "headline": (f"{sm.get('n_funds', 0)} funds — HOLD/ADD {sm.get('hold_add', 0)} · "
+                     f"RETAIN-ONLY {sm.get('retain_only', 0)} · WINDOW-SPLIT "
+                     f"{sm.get('window_split', 0)} · DEAD MONEY {sm.get('dead_money', 0)}"
+                     + (f" (£{sm.get('dead_money_value_gbp', 0):,.0f})"
+                        if sm.get('dead_money_value_gbp') else "")),
+        "rows": rows,
+        "anchor_failures": d.get("anchor_rule_failures", []),
+        "window_conflicts": d.get("dominance_window_conflicts", []),
+        "disputed": (d.get("xray_cross_check") or {}).get("disputed", []),
+        "method_note": (
+            "FRS is the fund analogue of the stock Source Score: return adequacy 35 / "
+            "risk-adjusted efficiency 25 / marginal diversification 20 / fee efficiency 10 / "
+            "mandate integrity 10. Bands: >=%.0f HOLD/ADD, %.0f-%.0f RETAIN-ONLY (no new "
+            "money), " % (_fas_bands()[0], _fas_bands()[1], _fas_bands()[0] - 1) +
+            "<%.0f DEAD MONEY. " % _fas_bands()[1] +
+            "Return adequacy is measured across 1y/3y/5y/10y and scored on the "
+            "MEDIAN, because a single window is a bet on a start date, not a measurement -- "
+            "Scottish Mortgage reads 0.2% over 5y and 22% over 3y purely because the 2022 "
+            "-45.7% year is inside one window and outside the other. A fund whose windows "
+            "DISAGREE is banded WINDOW-SPLIT and is explicitly NOT dead money. Points above "
+            "the floor are scaled to the sleeve's 75th percentile, so clearing the minimum and "
+            "beating it are no longer the same score; the bands were rebased in the same change "
+            "so the ownership floor did not move as a side effect."),
     }
 
 
@@ -742,7 +991,7 @@ def skeleton_s1() -> dict:
     }
 
 
-def skeleton_s2() -> dict:
+def skeleton_s2(analytics=None) -> dict:
     return {
         "kpis": [
             {"label": "Capital Available", "value": "[Claude fills]", "sub": "Effective cash", "style": "normal"},
@@ -760,15 +1009,56 @@ def skeleton_s2() -> dict:
         ],
         "notes": "[Claude fills: explicit statement of capital deployed now vs retained, and why.]",
         # Doc B standing lines (computed; render verbatim in §2)
-        "standing_lines": _s2_standing_lines(),
+        "standing_lines": _s2_standing_lines(analytics),
     }
 
 
-def _s2_standing_lines() -> list:
+def _s2_north_star_lines(analytics=None) -> list:
+    """One line for the gap, one for the largest drags, one for the cheapest lever."""
+    ra = _ra_load(analytics or {})
+    sc = (ra.get("section_c") or {})
+    v, a = sc.get("value_pct"), sc.get("anchor_pct")
+    if v is None or a is None:
+        return ["Total ISA expected return: NOT COMPUTED this run — Step 6.08 "
+                "(return_architecture) did not produce a Section C. This is the number that "
+                "says whether the plan is on track; its absence is a run failure, not a gap "
+                "in the data."]
+    gap = sc.get("shortfall_pp") or 0.0
+    out = [f"Total ISA expected return: {v:.2f}% vs a required {a:.1f}% — "
+           f"{'SHORT by ' + format(gap, '.2f') + 'pp' if gap > 0 else 'AHEAD by ' + format(abs(gap), '.2f') + 'pp'} "
+           f"({sc.get('verdict')}), basis '{ra.get('operative_basis')}'"]
+    rows = (ra.get("shortfall_attribution") or {}).get("rows") or []
+    drags = [r for r in rows if (r.get("contribution_to_shortfall_pp") or 0) > 0][:3]
+    if drags:
+        out.append("Largest drags on the required return: " + " · ".join(
+            f"{r['asset_id']} {r['contribution_to_shortfall_pp']:+.2f}pp "
+            f"({r['weight_of_covered_pct']:.1f}% at {r['er_pct']:.1f}%)" for r in drags))
+    lev = sorted((l for l in (ra.get("levers") or [])
+                  if l.get("feasible") and l.get("delta_pp") is not None),
+                 key=lambda l: -l["delta_pp"])[:2]
+    if lev:
+        out.append("Largest priced levers: " + " · ".join(
+            f"{l['lever']} {l['delta_pp']:+.2f}pp" for l in lev)
+            + " — priced independently, NOT additive; see §8 Section C.")
+    blocked = [l for l in (ra.get("levers") or []) if not l.get("feasible")]
+    for b in blocked:
+        out.append(f"Lever BLOCKED — {b['lever']}: {b.get('blocked_reason')}")
+    return out
+
+
+def _s2_standing_lines(analytics=None) -> list:
     """B5 trajectory + B1 drawdown-ladder standing lines for §2 (+ A21 policy note)."""
     lines = []
     ts = load_json_optional(os.path.join(SCRIPT_DIR, "target_state.json"))
     lines.append(build_b5_trajectory(ts, date.today()))
+    # ── ⚑ THE NORTH-STAR LINE, BESIDE THE ANCHOR IT IS MEASURED AGAINST ──────────────
+    # Section A/B/C lives inside §8, which is the largest section in the report and sits 5th
+    # in the lean triage order. On a full month §8 is dropped from the emailed copy — which
+    # would take the answer to "am I on track for £1m" out of the email while leaving the
+    # required return in it. The trajectory line states the BAR; this states where the
+    # portfolio actually is against it, and the two belong together. Same reasoning that
+    # raised §10 on 05-Aug: highest value per byte in the report.
+    lines.extend(_s2_north_star_lines(analytics))
     ds = load_json_optional(os.path.join(SCRIPT_DIR, "drawdown_state.json"))
     if ds and ds.get("last_check"):
         lines.append(f"Drawdown ladder: {ds.get('drawdown_pct', 0):+.1f}% from 252d high | "
@@ -1229,7 +1519,7 @@ def build_prefilled_email(
         ),
         "meta":                   build_meta(portfolio, run_date),
         "s1_decision_summary":    skeleton_s1(),
-        "s2_capital_allocation":  skeleton_s2(),
+        "s2_capital_allocation":  skeleton_s2(analytics),
         "s3_investment_cases":    build_s3_from_scored(scored) if has_scored else skeleton_s3(),
         "s4_liquidation_tracker": skeleton_s4(),
         "s5_watchlist":           _s5,

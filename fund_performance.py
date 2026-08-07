@@ -22,7 +22,12 @@ UNIVERSE = os.path.join(SCRIPT_DIR, "fund_universe.json")
 CACHE_DIR = os.path.join(SCRIPT_DIR, "nav_cache")
 HISTORY_CSV = os.path.join(SCRIPT_DIR, "fund_performance_history.csv")
 
-WINDOWS = {"1m": 1/12, "3m": 0.25, "6m": 0.5, "1y": 1.0, "3y": 3.0, "5y": 5.0}
+WINDOWS = {"1m": 1/12, "3m": 0.25, "6m": 0.5, "1y": 1.0, "3y": 3.0, "5y": 5.0,
+           # 10y added 05-Aug-2026: a single window is a bet on a start date. Scottish
+           # Mortgage reads ~0.2% over 5y, ~22% over 3y and ~16.7% over 10y — the same
+           # fund, three answers, decided entirely by whether the 2022 -45.7% year is
+           # inside the window. The anchor rule now needs every window it can get.
+           "10y": 10.0}
 PRICE_MATCH_TOL_PCT = 1.0      # I1
 MAX_PRICING_LAG_DAYS = 3       # I1: OEICs are struck T-1 vs the broker valuation
                                # date; ETFs/ITs T-0. Empirically every holding
@@ -90,9 +95,18 @@ def _scale_for(u):
     return 100.0 if (u or {}).get("price_unit") == "GBp" else 1.0
 
 
-def fetch_nav_history(symbol, period="10y", use_cache=True, refresh=False, scale=1.0):
+def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale=1.0):
     """[(date, close)] ascending, dividend-reinvested. Cached so the 45s sandbox
-    ceiling cannot half-complete a 12-fund run."""
+    ceiling cannot half-complete a 12-fund run.
+
+    ⚑ period="max", NOT "10y" (fixed 06-Aug-2026). A fetch exactly as long as the longest window
+    can never cover that window: yfinance measures 10y back from TODAY, the returns are measured
+    back from a MONTH-END as_of, and the few days between them are enough. Every cache begins
+    2016-08-05 while the 10-year window from 31-Jul-2026 needs 01-Aug-2016 — short by four days.
+    The consequence was that the 10y window, declared in WINDOWS and load-bearing in the
+    return-adequacy median, produced NOTHING for any of the twelve funds on any run since it was
+    added, and read as "not applicable" rather than "never fetched". `window_coverage()` below
+    now makes that class of silence impossible to repeat."""
     if not symbol:
         return []
     if use_cache and not refresh:
@@ -152,12 +166,31 @@ def trailing_return(series, as_of, years, source, label):
     if not end:
         return miss(f"no NAV within 10d of {as_of}")
     start_target = _years_before(as_of, years)
-    if series[0][0] > start_target:
+    # ⚑ ONE THRESHOLD, NOT TWO (fixed 06-Aug-2026). This gate demanded the history reach the FULL
+    # window while MIN_COVERAGE below declared 98% sufficient — two rules for the same question,
+    # with the stricter one winning silently and MIN_COVERAGE never consulted at the boundary.
+    # Every cache begins 2016-08-05 and the 10-year window from 31-Jul-2026 needs 01-Aug-2016, so
+    # the 10y figure was refused on FOUR DAYS while 99.9% of the window was sitting in the file.
+    # The two now agree, and MIN_COVERAGE is the single home for "how much of the window is
+    # enough". (Annualisation stays on the NOMINAL window — that is the convention Morningstar
+    # uses and the reason RLGES 15.82 and JPM UK 12.06 reproduce to 2dp.)
+    if series[0][0] > _years_before(as_of, years * MIN_COVERAGE):
         have = (as_of - series[0][0]).days / 365.25
-        return miss(f"insufficient_history: {have:.1f}y available, {years:g}y required")
+        return miss(f"insufficient_history: {have:.2f}y available, "
+                    f"{years * MIN_COVERAGE:.2f}y required ({MIN_COVERAGE:.0%} of {years:g}y)")
     start = _nav_on_or_before(series, start_target, max_back_days=15)
     if not start:
-        return miss(f"no NAV within 15d of {start_target}")
+        # The history begins just AFTER the window's start date. Refusing here was the second
+        # half of the same two-thresholds defect: the gate above now admits 98% coverage, and
+        # then this lookup demanded a NAV on or before the full-window date and refused anyway.
+        # Fall back to the earliest observation and let MIN_COVERAGE below be the single arbiter.
+        cand = series[0]
+        if (end[0] - cand[0]).days / 365.25 >= years * MIN_COVERAGE:
+            start = cand
+        else:
+            return miss(f"no NAV within 15d of {start_target} and the earliest observation "
+                        f"({cand[0]}) covers only "
+                        f"{(end[0] - cand[0]).days / 365.25:.2f}y of {years:g}y")
     covered = (end[0] - start[0]).days / 365.25
     if covered < years * MIN_COVERAGE:
         return miss(f"window_undercovered: {covered:.2f}y of {years:g}y")
@@ -165,7 +198,7 @@ def trailing_return(series, as_of, years, source, label):
         return miss("non-positive start NAV")
     cum = (end[1] / start[1]) - 1.0
     ann = (1.0 + cum) ** (1.0 / years) - 1.0 if years >= 1 else cum
-    note = f"{start[0]}->{end[0]}"
+    note = f"{start[0]}->{end[0]} ({covered:.2f}y covered of {years:g}y nominal)"
     return (Metric(cum * 100, end[0], source, unit="%", note=note),
             Metric(ann * 100, end[0], source, unit="%", note=note))
 
@@ -280,6 +313,17 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
     out["nav_points"] = len(series)
     if series:
         out["nav_range"] = [series[0][0].isoformat(), series[-1][0].isoformat()]
+        # DECLARED inception (KID/factsheet), carried so that an absent window can be
+        # classified rather than merely reported. Absent = the absence stays `unclassified`,
+        # which is an honest open question, not a pass.
+        out["declared_inception"] = (u or {}).get("inception")
+        out["inception_source"] = (u or {}).get("inception_source")
+        if out["declared_inception"] and out["nav_range"][0] < str(out["declared_inception"])[:10]:
+            out.setdefault("notes", []).append(
+                f"⚑ NAV history begins {out['nav_range'][0]}, BEFORE the declared inception "
+                f"{out['declared_inception']} — one of the two is wrong. Declared inception is "
+                f"not used for this fund until reconciled.")
+            out["declared_inception"] = None
 
     # Pin the measurement date to the NAV the BROKER actually priced against.
     # "Latest available" makes a return depend on WHEN the pipeline runs, because
@@ -345,6 +389,85 @@ def all_fund_performance(as_of, portfolio_funds=None, refresh=False):
         missing = [f["ticker"] for f in portfolio_funds if f["ticker"] not in res]
         res["_i5_coverage"] = {"pass": not missing, "missing": missing}
     return res
+
+
+def window_coverage(perf_by_sedol):
+    """I8 — a DECLARED window that yields nothing for the ENTIRE universe is a build fault, not a
+    data fact. It was silence exactly like this that hid the 10-year window for a whole month:
+    every fund returned Missing('insufficient_history'), which is individually plausible and
+    collectively impossible. One fund missing a window is data; twelve of twelve is code."""
+    cov = {w: {"have": [], "missing": {}} for w in WINDOWS}
+    for sedol, p in sorted(perf_by_sedol.items()):
+        if str(sedol).startswith("_"):
+            continue
+        for w in WINDOWS:
+            a = ((p.get("returns", {}).get(w) or {}).get("annualised") or {})
+            if a.get("present"):
+                cov[w]["have"].append(sedol)
+            else:
+                cov[w]["missing"][sedol] = a.get("reason", "absent")
+    n = sum(1 for k in perf_by_sedol if not str(k).startswith("_"))
+    out = {}
+    for w, c in cov.items():
+        # ⚑ FIXED 06-Aug-2026. This line was
+        #     {k: v for k, v in list(c["missing"].items())[:3]}
+        # — the reasons were TRUNCATED TO THREE. On the August run four funds had no 10-year
+        # figure and three reasons were published, so **VUAG's absence was silent**: the report
+        # showed 8 of 12 covered and explained 3 of the 4 gaps, with nothing indicating that
+        # anything had been left out.
+        #
+        # This is the same failure as N5 (`consistency_check` verifying a fixed byte window
+        # instead of the table): a report whose explanatory coverage shrinks as the thing it
+        # explains grows. It is harmless-looking at 4 gaps and a false all-clear at 40.
+        # An explanation list must never be truncated — the whole point of it is completeness.
+        out[w] = {"covered": len(c["have"]), "of": n,
+                  "alarm": bool(n and not c["have"]),
+                  "n_missing": len(c["missing"]),
+                  "reasons": dict(c["missing"])}
+        assert len(out[w]["reasons"]) == out[w]["n_missing"], (
+            f"{w}: every absence must carry a reason ({out[w]['n_missing']} missing, "
+            f"{len(out[w]['reasons'])} explained)")
+        assert out[w]["covered"] + out[w]["n_missing"] == n, (
+            f"{w}: covered + missing must equal the universe")
+        # ── structural history limit vs an unexpected short series ─────────────────────
+        # "insufficient_history" is two different facts wearing one label: a fund that did not
+        # exist yet (permanent, expected, not a defect) and a fetch that came back short
+        # (transient, a defect, and indistinguishable from the first without a second source).
+        # `inception` in fund_universe.json is that second source — DECLARED from the KID, never
+        # inferred — and the two must agree.
+        struct = {}
+        for sd, reason in out[w]["reasons"].items():
+            p = perf_by_sedol.get(sd) or {}
+            inc = p.get("declared_inception")
+            first = (p.get("nav_range") or [None])[0]
+            cls = "unclassified"
+            note = ("no declared inception in fund_universe.json — this absence cannot be "
+                    "distinguished from a short fetch. One declared date per fund closes it.")
+            if "not published" in str(reason):
+                cls, note = "source_does_not_publish", str(reason)
+            elif inc:
+                need = _years_before(dt.date.today(), WINDOWS[w])
+                inc_d = str(inc)[:10]
+                if inc_d > need.isoformat():
+                    cls = "structural_history_limit"
+                    note = (f"declared inception {inc_d} postdates the {w} window start "
+                            f"{need.isoformat()} — the history does not exist and never will. "
+                            f"Expected, permanent, NOT a defect.")
+                else:
+                    cls = "UNEXPECTED_SHORT_SERIES"
+                    note = (f"⚑ declared inception {inc_d} PREDATES the {w} window start "
+                            f"{need.isoformat()}, so this history should exist. A short series "
+                            f"here is a FETCH problem, not a fund fact.")
+            struct[sd] = {"reason": str(reason), "classification": cls,
+                          "declared_inception": inc, "observed_series_start": first,
+                          "note": note}
+        out[w]["absence_classification"] = struct
+        if out[w]["alarm"]:
+            out[w]["note"] = (f"⚑ the {w} window produced NOTHING across all {n} funds. A window "
+                              f"declared in WINDOWS and used by return adequacy must either "
+                              f"produce values or be removed — an empty one reads as 'not "
+                              f"applicable' and quietly shrinks the evidence base.")
+    return out
 
 
 def append_history(perf_by_sedol, est_by_sedol, run_date):

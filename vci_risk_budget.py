@@ -85,10 +85,18 @@ if __name__ == "__main__":
     openp = [dict(ticker="A", size_pct=1.0, L=0.60, p_thesis=0.30, catalyst_domain="biotech_readout"),
              dict(ticker="B", size_pct=0.75, L=0.35, p_thesis=0.55, catalyst_domain="ai_optical")]
     print("committed:", committed_risk(openp))
-    # a small 3rd binary should ADMIT (count cap alone at 2 would have blocked)
-    r1 = admit(dict(ticker="C", size_pct=0.5, L=0.35, p_thesis=0.55, catalyst_domain="rare_earth"), openp)
-    print("small 3rd:", r1["ok"], r1["reason"])
+    # Mechanism demo: with the count cap loosened to 3 (E4's original design point), a small 3rd
+    # binary should ADMIT on budget grounds alone (a tight count cap at 2 would have blocked it).
+    # The LIVE config cap is 2, not 3 (31-Jul-2026 reconciliation, scoring_config.py §9.4) -- pass
+    # max_concurrent explicitly here to demonstrate the mechanism independent of that live policy value.
+    r1 = admit(dict(ticker="C", size_pct=0.5, L=0.35, p_thesis=0.55, catalyst_domain="rare_earth"),
+               openp, max_concurrent=3)
+    print("small 3rd (cap loosened to 3):", r1["ok"], r1["reason"])
     assert r1["ok"]
+    # Regression: under the LIVE cap (2), that same 3rd binary is correctly blocked by count alone.
+    r1_live = admit(dict(ticker="C", size_pct=0.5, L=0.35, p_thesis=0.55, catalyst_domain="rare_earth"), openp)
+    print("small 3rd (live cap=2):", r1_live["ok"], r1_live["reason"])
+    assert not r1_live["ok"] and "count cap" in r1_live["reason"]
     # an oversized 3rd should DENY on a tight budget (committed 0.54 + 0.675 = 1.21 > 1.0)
     r2 = admit(dict(ticker="D", size_pct=1.5, L=0.60, p_thesis=0.25, catalyst_domain="quantum"), openp, budget=1.0)
     print("oversized:", r2["ok"], r2["reason"])

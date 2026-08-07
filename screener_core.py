@@ -1756,46 +1756,12 @@ def apply_gates_standard(ticker_sym, info, income_stmt, cashflow):
             "rev_cagr_3yr": rev_cagr}
 
 
-# Security-type classification for the CAPTURE LAYER ONLY. Never consulted by a gate, a score
-# or the universe filter (H7: the capture layer observes, it never calibrates).
-#
-# Why it exists: the NASDAQ constituent feed labelled "clean equities" contains preferred
-# depositary shares and baby bonds (ACGLN, ACGLO, ADAML/M/N ...). yfinance reports quoteType
-# "EQUITY" for all of them, so they cannot be told apart from the info payload — but the feed's
-# own `company` description names the instrument exactly. These securities have no revenue line
-# and no marketCap, so they depress every coverage statistic without any measurement having
-# failed. Left unclassified they would make a universe-hygiene problem look like a data-quality
-# problem, which is the specific confusion this framework keeps having.
-_NON_COMMON_MARKERS = (
-    "depositary share", "depositary receipt", "preferred", "pfd", "% series", "% notes",
-    "senior note", "subordinated note", " notes due", "warrant", " unit", "units)", " right",
-    " rights", "trust preferred", "capital security", "debenture",
+# Security-type classification — SINGLE HOME is `security_type.py` (extracted 05-Aug-2026).
+# Re-exported here so existing references keep resolving. Do NOT re-add the implementation:
+# two copies of a classification rule is the Class D defect this project keeps paying for.
+from security_type import (                       # noqa: F401
+    classify_security_type, _NON_COMMON_MARKERS, _COMMON_MARKERS,
 )
-_COMMON_MARKERS = ("common stock", "ordinary share", "ordinary stock", "class a", "class b",
-                   "class c", "american depositary share", "american depositary receipt",
-                   "shares of beneficial interest")
-
-
-def classify_security_type(company_desc, ticker=None):
-    """'common' | 'non_common' | 'unknown' from the constituent feed's own description.
-
-    American Depositary Shares are COMMON — they are the ordinary equity of a foreign issuer
-    (Abivax/ABVX). Plain 'Depositary Shares' are the preferred wrapper (Arch Capital/ACGLN).
-    That single distinction is why this reads the description rather than pattern-matching on
-    the word 'depositary'.
-    """
-    d = str(company_desc or "").lower()
-    if not d:
-        return "unknown"
-    if "american depositary" in d:
-        return "common"
-    for m in _NON_COMMON_MARKERS:
-        if m in d:
-            return "non_common"
-    for m in _COMMON_MARKERS:
-        if m in d:
-            return "common"
-    return "unknown"
 
 
 def measure_gate_variables(ticker_sym, info, income_stmt, cashflow):
@@ -3455,21 +3421,144 @@ def save_csv(df, path):
     log.info(f"Saved: {path} ({len(df)} rows)")
 
 
+def measure_formation_frictions(scored, info):
+    """§Q4 — what would it have COST to take this signal, measured at formation.
+
+    Six fields, all point-in-time:
+      bid / ask / spread_pct   the irrecoverable ones — yfinance reports the CURRENT book and
+                               nothing stores it, so an unrecorded week is gone for good
+      avg_volume_3m            average daily share volume
+      adv_value                average daily traded VALUE = ADV x price, in the listing currency.
+                               Value, not share count: 10m shares at $2 and 10m at $200 are not
+                               the same liquidity, and the share count alone invites that error
+      liquidity_basis          which of the above were actually available, so a later study can
+                               tell "thin" from "unmeasured"
+
+    A missing input yields None plus a stated reason. Never 0 — a zero spread and an unmeasured
+    spread are opposite facts and the framework has already been bitten by exactly that
+    conflation (`source_score` absent read as zero, CAP-4).
+    """
+    import datetime as _d
+    out = {"bid": None, "ask": None, "spread_pct": None, "avg_volume_3m": None,
+           "adv_value": None, "mkt_cap": None, "liquidity_basis": None,
+           "liquidity_as_of": _d.datetime.now(_d.timezone.utc).isoformat(timespec="seconds")}
+    have, missing = [], []
+
+    def _n(k):
+        try:
+            v = info.get(k)
+            if v is None or v != v:
+                return None
+            v = float(v)
+            return v if v > 0 else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    bid, ask = _n("bid"), _n("ask")
+    px = _n("currentPrice") or _n("regularMarketPrice") or _n("previousClose")
+    if bid and ask and ask >= bid:
+        mid = (bid + ask) / 2.0
+        out["bid"], out["ask"] = bid, ask
+        out["spread_pct"] = round(100.0 * (ask - bid) / mid, 4) if mid else None
+        have.append("quoted_spread")
+    else:
+        missing.append("bid/ask absent from the info payload — a POINT-IN-TIME spread cannot "
+                       "be reconstructed later, so this week's is permanently unavailable")
+
+    vol = _n("averageVolume") or _n("averageDailyVolume3Month") or _n("averageVolume10days")
+    if vol:
+        out["avg_volume_3m"] = vol
+        have.append("avg_volume")
+        if px:
+            out["adv_value"] = round(vol * px, 2)
+            have.append("adv_value")
+        else:
+            missing.append("no price, so average daily traded VALUE cannot be formed from volume")
+    else:
+        missing.append("no average volume in the info payload")
+
+    # market cap: a SECOND, independent tie-break input for the listing policy, so a single
+    # absent field cannot leave an issuer unresolvable
+    mc = _n("marketCap")
+    if mc:
+        out["mkt_cap"] = mc
+        have.append("mkt_cap")
+    else:
+        out["mkt_cap"] = None
+        missing.append("no marketCap in the info payload")
+
+    out["liquidity_basis"] = ("; ".join(have) if have else "UNMEASURED") + \
+        ((" | missing: " + "; ".join(missing)) if missing else "")
+    scored.update(out)
+    return out
+
+
 def save_full_data(rows, outputs_dir, run_date, group):
     df   = pd.DataFrame(rows, columns=FIELD_MAP)
     path = os.path.join(outputs_dir, f"{run_date}_{group}_full_data.csv")
     save_csv(df, path)
+    _inv = os.path.dirname(os.path.abspath(__file__))
     # Jul-26 Part 9a: append the point-in-time score panel (learning module). Best-effort — a logging
     # failure must never break a screen. Persistent store lives beside the scripts (synced with the repo).
     try:
         import score_panel_logger as _spl
-        _store = os.path.join(os.path.dirname(os.path.abspath(__file__)), "score_panel.csv")
+        _store = os.path.join(_inv, "score_panel.csv")
         _spl.log_from_full_data(df, group=group, run_date=run_date, store=_store)
     except Exception as _e:
         try:
             log.warning(f"score-panel log skipped: {_e}")
         except Exception:
             pass
+
+    # §Q capture (05-Aug-2026) — MECHANISM, not instruction.
+    # ------------------------------------------------------------------
+    # Run_Context step 16c-2 already mandates `capture_screen_artefacts.py`, but a prose step is
+    # the 17th of 19 in a 116KB document and step 16b's own degradation ladder does not name it —
+    # so under session pressure it is dropped, and a dropped week is gone forever. Capture is
+    # therefore a PROPERTY OF PRODUCING THE FRAME: whatever writes full_data also retains it.
+    # 16c-2 remains, downgraded from mechanism to verification (and it is where the regime stamp
+    # gets upgraded to point-in-time, because drawdown_monitor.py has run by then).
+    #
+    # Deliberately best-effort on the SCREEN, but NOT silent: the outcome is written to
+    # `screen_capture_status.json` and asserted independently by
+    # consistency_check.pair_screen_capture_coverage(), so a silent failure here cannot survive
+    # to the next consistency run. (Class A defence: the failure yields a recorded reason,
+    # never a plausible-looking success.)
+    _cap = {"run_date": run_date, "group": group, "path": path, "ok": False, "reason": None}
+    try:
+        import capture_screen_artefacts as _csa
+        _r = _csa.capture_one(path, _inv, run_date=None, group=None)
+        _fd = _r.get("full_data", {})
+        _cap["ok"] = bool(_fd.get("ok"))
+        _cap["action"] = _fd.get("action")
+        _cap["dest"] = _fd.get("dest")
+        _cap["columns"] = _fd.get("columns")
+        _cap["constituents"] = _r.get("constituents", {}).get("rows_in")
+        _rg = _r.get("regime", {}) or {}
+        _cap["regime_stamp_basis"] = _rg.get("stamp_basis")
+        _cap["regime_pit"] = _rg.get("pit")
+        if not _cap["ok"]:
+            _cap["reason"] = _fd.get("reason", "unknown")
+        log.info(f"§Q capture: {_cap['action']} -> {_cap['dest']} | "
+                 f"{_cap.get('columns')} cols | constituents {_cap['constituents']} | "
+                 f"regime {_cap['regime_stamp_basis']}")
+        if _cap.get("regime_pit") is False:
+            log.warning("§Q capture: regime NOT point-in-time yet — re-run "
+                        "`capture_screen_artefacts.py --src outputs --dest .` after "
+                        "drawdown_monitor.py (Run_Context 16d) to upgrade it.")
+    except Exception as _e:
+        _cap["reason"] = f"{type(_e).__name__}: {_e}"
+        try:
+            log.error(f"§Q CAPTURE FAILED — a permanently-lost week unless re-run this session: {_cap['reason']}")
+        except Exception:
+            pass
+    try:
+        import json as _json
+        _cap["captured_at"] = _dt.datetime.now().isoformat(timespec="seconds") if "_dt" in dir() else None
+        with open(os.path.join(_inv, "screen_capture_status.json"), "w") as _f:
+            _json.dump(_cap, _f, indent=2, default=str)
+    except Exception:
+        pass
     return path
 
 
@@ -3966,6 +4055,19 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
 
     # Forward axis (Part 3 §13) — additive, separate from Part A/B; consumed by the Source Score (rerank)
     compute_forward_axis(scored, info, inc_q)
+
+    # ── §Q4 FORMATION FRICTIONS (05-Aug-2026) ────────────────────────────────
+    # The register's own ranking of what is left to capture puts bid-ask at formation FIRST,
+    # because it is the only remaining field that is lost permanently every single week:
+    # ADV is retrievable from volume history later, a point-in-time SPREAD is not.
+    #
+    # It matters most exactly where the framework has been most active — WOSG.L, APN.L, ONT —
+    # because on those names the spread decides whether a signal is exploitable at all rather
+    # than merely correct. A backtest that ignores it measures a return nobody could have taken.
+    #
+    # Every field is Missing-with-a-reason rather than zero, and every one carries its own
+    # as_of, because a spread from yesterday's close is a different fact from a live one.
+    measure_formation_frictions(scored, info)
 
     # ── Set final_status for ranked stocks (only failures were set above) ─────
     if not scored.get("final_status"):
