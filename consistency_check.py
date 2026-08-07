@@ -597,10 +597,54 @@ def pair_undefined_constants(py_texts):
 
 # ── driver ───────────────────────────────────────────────────────────────────────────────
 
+def pair_orchestrator_parity():
+    """07-Aug-2026. TWO INDEPENDENT DERIVATIONS OF "WHAT THE WEEKLY SCREEN DOES".
+
+    The reference orchestrator (`screener_core.run_scheduled`) and the live one
+    (`screener_local.main`) must agree on which capabilities run. They diverged for nine days
+    without anything noticing, and the cost was that PRICE_MOM_SCORING="percentile" — set on
+    29-Jul-2026 — had never once been in force on a weekly screen.
+
+    Lives in the ROUTINE battery deliberately: a suite that is not in the routine battery is not
+    a test (register D3).
+    """
+    out = []
+    try:
+        sys.path.insert(0, HERE)
+        import orchestrator_parity as _op
+        res = _op.check_all()
+        cap, cfgr = res["capability_parity"], res["config_reachability"]
+        if cap.get("undeclared_missing"):
+            out.append("ORCHESTRATOR PARITY: capabilities in screener_core.run_scheduled that the "
+                       "LIVE path (screener_local) never calls, and that are not declared in "
+                       f"orchestrator_parity.EXEMPT: {cap['undeclared_missing']}. Each is a "
+                       "capability the framework believes it has and does not.")
+        if cap.get("exempt_with_blank_reason"):
+            out.append(f"ORCHESTRATOR PARITY: exemptions with no stated reason: "
+                       f"{cap['exempt_with_blank_reason']} — an exemption is a declaration, not a "
+                       "suppression.")
+        if cap.get("stale_exemptions"):
+            out.append(f"ORCHESTRATOR PARITY (advisory): exemptions for capabilities no longer "
+                       f"required: {cap['stale_exemptions']} — remove them before the list rots.")
+        if cap.get("reason") and not cap.get("undeclared_missing"):
+            out.append(f"ORCHESTRATOR PARITY: {cap['reason']}")
+        for st in cfgr.get("stranded", []):
+            out.append(f"CONFIG REACHABILITY: {st['constant']} is declared in scoring_config and "
+                       f"read ONLY by {st['read_only_by']}, which the live entry point cannot "
+                       "reach. It is declared operative and is not.")
+    except Exception as e:                                     # noqa: BLE001
+        # Loud, never silent: an unrunnable parity check is indistinguishable from a passing one
+        # unless it says so.
+        out.append(f"ORCHESTRATOR PARITY could not run ({type(e).__name__}: {e}) — "
+                   "treat as UNKNOWN, not as PASS.")
+    return out
+
+
 def check_all():
     errs = []
     run_ctx = _read("Run_Context_ISA_Growth_Stock_Analysis.md")
     bem = _read("build_email.py")
+    errs += pair_orchestrator_parity()
     errs += pair_stale_partb(run_ctx)
     errs += pair_summary_floor_prose(run_ctx)
     errs += pair_top10_columns(run_ctx, bem)

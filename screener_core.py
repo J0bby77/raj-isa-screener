@@ -3368,6 +3368,12 @@ FIELD_MAP = [
     # the two-horizon state label. WP-D: high_52wk (door_inflection dependency that never existed).
     "price_mom_1m_pct", "score_f_price_mom_1m", "price_mom_pctl", "score_f_price_mom_blend",
     "momentum_state", "timing_gate_shadow", "high_52wk", "low_52wk",
+    # ── ORCHESTRATOR PARITY (07-Aug-2026). `apply_cross_sectional_momentum` restamps
+    # forward_axis_score from percentile ranks; these retain the pre-restamp BAND values so the
+    # effect of the declared basis is visible in the frame instead of being asserted in prose,
+    # and `scoring_basis` makes every retained frame self-describing (a calibration study that
+    # spans 07/08-Aug-2026 must not silently average two different momentum treatments).
+    "forward_axis_score_bands", "score_f_price_mom_blend_bands", "scoring_basis",
     "revision_stage", "revision_runway",
     "score_b_peg", "score_b_ev_g", "score_b_pfcf_g", "score_b_est_rev",
     "est_rev_direction",

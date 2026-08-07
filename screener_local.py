@@ -119,29 +119,49 @@ def save_state(state, path):
 def screen_batch_nasdaq(core, cdf, info_map, stmt_map):
     """Apply Nasdaq-modified gates (Gate1 sector nasdaq_mode, Gate2 GM 40%, Gate3 FCF, Gate4 RevCAGR)
     per ticker for one batch — mirrors screener_core.screen_group_nasdaq Phase1+2 logic. MktCap>=$2bn
-    pre-gate is applied at SOURCING by fetch_nasdaq, so it is not re-checked here."""
+    pre-gate is applied at SOURCING by fetch_nasdaq, so it is not re-checked here.
+
+    ⚑ DECLARED DIVERGENCE (07-Aug-2026). This is a SECOND HOME for the Nasdaq gate sequence; the
+    first is screener_core.screen_group_nasdaq. It exists because that function owns its own
+    fetching and cannot be driven batch-wise. It is registered in ORCHESTRATOR_PARITY_EXEMPT with
+    a reason so the parity invariant reports it rather than silently tolerating it.
+
+    Returns (passers_df, exclusions_df, gate_data). `gate_data` maps ticker -> the gate verdict, and
+    is REQUIRED by emit_gate_variables: without it every rejected name is recorded with a blank
+    verdict, which is the shape of the data that makes a bad gate invisible. `gate_pass` preserves
+    True / False / None(unresolved) distinctly — an unresolved name is not a rejected one."""
     import pandas as pd
     passers, excl = [], []
+    gate_data = {}
+
+    def _verdict(sym, code, reason, passed):
+        gate_data[sym] = {"gate_code": code, "gate_reason": reason, "gate_pass": passed}
     for _, row in cdf.iterrows():
         rowd = row.to_dict(); sym = rowd["ticker"]; info = info_map.get(sym)
         if info is None:
+            _verdict(sym, "TECHNICAL_SOURCE_FAILURE", "info fetch failed", None)
             excl.append({**rowd, "gate_code": "TECHNICAL_SOURCE_FAILURE", "gate_reason": "info fetch failed"}); continue
         g1, r1, c1 = core.gate1_pass(info, nasdaq_mode=True)
         if not g1:
+            _verdict(sym, c1, r1, False)
             excl.append({**rowd, "gate_code": c1, "gate_reason": r1}); continue
         st = stmt_map.get(sym, {}); inc = st.get("income_stmt"); cf = st.get("cashflow")
         g2, r2, c2, gm = core.gate2_pass(inc, info, nasdaq_mode=True)
         if g2 is None or not g2:
+            _verdict(sym, c2, r2, None if g2 is None else False)
             excl.append({**rowd, "gate_code": c2, "gate_reason": r2, "gross_margin": gm}); continue
         g3, r3, c3, fp, av = core.gate3_pass(cf)
         if g3 is None or not g3:
+            _verdict(sym, c3, r3, None if g3 is None else False)
             excl.append({**rowd, "gate_code": c3, "gate_reason": r3}); continue
         bucket = core.classify_sector_bucket(info.get("sector", "") or "", info.get("industry", "") or "")
         g4, r4, c4, rc = core.gate4_pass(inc, sector_bucket=bucket)
         if g4 is None or not g4:
+            _verdict(sym, c4, r4, None if g4 is None else False)
             excl.append({**rowd, "gate_code": c4, "gate_reason": r4, "rev_cagr_3yr": rc}); continue
+        _verdict(sym, "", "", True)
         passers.append(rowd)
-    return pd.DataFrame(passers), pd.DataFrame(excl)
+    return pd.DataFrame(passers), pd.DataFrame(excl), gate_data
 
 
 def main():
@@ -253,9 +273,24 @@ def main():
             info_map, info_err = (_fg.with_backoff(core.fetch_phase1_info, batch, pg) if _fg else core.fetch_phase1_info(batch, pg))  # H-5
             stmt_map, stmt_err = (_fg.with_backoff(core.fetch_phase2_statements, batch, pg) if _fg else core.fetch_phase2_statements(batch, pg))  # H-5
             if pg == "NASDAQ":
-                passers_df, exclusions_df = screen_batch_nasdaq(core, cdf, info_map, stmt_map)
+                passers_df, exclusions_df, _gd = screen_batch_nasdaq(core, cdf, info_map, stmt_map)
             else:
                 passers_df, exclusions_df, _gd = core.screen_group_standard(cdf, info_map, stmt_map)
+            # ── CAPTURE LAYER ITEM 1 / ORCHESTRATOR PARITY (07-Aug-2026) ───────────────────
+            # screener_core.run_scheduled has emitted gate variables since 02-Aug; this path —
+            # the one that actually runs every week — never did, so PIT constituent membership
+            # covered scored names ONLY and every backward-looking study on a weekly frame
+            # inherited a survivor-biased universe.
+            #
+            # ⚑ THE DATE FORMAT IS LOAD-BEARING. capture_screen_artefacts joins gate_variables on
+            # the ISO run_date it derives from the frame filename. Passing the compact YYYYMMDD
+            # used for filenames writes rows that match NOTHING and reports success — the exact
+            # defect class this framework keeps paying for. `a.date` is ISO; use it, not run_date.
+            _gv = core.emit_gate_variables(cdf, info_map, stmt_map, _gd, group, a.date)
+            state.setdefault("gate_vars", []).append({
+                "batch": nxt, "rows_in": _gv.get("rows_in"), "error": _gv.get("error")})
+            if _gv.get("error"):
+                print(f"WARN GATE_VARS batch {nxt}: {_gv['error']}")
             passers = passers_df["ticker"].tolist() if not passers_df.empty else []
             ph3, _e = (_fg.with_backoff(core.fetch_phase3_scoring, passers, pg) if _fg else core.fetch_phase3_scoring(passers, pg))  # H-5
             scored, techfail = [], []
@@ -337,6 +372,47 @@ def main():
         save_state(state, partial)
 
     scored = [{k: native(v) for k, v in r.items()} for r in state["scored"]]
+
+    # ── ORCHESTRATOR PARITY (07-Aug-2026): CROSS-SECTIONAL MOMENTUM ──────────────────────────
+    # WP-M (29-Jul-26) set PRICE_MOM_SCORING="percentile" because the absolute bands SATURATE at
+    # both tails — on 24-Jul-26 MU scored 2/2 at +753% and would score 2/2 at +40%. The only code
+    # that acts on that setting is core.apply_cross_sectional_momentum, which lived solely in
+    # screener_core.run_scheduled. This path never called it, so the declared basis had never once
+    # been in force on a weekly screen: on the 07-Aug SP500 frame price_mom_pctl was a declared
+    # column with 0 of 312 non-null values, and 126 of 312 names sat on ONE blend value.
+    #
+    # It MUST run here — after all scoring, before the Source stamp below — because it restamps
+    # forward_axis_score, which source_score_components_for_row consumes.
+    _basis_declared = str(getattr(getattr(core, "_cfg", None), "PRICE_MOM_SCORING", "bands")).lower()
+    for _r in scored:
+        _r["forward_axis_score_bands"] = _r.get("forward_axis_score")
+        _r["score_f_price_mom_blend_bands"] = _r.get("score_f_price_mom_blend")
+    _n_mom = core.apply_cross_sectional_momentum(scored)
+    _basis_in_force = "percentile" if (_basis_declared == "percentile" and _n_mom) else "bands"
+    for _r in scored:
+        _r["scoring_basis"] = _basis_in_force
+
+    # HARD POST-CONDITION. A declared basis that restamps nothing is the failure this whole fix
+    # exists to end: the run would succeed, the email would look clean, and the config would be a
+    # lie. apply_cross_sectional_momentum swallows its own exceptions by design (a scoring failure
+    # must not kill a screen), so the ONLY place this can be caught is here, at the call site.
+    # It is not a warning. Below 20 rows the percentile rank is legitimately refused as too thin.
+    if _basis_declared == "percentile" and len(scored) >= 20 and not _n_mom:
+        print(f"MOMENTUM_BASIS_UNAPPLIED: PRICE_MOM_SCORING='percentile' restamped 0 of "
+              f"{len(scored)} rows. The declared basis is NOT in force and the ranking below "
+              f"would be built on the retired absolute bands. Refusing to publish.")
+        sys.exit(4)
+
+    # DUAL-BASIS DIFF — published, not asserted. The magnitude of a scoring change belongs in the
+    # run output, where it can be checked, not in a retrospective written afterwards.
+    _d = [abs(_r["forward_axis_score"] - _r["forward_axis_score_bands"]) for _r in scored
+          if _r.get("forward_axis_score") is not None and _r.get("forward_axis_score_bands") is not None]
+    if _d:
+        _moved = sum(1 for _x in _d if _x > 0.05)
+        print(f"MOMENTUM_BASIS basis={_basis_in_force} declared={_basis_declared} "
+              f"restamped={_n_mom}/{len(scored)} forward_axis_moved={_moved}/{len(_d)} "
+              f"mean_abs_delta={sum(_d)/len(_d):.2f} max_abs_delta={max(_d):.2f}")
+
     # ── Fix Pack P2.1 (18-Jul-26): stamp unified Source anatomy + E[r] on EVERY scored row ──
     # Parity with screener_core's post-overlay stamp (core run flow, "fixpack_stamp" phase).
     # The local batching path previously skipped it, leaving screen_source / implied_upside_fv /
@@ -378,6 +454,30 @@ def main():
         g4 = {}
     total = len(state["const"])
     accounted = len(scored) + len(state["excluded"]) + len(state["techfail"])
+
+    # ── ORCHESTRATOR PARITY (07-Aug-2026): run QA ────────────────────────────────────────────
+    # run_scheduled has always called save_run_qa; this path never did, which is why build_email
+    # pointed at a `{run_date}_{group}_run_qa.csv` that the live path did not produce and why the
+    # Excel DIAGNOSTICS tab has been built without it. save_run_qa writes to outputs_dir ONLY
+    # (session-temp, never OneDrive) and is the documented input to build_excel.py --run_qa.
+    _run_qa = {
+        "group": group, "run_date": run_date, "run_date_iso": a.date, "path": "local_primary",
+        "constituents": total, "accounted": accounted, "scored": len(scored),
+        "excluded": len(state["excluded"]), "technical_failures": len(state["techfail"]),
+        "warnings": state.get("warnings"),
+        "batches": len(state.get("plan", [])), "overlay_batches": len(state.get("overlay_plan", [])),
+        "gate4_sector_summary": g4,
+        "gate4_sector_concentration_warning": bool(g4.get("_concentration_warning")),
+        "gate_variables": state.get("gate_vars"),
+        "scoring_basis": _basis_in_force, "scoring_basis_declared": _basis_declared,
+        "momentum_rows_restamped": _n_mom,
+    }
+    try:
+        core.save_run_qa(_run_qa, a.inv_dir, run_date, group,
+                         outputs_dir=a.outputs, tech_failures=state["techfail"])
+    except Exception as _qe:
+        print(f"WARN run_qa save failed (non-fatal): {_qe}")
+
     json.dump({"status": "done"}, open(partial, "w", encoding="utf-8"))
     print(f"ALL_DONE group={group} constituents={total} scored={len(scored)} "
           f"excluded={len(state['excluded'])} techfail={len(state['techfail'])} "
