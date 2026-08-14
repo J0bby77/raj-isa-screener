@@ -2,7 +2,7 @@
   "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-08-08",
+  "last_updated": "2026-08-14",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -109,102 +109,102 @@
     "Nasdaq 100": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 3358,
-        "successes": 3357,
-        "success_rate": 0.9997,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 863,
-        "last_run_successes": 863,
-        "last_run_rate": 1.0
+        "attempts": 4254,
+        "successes": 4250,
+        "success_rate": 0.9991,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 896,
+        "last_run_successes": 893,
+        "last_run_rate": 0.9966
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 3358,
-        "successes": 3357,
-        "success_rate": 0.9997,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 863,
-        "last_run_successes": 863,
+        "attempts": 4257,
+        "successes": 4255,
+        "success_rate": 0.9995,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 3358,
-        "successes": 3358,
+        "attempts": 4257,
+        "successes": 4257,
         "success_rate": 1.0,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 863,
-        "last_run_successes": 863,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 3358,
-        "successes": 3356,
-        "success_rate": 0.9994,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 863,
-        "last_run_successes": 863,
+        "attempts": 4257,
+        "successes": 4255,
+        "success_rate": 0.9995,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2568,
-        "success_rate": 0.9927,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "attempts": 3026,
+        "successes": 3007,
+        "success_rate": 0.9937,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "forward_pe": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2587,
+        "attempts": 3026,
+        "successes": 3026,
         "success_rate": 1.0,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "ev_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2582,
-        "success_rate": 0.9981,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "attempts": 3026,
+        "successes": 3021,
+        "success_rate": 0.9983,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "net_debt_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2581,
-        "success_rate": 0.9977,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "attempts": 3026,
+        "successes": 3020,
+        "success_rate": 0.998,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2587,
+        "attempts": 3026,
+        "successes": 3026,
         "success_rate": 1.0,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 2587,
-        "successes": 2587,
+        "attempts": 3026,
+        "successes": 3026,
         "success_rate": 1.0,
-        "last_run": "2026-07-24",
-        "last_run_attempts": 423,
-        "last_run_successes": 423,
+        "last_run": "2026-08-14",
+        "last_run_attempts": 439,
+        "last_run_successes": 439,
         "last_run_rate": 1.0
       }
     },
@@ -1886,6 +1886,60 @@
         }
       ],
       "notes": "First STOXX600 run to fully exercise the constituent-hybrid GitHub bridge without prior seeding; loop of 3-5 screener_local.py calls per bash invocation used to reduce call count."
+    },
+    {
+      "run_date": "2026-08-14",
+      "group": "NASDAQ",
+      "task_id": "isa-nasdaq-fri2",
+      "run_mode": "local_primary",
+      "constituent_source": "nasdaq_screener_api",
+      "constituents_fetched": 896,
+      "accounted": 896,
+      "scored": 439,
+      "excluded": 457,
+      "technical_source_failure": 0,
+      "batches": 60,
+      "overlay_batches": 6,
+      "summary_eligible_pre_cap": 143,
+      "summary_selected": 40,
+      "summary_floor": 70,
+      "summary_cap": 40,
+      "top_source_score_tickers": ["STX", "DGII", "CHEF", "LFST", "CORT", "NESR", "BKR"],
+      "top_source_score": 100,
+      "top_total_score": 46,
+      "top_total_score_ticker": "STX",
+      "avg_fv_upside_top10": -0.276,
+      "gate4_sector_concentration_warning": true,
+      "gate4_largest_sector": "Technology",
+      "gate4_largest_sector_pct": 35.8,
+      "drawdown_state": "-0.0% from 252d high (111.56), 0/3 tranches fired, regime RISK_ON",
+      "score_panel_store_total": 4035,
+      "capture_verify": "ok=True checked=3 missing=none not_pit=none",
+      "excel_file": "Growth Stock Analysis NASDAQ W-e 14-Aug-26.xlsx",
+      "retrospective_file": "20260814_NASDAQ_retrospective.md",
+      "dq_flags": [
+        {
+          "severity": "L",
+          "event": "GATE_VARS_PLAUSIBILITY_WARNINGS",
+          "detail": "9 tickers (ASTS, MSTR, STRC, USAR capex_intensity; CLDX, CRNX, DNTH, FRVO, PLSE, QUBT, ROIV op_margin; SKHY revenue_latest; VRDN rev_cagr_3yr) outside plausible ranges — non-fatal WARN only, did not block scoring."
+        },
+        {
+          "severity": "M",
+          "event": "SKHY_REVENUE_UNITS_ANOMALY",
+          "detail": "revenue_latest=9.7e13, ~4 orders of magnitude too high — likely currency/units parsing defect. Logged to item register for investigation if ticker persists."
+        },
+        {
+          "severity": "M",
+          "event": "FIXTURE_CHECK_X-A1_FAIL",
+          "detail": "xa1_replay.py AnchorTableMissing — test harness does not pass anchor_table to expected_return_for_row(); live scoring unaffected (D24_ANCHOR succeeded). Logged to item register."
+        },
+        {
+          "severity": "M",
+          "event": "FIXTURE_CHECK_X-A2_FAIL",
+          "detail": "Register markdown views (ISA_OPEN_ITEMS_REGISTER.md, ISA_Decision_Register.md, ISA_Build_Backlog_Ranked.md) stale vs isa_register.py store (R14.3). Fix: python3 isa_register_render.py --write (not run this session, maintenance action)."
+        }
+      ],
+      "notes": "896 constituents (post-$2bn filter), 100% accounted, 0 technical failures. 60 local score batches + 6 overlay batches, no Composio fallback triggered. SUMMARY: 143 eligible pre-cap, 40 selected (floor 70, cap 40). Top Source Score ties at 100 (STX, DGII, CHEF, LFST, CORT, NESR, BKR); Top Total STX 46/50 (24 Part A / 22 Part B). Gate4 Technology concentration 35.8% (just above 35% flag threshold, consistent with prior NASDAQ runs ~32-40%). Regime capture initially stamped live_stale_source (drawdown_state lag 6d) — ran drawdown_monitor.py then re-captured to upgrade to live, verified ok=True. Two fixture checks (X-A1, X-A2) failed on pre-existing test-harness/maintenance issues unrelated to this run's scoring — logged to item register, not fixed (out of scheduled-run scope). universe_hygiene PASS (no non-common instruments at/above SUMMARY floor). 4 findings recorded in item register via isa_retrospective_intake.py."
     }
   ]
 }
