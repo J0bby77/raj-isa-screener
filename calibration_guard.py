@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse, datetime, hashlib, json, os, sys
 
 SCHEMA_VERSION = "1.0"
+HERE = os.path.dirname(os.path.abspath(__file__))
 POOL_STORE_DEFAULT = "calibration_pool_history.json"
 
 # The parameters that materially determine WHICH names reach SUMMARY. Adding one here is how a new
@@ -88,6 +89,163 @@ def compare_fingerprint(stamped, live=None):
             "message": ("Output was produced under a DIFFERENT calibration (%s vs live %s). %d "
                         "parameter(s) changed. Its SUMMARY ranking is NOT current — restamp before "
                         "the pre-run consumes it." % (stamped.get("hash"), live["hash"], len(changed)))}
+
+
+STAMP_STORE_DEFAULT = "calibration_stamp_history.json"
+
+
+def exclude_from_pool(run_date, group, *, reason, approved_by, store=STAMP_STORE_DEFAULT):
+    """Exclude one screen from candidate-pool merging, with a reason and an owner.
+
+    The alternative - deleting the artefacts - destroys captured history to solve a selection
+    problem. An exclusion says "retained as evidence, inadmissible for selection", which is the
+    same pattern as regime_history's `backfilled_not_pit`. An unattributed exclusion would be
+    indistinguishable from a bug, so reason and approved_by are mandatory (R7.7).
+    """
+    import os
+    if not reason or not approved_by:
+        raise ValueError("a pool exclusion requires a reason and an owner (R7.7)")
+    path = store if os.path.isabs(store) else os.path.join(HERE, store)
+    data = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    data.setdefault("_pool_exclusions", {})[f"{_norm_date(run_date)}|{group}"] = {
+        "reason": reason, "approved_by": approved_by,
+        "excluded_on": datetime.date.today().isoformat()}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+    return data["_pool_exclusions"]
+
+
+def pool_exclusions(store=STAMP_STORE_DEFAULT):
+    import os
+    path = store if os.path.isabs(store) else os.path.join(HERE, store)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh).get("_pool_exclusions", {})
+
+
+def contributors_in_window(year, month, store=STAMP_STORE_DEFAULT):
+    """Every stamped screen whose run_date falls in the given calendar month.
+
+    The pool window is a month, and a group is screened once per cycle, so the stamp store
+    is the authority on what contributed - no filename parsing, and therefore no second home
+    for the group vocabulary (R4.4).
+    """
+    import os
+    path = store if os.path.isabs(store) else os.path.join(HERE, store)
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    excl = data.get("_pool_exclusions", {})
+    out = []
+    for key, rec in data.items():
+        if key.startswith("_") or not isinstance(rec, dict):
+            continue
+        if key in excl:
+            continue
+        rd = rec.get("run_date", "")
+        if len(rd) >= 7 and rd[:4].isdigit():
+            if int(rd[:4]) == int(year) and int(rd[5:7]) == int(month):
+                out.append((rd, rec.get("group")))
+    return sorted(out)
+
+
+def record_calibration_stamp(run_date, group, fingerprint=None, store=STAMP_STORE_DEFAULT):
+    """Record the calibration fingerprint IN FORCE when a screen was scored.
+
+    D-14 (12-Aug-2026). update_watchlist merges the candidate pool by HIGHEST SCORE across
+    every contributing workbook, not by newest - so a frame scored under a retired basis can
+    outrank a correctly scored one and enter the pool on a number that today's config would
+    never produce. That happened on 07-Aug-2026: the SP500 screen ran on the retired momentum
+    bands because screener_local never called run_scheduled.
+
+    Deleting that workbook fixes one month. This stamp plus assert_one_calibration_stamp()
+    is what makes the NEXT basis change fail loudly instead of silently winning a merge.
+    """
+    import os
+    fp_obj = fingerprint if isinstance(fingerprint, dict) else config_fingerprint()
+    fp = fp_obj.get('hash') if isinstance(fp_obj, dict) else str(fp_obj)
+    path = store if os.path.isabs(store) else os.path.join(HERE, store)
+    data = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    key = f"{_norm_date(run_date)}|{group}"
+    prior = data.get(key)
+    if prior and prior.get("fingerprint") != fp:
+        # A screen's basis cannot change after the fact. Overwriting would erase the very
+        # evidence this store exists to hold (R6.4: relabel, never rewrite).
+        data.setdefault("_conflicts", []).append(
+            {"key": key, "was": prior.get("fingerprint"), "now": fp,
+             "observed_at": datetime.date.today().isoformat()})
+    else:
+        data[key] = {"fingerprint": fp, "group": group,
+                     "schema_version": fp_obj.get("schema_version") if isinstance(fp_obj, dict) else None,
+                     "run_date": _norm_date(run_date),
+                     "stamped_at": datetime.date.today().isoformat()}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+    return fp
+
+
+def _norm_date(v):
+    s = str(v or "").strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    return s
+
+
+def assert_one_calibration_stamp(contributors, store=STAMP_STORE_DEFAULT):
+    """contributors = [(run_date, group), ...] feeding one candidate pool.
+
+    Returns (ok, verdict). ok=False means the pool spans more than one calibration basis and
+    MUST NOT be merged - scores from different bases are not comparable, and the merge keeps
+    the highest.
+
+    Unknown stamps are REPORTED, never assumed to agree (R4.1). A pool that is entirely
+    unstamped is pre-stamp history and passes with a warning; a pool mixing a KNOWN stamp
+    with an unknown one cannot be shown to be single-basis, so it fails. The check therefore
+    hardens by itself as stamps accumulate, instead of needing a migration first.
+    """
+    import os
+    path = store if os.path.isabs(store) else os.path.join(HERE, store)
+    data = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    excl = data.get("_pool_exclusions", {})
+    known, unknown, excluded = {}, [], []
+    for rd, grp in contributors:
+        _k = f"{_norm_date(rd)}|{grp}"
+        if _k in excl:
+            excluded.append(f"{_norm_date(rd)} {grp} ({excl[_k]['reason'][:60]})")
+            continue
+        rec = data.get(_k)
+        if rec:
+            known.setdefault(rec["fingerprint"], []).append(f"{_norm_date(rd)} {grp}")
+        else:
+            unknown.append(f"{_norm_date(rd)} {grp}")
+    if len(known) > 1:
+        return False, {"status": "MIXED_CALIBRATION", "stamps": known, "unstamped": unknown, "excluded": excluded,
+                       "message": ("The candidate pool spans %d calibration bases: %s. The merge "
+                                   "keeps the HIGHEST score, so a frame scored under a retired "
+                                   "basis can win. Re-run the stale group or exclude it."
+                                   % (len(known), {k[:12]: v for k, v in known.items()}))}
+    if known and unknown:
+        return False, {"status": "PARTIALLY_UNSTAMPED", "stamps": known, "unstamped": unknown, "excluded": excluded,
+                       "message": ("%d contributor(s) carry no calibration stamp and cannot be "
+                                   "shown to share the basis of the %d that do: %s. Unknown is "
+                                   "not agreement." % (len(unknown), sum(len(v) for v in known.values()), unknown))}
+    if not known and unknown:
+        return True, {"status": "ALL_UNSTAMPED_PRE_STAMP_HISTORY", "unstamped": unknown,
+                      "excluded": excluded,
+                      "message": "No contributor carries a stamp (pre-12-Aug-2026 history). "
+                                 "Passing with a warning; this hardens as stamps accumulate."}
+    return True, {"status": "SINGLE_BASIS", "stamps": known, "excluded": excluded}
 
 
 def record_pool(group, run_date, pool_size, eligible_size=None, store=POOL_STORE_DEFAULT,

@@ -47,7 +47,12 @@ UNIVERSE_CACHE = os.path.join(HERE, "calibration_universe.json")
 # The acceptance criterion names these two because they are the worst cases: both are
 # non-US, both carry exchange suffixes, and both are where resolution silently failed.
 ACCEPTANCE_GROUPS = ("STOXX600", "F250-SPI")
-ACCEPTANCE_FLOOR = 0.85
+# Renamed from PRICE_RESOLUTION_FLOOR 12-Aug-2026 (register ISA-0012). gate_variables held a
+# DIFFERENT 0.95 under the SAME name: two numeric coverage floors, one flat namespace, and
+# an import of the wrong one would have produced a plausible number - FC-B by construction.
+# The emitted JSON key stays "acceptance_floor": that is an artefact contract with the
+# dashboard and the pre-run, and a rename must not move it.
+PRICE_RESOLUTION_FLOOR = 0.85
 MIN_OBS_1M = 15          # trading days that must be present for "1m resolved"
 
 
@@ -274,8 +279,8 @@ def coverage(groups=None, price_cache=PRICE_CACHE, universe_cache=None):
         }
     vals = [v["resolution_vs_universe"] for v in out["groups"].values() if "error" not in v]
     out["worst"] = min(vals) if vals else 0.0
-    out["acceptance_floor"] = ACCEPTANCE_FLOOR
-    out["acceptance"] = "PASS" if out["worst"] >= ACCEPTANCE_FLOOR else "FAIL"
+    out["acceptance_floor"] = PRICE_RESOLUTION_FLOOR
+    out["acceptance"] = "PASS" if out["worst"] >= PRICE_RESOLUTION_FLOOR else "FAIL"
     return out
 
 

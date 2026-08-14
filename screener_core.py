@@ -1601,10 +1601,16 @@ def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
 
         # Price history
         period = "5y" if score_gt38 else "2y"   # >=2y so the 12-1m price-momentum window (~273d) is always spannable
+        # D-25: the period is now carried WITH the data. compute_val_hist needs up to 5 annual
+        # fiscal year-ends of price; a 2y window cannot span them, and until now nothing recorded
+        # which window a row was computed under. HYPOTHESIS (not asserted): this split is why
+        # val_hist resolves on ~8% of names. The instrumentation is what will settle it.
+        data["history_period"] = period
         try:
             data["history"] = tk.history(period=period)
-        except Exception:
+        except Exception as _he:
             data["history"] = None
+            data["history_error"] = f"{type(_he).__name__}: {_he}"
 
         # High-score overlays (eps_revisions already fetched above for all gate-passers)
         if score_gt38:
@@ -2421,6 +2427,7 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     eps_series = get_stmt_series(income_stmt,
         ["Diluted EPS", "Diluted EPS From Continuing Operations",
          "Basic EPS", "Basic EPS From Continuing Operations"], 5)
+
     eps_cagr = None
     eps_cagr_math_unreliable = False
     if len(eps_series) >= 3:
@@ -3184,8 +3191,16 @@ def compute_val_hist(ticker_sym, info, scoring_data, income_stmt, cashflow):
            "val_hist_pe_status": "unresolved", "val_hist_periods_used": 0}
 
     price_history = scoring_data.get("history")
+    # The inputs this calculation depends on, recorded whether it succeeds or not. Without
+    # these the failure mode is indistinguishable from "the vendor has no data" - which is
+    # what it was mistaken for (register ISA-0021).
+    out["val_hist_price_period"] = scoring_data.get("history_period") or "unknown"
+    out["val_hist_price_history_rows"] = (
+        0 if price_history is None else
+        (len(price_history) if hasattr(price_history, "__len__") else -1))
     if price_history is None or (hasattr(price_history, "empty") and price_history.empty):
         out["val_hist_status"] = "insufficient_history"
+        out["val_hist_basis"] = "no_price_history"
         return out
 
     gbp_div = 100 if get_market_suffix(ticker_sym) == ".L" else 1
@@ -3197,6 +3212,11 @@ def compute_val_hist(ticker_sym, info, scoring_data, income_stmt, cashflow):
     eps_series = get_stmt_series(income_stmt,
         ["Diluted EPS", "Diluted EPS From Continuing Operations",
          "Basic EPS", "Basic EPS From Continuing Operations"], 5)
+    out["val_hist_eps_periods"] = len(eps_series)
+    if not eps_series:
+        out["val_hist_status"] = "no_eps_series"
+        out["val_hist_basis"] = "statements_missing_eps"
+
     fcf_series, _ = compute_fcf_series(cashflow)
     shares_series  = get_stmt_series(income_stmt,
         ["Diluted Average Shares", "Weighted Average Shares Diluted",
@@ -3384,12 +3404,23 @@ FIELD_MAP = [
     # dropped here), unified Source-Score anatomy, and the E[r] block. Stamped post-overlay
     # by the run flow via source_score.source_score_components_for_row + expected_return.
     "val_hist_pe_3yr_avg", "val_hist_current_pe", "val_hist_pfcf_3yr_avg", "val_hist_current_pfcf",
+    # D-25 (12-Aug-2026): these three were COMPUTED by compute_val_hist and never emitted, so
+    # a 92% loss was invisible in the frame and read for months as thin European coverage. An
+    # absent column is not a blank value - I made exactly that misreading while diagnosing this.
+    "val_hist_status", "val_hist_basis", "val_hist_periods_used",
+    "val_hist_price_history_rows", "val_hist_price_period", "val_hist_eps_periods",
     "val_hist_pe_anchor", "val_hist_pe_anchor_periods", "val_hist_pe_anchor_basis",
     "val_hist_pe_premium_disc_anchor",
     "screen_source", "src_fwd_raw", "src_fwd_w", "src_rev_raw", "src_rev_w",
     "src_deploy_raw", "src_deploy_w", "src_qual_raw", "src_qual_w", "src_analyst_raw", "src_analyst_w",
     "implied_upside_fv", "display_target_gap", "fv_basis", "fv_conf", "source_input_missing",
     "expected_return_12_24m", "er_growth", "er_rerate", "er_yield", "er_confidence", "er_basis",
+    # D-24 (09-Aug-2026) — the anchor evidence travels WITH the number it produced. Without these
+    # columns the re-rate is once again a bare figure nobody can audit after the fact.
+    "er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own", "er_anchor_operative",
+    "er_anchor_divergence", "er_anchor_divergence_pct", "er_anchor_corroborated",
+    "er_multiple_field", "er_multiple_value", "er_growth_clamped", "er_rerate_clamped",
+    "er_anchor_table_as_of", "er_anchor_table_group", "er_anchor_mode",
     "capital_signal_conflict", "fv_annualised_pct",
     "door", "door_admit_shadow", "regime_at_screen",
     "door_momentum", "door_quality", "door_inflection",
@@ -4319,11 +4350,34 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 _regime = (_dj.load(_df_) or {}).get("regime_state")
         except Exception:
             pass
+        # ── D-24 (09-Aug-2026): E[r] is stamped by THE shared screen entry point, which builds
+        # the cross-sectional anchor table from the WHOLE frame, persists it for the pre-run,
+        # asserts the evidence route is reachable, and records L-10. screener_local calls the
+        # same function — the live path cannot drift from this one the way PRICE_MOM_SCORING did.
+        # NOT inside the per-row try: a failure to build the anchor table is not a per-row event
+        # and must not degrade into 312 rows silently carrying the pre-D-24 defect.
+        _d24 = _er.stamp_frame(scored_rows, run_date=run_date, group=group, regime=_regime)
+        run_qa["er_anchor_table_as_of"] = (_d24["anchor_table"] or {}).get("as_of")
+        run_qa["er_anchor_sectors"] = len((_d24["anchor_table"] or {}).get("median_by_sector") or {})
+        run_qa["er_anchor_excluded"] = _d24["built_table"]["excluded"]
+        run_qa["er_anchor_fit"] = _d24["built_table"]["fit_for_anchoring"]
+        run_qa["er_anchor_substituted_from"] = _d24["unmeasured"].get("anchor_substituted_from")
+        if not _d24["built_table"]["fit_for_anchoring"]:
+            log.warning("D-24: this frame (%d rows) is below ER_ANCHOR_MIN_ROWS and cannot form "
+                        "its own anchor — %s", _d24["built_table"]["rows_in"],
+                        ("borrowing the last fit table "
+                         + str(_d24["unmeasured"].get("anchor_substituted_from")))
+                        if _d24["anchor_table"] else "re-rate REFUSED on every row")
+        run_qa["er_reachability"] = _d24["reachability"]["message"]
+        run_qa["er_unmeasured"] = _d24["unmeasured"]["message"]
+        if _d24["unmeasured"]["verdict"] == "FAIL":
+            log.error("D-24 §6 " + _d24["unmeasured"]["message"] +
+                      " — something upstream has broken again")
+        elif _d24["unmeasured"]["verdict"] == "WARN":
+            log.warning("D-24 §6 " + _d24["unmeasured"]["message"])
         for _srow in scored_rows:
             try:
                 _srow.update(_ss.source_score_components_for_row(_srow))
-                _srow.update(_er.expected_return_for_row(_srow))
-                _er.apply_capital_signal_conflict(_srow)          # review item 8
                 _srow.update(_ss.door_flags_for_row(_srow, _regime))  # B7 shadow tags
             except Exception as _se:
                 _srow.setdefault("source_input_missing", f"stamp_error:{_se}")

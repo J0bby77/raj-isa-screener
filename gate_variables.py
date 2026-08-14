@@ -196,7 +196,9 @@ def log_gate_variables(records, group=None, run_date=None, store=None, strict=Tr
 # across the full fetched constituent list."
 ACCEPTANCE_VARS = ("sector", "mkt_cap", "gross_margin", "rev_cagr_3yr", "fcf_pos_years",
                    "op_margin")
-ACCEPTANCE_FLOOR = 0.95
+# Renamed from GATE_VAR_COVERAGE_FLOOR 12-Aug-2026 (register ISA-0012); see the note in
+# calibration_universe.py. Emitted key "acceptance_floor" deliberately unchanged.
+GATE_VAR_COVERAGE_FLOOR = 0.95
 
 
 def coverage_report(store=None, group=None, run_date=None):
@@ -254,8 +256,8 @@ def coverage_report(store=None, group=None, run_date=None):
         "coverage": an_cov,
         "coverage_all_fetched": all_cov,
         "worst": worst,
-        "acceptance_floor": ACCEPTANCE_FLOOR,
-        "acceptance": "PASS" if worst >= ACCEPTANCE_FLOOR else "FAIL",
+        "acceptance_floor": GATE_VAR_COVERAGE_FLOOR,
+        "acceptance": "PASS" if worst >= GATE_VAR_COVERAGE_FLOOR else "FAIL",
         "unconditional_rows": int(d["measured_unconditionally"].map(
             lambda v: bool(v) if v == v and v not in (None, "", "False", "false") else False).sum())
         if "measured_unconditionally" in d.columns else 0,

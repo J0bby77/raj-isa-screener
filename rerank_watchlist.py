@@ -851,10 +851,19 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     # tier when cfg.T1_QUALIFICATION_MODE is True. E[r] comes from expected_return.py (the ONE
     # implementation the screen uses) on the fresh pre-run scored row; stage was re-derived by
     # fetch_watchlist_metrics via screener_core.compute_forward_axis (A3 — same classifier).
+    # ⚑ D-24 §3.3 THE PRE-RUN TRAP. rerank runs on a handful of watchlist rows; a sector median
+    # computed HERE would be nonsense. It therefore LOADS the table the screen persisted and
+    # FAILS if it is absent — it may not recompute, and it may not fall back to "no re-rate",
+    # because that silently reinstates the defect D-24 exists to remove.
+    _anchor_tbl = _er.load_anchor_table()          # raises AnchorTableMissing when absent
+    log.info("D-24 anchor table %s@%s — %d sector medians, excluded %s",
+             _anchor_tbl.get("group"), _anchor_tbl.get("as_of"),
+             len(_anchor_tbl.get("median_by_sector") or {}),
+             sorted((_anchor_tbl.get("excluded") or {}).keys()))
     for e in eligible:
         td = tk.get(e["ticker"]) or {}
         try:
-            _erd = _er.expected_return_for_row(td) if td else None
+            _erd = _er.expected_return_for_row(td, anchor_table=_anchor_tbl) if td else None
         except Exception:
             _erd = None
         if _erd:
@@ -867,6 +876,14 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
             e["er_growth"] = _erd.get("er_growth")
             e["er_rerate"] = _erd.get("er_rerate")
             e["er_yield"] = _erd.get("er_yield")
+            # D-24: the anchor evidence travels with the number. Without er_status the gate
+            # cannot tell a measured 4.0% from a partial one, and they are opposite facts.
+            for _k in ("er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own",
+                       "er_anchor_divergence", "er_anchor_divergence_pct",
+                       "er_anchor_corroborated", "er_multiple_field", "er_multiple_value",
+                       "er_growth_clamped", "er_rerate_clamped", "er_anchor_table_as_of",
+                       "er_anchor_table_group", "er_anchor_mode"):
+                e[_k] = _erd.get(_k)
         if td.get("revision_stage") is not None:
             e["revision_stage"] = td.get("revision_stage")   # first-class field (A3; flag-string retired)
         # A5 v3: sightings from the A8 score panel — the alternative evidence route

@@ -15,7 +15,7 @@ Library:
   log_from_full_data(df, group="NASDAQ", run_date="2026-06-26", store="score_panel.csv")
 """
 from __future__ import annotations
-import argparse, os, sys
+import argparse, os, re, sys
 
 PANEL_COLS = [
     "run_date", "group", "ticker", "part_a_score", "part_b_score", "total_score",
@@ -50,8 +50,64 @@ def _src_score(row, paf=28.0, pbf=22.0):
         return None
 
 
+# ── D-15 (Raj, 09-Aug-2026): ONE DATE FORMAT, ENFORCED AT THE ONLY WRITER ───────────────
+# `score_panel.csv` held the 08-Aug F250-SPI screen TWICE — 140 rows under `2026-08-08` and the
+# same 140 under `20260808` — because the panel key is (run_date, group, ticker) and the callers
+# pass different shapes: the weekly screen passes its own compact `YYYYMMDD`, the monthly rerank
+# passes ISO. Two spellings of one day are two different keys, so the idempotent merge could not
+# see them as one screen. Any study grouping by run_date double-counts it, and
+# `capture_screen_artefacts` joins gate_variables on the ISO form — so the compact rows join
+# nothing and report success (the register's second failure class).
+#
+# Normalising at the CALL SITES would have to be redone for every future caller. It is done here,
+# at the single writer, and an unrecognised shape is REFUSED rather than written through: a date
+# this function cannot read is a key nothing else will match either.
+RUN_DATE_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RUN_DATE_COMPACT = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
+
+class RunDateFormatError(ValueError):
+    """A run_date that is not, and cannot be resolved to, ISO YYYY-MM-DD."""
+
+
+def norm_run_date(v):
+    """-> 'YYYY-MM-DD'. Accepts ISO, compact YYYYMMDD, or a date/datetime. Refuses anything else."""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    t = str(v).strip()
+    if RUN_DATE_ISO.match(t):
+        return t
+    m = _RUN_DATE_COMPACT.match(t)
+    if m:
+        return "-".join(m.groups())
+    raise RunDateFormatError(
+        f"run_date {v!r} is neither ISO YYYY-MM-DD nor compact YYYYMMDD. The panel key is "
+        f"(run_date, group, ticker); an unrecognised shape silently creates a second screen.")
+
+
+def assert_one_date_format(store):
+    """Every run_date in the store is ISO. Returns the offending values; empty list when clean."""
+    import csv as _csv
+    if not os.path.exists(store):
+        return []
+    with open(store, encoding="utf-8") as fh:
+        return sorted({str(r.get("run_date")) for r in _csv.DictReader(fh)
+                       if not RUN_DATE_ISO.match(str(r.get("run_date") or ""))})
+
+
 def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=22.0):
     import pandas as pd
+    _rd = norm_run_date(run_date)      # D-15: one spelling per day; refused, never coerced
+    # D-14 (12-Aug-2026): record the calibration basis this screen is being scored under, at
+    # the moment it is scored. A stamp written afterwards is a claim about the past; this is a
+    # fact. update_watchlist merges the pool by HIGHEST score across contributing workbooks,
+    # so without this a frame scored on a retired basis can win the merge - which is exactly
+    # what the 07-Aug SP500 screen did.
+    try:
+        import calibration_guard as _cg
+        _cg.record_calibration_stamp(_rd, group)
+    except Exception as _e:            # a stamp failure must never block a screen
+        print(f"  [score_panel] calibration stamp NOT recorded ({_e}) - pool guard degraded")
     rows = []
     for _, r in df.iterrows():
         tk = r.get("ticker")
@@ -66,7 +122,7 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
                                ("source_score", "screen_source")):
             if rec.get(_short) in (None, "") and r.get(_canon) not in (None, ""):
                 rec[_short] = r.get(_canon)
-        rec["run_date"] = run_date
+        rec["run_date"] = _rd
         rec["group"] = group
         rec["ticker"] = tk
         if rec.get("source_score") in (None, "") or (isinstance(rec.get("source_score"), float) and pd.isna(rec.get("source_score"))):
@@ -107,6 +163,12 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
         merged = merged[PANEL_COLS]
     else:
         merged = new
+    # D-15 post-condition: the store this call just wrote carries exactly one date spelling.
+    # Checked on the frame in hand, before it reaches disk — a store that has drifted for any
+    # other reason still fails here rather than at the next study that groups by run_date.
+    _bad = sorted({str(v) for v in merged["run_date"] if not RUN_DATE_ISO.match(str(v))})
+    if _bad:
+        raise RunDateFormatError(f"non-ISO run_date values would be written to {store}: {_bad}")
     merged.to_csv(store, index=False)
     return len(new), len(merged)
 

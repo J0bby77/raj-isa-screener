@@ -46,6 +46,37 @@ import argparse, datetime as dt, glob, json, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ISA_ALLOWANCE_GBP = 20000.0
 
+# ---------------------------------------------------------------------------
+# THE single home for cash-side portfolio constants (R4.4). This module already owns
+# FX_RATE_FRACTION on the same principle: the module that extracts the truth owns the
+# constant, and every consumer imports it. Consolidated 12-Aug-2026 after the Framework
+# Atlas found ISA_ALLOWANCE_GBP in 2 homes, CASH_BUFFER_MIN in 2, and the monthly standing
+# order in THREE homes under TWO different names (STANDING_ORDER and STANDING_ORDER_MONTHLY).
+#
+# ⚑ VALUES ARE UNCHANGED BY THAT CONSOLIDATION. A refactor must never move a number.
+# ---------------------------------------------------------------------------
+CASH_BUFFER_MIN = 150.0
+CASH_BUFFER_MAX = 200.0
+
+# ⚑ OPEN QUESTION FOR RAJ (register ISA-0011): user_raj_profile records the £1,250 monthly
+# standing order as PAUSED from Jul-2026 (job security). All three former homes carried
+# 1250.0 as if live. The VALUE IS LEFT AS IT WAS so this consolidation changes no behaviour;
+# STANDING_ORDER_ACTIVE makes the assumption explicit and switchable in ONE place instead of
+# being implicit in three. It feeds contribution schedules, the required-return anchor and
+# allowance projection - so if the pause is real, the anchor is derived on a schedule that
+# is not happening.
+STANDING_ORDER = 1250.0
+# ⚑ CONFIRMED BY RAJ 12-Aug-2026: the standing order is PAUSED. Last payment June-2026.
+# Allowance used £8,750 = £5,000 initial + 3 x £1,250 (April, May, June). Nothing since.
+# target_state.json already models this correctly (contribution_schedule: 0/month from
+# 2026-07-01), so the REQUIRED-RETURN ANCHOR was never affected. What WAS affected is cash:
+# extract_portfolio.standing_order_adjustment() credited £1,250 of "unprocessed S/O" to
+# effective cash whenever the broker file was dated within SO_CLEAR_WORKING_DAYS of the 1st -
+# which is exactly when the monthly review runs. See register ISA-0011.
+STANDING_ORDER_ACTIVE = False
+STANDING_ORDER_PAUSED_FROM = "2026-07-01"   # Raj, job security
+SO_CLEAR_WORKING_DAYS = 3             # clears within ~3 working days of the 1st
+
 # ⚑ SINGLE HOME for the AJ Bell FX charge. Evidenced by two `FX Charge (0.50%)` rows in the
 # 2026-27 cash statement and by the COCO fill. Anything that models a USD trade cost reads THIS.
 FX_RATE_PCT = 0.50

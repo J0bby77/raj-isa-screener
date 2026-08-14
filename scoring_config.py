@@ -240,6 +240,83 @@ ER_RERATE_NEUTRAL_BAND = 0.05          # C1 — deciles 2-7 measured -2 to -3%: 
 ER_RERATE_REGIME_DAMPING = {           # C1 — DE-RATE side only; a cheap name is never damped
     "RISK_ON": 0.25, "LATE_CYCLE": 0.50, "RISK_OFF": 1.00, "RECOVERY": 1.00,
 }                                      # an UNKNOWN regime is UNDAMPED — conservative, not a guess
+# ── D-24 (09-Aug-2026) sector-declared multiple selection ─────────────────────────
+# THE DEFECT: the E[r] row adapter resolved `current_multiple` from `trailing_pe` first (8.7% of
+# SP500 rows) and the anchor from `val_hist_pe_anchor` (8.3%). A missing term contributed 0, so on
+# 92% of every universe screened E[r] silently ASSERTED that the multiple would not change, and the
+# fundamentals evidence route was unreachable (confidence ceiling 0.70 vs EVIDENCE_ER_CONF_MIN 0.75).
+#
+# DECLARED mapping, not fitted. One home. Values are yfinance `sector` strings. No parameter below
+# is estimated from the data, so this adds no degrees of freedom.
+ER_MULTIPLE_BY_SECTOR = {
+    "Technology":             "fwd_pe",
+    "Healthcare":             "fwd_pe",
+    "Consumer Cyclical":      "fwd_pe",
+    "Consumer Defensive":     "fwd_pe",
+    "Communication Services": "fwd_pe",
+    "Financial Services":     "fwd_pe",     # P/B would be better; not populated. Declared limitation.
+    "Industrials":            "ev_ebitda",  # capital-intensive
+    "Utilities":              "ev_ebitda",
+    "Energy":                 "ev_ebitda",
+    "Basic Materials":        "ev_ebitda",
+}
+ER_MULTIPLE_DEFAULT      = "fwd_pe"
+ER_MULTIPLE_FALLBACK     = "price_fcf"   # used only if the sector's chosen multiple is absent
+ER_ANCHOR_MIN_SECTOR_N   = 5             # below this, no sector median is formed
+ER_ANCHOR_MIN_ROWS       = 30            # ⚑ below this the WHOLE TABLE is not fit to anchor with.
+                                         # Found live 09-Aug-2026: a 6-ticker ad-hoc screener_local
+                                         # run built a table with ZERO sector medians and would
+                                         # have become the `latest` pointer the monthly pre-run
+                                         # reads — §3.3's trap re-entering through the back door.
+                                         # An unfit table is still PERSISTED (it is a record of
+                                         # what ran) but never becomes the pointer, and never
+                                         # anchors anything.
+ER_ANCHOR_AGREE_BAND     = 0.25          # |xs/own - 1| above this = DIVERGENCE, published
+ER_ANCHOR_MODE           = "cross_sectional_primary"  # | "own_history_primary" | "own_history_only"
+                                         # ROLLBACK (§11): "own_history_only" restores pre-D-24
+                                         # behaviour EXACTLY. T8 asserts the 152/312 pass count.
+ER_XS_CONF_WEIGHT        = 0.20          # re-rate confidence credit from a cross-sectional anchor
+ER_OWN_CONF_WEIGHT       = 0.30          # ...from an own-history anchor (unchanged)
+# Sanity band per multiple family, applied BEFORE a median is taken. Count/publish what it removes.
+ER_MULTIPLE_SANITY = {"fwd_pe": (0.0, 200.0), "trailing_pe": (0.0, 200.0),
+                      "val_hist_current_pe": (0.0, 200.0), "current_pe": (0.0, 200.0),
+                      "price_fcf": (0.0, 200.0), "ev_ebitda": (0.0, 60.0)}
+# §6 — share of rows refusing to measure the re-rate. Above these, something upstream has broken.
+ER_UNMEASURED_WARN_SHARE = 0.10
+ER_UNMEASURED_FAIL_SHARE = 0.25
+ER_ANCHOR_STORE   = "er_anchor_store.json"     # persisted beside the scripts (like score_panel.csv)
+ER_LEARNING_STORE = "er_anchor_learning.csv"   # L-10 — per-row anchor evidence; ships with Stage 1
+
+# ⛑ §1.3 THE MANIFEST. `expected_return`'s docstring claimed TWO consumers; there are NINE live
+# call sites, and every one called expected_return_for_row(row) with no context argument — so an
+# anchor-table parameter added to one of them leaves the other eight silently running the old,
+# defective behaviour. test_d24_expected_return.py asserts that the set of modules importing
+# `expected_return` EQUALS this manifest: a tenth caller added later fails the battery until it is
+# registered. This is orchestrator_parity.py applied to a CONTRACT SURFACE rather than a code path.
+ER_CALLSITE_MANIFEST = {
+    "screener_core.py":           "screen — BUILDS the anchor table and passes it",
+    "screener_local.py":          "screen (LIVE path) — builds it too; the copy of run_scheduled that never calls it",
+    "rerank_watchlist.py":        "pre-run — READS persisted; must not recompute",
+    "fetch_watchlist_metrics.py": "pre-run — READS persisted; must not recompute",
+    "step9_pre_builder.py":       "pre-run fallback compute — READS persisted",
+    "build_email.py":             "monthly review email — READS persisted, else er_status=unmeasured",
+    "build_excel.py":             "screen workbook — READS persisted",
+    "return_architecture.py":     "Section A/B/C — READS persisted, else er_status=unmeasured",
+    # Not a computer of E[r], but a declared importer nonetheless:
+    "orchestrator_parity.py":     "OBSERVER — runs the §6 reachability assertion; computes nothing",
+    "test_session_02aug2026.py":  "root-level session test (C1 re-rate shape) — fixtures only",
+}
+# ⚑ THREE MODULES THE SPEC LISTED THAT DO **NOT** IMPORT `expected_return`, verified by AST
+# 09-Aug-2026 — and the manifest records the truth, not the spec:
+#   • t1_gates.py — CONSUMES the stamped fields (expected_return_12_24m, er_confidence, er_status)
+#     and never computes E[r]. That is the correct arrangement: one implementation, one consumer
+#     boundary. It is listed in the D-24 spec's §1.4 files-touched table because its er_status
+#     handling changed, not because it calls the module.
+#   • Dashboard/server/cache.py and Dashboard/server/decision_table.py — RENDER
+#     `expected_return_12_24m` off the frame. Render-only was the spec's open question at row 9
+#     of §1; CONFIRMED at build time. If a future change adds the import, the manifest check
+#     below fails until someone decides what anchor table the dashboard should use.
+
 ER_GATE_ACTIVE      = True    # A2 — E[r] T1-deploy gate; FLIPPED LIVE 13-Jul-26 (P2) — consumed 1-Aug pre-run
 STAGE_GATE_ACTIVE   = True    # A3 — stage gate; FLIPPED LIVE 13-Jul-26 (P2)
 T1_QUALIFICATION_MODE = True  # A4 — T1 = QUALIFICATION; FLIPPED LIVE 13-Jul-26 (P2); False = legacy rank-band rollback

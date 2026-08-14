@@ -280,7 +280,10 @@ def evidence(entry, scored_row=None, ref_date=None):
 
     er_conf = _num(g("er_confidence"))
     conf_min = float(_c("EVIDENCE_ER_CONF_MIN", 0.75))
-    conf_ok = er_conf is not None and er_conf >= conf_min
+    # D-24 §5: an UNMEASURED re-rate makes E[r] a partial number. It may not certify the
+    # fundamentals evidence route, and the name is never eligible for `full` size on it.
+    er_unmeasured = str(g("er_status") or "") == "unmeasured"
+    conf_ok = (er_conf is not None and er_conf >= conf_min) and not er_unmeasured
     direction = str(g("est_rev_direction") or "").lower()
     trend_90d = _num(g("eps_trend_mom_pct"))
     rev_ok = (direction == "improving") and (trend_90d is not None and trend_90d > 0)
@@ -292,15 +295,17 @@ def evidence(entry, scored_row=None, ref_date=None):
     sightings = int(sightings) if _num(sightings) is not None else None
     sightings_ok = sightings is not None and sightings >= int(_c("EVIDENCE_SIGHTING_MIN", 2))
 
-    confirmed = bool(fundamentals_ok or sightings_ok)
+    confirmed = bool(fundamentals_ok or sightings_ok) and not er_unmeasured
     return {
         "evidence_confirmed": confirmed,
         "size_mode": "full" if confirmed else "starter",
         "starter_cap_pct": float(_c("STARTER_SIZE_CAP_PCT", 1.5)),
         "basis": {
-            "route": ("fundamentals" if fundamentals_ok else
+            "route": ("unconfirmed_er_unmeasured" if er_unmeasured else
+                      "fundamentals" if fundamentals_ok else
                       "sightings" if sightings_ok else "unconfirmed"),
             "er_confidence": er_conf, "er_conf_min": conf_min, "conf_ok": conf_ok,
+            "er_status": (g("er_status") or None), "er_unmeasured": er_unmeasured,
             "rev_30d_direction": direction or None, "rev_90d_trend_pct": trend_90d,
             "rev_both_windows_ok": rev_ok,
             "stage": stage, "stage_ok": stage_ok,
@@ -334,15 +339,25 @@ def evaluate(entry, scored_row=None, ref_date=None):
     reversal = bool(e.get("reversal_unresolved")) or (
         "recent_reversal_vs_12_1m" in (e.get("review_flags") or s.get("review_flags") or []))
     er_floor = float(_c("ER_DEPLOY_FLOOR", 15.9))
+    er_status = str(g("er_status") or "")
+    er_unmeasured = (er_status == "unmeasured")
 
     detail = {
         "ns_floor": {"pass": ns is not None and ns >= NS_FLOOR, "value": ns},
         "stage": {"pass": (not st_blocked) or bool(overrides.get("stage")),
                   "state": st_state, "value": stage, "override": overrides.get("stage")},
-        # er: missing E[r] = NO_DATA -> pass + flagged (never block on unseen data)
-        "er": {"pass": (er is None) or (er >= er_floor) or catalyst,
-               "state": ("NO_DATA" if er is None else "OK" if (er >= er_floor or catalyst) else "BELOW_FLOOR"),
-               "value": er, "floor": er_floor, "catalyst": catalyst},
+        # er: missing E[r] = NO_DATA -> pass + flagged (never block on unseen data).
+        # D-24 (09-Aug-2026): er_status == "unmeasured" means the RE-RATE term was refused rather
+        # than silently scored 0, so the total is a partial figure. Doctrine is unchanged — "no
+        # gate blocks on data it didn't see" — so it is NO_DATA (pass + flagged), NOT a pass on a
+        # fabricated number. `evidence()` additionally denies it `full` size.
+        "er": {"pass": (er is None) or er_unmeasured or (er >= er_floor) or catalyst,
+               "state": ("NO_DATA" if er is None else
+                         "NO_DATA_UNMEASURED" if er_unmeasured else
+                         "OK" if (er >= er_floor or catalyst) else "BELOW_FLOOR"),
+               "value": er, "floor": er_floor, "catalyst": catalyst,
+               "er_status": er_status, "er_rerate_status": g("er_rerate_status"),
+               "partial": er_unmeasured},
         "clean_flags": {"pass": (not dq) and (not reversal) and ((not late) or bool(overrides.get("late_cycle"))),
                         "disqualifiers": dq, "reversal_unresolved": reversal,
                         "late_cycle_flag": late, "override": overrides.get("late_cycle")},
@@ -435,7 +450,17 @@ if __name__ == "__main__":
     assert n == 2, n   # 01-Jul counts, 03-Jul too close (<7d), 10-Jul counts, May out of window
     os.unlink(pth)
     assert screen_sightings_from_panel("XXX", "/nonexistent.csv") is None
-    print("t1_gates SELF-TEST OK (A5 v3 — evidence sizing, tenure gate removed)")
+    # D-24 (09-Aug-2026): er_status == "unmeasured" is NO_DATA (pass + flagged), never a pass on
+    # a fabricated number — and never eligible for `full` size however high er_confidence reads.
+    um = evaluate(dict(base, expected_return_12_24m=4.0, er_status="unmeasured",
+                       er_rerate_status="UNMEASURED", er_confidence=1.0,
+                       est_rev_direction="improving", eps_trend_mom_pct=6.0), ref_date=ref)
+    assert um["er"]["state"] == "NO_DATA_UNMEASURED" and um["er"]["pass"], um["er"]
+    assert um["t1_qualified"] and um["size_mode"] == "starter", um
+    assert um["evidence"]["basis"]["route"] == "unconfirmed_er_unmeasured", um["evidence"]
+    # (gate_status_for_screen_row is defined below this self-test block — its D-24 label
+    #  assertion lives in tests_jul2026/test_d24_expected_return.py)
+    print("t1_gates SELF-TEST OK (A5 v3 — evidence sizing, tenure gate removed; + D-24 er_status)")
 
 
 def gate_status_for_screen_row(row, get=None):
@@ -453,7 +478,10 @@ def gate_status_for_screen_row(row, get=None):
     reasons = []
     if st_blocked:
         reasons.append("stage")
-    if er is not None and er < er_floor:
+    # D-24: an UNMEASURED re-rate makes E[r] partial — it must not BLOCK on a number it did not
+    # fully see, and it must not read as a clean PASS either. It is flagged, exactly like NO_DATA.
+    er_unmeasured = str(g(row, "er_status") or "") == "unmeasured"
+    if er is not None and er < er_floor and not er_unmeasured:
         reasons.append(f"E[r]<{er_floor:g}")
     if late:
         reasons.append("late-cycle")
@@ -462,6 +490,8 @@ def gate_status_for_screen_row(row, get=None):
                     "UNRESOLVED_HARD_GATE_NOT_RANKABLE"):
         reasons.append("gate-fail")
     label = "PASS" if not reasons else "BLOCKED(" + ",".join(reasons) + ")"
+    if er_unmeasured:
+        label += " ?E[r]unmeasured"
     conflict = str(g(row, "capital_signal_conflict") or "").lower() in ("true", "1", "yes")
     if conflict:
         label += " !conflict"

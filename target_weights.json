@@ -38,25 +38,25 @@
     "B1": {
       "name": "Core Global Equity",
       "role": "Stable backbone. Diversified, quality, lower vol. Reliable compounding.",
-      "min_expected_return": 0.09,
+      "ownership_floor_return": 0.12,
       "max_weight_pct": 0.35
     },
     "B2": {
       "name": "Active Growth Equity",
       "role": "Primary return engine. Active management premium. GARP, quality growth.",
-      "min_expected_return": 0.12,
+      "ownership_floor_return": 0.12,
       "max_weight_pct": 0.45
     },
     "B3": {
       "name": "High-Growth / Structural Theme",
       "role": "Highest expected return, highest vol. Structural tailwinds.",
-      "min_expected_return": 0.13,
+      "ownership_floor_return": 0.13,
       "max_weight_pct": 0.25
     },
     "hedge": {
       "name": "Tail Hedge",
       "role": "Risk reduction only (gold). NO expected-return claim under the 14% formula - excluded from ALL return-bucket math and the Section-A gate.",
-      "min_expected_return": null,
+      "ownership_floor_return": null,
       "max_weight_pct": 0.12
     }
   },

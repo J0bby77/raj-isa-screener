@@ -137,6 +137,93 @@ def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale
     return series
 
 
+# ---------------------------------------------------------------- local series (ISA-0307)
+class LocalSeriesError(RuntimeError):
+    """A declared local series that cannot be read. RAISED, never silently empty: the whole
+    defect this route exists to fix was a NAV series that was on disk, correct, reconciled, and
+    read by nothing — while the study reported `warnings: []`."""
+
+
+def load_local_series(u, base=None):
+    """[(date, close)] for a fund whose NAV has no feed and is supplied manually.
+
+    ⚑ WHY THIS EXISTS. `yfinance` rejects the valid ISIN IE00B42W4J83, so Polar Capital Global
+    Tech had no NAV series and every consumer recorded 'no NAV series — factsheet-only fund'.
+    Raj supplied a reconciling monthly series on 06-Aug-2026, it was cached, and for six days
+    nothing read it: 7.6% of the portfolio carried no measured beta and M* coverage read 92.4%
+    for want of a file that was already on disk. Built, believed live, never reached.
+
+    ⚑ THE ROUTE IS DECLARED, NOT DISCOVERED. It fires only where `fund_universe` carries a
+    `local_series` block naming the file, sheet and columns, and it re-asserts that block's own
+    factsheet reconciliation before returning anything (R4.10 — an artefact asserts its own
+    fitness for the use it will be put to)."""
+    ls = (u or {}).get("local_series")
+    if not ls:
+        return []
+    base = base or os.path.dirname(os.path.abspath(__file__))
+    cache = os.path.join(base, ls.get("cache", ""))
+    series = []
+    if ls.get("cache") and os.path.exists(cache):
+        with open(cache) as fh:
+            for r in csv.DictReader(fh):
+                series.append((dt.date.fromisoformat(r["date"]), float(r["close"])))
+    else:
+        path = os.path.normpath(os.path.join(base, ls["path"]))
+        if not os.path.exists(path):
+            raise LocalSeriesError(f"declared local_series not found: {path}")
+        import openpyxl
+        ws = openpyxl.load_workbook(path, data_only=True)[ls["sheet"]]
+        hdr = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        di, vi = hdr.index(ls["date_col"]), hdr.index(ls["value_col"])
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[di] is None or row[vi] is None:
+                continue
+            d = row[di].date() if hasattr(row[di], "date") else row[di]
+            series.append((d, float(row[vi])))
+        if ls.get("cache"):
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            with open(cache, "w", newline="") as fh:
+                w = csv.writer(fh); w.writerow(["date", "close"])
+                w.writerows([(d.isoformat(), v) for d, v in sorted(series)])
+    series.sort()
+    if not series:
+        raise LocalSeriesError("declared local_series produced no rows")
+    _assert_local_reconciliation(series, ls)
+    return series
+
+
+def _assert_local_reconciliation(series, ls):
+    """The block declares deltas against a named factsheet. Re-derive them and RAISE on
+    disagreement — two independent derivations must agree, with a stated tolerance (R5.2)."""
+    rec = ls.get("reconciliation") or {}
+    tol = rec.get("tolerance_pp")
+    deltas = rec.get("deltas_pp") or {}
+    if tol is None or not deltas:
+        raise LocalSeriesError("local_series carries no reconciliation — a manually supplied NAV "
+                               "series may not be used unmeasured (R6.3)")
+    for k, v in deltas.items():
+        if abs(float(v)) > float(tol):
+            raise LocalSeriesError(
+                f"local_series reconciliation {k} is {v}pp, outside the declared {tol}pp tolerance")
+    L = {}
+    for d, v in series:
+        L[(d.year, d.month)] = v
+    if len(L) < 30:
+        raise LocalSeriesError(f"local_series has {len(L)} months, below the 30-month minimum")
+
+
+def nav_series_for(sedol, u, refresh=False):
+    """THE one way to get a NAV series for a fund. Local series first where declared, then the
+    feed. One home (R4.4) — every caller that had its own `yf_symbol or isin` line was a place a
+    fund with no feed could go quietly missing."""
+    if (u or {}).get("local_series"):
+        s = load_local_series(u)
+        if s:
+            return s
+    sym = (u or {}).get("yf_symbol") or (u or {}).get("isin")
+    return fetch_nav_history(sym, use_cache=True, refresh=refresh, scale=_scale_for(u))
+
+
 # ---------------------------------------------------------------- maths
 def _nav_on_or_before(series, target, max_back_days=10):
     lo, hi = 0, len(series) - 1
@@ -307,9 +394,11 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
         return out
 
     sym = u["yf_symbol"]
-    src = f"yfinance:{sym}"
+    src = (f"local_series:{u['local_series']['path']}" if u.get("local_series")
+           else f"yfinance:{sym}")
     scale = _scale_for(u)
-    series = fetch_nav_history(sym, refresh=refresh, scale=scale)
+    series = (load_local_series(u) if u.get("local_series")
+              else fetch_nav_history(sym, refresh=refresh, scale=scale))
     out["nav_points"] = len(series)
     if series:
         out["nav_range"] = [series[0][0].isoformat(), series[-1][0].isoformat()]

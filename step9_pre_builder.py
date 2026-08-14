@@ -47,6 +47,20 @@ try:
 except Exception:
     _er = None
 
+_D24_TBL = {}
+
+
+def _d24_anchor_table():
+    """D-24 §3.3 — the screen's persisted anchor table, loaded once. Raises when absent.
+
+    Deliberately NOT wrapped in a try/except at the call site's discretion: a fallback compute
+    that silently used no anchor would reinstate the pre-D-24 behaviour on exactly the names
+    rerank did not touch, which is the population least likely to be looked at.
+    """
+    if "v" not in _D24_TBL:
+        _D24_TBL["v"] = _er.load_anchor_table()
+    return _D24_TBL["v"]
+
 
 # ---------------------------------------------------------------------------
 # Sector type derivation
@@ -791,11 +805,17 @@ def main():
         _er_val = wt_entry.get("expected_return_12_24m")
         _er_conf = wt_entry.get("er_confidence")
         _er_basis = wt_entry.get("er_basis")
+        _er_status = wt_entry.get("er_status")
+        _er_rr_status = wt_entry.get("er_rerate_status")
         if _er_val is None and _er is not None:
+            # D-24 §3.3: the FALLBACK compute reads the screen's persisted anchor table too.
+            # A fallback that quietly used a different anchor than rerank would put two different
+            # E[r] values for the same name into the same review.
             try:
-                _erd = _er.expected_return_for_row(ts)
+                _erd = _er.expected_return_for_row(ts, anchor_table=_d24_anchor_table())
                 _er_val, _er_conf, _er_basis = (_erd.get("expected_return_12_24m"),
                                                 _erd.get("er_confidence"), _erd.get("er_basis"))
+                _er_status, _er_rr_status = _erd.get("er_status"), _erd.get("er_rerate_status")
             except Exception:
                 pass
         base_record.update({
@@ -803,6 +823,8 @@ def main():
             "expected_return_12_24m": _er_val,
             "er_confidence":          _er_conf,
             "er_basis":               _er_basis,
+            "er_status":              _er_status,        # D-24 — the gate reads this
+            "er_rerate_status":       _er_rr_status,
             "first_seen":             wt_entry.get("first_seen"),
             "cycles_seen":            wt_entry.get("cycles_seen"),
         })

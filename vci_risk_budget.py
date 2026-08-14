@@ -28,12 +28,44 @@ def _c(name, default):
     return getattr(cfg, name, default)
 
 
+try:   # D-24 Stage 6 / V-1 — THE one shared null-handling helper (gated_control.py)
+    from gated_control import gated as _gated, unknown_controls as _unknown_controls
+except Exception:                                            # noqa: BLE001
+    def _gated(v, *, control_name, registry=None):
+        ok = v is not None and not isinstance(v, bool)
+        if registry is not None:
+            registry[control_name] = "OK" if ok else "UNKNOWN"
+        return ("OK" if ok else "UNKNOWN"), (not ok), (float(v) if ok else None)
+
+    def _unknown_controls(reg):
+        return sorted(k for k, v in (reg or {}).items() if v == "UNKNOWN")
+
+
 def position_risk(size_pct: Optional[float], L: Optional[float], p: Optional[float]) -> float:
-    """Expected loss (% ISA) of one binary starter. Missing p/L -> conservative (p=0, L=1)."""
-    s = float(size_pct or 0.0)
-    ll = float(L if L is not None else 1.0)
-    pp = float(p if p is not None else 0.0)
-    return round(s * ll * (1.0 - pp), 4)
+    """Expected loss (% ISA) of one binary starter. Missing p/L -> conservative (p=0, L=1).
+
+    ⚑ D-24 Stage 6 / V-1 (09-Aug-2026). The substitution above is conservative FOR THE ARITHMETIC
+    and catastrophic for the DECISION: the number it returns is indistinguishable from a measured
+    one. On 09-Aug a caller-key typo (`p` where the entry stores `p_thesis`) therefore flipped a
+    DENY into an ADMIT on QBTS — the first deploy-eligible new VCI name in the sleeve's history —
+    and the wrong figure, 1.55, was entirely plausible. The float return is UNCHANGED so no caller
+    breaks; the missing inputs are now also NAMED via position_risk_detail(), and admit() blocks
+    on them. A control fed a null must return UNKNOWN and block, never pass.
+    """
+    return position_risk_detail(size_pct, L, p)["risk"]
+
+
+def position_risk_detail(size_pct: Optional[float], L: Optional[float],
+                         p: Optional[float], label: str = "") -> dict:
+    """{risk, unknown[]} — the same number, plus the controls that could not be evaluated."""
+    reg = {}
+    _, _, s_ = _gated(size_pct, control_name=f"{label}size_pct", registry=reg)
+    _, _, l_ = _gated(L, control_name=f"{label}L", registry=reg)
+    _, _, p_ = _gated(p, control_name=f"{label}p_thesis", registry=reg)
+    s = float(s_ if s_ is not None else 0.0)
+    ll = float(l_ if l_ is not None else 1.0)
+    pp = float(p_ if p_ is not None else 0.0)
+    return {"risk": round(s * ll * (1.0 - pp), 4), "unknown": _unknown_controls(reg)}
 
 
 def committed_risk(open_positions) -> float:
@@ -52,7 +84,14 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
     max_concurrent = int(max_concurrent if max_concurrent is not None else _c("VCI_BINARY_MAX_CONCURRENT", 3))
 
     committed = committed_risk(open_positions)
-    p_risk = position_risk(proposed.get("size_pct"), proposed.get("L"), proposed.get("p_thesis"))
+    _pd = position_risk_detail(proposed.get("size_pct"), proposed.get("L"),
+                              proposed.get("p_thesis"), label="proposed.")
+    p_risk = _pd["risk"]
+    # V-1: every control that could not be evaluated, across the proposed AND open starters.
+    unknown = list(_pd["unknown"])
+    for _i, _e in enumerate(open_positions):
+        unknown += position_risk_detail(_e.get("size_pct"), _e.get("L"), _e.get("p_thesis"),
+                                        label=f"open[{_e.get('ticker') or _i}].")["unknown"]
 
     # correlation rider: shared catalyst domain with any open starter inflates the proposed risk
     dom = proposed.get("catalyst_domain")
@@ -60,10 +99,17 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
     p_risk_eff = round(p_risk * (rider if correlated else 1.0), 4)
 
     # budget disabled -> fall back to the count cap only
+    if unknown:
+        # A control fed a null returns UNKNOWN and BLOCKS. It never quietly becomes p = 0.
+        return {"ok": False, "committed": committed, "proposed_risk": p_risk_eff,
+                "headroom": None, "correlated": correlated, "unknown_controls": unknown,
+                "reason": "DENY: UNKNOWN control(s) " + ", ".join(unknown)
+                          + " — a missing input is not a measured zero (V-1)"}
+
     if not budget:
         ok = len(open_positions) < max_concurrent
         return {"ok": ok, "committed": committed, "proposed_risk": p_risk_eff,
-                "headroom": None, "correlated": correlated,
+                "headroom": None, "correlated": correlated, "unknown_controls": [],
                 "reason": "budget disabled; count cap " + ("ok" if ok else "breached")}
 
     headroom = round(budget - committed, 4)
@@ -78,7 +124,8 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
     else:
         reason = f"DENY: count cap {max_concurrent} reached"
     return {"ok": ok, "committed": committed, "proposed_risk": p_risk_eff,
-            "headroom": headroom, "correlated": correlated, "reason": reason}
+            "headroom": headroom, "correlated": correlated, "unknown_controls": [],
+            "reason": reason}
 
 
 if __name__ == "__main__":
@@ -105,4 +152,15 @@ if __name__ == "__main__":
     r3 = admit(dict(ticker="E", size_pct=1.0, L=0.35, p_thesis=0.55, catalyst_domain="ai_optical"), openp)
     print("correlated:", r3["ok"], r3["correlated"], r3["proposed_risk"], r3["reason"])
     assert r3["correlated"]
-    print("vci_risk_budget self-test PASSED")
+    # ⚑ V-1 (09-Aug-2026): a MISSING p_thesis must DENY, not silently price at p = 0. This is the
+    # exact shape of the QBTS flip — same call, same plausible number, opposite decision.
+    r4 = admit(dict(ticker="F", size_pct=0.75, L=0.60, catalyst_domain="quantum"), openp[:1])
+    print("missing p_thesis:", r4["ok"], r4["reason"])
+    assert not r4["ok"] and r4["unknown_controls"] == ["proposed.p_thesis"], r4
+    # ...and a missing input on an ALREADY-OPEN starter poisons the committed total just as badly.
+    r5 = admit(dict(ticker="G", size_pct=0.5, L=0.35, p_thesis=0.55), [dict(ticker="H", size_pct=1.0, L=0.6)])
+    assert not r5["ok"] and "open[H].p_thesis" in r5["unknown_controls"], r5
+    # A real ZERO is not a missing value.
+    r6 = admit(dict(ticker="I", size_pct=0.5, L=0.35, p_thesis=0.0), [], budget=1.0)
+    assert r6["ok"] and r6["unknown_controls"] == [], r6
+    print("vci_risk_budget self-test PASSED (incl. V-1 UNKNOWN-blocks)")

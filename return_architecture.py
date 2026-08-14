@@ -89,18 +89,21 @@ THRESHOLD_PARITY_TOL_PP    = 0.15    # beyond this a derived/legacy pair is a DI
 # ⚑ "missing" cannot be a number. Below this, no verdict is issued at all.
 COVERAGE_FLOOR = 0.90
 
-# ── BUCKET-MINIMUM PROVENANCE — a live divergence, preserved not resolved ───────────────
-# `fund_action_stack._bucket_minimums()` documents itself as "One home: read from
-# target_weights.json when present so a threshold cannot say one thing here and another there."
-# It reads keys `min_return` / `return_minimum`. **The key in target_weights.json is
-# `min_expected_return`.** The read has therefore NEVER matched and the module has always used
-# its own DEFAULT_BUCKET_MIN — so the B1 ownership floor is 12.0% in the fund action stack and
-# 9.0% in the policy file, in the same report, for the same fund.
+# ── BUCKET-MINIMUM PROVENANCE — RESOLVED by D-13 (Raj, 09-Aug-2026) ─────────────────────
+# The divergence this block used to preserve: `fund_action_stack._bucket_minimums()` read keys
+# `min_return` / `return_minimum`, neither of which exists in target_weights.json, so the
+# documented "one home" always fell through to DEFAULT_BUCKET_MIN and the B1 ownership floor read
+# 12.0% in the fund action stack and 9.0% in the policy file, in the same report, for the same fund.
 #
-# Fixing the read would LOOSEN the B1 floor by 3pp as a side effect of a bug fix. That is
-# exactly the mistake D-C(ii) records (a measurement fix shipping an undecided policy change),
-# so it is NOT done here. The divergence is measured, published every run, and left for Raj.
-BUCKET_MIN_POLICY = "code_default_pending_decision"   # "code_default_pending_decision" | "target_weights"
+# It was deliberately left unfixed because repairing the read alone would have LOOSENED B1 by 3pp
+# as a side effect of a bug fix — the mistake D-C(ii) records. D-13 makes the policy call first:
+# **B1 = 0.12**, the read is repaired, and the field is renamed `ownership_floor_return` because
+# D-8 moved the return-EXPECTATION job out of it. Policy and code default now agree, so the
+# measurement fix ships with a NULL behaviour delta (D-20: 100% method, 0% data).
+#
+# The publisher below stays. A resolved divergence still needs a live check — this is now the
+# assertion that the two derivations continue to agree, not a report that they do not.
+BUCKET_MIN_POLICY = "target_weights"   # "code_default_pending_decision" | "target_weights"
 
 CASH_INPUTS_PATH = os.path.join(HERE, "return_inputs.json")
 
@@ -408,10 +411,13 @@ def stock_inputs(stocks, metrics_tickers, total_value, anchor_pct):
        contribution to Section C at ~4pp and declare the portfolio comfortably on track on the
        strength of a semiconductor upcycle. The forward E[r] is the right input for the
        DEPLOYMENT gate (ER_DEPLOY_FLOOR) and the wrong one for the structural question.
-    2. `expected_return.compute_expected_return` returns `expected_return_12_24m: 0.0` with
-       `er_confidence: 0.0` when every term is missing — live on ONT this month. A confident
+    2. `expected_return.compute_expected_return` returned `expected_return_12_24m: 0.0` with
+       `er_confidence: 0.0` when every term was missing — live on ONT this month. A confident
        zero where a refusal belongs is the failure family this register catalogues, so
-       confidence == 0 is treated as UNMEASURED here and reported as a defect upstream.
+       confidence == 0 is treated as UNMEASURED here and was reported as a defect upstream.
+       ⚑ FIXED UPSTREAM 09-Aug-2026 (D-24 §5): `er_status` is now a first-class field and a
+       refused re-rate returns `er_rerate = None`, not 0. The confidence == 0 test below is
+       RETAINED as a belt-and-braces check on older frames; `er_status` is the primary signal.
     """
     try:
         import expected_return as _er
@@ -425,10 +431,20 @@ def stock_inputs(stocks, metrics_tickers, total_value, anchor_pct):
         row = (metrics_tickers or {}).get(tkr)
         if row is not None and _er is not None:
             try:
-                e = _er.expected_return_for_row(row)
+                # ⚑ D-24 §1.2 (09-Aug-2026). Section A/B/C recomputes E[r] at REVIEW time on
+                # PORTFOLIO rows, with no screen anchor table in scope. It now reads the
+                # PERSISTED table so Section C and the screen cannot disagree on the same name;
+                # where none exists the re-rate is declared UNMEASURED, never silently zeroed.
+                e = _er.expected_return_for_row(
+                    row, anchor_table=_er.load_anchor_table(required=False),
+                    allow_missing_anchor_table=True)
                 conf_raw = e.get("er_confidence")
                 basis_str = e.get("er_basis")
-                if conf_raw is not None and float(conf_raw) > 0:
+                # D-24: er_status is now FIRST-CLASS. Previously the only signal that every term
+                # was missing was er_confidence == 0 — a confident zero where a refusal belonged.
+                if e.get("er_status") == "unmeasured":
+                    zero_conf.append(tkr)
+                elif conf_raw is not None and float(conf_raw) > 0:
                     fwd = float(e.get("expected_return_12_24m"))
                 else:
                     zero_conf.append(tkr)
@@ -876,6 +892,22 @@ def check_invariants(inputs, sect, attrib, thr, tw, frs_rows):
          f"the declared long-run expectation was READ for {len(read)} of {len(have)} funds that "
          f"carry one in target_weights.json — a default silently standing in for a policy value "
          f"is the defect this invariant exists to catch")
+
+    # ── I-RA-7 (D-8/D-12, 12-Aug-2026). M* substituted back must reproduce the anchor. ────
+    im = _implied_m_block(inputs, thr["derived"]["section_c_on_track"])
+    ic = im.get("identity_check") or {}
+    _add("I-RA-7", (im["status"] == "computed" and ic.get("holds") is True) or
+         im["status"] in ("BLOCKED", "INSUFFICIENT_COVERAGE", "REFUSED_NO_MARKET_SENSITIVITY"),
+         (f"M* {im.get('m_star_pct')} at λ {im.get('leverage_lambda')}; substituting it back "
+          f"through every holding reproduces the anchor (gap {ic.get('abs_gap_pp')}). Status "
+          f"{im['status']} — a refusal is a pass here, a computed value failing the "
+          f"substitution is not"))
+    # ── I-RA-8. The register's published M* and this module's must not drift apart. ───────
+    d8 = im.get("d8_reconciliation") or {}
+    _add("I-RA-8", (im["status"] != "computed") or d8.get("holds") is True,
+         (f"headline α mode {d8.get('headline_mode')!r} reproduces D-8's published "
+          f"{d8.get('d8_published_m_star_pct')}% (reproduced_by={d8.get('reproduced_by')}) "
+          f"within {d8.get('tolerance_pp')}pp"))
     return out
 
 
@@ -919,8 +951,9 @@ def bucket_minimum_divergence(tw):
         in_force = fas._bucket_minimums()
     except Exception as _e:                                    # noqa: BLE001
         return {"error": f"{type(_e).__name__}: {_e}"}
-    pol = {k: v.get("min_expected_return") for k, v in ((tw or {}).get("buckets") or {}).items()
-           if v.get("min_expected_return") is not None}
+    fld = getattr(fas, "BUCKET_FLOOR_FIELD", "ownership_floor_return")
+    pol = {k: v.get(fld) for k, v in ((tw or {}).get("buckets") or {}).items()
+           if v.get(fld) is not None}
     rows = []
     for k in sorted(set(pol) | set(code)):
         p = None if pol.get(k) is None else round(float(pol[k]) * 100, 2)
@@ -929,14 +962,581 @@ def bucket_minimum_divergence(tw):
                      "in_force_pct": round(float(in_force.get(k, 0)) * 100, 2) if k in in_force else None,
                      "agree": (p is not None and c is not None and abs(p - c) < 1e-9)})
     return {"rows": rows, "policy_setting": BUCKET_MIN_POLICY,
-            "diagnosis": ("fund_action_stack._bucket_minimums() reads `min_return` / "
-                          "`return_minimum`; target_weights.json stores `min_expected_return`. "
-                          "The read has never matched, so the documented 'one home' has always "
-                          "fallen through to DEFAULT_BUCKET_MIN."),
-            "why_not_fixed_here": ("repairing the read would move the B1 ownership floor from "
-                                   "12% to 9% as a SIDE EFFECT of a bug fix — the exact mistake "
-                                   "D-C(ii) records. Measured and published; the policy move is "
-                                   "Raj's, and it is one constant.")}
+            "field": fld,
+            "resolved_by": "D-13 (Raj, 09-Aug-2026)",
+            "diagnosis": ("RESOLVED. `fund_action_stack._bucket_minimums()` read `min_return` / "
+                          "`return_minimum`, keys that never existed in target_weights.json, so the "
+                          "documented 'one home' always fell through to DEFAULT_BUCKET_MIN. D-13 set "
+                          "B1 to 0.12, repaired the read and renamed the field to "
+                          "`ownership_floor_return` (D-8 moved the return-expectation job out of it)."),
+            "behaviour_delta": ("NONE. B1 policy 9% -> 12% matches the value already in force, so no "
+                                "floor, band, FRS band or verdict moves. 100% method, 0% data (D-20)."),
+            "live_check": ("_bucket_minimums() now RAISES BucketFloorDivergence on a legacy field "
+                           "name, a missing policy value or any policy-vs-code disagreement, instead "
+                           "of falling back to the code default silently.")}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# IMPLIED FORWARD MARKET RETURN M*  —  D-8 mechanism, built for D-23 (ISA-0158), 12-Aug-2026
+#
+# ⚑ WHAT M* IS, AND WHY IT IS THE ONE E[r] BASIS THAT NEEDS NO E[r] ASSUMPTION
+# The three legacy bases each answer "what will this portfolio earn?" and each requires an input
+# nobody owns — a declared prior per fund, a trailing window annualised, or a shrink of the two on
+# two uncalibrated constants. D-8 records the cost: Section C's verdict swung 11pp on the choice,
+# and `declared_prior` could not read On-track under ANY compliant allocation.
+#
+# M* inverts the question. Instead of assuming a market return and asking whether the portfolio
+# clears the anchor, it asks: **what would the market have to return for this portfolio to clear
+# the anchor?** That is an OUTPUT, so no market assumption is required to compute it — which is
+# why D-23 can be built today while O-1 (the per-region M_va formula) stays open.
+#
+#   E[r]_portfolio(M) = Σ_i w_i·(α_i + β_i·M)  +  w_cash·r_cash          (cash has no β)
+#                     = intercept + λ·M            where  λ = Σ_i w_i·β_i
+#   M* = (anchor − intercept) / λ
+#
+# λ IS THE LEVERAGE D-12 ASKS TO BE PRINTED NEXT TO M. It is derived from measured betas and
+# actual weights every run — never a constant. D-8's datapoint (M* = 11.91% at a 14.1% anchor)
+# implies λ ≈ 0.845, and D-12's "0.85× levered to M" is the same number stated the other way.
+#
+# ⚑ THE ASSUMPTION THAT IS DECLARED, NOT BURIED (and it is O-1's category error, named)
+# Each fund's β is measured against ITS OWN benchmark — S&P 500, UK All-Share, Asia ex-Japan,
+# Japan. Summing w_i·β_i into a single λ and inverting for a single M is only meaningful under
+# `IMPLIED_M_ASSUMPTION = "uniform_benchmark_return"`: every benchmark returns the same M. That
+# is a real assumption and it is exactly what O-1 (ISA-0160) exists to replace with per-region
+# M_va. It is stated on the output of every call so no reader can mistake it for a measurement.
+# ⚑ It is also why M* is reported as a REQUIRED rate and not as a verdict: see below.
+#
+# ⚑ NO VERDICT IS ISSUED, AND THAT IS THE CORRECT ANSWER TODAY (R4.8)
+# Turning M* into On-track/Watch/Flag needs a declared plausibility band for long-run equity
+# returns — a judgement Raj owns and has not made. Guessing it here would persist an invented
+# preference that is then reused unconditionally and becomes invisible. M* is published as a
+# number, with λ beside it and the full sensitivity grid, and the band is a named open item.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+IMPLIED_M_ASSUMPTION = "uniform_benchmark_return"   # O-1 / ISA-0160 replaces this with M_va
+BETA_STUDY_PATH = os.path.join(HERE, "beta_alpha_study_aug2026.json")
+
+# ⚑ DECLARED, not measured (R13.1 basis = DECLARED). `beta_alpha_study` covers the twelve FUNDS
+# only; no β has ever been measured for a single stock in this framework. 1.0 is the neutral
+# declaration and it UNDERSTATES λ for a MU/AVGO-style sleeve, which RAISES M* — i.e. it errs
+# toward requiring more of the market, which is the safe direction for a capital-gating hurdle.
+# Falsified by: a measured single-stock β. Revisit: 2026-11-30 (with the O-2 stock-E[r] work).
+STOCK_BETA_DECLARED = 1.0
+STOCK_BETA_SENSITIVITY = (1.0, 1.3, 1.6)
+# α: the intercept. "zero" credits no manager skill in a 12-year structural projection. The
+# measured alternative is published beside it and NEVER blended (R6.2) — D-9 is the standing
+# record of what happens when an alpha estimate is quietly turned into a decision.
+IMPLIED_M_ALPHA_MODES = ("zero", "measured")
+# ⚑ HEADLINE = "measured", AND THE CHOICE IS EVIDENCED, NOT PREFERRED (R4.8/R5.2).
+# The first build set this to "zero" on the reasoning that a 12-year structural projection should
+# credit no manager skill. Running both modes against D-8's own published datapoint settled it:
+#   D-8 states M* = 11.91% at a 14.1% anchor.
+#   measured-α reproduces 12.01% at a 14.1% anchor on the 30-Jun-2026 weights — 0.10pp out.
+#   zero-α     produces    15.65% at the same anchor — 3.74pp out, i.e. a different quantity.
+# So D-8's figure IS the measured-α basis, and a "zero" headline would have silently redefined
+# the number the decision register publishes. **D-9 is the same lesson from the other side:**
+# zeroing alpha because a t-statistic was small cost 2.18pp and is on the register as an error.
+# `zero` remains in the grid as the sensitivity, never blended (R6.2).
+IMPLIED_M_ALPHA_MODE_HEADLINE = "measured"
+# D-8's published figure, held as the reconciliation target rather than as prose (R5.2).
+# ── ISA-0310. The plausibility band for M*. Declared 13-Aug-2026; ONE HOME, in its own module.
+import mstar_plausibility as MPB
+
+# The horizon M* is solved over. Same target and end date the anchor is solved on in
+# `derive_required_return.solve_required_annual_pct(1_000_000, ..., 2037-12-31, ...)`.
+# ⚑ A percentile is a statement about a HORIZON. Reading M* against a distribution built on a
+# different horizon would be the FC-B defect: plausible, and wrong.
+TARGET_END_DATE = "2037-12-31"
+
+
+def _horizon_years(as_of):
+    """Years from `as_of` to the target date. Never defaulted — a missing date REFUSES."""
+    if not as_of:
+        return None
+    a = dt.date.fromisoformat(str(as_of)[:10])
+    e = dt.date.fromisoformat(TARGET_END_DATE)
+    return (e - a).days / 365.25 if e > a else None
+
+
+D8_PUBLISHED_M_STAR_PCT = 11.91
+D8_PUBLISHED_AT_ANCHOR_PCT = 14.1
+D8_RECONCILIATION_TOL_PP = 0.35
+
+
+class ImpliedMError(RuntimeError):
+    """Raised where M* cannot be computed honestly. Never defaulted to a plausible number."""
+
+
+def fund_betas(path=None, as_of=None):
+    """Measured β and α per fund, with the point-in-time status stamped (R6.4).
+
+    ⚑ A β measured over a window ENDING AFTER `as_of` is not point-in-time at `as_of`. For the
+    D-23 retrospective at 30-Jun-2026 every β on file was measured to 2026-08, so every row is
+    stamped `backfilled_not_pit` and is inadmissible as EVIDENCE — which is precisely D-23's
+    "100% method, 0% data". Never deleted, never silently promoted: relabelled.
+    """
+    path = path or BETA_STUDY_PATH
+    if not os.path.exists(path):
+        return None, {"status": "MISSING", "path": os.path.basename(path),
+                      "note": "no beta study on disk — M* cannot be computed (R4.3: BLOCKS)"}
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    rows, skipped = {}, []
+    for k, v in (doc.get("funds") or {}).items():
+        sf = v.get("single_factor") or {}
+        b, a = sf.get("beta"), sf.get("alpha_ann_pct")
+        if b is None:
+            skipped.append({"asset_id": k, "why": "no single_factor.beta"})
+            continue
+        win = v.get("window") or [None, None]
+        pit = True
+        if as_of and win[1]:
+            pit = str(win[1]) <= str(as_of)[:7]
+        rows[k] = {"beta": float(b), "alpha_ann_pct": (None if a is None else float(a)),
+                   "alpha_t": sf.get("alpha_t"), "r_squared": sf.get("r_squared"),
+                   "benchmark": v.get("benchmark"), "window": win,
+                   "n_months": sf.get("n_months"),
+                   "stamp_basis": "point_in_time" if pit else "backfilled_not_pit"}
+    n_pit = sum(1 for r in rows.values() if r["stamp_basis"] == "point_in_time")
+    return rows, {"status": "OK", "n": len(rows), "n_point_in_time": n_pit,
+                  "n_backfilled_not_pit": len(rows) - n_pit, "skipped": skipped,
+                  "generated_at": doc.get("generated_at"), "method": doc.get("method"),
+                  "source": os.path.basename(path),
+                  "admissibility": ("rows stamped backfilled_not_pit are inadmissible as evidence "
+                                    "(R6.4); they are used here because D-23 is explicitly a "
+                                    "method exercise, and that is stated on the result")}
+
+
+def market_sensitivity(inputs, betas, stock_beta=None, alpha_mode="zero"):
+    """λ = Σ w_i·β_i and the intercept, over ACTUAL weights. Cash carries β = 0, not β = missing.
+
+    ⚑ R4.1. A fund with no measured β is NOT given one. It is counted as uncovered, and if
+    uncovered weight breaks the coverage floor M* is refused outright rather than computed on a
+    renormalised subset that quietly excludes the holdings nobody could measure.
+    """
+    sb = STOCK_BETA_DECLARED if stock_beta is None else float(stock_beta)
+    if alpha_mode not in IMPLIED_M_ALPHA_MODES:
+        raise ImpliedMError(f"alpha_mode {alpha_mode!r} not in {IMPLIED_M_ALPHA_MODES}")
+    rows, uncovered = [], []
+    lam = intercept = w_cov = w_all = 0.0
+    for i in inputs:
+        w = float(i.get("weight") or 0.0)
+        w_all += w
+        kind = i["kind"]
+        if kind == "cash":
+            er = (i.get("er_by_basis") or {}).get("declared_prior")
+            if er is None:
+                uncovered.append({"asset_id": i["asset_id"], "kind": kind, "weight": w,
+                                  "why": "the money-market rate is undeclared (return_inputs.json)"})
+                continue
+            rows.append({"asset_id": i["asset_id"], "name": i["name"], "kind": kind, "weight": w,
+                         "beta": 0.0, "beta_source": "cash is not market-sensitive by construction",
+                         "alpha_ann_pct": float(er),
+                         "alpha_source": "derived money-market rate (return_inputs / cash statement)"})
+            intercept += w * float(er)
+            w_cov += w
+            continue
+        if kind == "stock":
+            rows.append({"asset_id": i["asset_id"], "name": i["name"], "kind": kind, "weight": w,
+                         "beta": sb, "beta_source": f"DECLARED {sb} (no single-stock β measured)",
+                         "alpha_ann_pct": 0.0, "alpha_source": "declared zero"})
+            lam += w * sb
+            w_cov += w
+            continue
+        b = (betas or {}).get(i["asset_id"])
+        if not b:
+            uncovered.append({"asset_id": i["asset_id"], "kind": kind, "weight": w,
+                              "why": "no measured β in the beta/alpha study"})
+            continue
+        al = 0.0 if alpha_mode == "zero" else float(b.get("alpha_ann_pct") or 0.0)
+        rows.append({"asset_id": i["asset_id"], "name": i["name"], "kind": kind, "weight": w,
+                     "beta": b["beta"], "beta_source": f"measured vs {b['benchmark']} "
+                                                       f"({b['n_months']}m, {b['stamp_basis']})",
+                     "alpha_ann_pct": al,
+                     "alpha_source": ("declared zero" if alpha_mode == "zero" else
+                                      f"measured α {b.get('alpha_ann_pct')} (t={b.get('alpha_t')})"),
+                     "stamp_basis": b["stamp_basis"]})
+        lam += w * b["beta"]
+        intercept += w * al
+        w_cov += w
+    return {"lambda": _round(lam, 8), "intercept_pct": _round(intercept, 8),
+            # ⚑ EXACT, UNROUNDED, for the I-RA-7 identity. The first run of this invariant fired
+            # at 5.4e-08 against a 1e-9 tolerance because λ and the intercept were rounded to 8dp
+            # before M* was solved from them — the invariant correctly refusing to call two
+            # DIFFERENTLY ROUNDED numbers "agreeing". `_sleeve()` carries `_exact_num`/`_exact_w`
+            # for exactly this reason and the note there says exactly this. Second occurrence of
+            # one bug class in one module is a pattern, not a coincidence.
+            "_exact_lambda": lam, "_exact_intercept": intercept, "_exact_covered_weight": w_cov,
+            "covered_weight": _round(w_cov, 8), "total_weight": _round(w_all, 8),
+            "coverage": _round(w_cov / w_all if w_all else None, 6),
+            "alpha_mode": alpha_mode, "stock_beta": sb,
+            "rows": rows, "uncovered": uncovered,
+            "assumption": IMPLIED_M_ASSUMPTION,
+            "note": ("λ is the leverage of Section C to the market return (D-12). It is derived "
+                     "from measured betas and actual weights every run and is never a constant.")}
+
+
+def implied_market_return(inputs, anchor_pct, betas, stock_beta=None, alpha_mode="zero",
+                          horizon_years=None):
+    """M* — the forward market return this allocation requires to reach the anchor.
+
+    Emits `Missing(reason)` semantics rather than a number wherever it cannot be honest:
+    λ = 0 (an all-cash portfolio requires an infinite market return, which is a refusal, not a
+    figure), or coverage below the floor.
+    """
+    ms = market_sensitivity(inputs, betas, stock_beta, alpha_mode)
+    lam, inter = ms["_exact_lambda"], ms["_exact_intercept"]
+    cov = ms["coverage"]
+    if cov is not None and cov < COVERAGE_FLOOR:
+        return {**ms, "status": "INSUFFICIENT_COVERAGE", "m_star_pct": None,
+                "note": (f"β/E[r] coverage {cov:.1%} is below the {COVERAGE_FLOOR:.0%} floor — "
+                         f"an M* computed on a renormalised subset would be a claim about the "
+                         f"holdings that could not be measured")}
+    if not lam or abs(lam) < 1e-9:
+        return {**ms, "status": "REFUSED_NO_MARKET_SENSITIVITY", "m_star_pct": None,
+                "note": ("λ = 0: nothing in this portfolio is market-sensitive, so no market "
+                         "return reaches the anchor. That is a refusal, not a large number")}
+    a = float(anchor_pct)
+    w = float(ms["_exact_covered_weight"] or 0.0)
+    # ⚑ RENORMALISED OVER COVERED WEIGHT, because that is what Section C does. `_sleeve()`
+    # computes Σ w_i·er_i / W_covered, so M* must solve (intercept + λ·M)/W_covered = anchor, NOT
+    # intercept + λ·M = anchor. The two coincide only at 100% coverage — which the August run
+    # happens to have, so the wrong form would have produced the right number today and the
+    # wrong one the first month a holding went unmeasured.
+    m_star = (a * w - inter) / lam
+    # ── I-RA-7. TWO INDEPENDENT DERIVATIONS MUST AGREE (R5.2). ───────────────────────────
+    # (1) M* from the closed form above.
+    # (2) FORWARD SUBSTITUTION: rebuild Σ w_i·(α_i + β_i·M*) holding by holding, renormalise over
+    #     covered weight, and require it to reproduce the ANCHOR. The closed form can be right
+    #     while the row-level model is wrong — a mis-signed α, or a β attached to the wrong row,
+    #     cancels in the aggregate λ and does NOT cancel here.
+    recon = sum(r["weight"] * (r["alpha_ann_pct"] + r["beta"] * m_star) for r in ms["rows"]) / w
+    gap = abs(recon - a)
+    return {**ms, "status": "computed", "m_star_pct": _round(m_star, 4),
+            "anchor_pct": _round(a, 4),
+            "leverage_lambda": _round(lam, 6),
+            "leverage_note": (f"Section C moves {lam:.4f}pp for every 1pp of market return "
+                              f"(D-12). {1.0/lam:.4f}pp of M covers 1pp of anchor."),
+            "pp_of_m_per_pp_of_anchor": _round(1.0 / lam, 6),
+            "identity_check": {"m_star_pct": _round(m_star, 10),
+                               "forward_substituted_section_c_pct": _round(recon, 10),
+                               "anchor_pct": _round(a, 10),
+                               "covered_weight": _round(w, 8),
+                               "abs_gap_pp": _round(gap, 12), "tolerance_pp": 1e-9,
+                               "holds": bool(gap < 1e-9),
+                               "note": ("substituting M* back through every holding row must "
+                                        "reproduce the anchor exactly; the closed form and the "
+                                        "row-level model are independent paths")},
+            "assumption_declared": {
+                "assumption": IMPLIED_M_ASSUMPTION,
+                "meaning": ("every holding's own benchmark is assumed to return the same M. Each "
+                            "β on file is measured against a DIFFERENT benchmark (S&P 500, UK "
+                            "All-Share, Asia ex-Japan, Japan), so a single λ is only meaningful "
+                            "under this assumption"),
+                "replaced_by": "O-1 / ISA-0160 — the per-region M_va formula",
+                "why_acceptable_today": ("M* is an OUTPUT, not an assumed input, so no regional "
+                                         "market forecast is required to compute it (D-23)")},
+            **_mstar_verdict(m_star, horizon_years)}
+
+
+def _mstar_verdict(m_star_pct, horizon_years):
+    """ISA-0310. The verdict on M*, delegated in full to the declared band. CLOSED 13-Aug-2026.
+
+    ⚑ WHY THE PERCENTILE AND NOT TWO PERCENTAGE BOUNDS. D-12 measures ~1.2pp of M between Flag
+    and On-track, so the live range of M* is narrower than any plausibility band drawn in
+    percentage terms — a two-bound band would have frozen the verdict at a constant. The
+    percentile keeps the same declared judgement and restores the resolution.
+    """
+    if horizon_years is None:
+        return {"verdict": None,
+                "verdict_withheld_reason": (
+                    "no horizon was supplied, and a percentile is a statement about a horizon. "
+                    "This is a refusal, not a default (R4.3).")}
+    p = MPB.assess(m_star_pct, horizon_years, m_star_basis=MPB.MSTAR_BASIS)
+    return {"verdict": p.get("verdict"), "verdict_withheld_reason": None, "plausibility": p}
+
+
+def implied_m_sensitivity(inputs, anchor_pct, betas):
+    """The full grid, never blended (R6.2). Both declared-α and measured-α, all three stock βs."""
+    rows = []
+    for am in IMPLIED_M_ALPHA_MODES:
+        for sb in STOCK_BETA_SENSITIVITY:
+            r = implied_market_return(inputs, anchor_pct, betas, stock_beta=sb, alpha_mode=am)
+            rows.append({"alpha_mode": am, "stock_beta": sb, "status": r["status"],
+                         "lambda": r.get("lambda"), "intercept_pct": r.get("intercept_pct"),
+                         "m_star_pct": r.get("m_star_pct"),
+                         "headline": bool(am == IMPLIED_M_ALPHA_MODE_HEADLINE and
+                                          sb == STOCK_BETA_DECLARED)})
+    span = [r["m_star_pct"] for r in rows if r["m_star_pct"] is not None]
+    return {"rows": rows,
+            "m_star_range_pct": ([min(span), max(span)] if span else None),
+            "spread_pp": (_round(max(span) - min(span), 4) if span else None),
+            "note": ("published as a grid because the two α modes answer different questions and "
+                     "a blended figure would conceal which one moved the number (R6.2)")}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# D-23 · ISA-0158 — RETROSPECTIVE SECTION C AT 30-JUN-2026, ON THE IMPLIED-M* BASIS ONLY
+#
+# ⚑ WHY 30-JUN-2026 AND NOT ANY OTHER DATE. The anchor stored on 12-Jul-2026 (13.9 / 18.7) was
+# solved on the 30-Jun-2026 portfolio value of £144,342.19. Every Section C ever published used
+# an anchor derived on one date against weights measured on another. At 30-Jun-2026 the anchor and
+# the weights are the same date for the first time, which is the whole content of D-23.
+#
+# ⚑ WHAT IS AND IS NOT PUBLISHED, AND WHY
+# PUBLISHED: M*, λ, the sensitivity grid, and the per-holding β/α table. All of it is derived from
+#            the 30-Jun weights and the anchor derived on that date.
+# NOT PUBLISHED: the three legacy bases. `declared_prior` reads a policy file that is current, not
+#            as-at-June; `realised` reads FRS windows computed in August. Reproducing them at
+#            30-Jun would mean stamping August inputs with a June date, which is the FC-B defect
+#            this framework has spent two months removing. D-23 says "implied-M* basis only", and
+#            this is the reason that instruction is correct rather than merely convenient.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+RETROSPECTIVE_SECTION_C_DATE = "2026-06-30"
+
+
+def _anchor_as_derived_on(as_of, state=None, expect_value_gbp=None):
+    """The anchor as it was DERIVED, not as it stands today (R6.4 — point-in-time or labelled).
+
+    Reads `target_state.derivation_history` for the row whose derivation used the valuation at
+    `as_of`. Refuses rather than substituting today's anchor, which is the whole defect D-23 names.
+    """
+    state = state or json.load(open(os.path.join(HERE, "target_state.json"), encoding="utf-8"))
+    want = str(as_of)[:10]
+    cands = []
+    for h in state.get("derivation_history") or []:
+        # the row is identified by the valuation DATE it solved on where recorded, else by the
+        # valuation VALUE matching the month-end portfolio value
+        if str(h.get("portfolio_value_date", ""))[:10] == want:
+            cands.append(("value_date", h))
+    if not cands and expect_value_gbp is not None:
+        # ⚑ The first cut took cands[0] from every row that merely HAD a value, so it would have
+        # silently returned whichever derivation happened to sit first in the file. The fallback
+        # must MATCH THE VALUATION to the penny, and an ambiguous match is refused, not picked.
+        for h in state.get("derivation_history") or []:
+            v = h.get("portfolio_value_gbp")
+            if v is not None and abs(float(v) - float(expect_value_gbp)) < 0.51:
+                cands.append(("valuation_value_match", h))
+    if not cands:
+        raise ImpliedMError(f"no derivation_history row identifiable at {want} (expected valuation "
+                            f"{expect_value_gbp}) — refusing to use today's anchor for a "
+                            f"retrospective, which IS the D-23 defect")
+    if len({(c[1].get("derived_at"), c[1].get("operative_pct") or c[1].get("floor_pct"))
+            for c in cands}) > 1:
+        raise ImpliedMError(
+            f"{len(cands)} derivation_history rows match {want} with DIFFERENT anchors: "
+            f"{[(c[1].get('derived_at'), c[1].get('floor_pct')) for c in cands]} — refusing to "
+            f"choose (R4.8)")
+    how, row = cands[0]
+    return {"floor_pct": row.get("floor_pct", row.get("operative_floor_pct")),
+            "operative_pct": row.get("operative_pct"),
+            "stretch_pct": row.get("stretch_pct"),
+            "derived_at": row.get("derived_at"),
+            "portfolio_value_gbp": row.get("portfolio_value_gbp"),
+            "identified_by": how,
+            "source": "target_state.derivation_history",
+            "stamp_basis": "point_in_time",
+            "note": ("the anchor AS DERIVED on this valuation, not the anchor as it stands today")}
+
+
+def d8_reconciliation(inputs, betas):
+    """⚑ TWO INDEPENDENT DERIVATIONS OF THE SAME PUBLISHED NUMBER (R5.2).
+
+    D-8 states M* = 11.91% at a 14.1% anchor. That figure was arrived at in a conversation; this
+    is code. If the two disagree, either the register is wrong or this module is, and both are
+    worth knowing — so the disagreement is PUBLISHED rather than reconciled away (R6.2/D-20).
+    """
+    out = {}
+    for am in IMPLIED_M_ALPHA_MODES:
+        r = implied_market_return(inputs, D8_PUBLISHED_AT_ANCHOR_PCT, betas, alpha_mode=am)
+        ms = r.get("m_star_pct")
+        out[am] = {"m_star_pct": ms, "status": r["status"],
+                   "delta_vs_d8_pp": (None if ms is None else _round(ms - D8_PUBLISHED_M_STAR_PCT, 4)),
+                   "agrees": bool(ms is not None and
+                                  abs(ms - D8_PUBLISHED_M_STAR_PCT) <= D8_RECONCILIATION_TOL_PP)}
+    hit = [k for k, v in out.items() if v["agrees"]]
+    return {"d8_published_m_star_pct": D8_PUBLISHED_M_STAR_PCT,
+            "d8_published_at_anchor_pct": D8_PUBLISHED_AT_ANCHOR_PCT,
+            "tolerance_pp": D8_RECONCILIATION_TOL_PP,
+            "by_alpha_mode": out, "reproduced_by": hit,
+            "headline_mode": IMPLIED_M_ALPHA_MODE_HEADLINE,
+            "holds": bool(IMPLIED_M_ALPHA_MODE_HEADLINE in hit),
+            "note": ("this is what selected the headline α mode. It is an assertion, not a "
+                     "description: if the register's number and this module's number stop "
+                     "agreeing, the battery says so")}
+
+
+def _implied_m_block(inputs, anchor_pct, as_of=None):
+    """M*, λ and the sensitivity grid for the live run. Absent betas BLOCK; they never default."""
+    betas, bmeta = fund_betas(as_of=as_of)
+    if betas is None:
+        return {"status": "BLOCKED", "m_star_pct": None, "beta_source": bmeta,
+                "note": ("no measured betas on disk, so λ cannot be derived and M* is refused. "
+                         "A leverage of 1.0 would be a plausible number and a false one (R4.3)")}
+    m = implied_market_return(inputs, anchor_pct, betas,
+                             alpha_mode=IMPLIED_M_ALPHA_MODE_HEADLINE,
+                             horizon_years=_horizon_years(as_of))
+    return {"status": m["status"], "m_star_pct": m.get("m_star_pct"),
+            "anchor_pct": _round(anchor_pct, 4),
+            "leverage_lambda": m.get("leverage_lambda"),
+            "leverage_note": m.get("leverage_note"),
+            "pp_of_m_per_pp_of_anchor": m.get("pp_of_m_per_pp_of_anchor"),
+            "intercept_pct": m.get("intercept_pct"), "coverage": m.get("coverage"),
+            "uncovered": m.get("uncovered"), "alpha_mode": IMPLIED_M_ALPHA_MODE_HEADLINE,
+            "assumption_declared": m.get("assumption_declared"),
+            "identity_check": m.get("identity_check"),
+            "verdict": m.get("verdict"),
+            "verdict_withheld_reason": m.get("verdict_withheld_reason"),
+            "plausibility": m.get("plausibility"),
+            "horizon_years": _horizon_years(as_of),
+            "beta_source": bmeta, "rows": m.get("rows"),
+            "sensitivity": implied_m_sensitivity(inputs, anchor_pct, betas),
+            "d8_reconciliation": d8_reconciliation(inputs, betas)}
+
+
+def retrospective_section_c(as_of=None, portfolio=None, tw=None, metrics=None, state=None,
+                            betas=None, out_path=None):
+    """D-23. Section C at `as_of` on the implied-M* basis only."""
+    as_of = str(as_of or RETROSPECTIVE_SECTION_C_DATE)[:10]
+    if portfolio is None:
+        raise ValueError("portfolio_data as at the retrospective date is required — the weights "
+                         "are the whole point")
+    pmeta = (portfolio.get("_meta") or {})
+    if str(pmeta.get("data_date") and _dnorm(pmeta["data_date"])) != as_of:
+        raise ImpliedMError(
+            f"portfolio_data is stamped {pmeta.get('data_date')!r}, not {as_of} — a retrospective "
+            f"computed on the wrong month's weights is worse than none (R4.2)")
+    tw = tw if tw is not None else json.load(
+        open(os.path.join(HERE, "target_weights.json"), encoding="utf-8"))
+    anchor = _anchor_as_derived_on(
+        as_of, state, expect_value_gbp=(portfolio.get("summary") or {}).get("total_value_gbp"))
+    a_pct = float(anchor["operative_pct"])
+    total_value = float((portfolio.get("summary") or {}).get("total_value_gbp") or 0.0)
+
+    # Weights and the cash rate are all M* needs. FRS rows are NOT read: nothing here depends on
+    # a declared prior, which is exactly why this basis is computable at a past date.
+    #
+    # ⚑ THE IDENTIFIER IS `ticker`, NOT `sedol`. `portfolio_data.funds[]` carries the SEDOL for an
+    # OEIC and the exchange ticker for an ETF, both under the key `ticker`; `target_weights.funds`
+    # and `fund_retention_score[].sedol` hold those same values. Reading `.get("sedol")` here
+    # returned None for all twelve funds, collapsed the weight lookup onto a single holding, and
+    # produced twelve identical weights summing to 0.713. **I-D23-1 caught it on the first run.**
+    # A rule would not have found this; an invariant did — which is the whole of R5.2.
+    frs_like = [{"sedol": f.get("ticker"), "name": f.get("name"),
+                 "value_gbp": f.get("value_gbp"), "band": None}
+                for f in (portfolio.get("funds") or [])]
+    no_id = [f.get("name") for f in (portfolio.get("funds") or []) if not f.get("ticker")]
+    if no_id:
+        raise ImpliedMError(f"{len(no_id)} fund row(s) carry no identifier: {no_id} — a holding "
+                            f"that cannot be identified cannot be weighted (R4.9)")
+    fi = fund_inputs(frs_like, tw, total_value)
+    si, _zc = stock_inputs(portfolio.get("stocks") or [], (metrics or {}).get("tickers") or {},
+                           total_value, a_pct)
+    cash_declared = cash_input()
+    ci = cash_inputs(portfolio, total_value, cash_declared)
+    inputs = fi + si + [ci]
+
+    if betas is None:
+        betas, bmeta = fund_betas(as_of=as_of)
+    else:
+        bmeta = {"status": "OK", "n": len(betas), "source": "caller-supplied"}
+    if betas is None:
+        raise ImpliedMError(f"no measured betas available — M* BLOCKS rather than guessing: {bmeta}")
+
+    mstar = implied_market_return(inputs, a_pct, betas, alpha_mode=IMPLIED_M_ALPHA_MODE_HEADLINE,
+                                  horizon_years=_horizon_years(as_of))
+    grid = implied_m_sensitivity(inputs, a_pct, betas)
+    w_sum = sum(float(i.get("weight") or 0.0) for i in inputs)
+    doc = {
+        "schema_version": SCHEMA_VERSION,
+        "item": "ISA-0158 (D-23)",
+        "as_of": as_of,
+        "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "basis": "implied_market_return_m_star",
+        "basis_note": ("the three legacy E[r] bases are NOT reproduced at this date: their inputs "
+                       "(policy priors, FRS trailing windows) are current, not as-at, and "
+                       "stamping them with a June date would be the FC-B defect. D-23 specifies "
+                       "the M* basis only, and this is why"),
+        "anchor_as_derived": anchor,
+        "portfolio": {"total_value_gbp": _round(total_value, 2),
+                      "data_date": pmeta.get("data_date"),
+                      "source_file": pmeta.get("source_file"),
+                      "n_funds": len(portfolio.get("funds") or []),
+                      "n_stocks": len(portfolio.get("stocks") or []),
+                      "weights_sum": _round(w_sum, 10)},
+        "beta_source": bmeta,
+        "cash_rate_input": cash_declared,
+        "implied_m_star": mstar,
+        "sensitivity": grid,
+        "d8_reconciliation": d8_reconciliation(inputs, betas),
+        "consistency_with_anchor": {
+            "anchor_derived_at": anchor.get("derived_at"),
+            "anchor_solved_on_value_gbp": anchor.get("portfolio_value_gbp"),
+            "retrospective_value_gbp": _round(total_value, 2),
+            "agree": bool(anchor.get("portfolio_value_gbp") is not None and
+                          abs(float(anchor["portfolio_value_gbp"]) - total_value) < 0.51),
+            "note": ("D-23's premise: the anchor and the weights must be the same valuation. This "
+                     "field is the assertion of that premise, not a description of it")},
+        "invariants": [
+            {"invariant": "I-D23-1", "holds": bool(abs(w_sum - 1.0) < 1e-6),
+             "detail": f"every holding's weight sums to {w_sum:.10f} at {as_of}"},
+            {"invariant": "I-D23-2",
+             "holds": bool((mstar.get("identity_check") or {}).get("holds") is True),
+             "detail": ("substituting M* back through every holding row reproduces the anchor "
+                        f"(gap {(mstar.get('identity_check') or {}).get('abs_gap_pp')})")},
+            {"invariant": "I-D23-3",
+             "holds": bool(anchor.get("portfolio_value_gbp") is not None and
+                           abs(float(anchor["portfolio_value_gbp"]) - total_value) < 0.51),
+             "detail": ("the anchor read here was DERIVED on this same valuation — the one thing "
+                        "D-23 exists to establish")},
+            {"invariant": "I-D23-5",
+             "holds": bool((d8_reconciliation(inputs, betas) or {}).get("holds")),
+             "detail": ("the headline α mode reproduces D-8's published M* of "
+                        f"{D8_PUBLISHED_M_STAR_PCT}% at a {D8_PUBLISHED_AT_ANCHOR_PCT}% anchor "
+                        f"within {D8_RECONCILIATION_TOL_PP}pp")},
+            # ── I-D23-4 INVERTED 13-Aug-2026 (ISA-0310 CLOSED). It previously asserted that NO
+            #    verdict existed, which was the correct assertion while the band was undeclared.
+            #    It now asserts the opposite AND re-derives it independently, so a silently
+            #    dropped band would fail the battery instead of quietly restoring "no verdict".
+            {"invariant": "I-D23-4",
+             "holds": bool(mstar.get("verdict") is not None and mstar.get("verdict") ==
+                           MPB.assess(mstar.get("m_star_pct"), _horizon_years(as_of),
+                                      run_monte_carlo=False).get("verdict")),
+             "detail": ("the M* verdict is issued from the declared plausibility band "
+                        f"(ISA-0310) and re-derives to {mstar.get('verdict')!r} at "
+                        f"{(mstar.get('plausibility') or {}).get('percentile_label')}")},
+            {"invariant": "I-D23-6",
+             "holds": bool((((mstar.get("plausibility") or {}).get("identity_check")) or {})
+                           .get("holds") is True),
+             "detail": ("the percentile agrees across three independent paths: erf forward CDF, "
+                        "Acklam inverse CDF round-trip, and a seeded Monte Carlo draw")},
+        ],
+        "learning_L0": {
+            "learnable_now": True,
+            "task": ("M* is a falsifiable forward statement. Recording M* each month against the "
+                     "realised market return of the following 12 months builds the first data "
+                     "series in this framework that can test whether the required rate was ever "
+                     "attainable — 0 observations today, 1 per month from now"),
+            "first_observation_due": "2027-06-30",
+            "store": "recorded on the register item; no store exists yet",
+        },
+    }
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+    return doc
+
+
+def _dnorm(s):
+    """`30-Jun-2026` / `2026-06-30` -> `2026-06-30`. Raises rather than guessing."""
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y"):
+        try:
+            return dt.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    raise ImpliedMError(f"unparseable date {s!r} — refusing to guess")
 
 
 # ──────────────────────────────────────────────────────────────────────────────── build
@@ -955,7 +1555,8 @@ def build(as_of=None, portfolio=None, frs=None, tw=None, metrics=None, out_path=
     fi = fund_inputs(frs_rows, tw, total_value)
     si, zero_conf = stock_inputs(portfolio.get("stocks") or [],
                                  (metrics or {}).get("tickers") or {}, total_value, a_pct)
-    ci = cash_inputs(portfolio, total_value, cash_input())
+    cash_declared = cash_input()
+    ci = cash_inputs(portfolio, total_value, cash_declared)
     inputs = fi + si + [ci]
 
     sect = sections(inputs, ER_BASIS_OPERATIVE, thr, a_pct)
@@ -976,6 +1577,11 @@ def build(as_of=None, portfolio=None, frs=None, tw=None, metrics=None, out_path=
         "shortfall_attribution": attrib,
         **lev,
         "basis_study": basis_study(inputs, thr, a_pct, tw, frs_rows, portfolio),
+        # ⚑ D-12 asks for the leverage to be PRINTED NEXT TO M EVERY RUN. R14.2/R4.11: that makes
+        # it a property of producing the artefact rather than a prose step, so it is emitted here
+        # instead of being left to whoever writes the email. D-8's headline basis and D-12's
+        # leverage are the same computation and there is one home for it.
+        "implied_market_return": _implied_m_block(inputs, a_pct),
         "bucket_minimum_divergence": bucket_minimum_divergence(tw),
         "invariants": inv,
         "defects_observed": ([{
@@ -1028,6 +1634,58 @@ def _selftest():
     # negative control: move the anchor and the parity check MUST fire
     t2 = thresholds(a + 3.0, tw)
     ok(t2["divergences"], "a moved anchor must produce reported divergences, not silence")
+
+    # ── D-8 / D-12 / D-23: implied M* ────────────────────────────────────────────────
+    # β=1 everywhere and zero α: λ must be 1.0 and M* must BE the anchor. If λ or the intercept
+    # is mis-signed this is the assertion that fails, because the answer is known by construction.
+    _in1 = [_mk("F1", "F1", "fund", 50.0, 100.0, {"declared_prior": 9.0}, []),
+            _mk("F2", "F2", "fund", 50.0, 100.0, {"declared_prior": 9.0}, [])]
+    _b1 = {"F1": {"beta": 1.0, "alpha_ann_pct": 0.0, "benchmark": "X", "n_months": 60,
+                  "stamp_basis": "point_in_time"},
+           "F2": {"beta": 1.0, "alpha_ann_pct": 0.0, "benchmark": "X", "n_months": 60,
+                  "stamp_basis": "point_in_time"}}
+    _m1 = implied_market_return(_in1, 13.9, _b1, alpha_mode="zero")
+    ok(_m1["status"] == "computed" and abs(_m1["lambda"] - 1.0) < 1e-9
+       and abs(_m1["m_star_pct"] - 13.9) < 1e-6,
+       f"β=1, α=0 => λ=1 and M* must BE the anchor; got λ={_m1.get('lambda')} "
+       f"M*={_m1.get('m_star_pct')}")
+    ok(_m1["identity_check"]["holds"], "I-RA-7 must hold in the closed-form case")
+    # β=0.5 everywhere => λ=0.5 and M* must be exactly twice the anchor. D-12's leverage, tested.
+    for _k in _b1:
+        _b1[_k] = dict(_b1[_k], beta=0.5)
+    _m2 = implied_market_return(_in1, 13.9, _b1, alpha_mode="zero")
+    ok(abs(_m2["m_star_pct"] - 27.8) < 1e-6 and abs(_m2["pp_of_m_per_pp_of_anchor"] - 2.0) < 1e-9,
+       f"λ=0.5 must double the required market return; got {_m2.get('m_star_pct')}")
+    # a positive measured α must LOWER M* — the market has less work to do
+    for _k in _b1:
+        _b1[_k] = dict(_b1[_k], beta=1.0, alpha_ann_pct=2.0)
+    _m3 = implied_market_return(_in1, 13.9, _b1, alpha_mode="measured")
+    ok(abs(_m3["m_star_pct"] - 11.9) < 1e-6, f"α=+2 must lower M* by 2pp; got {_m3['m_star_pct']}")
+    ok(implied_market_return(_in1, 13.9, _b1, alpha_mode="zero")["m_star_pct"] > _m3["m_star_pct"],
+       "the two α modes must differ — a headline that ignored α would publish a different number")
+    # NEGATIVE CONTROL: λ = 0 is a REFUSAL, not a very large number and not a ZeroDivisionError
+    _cash_only = [_mk("CASH", "Cash", "cash", 100.0, 100.0, {"declared_prior": 1.757}, [])]
+    _m4 = implied_market_return(_cash_only, 13.9, {}, alpha_mode="zero")
+    ok(_m4["status"] == "REFUSED_NO_MARKET_SENSITIVITY" and _m4["m_star_pct"] is None,
+       f"an all-cash portfolio must REFUSE M*, not report one; got {_m4['status']}")
+    # NEGATIVE CONTROL: an unmeasurable holding above the coverage floor must refuse
+    _in5 = _in1 + [_mk("F3", "F3", "fund", 100.0, 200.0, {"declared_prior": 9.0}, [])]
+    _m5 = implied_market_return(_in5, 13.9, _b1, alpha_mode="zero")
+    ok(_m5["status"] == "INSUFFICIENT_COVERAGE" and _m5["m_star_pct"] is None,
+       f"50% of weight with no β must refuse, not renormalise silently; got {_m5['status']}")
+    # no verdict is ever issued, on any path (R4.8)
+    ok(_m1["verdict"] is None and _m1["verdict_withheld_reason"],
+       "M* must publish NO verdict and must say why")
+    ok(_m1["assumption_declared"]["assumption"] == IMPLIED_M_ASSUMPTION and
+       "ISA-0160" in _m1["assumption_declared"]["replaced_by"],
+       "the uniform-benchmark assumption must travel on the result, naming O-1")
+    # β stamped not-point-in-time for a past date, and point-in-time for a current one (R6.4)
+    _bb, _bm = fund_betas(as_of="2026-06-30")
+    if _bb:
+        ok(_bm["n_backfilled_not_pit"] > 0,
+           "a β measured to 2026-08 must be stamped backfilled_not_pit at a 30-Jun-2026 as_of")
+        ok(fund_betas(as_of="2026-12-31")[1]["n_backfilled_not_pit"] == 0,
+           "...and point_in_time at a later as_of — negative control on the stamp")
 
     # ── a missing input never becomes a number ───────────────────────────────────────
     m = _mk("Z", "Z", "fund", 10.0, 100.0, {"declared_prior": None, "realised": None,

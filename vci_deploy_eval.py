@@ -26,10 +26,28 @@ def _c(name, default):
     return getattr(cfg, name, default)
 
 
+try:   # D-24 Stage 6 / V-1 — THE one shared null-handling helper
+    from gated_control import gated as _gated, unknown_controls as _unknown_controls
+except Exception:                                            # noqa: BLE001
+    def _gated(v, *, control_name, registry=None):
+        ok = v is not None and not isinstance(v, bool)
+        if registry is not None:
+            registry[control_name] = "OK" if ok else "UNKNOWN"
+        return ("OK" if ok else "UNKNOWN"), (not ok), (float(v) if ok else None)
+
+    def _unknown_controls(reg):
+        return sorted(k for k, v in (reg or {}).items() if v == "UNKNOWN")
+
+
 def size_for(acs, signal_count, days_to_catalyst, eligible, adv_usd=None, portfolio_value=None):
-    """§9.2 pre-catalyst starter size, E5 liquidity-capped. Returns (size_pct, note, liq_capped)."""
+    """§9.2 pre-catalyst starter size, E5 liquidity-capped.
+
+    Returns (size_pct, note, liq_capped, liq_status) — D-24 Stage 6 added the fourth element:
+    "APPLIED" | "NOT_BINDING" | "UNKNOWN". UNKNOWN means the control could not be evaluated and
+    must not be read as "not capped".
+    """
     if not eligible or acs is None:
-        return 0.0, "not eligible", False
+        return 0.0, "not eligible", False, "NOT_APPLICABLE"
     hi = _c("VCI_HIGH_ACS", 80)
     exc = _c("VCI_EXCEPTIONAL_SIZE_PCT", 1.5)
     full = _c("VCI_STARTER_SIZE_PCT", 1.0)
@@ -42,17 +60,30 @@ def size_for(acs, signal_count, days_to_catalyst, eligible, adv_usd=None, portfo
     elif acs >= 75:
         base, note = mid, f"ACS 75-{hi-1} -> {mid}% ahead, scale to {full}% on confirmation"
     else:
-        return 0.0, "below ACS floor", False
+        return 0.0, "below ACS floor", False, "NOT_APPLICABLE"
 
     # E5 liquidity cap: position value <= VCI_MAX_PCT_ADV of ADV
+    # ⚑ D-24 Stage 6 / V-1 (09-Aug-2026). The old test was `if adv_usd and portfolio_value:` —
+    # so a NULL adv_usd returned liq_capped = False on 9 of 9 observed names, and "the liquidity
+    # cap did not bind" became indistinguishable from "the liquidity cap was never evaluated".
+    # Same failure class as p_thesis=None -> p=0 and a missing re-rate -> 0. The boolean is kept
+    # (callers test it directly) and the third state is carried alongside it, where it BLOCKS.
+    reg = {}
+    _, _, adv = _gated(adv_usd, control_name="adv_usd", registry=reg)
+    _, _, pv = _gated(portfolio_value, control_name="portfolio_value", registry=reg)
     liq_capped = False
-    if adv_usd and portfolio_value and portfolio_value > 0:
-        liq_cap_pct = float(_c("VCI_MAX_PCT_ADV", 0.10)) * float(adv_usd) / float(portfolio_value) * 100.0
+    liq_status = "NOT_BINDING"
+    if adv is not None and pv is not None and pv > 0:
+        liq_cap_pct = float(_c("VCI_MAX_PCT_ADV", 0.10)) * adv / pv * 100.0
         if liq_cap_pct < base:
             base = round(liq_cap_pct, 3)
             note += f" | ADV-capped to {base}%"
             liq_capped = True
-    return base, note, liq_capped
+            liq_status = "APPLIED"
+    else:
+        liq_status = "UNKNOWN"
+        note += " | ⚑ liquidity cap NOT EVALUATED (" + ", ".join(_unknown_controls(reg)) + ")"
+    return base, note, liq_capped, liq_status
 
 
 def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_share=None,
@@ -113,8 +144,12 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         revision_velocity=revision_velocity, weights=weights)
 
     # 5) size (E5 liquidity-capped)
-    size_pct, size_note, liq_capped = size_for(acs, signal_count, days_to_catalyst, deploy_eligible,
-                                               adv_usd=adv_usd, portfolio_value=portfolio_value)
+    size_pct, size_note, liq_capped, liq_status = size_for(
+        acs, signal_count, days_to_catalyst, deploy_eligible,
+        adv_usd=adv_usd, portfolio_value=portfolio_value)
+    if liq_status == "UNKNOWN" and size_pct:
+        # V-1: an unevaluable control never certifies a size. It escalates to a human instead.
+        require_manual = True
 
     # 6) E7 compression cause (needs prior FV / price)
     cause = _bfv.compression_cause(fv.bottleneck_fv_per_share, fv_prev, price, price_prev)
@@ -137,6 +172,7 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         "vci_source_score": vss, "rank_mode": _c("VCI_RANK_MODE", "advisory"),
         "revision_velocity": revision_velocity,
         "size_pct": size_pct, "size_note": size_note, "size_liquidity_capped": liq_capped,
+        "size_liquidity_status": liq_status,          # D-24 V-1: APPLIED|NOT_BINDING|UNKNOWN
         "adv_usd": adv_usd, "expected_loss_pct_isa": expected_loss,
         "asymmetry_compression_cause": cause,
         "days_to_catalyst": days_to_catalyst, "signal_count": signal_count,

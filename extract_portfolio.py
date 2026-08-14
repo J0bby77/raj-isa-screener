@@ -42,16 +42,24 @@ ISA_FOLDER = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".."
 )
 
-STANDING_ORDER_MONTHLY = 1250.0   # £1,250 standing order on 1st of each month
-SO_CLEAR_WORKING_DAYS  = 3        # S/O typically clears within 3 working days of the 1st
-CASH_BUFFER_MIN = 150.0
-CASH_BUFFER_MAX = 200.0
+# ONE HOME: extract_cash_statement (R4.4). Restating these here is what let the same rule
+# live under two names in three modules.
+from extract_cash_statement import (  # noqa: E402
+    CASH_BUFFER_MAX, CASH_BUFFER_MIN, SO_CLEAR_WORKING_DAYS,
+    STANDING_ORDER as STANDING_ORDER_MONTHLY, STANDING_ORDER_ACTIVE,
+)
 
 # Tickers classified as FUND for sleeve purposes even if listed on an exchange.
 # Add any new ETF/trust that should NOT count toward the stock sleeve.
+# THE single home for this set (R4.4). extract_transactions imports it; it must never
+# be restated. Until 12-Aug-2026 extract_transactions held its own copy carrying IWMO and
+# SGLN under a comment claiming it "mirrors" this one — it did not, and the divergence
+# would have booked both into the STOCK sleeve on first purchase.
 FUND_OVERRIDE_TICKERS = {
     "SMT",    # Scottish Mortgage — closed-end investment trust
     "VUAG",   # Vanguard S&P 500 ETF — UCITS ETF, fund sleeve
+    "IWMO",   # iShares MSCI World Momentum — UCITS ETF, B2 satellite (target_weights WP-6)
+    "SGLN",   # iShares Physical Gold — ETC, hedge bucket (target_weights WP-5)
 }
 
 # Exchanges that indicate a direct stock holding (not a fund)
@@ -120,6 +128,15 @@ def _standing_order_adjustment(file_dt: datetime | None) -> tuple[float, bool, i
         the 1st, the S/O has not cleared → add STANDING_ORDER_MONTHLY.
       - Otherwise the S/O is already reflected in the stated cash → add 0.
     """
+    # ⚑ 12-Aug-2026 (register ISA-0011). The standing order is PAUSED. There is no
+    # unprocessed payment to credit, so the adjustment is 0 in every branch - including the
+    # unknown-date branch below, whose "fail-safe: never under-count cash" is only fail-safe
+    # while a payment is actually coming. With the S/O paused, adding it OVER-counts
+    # deployable cash by £1,250, and it did so on any file dated within SO_CLEAR_WORKING_DAYS
+    # of the 1st - which is precisely when the monthly review runs.
+    if not STANDING_ORDER_ACTIVE:
+        return 0.0, False, (None if file_dt is None else _working_days_after_1st(file_dt))
+
     if file_dt is None:
         return STANDING_ORDER_MONTHLY, True, None
 
@@ -244,7 +261,7 @@ def classify_holding(investment_name: str, ticker) -> str:
 # files do not cover the whole tax year to the data date, allowance_reconciled=False and the
 # email must print "UNRECONCILED — verify AJ Bell", never a confident figure.
 # ---------------------------------------------------------------------------
-ISA_ALLOWANCE_GBP = 20000.0
+from extract_cash_statement import ISA_ALLOWANCE_GBP  # ONE HOME (R4.4)  # noqa: E402
 _DEPOSIT_TYPES = ("deposit", "subscription", "regular investment", "direct debit",
                   "cash in", "transfer in", "credit")
 

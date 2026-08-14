@@ -74,7 +74,8 @@ def _entry_display(entry_level, reach):
 # Constants
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-STANDING_ORDER = 1250.0
+from extract_cash_statement import (  # ONE HOME (R4.4)  # noqa: E402
+    STANDING_ORDER, STANDING_ORDER_ACTIVE, STANDING_ORDER_PAUSED_FROM)
 
 # Tax year 26/27 start
 TAX_YEAR_START = date(2026, 4, 6)
@@ -392,7 +393,9 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         {
             "label": "Cash (Effective)",
             "value": f"£{cash_eff:,.2f}",
-            "sub":   f"+£{STANDING_ORDER:,.0f} unprocessed S/O | Deployable: £{s['cash_deployable_gbp']:,.2f}",
+            "sub":   ((f"+£{STANDING_ORDER:,.0f} unprocessed S/O | " if STANDING_ORDER_ACTIVE
+                       else f"S/O PAUSED since {STANDING_ORDER_PAUSED_FROM} | ")
+                      + f"Deployable: £{s['cash_deployable_gbp']:,.2f}"),
             "style": "info",
         },
         {
@@ -488,9 +491,12 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
 
     notes = (
         f"Cash per AJ Bell file: £{s['cash_stated_gbp']:,.2f}. "
-        f"Adjusted for unprocessed standing order: +£{STANDING_ORDER:,.0f} = £{s['cash_effective_gbp']:,.2f} effective. "
-        f"Deployable after £{150:.0f} buffer: £{s['cash_deployable_gbp']:,.2f}. "
-        f"[Claude to fill: MoM change vs prior month, benchmark comparison for portfolio performance.]"
+        + (f"Adjusted for unprocessed standing order: +£{STANDING_ORDER:,.0f} = "
+           f"£{s['cash_effective_gbp']:,.2f} effective. " if STANDING_ORDER_ACTIVE else
+           f"Standing order PAUSED since {STANDING_ORDER_PAUSED_FROM}: no adjustment, "
+           f"effective = stated £{s['cash_effective_gbp']:,.2f}. ")
+        + f"Deployable after £{150:.0f} buffer: £{s['cash_deployable_gbp']:,.2f}. "
+        + f"[Claude to fill: MoM change vs prior month, benchmark comparison for portfolio performance.]"
     )
 
     return {

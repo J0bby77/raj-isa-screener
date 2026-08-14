@@ -429,11 +429,26 @@ def main():
                 _regime_fin = (_dj_fin.load(_df_fin) or {}).get("regime_state")
         except Exception:
             pass
+        # ⚑ D-24 §1.1 (09-Aug-2026). THIS is the live screen path, and it has its OWN E[r] call
+        # site. The register already records that screener_local is a hand-maintained copy of
+        # run_scheduled's orchestration that never calls it, and that this is why
+        # PRICE_MOM_SCORING="percentile" never took effect for twelve days. A D-24 built only into
+        # screener_core would not have reached the live screen AT ALL. Both paths now call the
+        # SAME function — expected_return.stamp_frame — so there is one orchestration to drift
+        # from, not two. orchestrator_parity.py asserts it.
+        _d24 = _er_fin.stamp_frame(scored, run_date=run_date, group=group, regime=_regime_fin)
+        _bt = _d24["built_table"]
+        print(f"D24_ANCHOR rows={_bt['rows_in']} fit={_bt['fit_for_anchoring']} "
+              f"sectors={len(_bt['median_by_sector'])} excluded={list(_bt['excluded'])} "
+              f"as_of={_bt['as_of']}"
+              + (f" | BORROWED {_d24['unmeasured'].get('anchor_substituted_from')}"
+                 if not _bt["fit_for_anchoring"] else "")
+              + f" | {_d24['reachability']['message']} | {_d24['unmeasured']['message']}")
+        if _d24["unmeasured"]["verdict"] != "OK":
+            print("WARN D-24 §6 " + _d24["unmeasured"]["message"])
         for _srow in scored:
             try:
                 _srow.update(_ss_fin.source_score_components_for_row(_srow))
-                _srow.update(_er_fin.expected_return_for_row(_srow))
-                _er_fin.apply_capital_signal_conflict(_srow)              # review item 8
                 _srow.update(_ss_fin.door_flags_for_row(_srow, _regime_fin))  # B7 shadow
             except Exception as _se:
                 _srow.setdefault("source_input_missing", f"stamp_error:{_se}")

@@ -18,35 +18,30 @@ right, the reference wrong). Where a style tilt is plausible the study runs a se
 with a style factor and REPORTS BOTH, because a single-factor alpha for a style manager is a
 number that will be quoted and should not be.
 """
-import csv, json, math, os, sys, datetime as dt
+import csv, hashlib, json, math, os, sys, datetime as dt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(HERE, "bench_cache")
 sys.path.insert(0, HERE)
 
-# ── fund -> asset-class benchmark. DECLARED, with the reason. Never inferred from the name. ──
-MAP = {
- "VUAG":    ("CSP1.L", "S&P 500 (GBp)", "CONTROL — VUAG tracks the S&P 500. Alpha must be ~ -OCF."),
- "B50MZ94": ("VJPN.L", "FTSE Japan (GBP)", "CONTROL — a Japan index tracker. Note the fund tracks MSCI Japan and the benchmark is FTSE Japan; a small residual is index difference, not skill."),
- "BF93W97": ("VEVE.L", "FTSE Developed World (GBP)", "unconstrained global developed-market equity"),
- "BR2Q8G6": ("VEVE.L", "FTSE Developed World (GBP)", "global equity, explicit VALUE process — style regression is the primary read"),
- "B2PLJD7": ("VERX.L", "FTSE Dev Europe ex-UK (GBP)", "European mandate; SmartGARP is a value/GARP screen"),
- "B2PLJM6": ("FTAL.L", "FTSE All-Share (GBP)", "UK mandate; SmartGARP value/GARP screen"),
- "B55QSH0": ("FTAL.L", "FTSE All-Share (GBP)", "UK core mandate"),
- "B5TP8W8": ("VEVE.L", "FTSE Developed World (GBP)", "global opportunities mandate"),
- "B6SQYF4": ("AAXJ",   "MSCI AC Asia ex-Japan (USD->GBP)", "holds China/India/Korea/Taiwan — DEVELOPED Asia Pac ex-Japan would be the wrong peer"),
- "B8N44Q8": ("AAXJ",   "MSCI AC Asia ex-Japan (USD->GBP)", "same mandate as M&G Asian; must be benchmarked identically or their pair test is meaningless"),
- "SMT":     ("VWRP.L", "FTSE All-World (GBP)", "⚑ closed-end: this is a PRICE return, so 'alpha' here contains the discount move as well as the manager"),
- # ⚑ RESOLVED 06-Aug-2026 — Raj supplied an investing.com series for 0P0000OMTA. VALIDATED as the
- # held share class before use: 1m/3m/6m/1y reproduce the AJ Bell factsheet at its own 31-Jul-2026
- # strike date to 0.00pp, 3y/5y to within 0.19pp. Same-class confirmation, not an assumption —
- # register SC1 exists because HL figures for the Investor class were once taken for this one.
- "B42W4J8": ("XLKQ.L", "MSCI World Info Tech (GBp)", "global technology mandate — the SECTOR is the "
-             "benchmark. Against a broad world index its beta reads 1.86, which prices the sector "
-             "bet as manager skill."),
-}
+# ── the benchmark is READ, not chosen here. ───────────────────────────────────────────────
+# ⚑ MAP IS RETIRED (13-Aug-2026, ISA-0320). It held twelve benchmarks chosen by me, with no record
+# of what any fund's own prospectus names and no way for a stored artefact to disagree with it
+# loudly. Both facts now live in `fund_universe.mandate_benchmark` and are read through
+# `benchmark_registry`, which is the single home (R4.4/R6.1). A fund with no block RAISES.
+#
+# ⚑ ONE SUBSTANTIVE CHANGE OF NUMBER CAME WITH IT: B42W4J8's benchmark was XLKQ.L labelled
+# "MSCI World Info Tech". XLKQ.L is the Invesco Technology S&P US SELECT SECTOR ETF — US-only,
+# corr 0.9970 with IITU.L against 0.885 with the world-technology trackers. A global technology
+# fund was measured against a US sector index wearing a global label. Its alpha moves -3.11% to
+# -0.71% on the corrected comparator.
+import benchmark_registry as breg
+
 STYLE = {"BR2Q8G6": "IWVL.L", "B2PLJD7": "IWVL.L", "B2PLJM6": "IWVL.L", "B5TP8W8": "IWQU.L"}
-USD_QUOTED = {"AAXJ", "IWVL.L", "IWQU.L", "IWMO.L"}
+# USD_QUOTED retired: the quote currency is read from bench_cache/_meta.json by
+# benchmark_registry.gbp_returns. A hand-maintained set is a second home for a fact the
+# metadata already carries, and a missing entry silently left the currency move inside beta.
+MATERIAL_SIGN_FLIP_PP = 2.0   # see the materiality gate below; DECLARED judgement (R14.4)
 RF_SENSITIVITY = (0.0, 2.0, 4.0)      # annual %, to show alpha's sensitivity to the rf assumption
 
 
@@ -67,13 +62,10 @@ def to_monthly_returns(levels):
 
 
 def gbp_returns(tkr):
-    """Monthly total return in GBP. A USD-quoted line is converted, because comparing a USD asset
-    to a GBP fund embeds the currency move in beta and alpha and neither belongs there."""
-    r = to_monthly_returns(read_series(tkr))
-    if tkr not in USD_QUOTED:
-        return r
-    fx = to_monthly_returns(read_series("GBPUSD_X"))   # GBPUSD up = GBP stronger = USD asset worth less
-    return {k: (1 + r[k]) / (1 + fx[k]) - 1.0 for k in r if k in fx}
+    """Monthly total return in GBP, via benchmark_registry — which reads the quote currency from
+    the feed metadata, applies the declared series start, and drops the months the spike scan
+    found to be defective prints. One home for all three (R4.4)."""
+    return breg.gbp_returns(tkr)
 
 
 def ols(y, X):
@@ -151,7 +143,9 @@ def annualise_series(rets):
 
 def study():
     import fund_performance as fp, fund_action_stack as fas
-    uni = fp.load_universe(); U = uni.get("funds", uni)
+    U = fp.load_universe()
+    with open(fp.UNIVERSE, encoding="utf-8") as _fh:      # top level, for verified_at
+        uni = json.load(_fh)
     out = {"generated_at": dt.datetime.now().isoformat(timespec="seconds"),
            "method": {
              "regression": "r_fund - rf = alpha + beta*(r_bench - rf) + e, monthly, GBP",
@@ -167,19 +161,35 @@ def study():
     for sd, u in U.items():
         if str(sd).startswith("_") or not isinstance(u, dict):
             continue
-        bt, bn, why = MAP.get(sd, (None, None, "no declared benchmark"))
+        mb = breg.mandate_for(sd, U)                 # RAISES if the fund has no recorded mandate
+        bt, comp = breg.comparator_for(sd, U)
         rec = {"name": u.get("name"), "bucket": u.get("bucket"), "ocf": u.get("ocf"),
-               "benchmark": bn, "benchmark_ticker": bt, "benchmark_rationale": why}
-        sym = u.get("yf_symbol") or u.get("isin")
+               "mandate_benchmark": mb["index_name"],
+               "mandate_declared_by_fund": mb["declared"],
+               "t4_mandate": breg.t4_mandate_for(sd, U)[0],
+               "t4_basis": breg.t4_mandate_for(sd, U)[1],
+               "mandate_source": f"{mb['source_doc']} ({mb['source_type']})",
+               "mandate_accessibility": mb["accessibility"]["verdict"],
+               "benchmark": comp["tracks_index"], "benchmark_ticker": bt,
+               "comparator_basis": comp["basis"],
+               "residual_caveat": comp["residual_caveat"] or None}
+        # ⚑ ONE way to get a NAV series, and it takes the declared local route first (ISA-0307).
         try:
-            nav = fp.fetch_nav_history(sym, use_cache=True)
-        except Exception:
+            nav = fp.nav_series_for(sd, u)
+        except Exception as exc:
             nav = None
+            out["warnings"].append(f"{sd} {u.get('name')}: NAV series unavailable — {exc}")
         fr = dict(fas._monthly_returns(nav)) if nav else {}
-        if not fr or not bt:
+        if not fr:
             rec["status"] = "NOT_DECOMPOSED"
-            rec["reason"] = ("no NAV series — factsheet-only fund" if not fr
-                             else "no declared benchmark")
+            rec["reason"] = "no NAV series"
+            # ⚑ COUNTED, not silent. A reader that cannot produce a result must count it and fail
+            # (R4.9). This study previously emitted a NOT_DECOMPOSED fund and `warnings: []`,
+            # which is how 7.6% of the portfolio carried no measured beta for six days with a
+            # reconciling series sitting on disk.
+            out["warnings"].append(
+                f"{sd} {u.get('name')}: NOT_DECOMPOSED — no NAV series. "
+                f"{u.get('ocf') is not None and 'held position' or ''}")
             out["funds"][sd] = rec
             continue
         br = gbp_returns(bt)
@@ -219,6 +229,64 @@ def study():
                         round(100 * (rec["fund_ann_pct"] - a_ann) / rec["fund_ann_pct"], 1)
                         if rec["fund_ann_pct"] else None),
                 }
+        # ── ⚑ ALPHA IS NEVER RENDERED AS A BARE POINT ESTIMATE (ISA-0330, 13-Aug-2026) ──
+        # Raj challenged the published -0.38% for Polar against AJ Bell's +7.71% 3-year figure and
+        # was right to. There was no methodological disagreement: the SAME method on the SAME
+        # benchmark gives +10.80% over 36 months and -0.74% over 67. The window flipped the sign,
+        # and the framework published one window and no interval — precisely the number that gets
+        # quoted and should not be. Every alpha now ships its interval and its window sweep.
+        res2 = ols(y, [x])
+        if res2:
+            b2c, se2c, r2c, n2c, _ = res2
+            rec["alpha_interval"] = {
+                "alpha_ann_pct": round(ann(b2c[0]), 2),
+                "se_ann_pp": round(ann(b2c[0] + se2c[0]) - ann(b2c[0]), 2),
+                "ci95_low_ann_pct": round(ann(b2c[0] - 1.96 * se2c[0]), 2),
+                "ci95_high_ann_pct": round(ann(b2c[0] + 1.96 * se2c[0]), 2),
+                "contains_zero": bool(ann(b2c[0] - 1.96 * se2c[0]) <= 0 <= ann(b2c[0] + 1.96 * se2c[0])),
+                "basis": "rf = 0, Newey-West HAC lag 3, same window as single_factor",
+                "read_this_first": "the interval is the finding. A point estimate whose interval "
+                                   "spans zero cannot order two funds, however large it looks."}
+            sweep, signs = {}, []
+            for lbl, m in (("3y", 36), ("4y", 48), ("5y", 60), ("full", len(common))):
+                if len(common) < m:
+                    sweep[lbl] = {"status": "INSUFFICIENT", "months_available": len(common)}
+                    continue
+                kk = common[-m:]
+                r3 = ols([fr[k] for k in kk], [[br[k] for k in kk]])
+                if not r3:
+                    sweep[lbl] = {"status": "DEGENERATE"}
+                    continue
+                b3, se3, r23, n3, _ = r3
+                a3 = ann(b3[0])
+                sweep[lbl] = {"n": n3, "alpha_ann_pct": round(a3, 2),
+                              "alpha_t": round(b3[0] / se3[0], 2) if se3[0] > 0 else None,
+                              "beta": round(b3[1], 3), "r_squared": round(r23, 4),
+                              "ci95": [round(ann(b3[0] - 1.96 * se3[0]), 2),
+                                       round(ann(b3[0] + 1.96 * se3[0]), 2)]}
+                signs.append(a3 > 0)
+            span = [v["alpha_ann_pct"] for v in sweep.values() if "alpha_ann_pct" in v]
+            rec["window_sweep"] = {
+                "windows": sweep,
+                "sign_stable": (len(set(signs)) <= 1) if signs else None,
+                "alpha_range_pp": round(max(span) - min(span), 2) if len(span) > 1 else None,
+                "verdict": ("SIGN FLIPS ACROSS WINDOWS — this alpha may not be quoted as a single "
+                            "number" if (len(set(signs)) > 1 and
+                                         (max(span) - min(span) if len(span) > 1 else 0)
+                                         >= MATERIAL_SIGN_FLIP_PP) else
+                            "sign flips but by less than the materiality gate — noise around zero"
+                            if len(set(signs)) > 1 else
+                            "sign stable across the windows tested")}
+            # ⚑ MATERIALITY GATE. On the first run the two index TRACKERS both tripped the
+            # sign-flip warning — VUAG by 0.42pp, Vanguard Japan by 0.53pp — because an alpha
+            # sitting on top of zero crosses it for free. A warning that fires on noise is a
+            # warning nobody reads. 2.0pp is DECLARED judgement: it is twice the largest flip the
+            # controls produce, and below the 1-point resolution of any FRS decision.
+            if len(set(signs)) > 1 and (rec["window_sweep"]["alpha_range_pp"] or 0) >= MATERIAL_SIGN_FLIP_PP:
+                out["warnings"].append(
+                    f"{sd} {u.get('name')}: alpha SIGN FLIPS across windows "
+                    f"(range {rec['window_sweep']['alpha_range_pp']}pp) — quote the interval, "
+                    f"never the point estimate")
         rec["rf_sensitivity"] = sens
         rec["alpha_rf_spread_pp"] = round(
             max(v["alpha_ann_pct"] for v in sens.values())
@@ -301,15 +369,51 @@ def study():
         out["warnings"].append(
             "⚑ CONTROL FAILURE — a passive tracker did not reproduce beta ~1 / alpha ~ -OCF. "
             "The benchmark mapping or the method is wrong and NO alpha below is trustworthy.")
+
+    # ── the artefact asserts its own fitness (R4.10) ──────────────────────────────────────
+    dec = [s for s, r in out["funds"].items() if r.get("status") not in
+           ("NOT_DECOMPOSED", "INSUFFICIENT_OVERLAP")]
+    nd = [s for s, r in out["funds"].items() if r.get("status") == "NOT_DECOMPOSED"]
+    io = [s for s, r in out["funds"].items() if r.get("status") == "INSUFFICIENT_OVERLAP"]
+    out["coverage"] = {"funds": len(out["funds"]), "decomposed": len(dec),
+                       "not_decomposed": nd, "insufficient_overlap": io,
+                       "pct": round(100.0 * len(dec) / max(len(out["funds"]), 1), 1)}
+    for s in io:
+        out["warnings"].append(f"{s}: INSUFFICIENT_OVERLAP — fewer than 30 common months")
+
+    # ── the freshness contract (ISA-0307 cause 2) ─────────────────────────────────────────
+    # A stored study that predates a change to fund_universe.mandate_benchmark is a stale artefact
+    # silently consumed by M*. Stamp what was read so a consumer can detect it, instead of
+    # asserting agreement between two homes that should never have both existed.
+    src = {s: (U[s]["mandate_benchmark"]["index_name"],
+               U[s]["mandate_benchmark"]["comparator"]["ticker"])
+           for s in out["funds"] if isinstance(U.get(s), dict) and "mandate_benchmark" in U[s]}
+    out["provenance"] = {
+      "fund_universe_verified_at": (uni.get("verified_at") if isinstance(uni, dict) else None),
+      "mandate_fingerprint": hashlib.sha256(
+          json.dumps(src, sort_keys=True).encode()).hexdigest()[:12],
+      "benchmark_validation": breg.validate_all(U),
+      "note": "a consumer that finds mandate_fingerprint different from the one it can compute "
+              "from fund_universe today is reading a STALE artefact and must refuse it"}
+    if out["provenance"]["benchmark_validation"]["errors"]:
+        out["warnings"].append(
+            "⚑ BENCHMARK SERIES FAILURE — " +
+            "; ".join(out["provenance"]["benchmark_validation"]["errors"]))
     return out
 
 
 if __name__ == "__main__":
     r = study()
     json.dump(r, open(os.path.join(HERE, "beta_alpha_study_aug2026.json"), "w"), indent=1)
+    c = r["coverage"]
+    print(f"=== COVERAGE {c['decomposed']}/{c['funds']} ({c['pct']}%) ===")
     print("=== CONTROLS (must pass before anything else is read) ===")
     for k, v in r["controls"].items():
         print(f"  {k:<9} pass={v['pass']}  beta {v.get('beta')}  alpha {v.get('alpha_ann_pct')}%  "
               f"OCF {v.get('ocf')}%  R2 {v.get('r_squared')}")
     for w in r["warnings"]:
         print(" ", w)
+    # a fund the study could not decompose is a FAILURE, not a footnote (R4.9)
+    sys.exit(1 if (r["coverage"]["not_decomposed"] or
+                   not all(v.get("pass") for v in r["controls"].values()) or
+                   r["provenance"]["benchmark_validation"]["errors"]) else 0)

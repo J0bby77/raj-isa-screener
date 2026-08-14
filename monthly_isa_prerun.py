@@ -125,6 +125,18 @@ def _resolve_memory_base() -> str:
 MEMORY_BASE = _resolve_memory_base()
 
 
+def _previous_month_label(month_label: str) -> str:
+    """'sep_2026' -> 'aug_2026'. MOA is retrospective: it attributes the month whose
+    decisions have already been made, never the one being prepared."""
+    _m = ["jan", "feb", "mar", "apr", "may", "jun",
+          "jul", "aug", "sep", "oct", "nov", "dec"]
+    mon, _, yr = month_label.lower().partition("_")
+    if mon not in _m or not yr.isdigit():
+        raise ValueError(f"unrecognised month label {month_label!r} - refusing to guess (R4.1)")
+    i = _m.index(mon)
+    return f"{_m[i - 1]}_{int(yr) - 1}" if i == 0 else f"{_m[i - 1]}_{yr}"
+
+
 def find_memory_file(pattern: str) -> str | None:
     """Find latest memory file matching a glob-style prefix."""
     import glob as _glob
@@ -561,6 +573,9 @@ def main():
                              "network time, pushing a full pass past the 45s bash ceiling. Run "
                              "the orchestrator once to land Steps 1-5, then re-run with this "
                              "flag (Step 6 self-skips on metrics coverage) to rebuild Steps 7-9.")
+    parser.add_argument("--skip-moa", action="store_true",
+                        help="skip the Missed-Opportunity Attribution stage (retrospective, "
+                             "resumable next month; never blocks the pre-run)")
     parser.add_argument("--skip-universe-prices", action="store_true",
                         help="Skip the Capture Layer Item 5 resumable price-cache extension "
                              "(one chunk per run). The cache is resumable, so skipping only "
@@ -2318,6 +2333,35 @@ def main():
         except Exception as _upe:
             warnings.append(f"Universe price extension skipped: {_upe}")
 
+    # ── MISSED-OPPORTUNITY ATTRIBUTION (§7.2) ────────────────────────────────────────────
+    # Wired 12-Aug-2026, register ISA-0003. Until then MOA was ARCHIVED by the Run_Context,
+    # contracted by the dashboard and served at /api/v1/missed-opportunity - and produced by
+    # NO RUN. The framework was archiving a file nothing made.
+    #
+    # It runs against the PREVIOUS month, not this one: build() reads step9_pre_* and
+    # entry_level_audit_*, which only exist once a month's decisions have been made. Asking
+    # it about the month the pre-run is preparing would give it nothing to attribute.
+    #
+    # Best-effort like the universe-price stage: MOA is retrospective, so a failure defers
+    # the question by a month and loses nothing. It must never block a pre-run.
+    if not args.skip_moa and not args.dry_run:
+        try:
+            import missed_opportunity_diag as _moa
+            _prev = _previous_month_label(month_label)
+            _doc = _moa.build(_prev, fetch=True)
+            # 12-Aug-2026: this read HERE, which is not defined in this module (the
+            # convention is SCRIPT_DIR, line 62). Inside a broad `except Exception` that
+            # only appends a warning, so the MOA stage would have raised NameError and
+            # SKIPPED SILENTLY on every pre-run - the same absent-execution class the stage
+            # was wired to close one day earlier. See ISA-0210.
+            _out = os.path.join(SCRIPT_DIR, f"missed_opportunity_{_prev}.json")
+            with open(_out, "w", encoding="utf-8") as _fh:
+                json.dump(_doc, _fh, indent=1)
+            summary["missed_opportunity"] = {"month": _prev, "path": _out}
+            print(f"  [MOA] {_prev}: written -> {os.path.basename(_out)}")
+        except Exception as _moe:
+            warnings.append(f"Missed-opportunity attribution skipped for the prior month: {_moe}")
+
     # TWO-REGIME RESOLUTION (02-Aug-2026). macro_regime (Step 4 judgement, forward, economic)
     # and market_regime (drawdown_monitor, mechanical, lagging price) are DIFFERENT VARIABLES,
     # not two readings of one. The pre-run emits both under their namespaced names plus the
@@ -2718,24 +2762,47 @@ def main():
     except Exception as _e:
         warnings.append(f"A20 reversal worklist skipped: {_e}")
 
-    # — A19: required-return anchor — coherence check EVERY run; re-derivation on the April
-    #   (tax-year start) run per D1b. Schedule changes (S/O resume) re-derive out-of-cycle. —
+    # — A19: required-return anchor. D-2/D-3/D-4 (12-Aug-2026) REPLACE the April-only rule. —
+    #
+    # ⚑ WHAT CHANGED AND WHY IT IS SAFER. The old step re-derived only when `run_date.month == 4`
+    # and otherwise ran `--check`, which errored on ANY drift above 0.2pp. Under the D-2 two-speed
+    # cadence that is wrong in both directions: legitimate reported drift between windows would
+    # raise a blocking error, and a scheduled 30-Sep window falling outside April would move
+    # nothing. Worse, the condition lived HERE, in the orchestrator — the same shape as the
+    # `screener_local` divergence and the "PRICE_MOM_SCORING never took effect" defect.
+    #
+    # So the calendar condition is DELETED from the orchestrator. The deriver is now run on EVERY
+    # pre-run and decides for itself: the reported anchor refreshes unconditionally, and the
+    # operative anchor moves only on a cadence authority it names (SCHEDULED_WINDOW / BREAK_GLASS
+    # / FLOW_TRIGGER_D4 / INITIALISE). `--check` afterwards is then a pure verification and fails
+    # only on genuine staleness, an unapplied update, or an unevaluable D-4 trigger (R14.2:
+    # the control moved from "documented rule" to "refusal", which is as far left as it goes).
     try:
-        _is_april = (run_date.month == 4)
-        if _is_april and not args.dry_run:
-            ok, stdout, stderr = run_script("derive_required_return", [], dry_run=args.dry_run)
-            if ok:
-                print("  A19: April re-derivation done — " + (stdout or "").strip().splitlines()[-1][:100])
-                summary["anchor_rederived"] = True
-            else:
-                errors.append(f"A19 April anchor re-derivation FAILED: {stderr or stdout}")
+        ok, stdout, stderr = run_script("derive_required_return", [], dry_run=args.dry_run)
+        if ok:
+            _tail = [ln for ln in (stdout or "").strip().splitlines() if ln.strip()]
+            for _ln in _tail[-5:]:
+                print("  A19: " + _ln.strip()[:160])
+            summary["anchor_rederived"] = True
+            if "SCHEDULED_WINDOW" in (stdout or "") or "BREAK_GLASS" in (stdout or "") \
+                    or "FLOW_TRIGGER_D4" in (stdout or ""):
+                summary["anchor_operative_moved"] = True
+                print("  A19: ⚑ the OPERATIVE anchor MOVED this run — every anchor-derived gate "
+                      "moved with it (D-2)")
+            if "DEGRADED" in (stdout or ""):
+                warnings.append("A19/D-3: the anchor valuation basis is DEGRADED to spot — "
+                                "fewer than 3 month-end observations on file. Expected until "
+                                "31-Aug-2026 lands; it is reported, never silent.")
+        else:
+            errors.append(f"A19 anchor derivation FAILED: {(stderr or stdout or '')[-300:]}")
         ok, stdout, stderr = run_script("derive_required_return", ["--check"], dry_run=args.dry_run)
         if not ok:
-            errors.append(f"A19 anchor check FAILED (stored anchor stale vs portfolio/schedule): "
-                          f"{(stdout or stderr or '').strip()[-200:]}")
+            errors.append(f"A19 anchor check FAILED (stale reported value, an unapplied operative "
+                          f"update, or an unevaluable D-4 flow trigger): "
+                          f"{(stdout or stderr or '').strip()[-300:]}")
             print("  A19 CHECK FAILED")
         else:
-            print("  A19: anchor CHECK OK")
+            print("  A19: anchor CHECK OK (two-speed cadence coherent)")
     except Exception as _e:
         warnings.append(f"A19 anchor step skipped: {_e}")
 

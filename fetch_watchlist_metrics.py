@@ -91,6 +91,22 @@ except ImportError as e:
     print(f"ERROR: Cannot import screener_core.py from {SCRIPT_DIR}: {e}")
     sys.exit(1)
 
+_D24_TBL = {}
+
+
+def _d24_anchor_table():
+    """D-24 §3.3 — load the screen's persisted anchor table ONCE per process, and FAIL if absent.
+
+    A sector median formed from the ~40 rows the pre-run touches is not a sector median. The only
+    admissible source is the table the screen built from the whole frame.
+    """
+    if "v" not in _D24_TBL:
+        _D24_TBL["v"] = _erm.load_anchor_table()      # raises AnchorTableMissing
+        log.info("D-24 anchor table %s@%s (%d sector medians)",
+                 _D24_TBL["v"].get("group"), _D24_TBL["v"].get("as_of"),
+                 len(_D24_TBL["v"].get("median_by_sector") or {}))
+    return _D24_TBL["v"]
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Ticker data fetch — full financial data (used for growth stock + energy)
@@ -352,11 +368,13 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
         log.warning(f"fv_composite failed for {ticker_sym}: {_e}")
     # Fix Pack A2 (P2): E[r] on the pre-run row (same module as the screen; rerank re-stamps
     # at the live price — this baseline makes the anatomy visible even for un-reranked names).
+    # D-24 §3.3: the anchor table is READ from the screen's persisted artefact (loaded once per
+    # process by _d24_anchor_table below) — never recomputed on a per-ticker basis.
     try:
-        _erd = _erm.expected_return_for_row(scored)
-        scored["expected_return_12_24m"] = _erd["expected_return_12_24m"]
-        scored["er_confidence"]          = _erd["er_confidence"]
-        scored["er_basis"]               = _erd["er_basis"]
+        _erd = _erm.expected_return_for_row(scored, anchor_table=_d24_anchor_table())
+        scored.update({k: v for k, v in _erd.items()})
+    except _erm.AnchorTableMissing:
+        raise
     except Exception as _e:
         log.warning(f"expected_return failed for {ticker_sym}: {_e}")
 

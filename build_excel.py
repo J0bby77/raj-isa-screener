@@ -522,11 +522,20 @@ def build_summary(wb, df_full, run_date, group):
     import source_score as _ss
     import expected_return as _er
 
+    # D-24 (09-Aug-2026): the E[r] recompute here must use THE SAME anchor table the screen
+    # stamped from, or the workbook and full_data.csv will disagree on the same name. Read the
+    # persisted table; if it is genuinely absent the recompute declares er_status="unmeasured"
+    # rather than quietly producing a second, different number.
+    _tbl = _er.load_anchor_table(required=False)
+    if _tbl is None:
+        print("WARN D-24: no persisted E[r] anchor table — SUMMARY E[r] cells will read "
+              "er_status='unmeasured' (re-rate refused, not zeroed)")
     _sel, _sqa = _ss.select_summary(df_full.to_dict("records"))
     _rows_out = []
     for _r, _sc in _sel:
         _comp = _ss.source_score_components_for_row(_r)
-        _erd = _er.expected_return_for_row(_r)
+        _erd = _er.expected_return_for_row(_r, anchor_table=_tbl,
+                                           allow_missing_anchor_table=True)
         _merged_f4 = ({
             **_r, **_erd,
             "source_score": _sc,

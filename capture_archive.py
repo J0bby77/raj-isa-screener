@@ -76,6 +76,12 @@ NEVER_PURGE = (
     "transaction_ledger.json", "decision_ledger.json", "score_panel.csv",
     "gate_variables.csv", "shadow_ledger.json", "watchlist_tickers.json",
     "calibration_registry.json", "vci_learning_store.json",
+    # ISA-0026 (12-Aug-2026). The item register is the ONE store that cannot be rebuilt by
+    # re-running anything: the 4Cs, detection sources and latencies exist nowhere else.
+    # BuildSpec s3 required P1 to handle this and it was missed, so it is wired here with a
+    # battery assertion behind it (consistency_check.pair_register_store_protected).
+    "isa_items.jsonl", "isa_item.schema.json", "isa_id_map.json",
+    "isa_id_highwater.json", "isa_migration_declarations.json",
 )
 
 

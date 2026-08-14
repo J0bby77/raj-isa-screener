@@ -53,8 +53,10 @@ except Exception:
 # Constants
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-STANDING_ORDER = 1250.0
-CASH_BUFFER_MIN = 150.0
+# ONE HOME: extract_cash_statement (R4.4). This module already imports FX_RATE_FRACTION
+# from there on the same principle.
+from extract_cash_statement import (  # noqa: E402
+    CASH_BUFFER_MIN, STANDING_ORDER, STANDING_ORDER_ACTIVE, STANDING_ORDER_PAUSED_FROM)
 AJ_BELL_DEALING_COST = 5.0       # £5 per trade
 # ⚑ CORRECTED 05-Aug-2026 (register H13). This read 0.0075 and was wrong: AJ Bell's own cash
 # statement carries literal `FX Charge (0.50%)` rows, and the COCO purchase executed at
@@ -378,15 +380,20 @@ def build_capital_summary(
 
     # Standing order note
     so_note = (
-        f"Standing order: £{STANDING_ORDER:,.0f}/month reserved for stock sleeve. "
-        f"Does NOT flow to funds even if no stock action taken — adds to cash buffer."
+        (f"Standing order: £{STANDING_ORDER:,.0f}/month reserved for stock sleeve. "
+         f"Does NOT flow to funds even if no stock action taken — adds to cash buffer.")
+        if STANDING_ORDER_ACTIVE else
+        (f"Standing order: PAUSED since {STANDING_ORDER_PAUSED_FROM} (Raj, job security). "
+         f"No monthly inflow — cash is not replenished and every deployment is from the "
+         f"existing balance.")
     )
 
     return {
         "total_portfolio_gbp":          total,
         "cash_effective_gbp":           cash_effective,
         "cash_deployable_gbp":          cash_deployable,
-        "standing_order_monthly":       STANDING_ORDER,
+        "standing_order_monthly":       STANDING_ORDER if STANDING_ORDER_ACTIVE else 0.0,
+        "standing_order_active":        STANDING_ORDER_ACTIVE,
         "cash_buffer_min":              CASH_BUFFER_MIN,
         "stock_sleeve_current_pct":     stock_sleeve_pct,
         "stock_sleeve_current_value_gbp": stock_value,

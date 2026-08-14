@@ -565,6 +565,39 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         else:
             excluded_wrong_cycle.append(os.path.basename(_p))
     xlsx_files = sorted(xlsx_files)
+
+    # ── D-14 CALIBRATION-BASIS GUARD (12-Aug-2026) ────────────────────────────────────────
+    # Phase 3 dedupes by keeping the HIGHEST normalised score per ticker, across every
+    # contributing screen. Scores from different calibration bases are not comparable, so a
+    # frame scored under a retired basis can WIN that merge on a number today's config would
+    # never produce. That is what the 07-Aug-2026 SP500 screen did: it ran on the retired
+    # momentum bands because screener_local never called run_scheduled.
+    #
+    # Deleting that workbook fixed one month. This fails the NEXT one loudly. The stamp store
+    # is the authority on what contributed - no filename parsing, so no second home for the
+    # group vocabulary (R4.4).
+    try:
+        import calibration_guard as _cg
+        _contribs = _cg.contributors_in_window(_py, _pm)
+        _ok, _verdict = _cg.assert_one_calibration_stamp(_contribs) if _contribs else (
+            True, {"status": "NO_STAMPED_SCREENS_IN_WINDOW",
+                   "message": f"No stamped screen found for {_py}-{_pm:02d} (pre-12-Aug-2026 "
+                              f"history). Guard degraded to a warning."})
+        promotion_log["calibration_basis_guard"] = _verdict
+        if not _ok:
+            print(f"  [update_watchlist] ⚑ CALIBRATION BASIS GUARD FAILED: {_verdict['message']}")
+            raise SystemExit(
+                "update_watchlist REFUSES to merge a candidate pool spanning more than one "
+                "calibration basis (D-14). " + _verdict["message"] +
+                " Re-run the stale group, or exclude it, then re-run this step.")
+        print(f"  [update_watchlist] calibration basis: {_verdict['status']} "
+              f"({len(_contribs)} stamped screen(s) in window)")
+    except SystemExit:
+        raise
+    except Exception as _cge:
+        # Reported, never silently skipped (R4.9).
+        promotion_log["calibration_basis_guard"] = {"status": "GUARD_UNAVAILABLE", "error": str(_cge)}
+        print(f"  [update_watchlist] calibration basis guard unavailable ({_cge}) - pool NOT checked")
     # Files eligible for end-of-run archiving = ONLY the cycle files that live in the working
     # dir. Off-cycle files (e.g. the first July SP500 screen) are excluded above and therefore
     # left untouched in place, per Raj: the July file must not be moved/archived this cycle.

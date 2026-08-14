@@ -66,12 +66,52 @@ FRS_BANDS_BASIS = ("rebased 06-Aug-2026 to preserve the 05-Aug band distribution
 DOMINANCE_CORR = 0.80
 REDUNDANCY_CORR = 0.80
 FEE_PEER_CORR = 0.85
+# ⚑ THESE FIVE NUMBERS ARE `judgement` (R14.4), AND THAT IS NOW A MEASURED CONCLUSION RATHER
+# THAN AN OMISSION. Raj asked on 13-Aug-2026 whether they could be derived. They were tested:
+# each candidate predictor was measured on 36 months of history against the fund's SUBSEQUENT
+# 12-month return relative to its own comparator, stepped every 6 months across all twelve funds.
+#
+#   trailing 3y relative return  rho +0.119    [-0.472, +0.710]
+#   risk-adjusted (sharpe-like)  rho +0.023    [-0.568, +0.614]
+#   OCF (negated)                rho -0.316    [-0.907, +0.275]
+#   3y alpha vs comparator       rho +0.103    [-0.488, +0.694]
+#
+# NOT ONE IS DISTINGUISHABLE FROM ZERO. The nominal 116 observations are an illusion: the windows
+# overlap and the funds are cross-correlated (sleeve R2 vs MSCI World = 0.80), so EFFECTIVE N IS
+# 12 — the number of funds — and nominal N flatters it about thirtyfold (R3.2). Establishing a rho
+# of 0.30 at 95% needs ~43 INDEPENDENT funds. Raj holds 12.
+#
+# ⚑ So this is R3.5, not a failure: absence of evidence reported as ABSENCE OF POWER. The weights
+# cannot be calibrated on a twelve-fund portfolio and no amount of further work on this data will
+# change that — it would take a fund universe of ~40+ independent names, which is ISA-0327. Note
+# also that OCF came out with the WRONG SIGN against the published evidence, which is what an
+# underpowered estimate looks like and is a reason to distrust the magnitude, not to invert it.
+#
+# Until that universe exists these are DECLARED, REVERSIBLE JUDGEMENT, carried here as their one
+# home, and any claim that they are calibrated is false.
 WEIGHTS = {"return_adequacy": 35, "risk_efficiency": 25, "diversification": 20,
            "fee_efficiency": 10, "mandate_integrity": 10}
+WEIGHTS_BASIS = "judgement"
+WEIGHTS_BASIS_NOTE = ("derivation ATTEMPTED and refused on power 13-Aug-2026: effective N = 12 "
+                      "funds; no candidate predictor's rank correlation with forward relative "
+                      "return is distinguishable from zero; ~43 independent funds needed for "
+                      "rho 0.30 (R3.2, R3.5, R14.4)")
 
-# Bucket minimum annualised returns. One home: read from target_weights.json when present so a
-# threshold cannot say one thing here and another there.
+# Bucket ownership floors. ONE HOME: target_weights.json, field `ownership_floor_return`.
+# D-13 (Raj, 09-Aug-2026): the read below named `min_return`/`return_minimum`, keys that have never
+# existed in that file, so the documented "one home" always fell through to the code default and the
+# B1 floor read 12% here and 9% in policy, in the same report, for the same fund. The decision set
+# B1 to 0.12 and renamed the field: D-8 moved the return-EXPECTATION job out of it (Section C's
+# headline is now the implied forward market return M*), leaving it one job — the floor below which
+# a holding no longer earns its place. Policy and code default therefore AGREE and this repair moves
+# no verdict; `span = max(anchor, bm)` was already unchanged either way.
+#
+# DEFAULT_BUCKET_MIN is retained NOT as a fallback but as the SECOND INDEPENDENT DERIVATION. The two
+# are asserted equal on every read: a threshold that silently disagrees with itself is the defect
+# class this framework exists to refuse, and a quiet fallback is how it stayed invisible for months.
 DEFAULT_BUCKET_MIN = {"B1": 0.12, "B2": 0.12, "B3": 0.13}
+BUCKET_FLOOR_FIELD = "ownership_floor_return"
+BUCKET_FLOOR_LEGACY_FIELDS = ("min_expected_return", "min_return", "return_minimum")
 
 # ── RETURN-ADEQUACY BASIS (Tier-1 items 1 and 5, 06-Aug-2026) ───────────────────────────
 # Two separate choices, both stated here and both reversible, because both were being made
@@ -154,19 +194,57 @@ def _window_stat(vals, stat):
     return v[len(v) // 2] if len(v) % 2 else (v[len(v) // 2 - 1] + v[len(v) // 2]) / 2.0
 
 
-def _bucket_minimums():
+class BucketFloorDivergence(RuntimeError):
+    """The ownership floor cannot be established from one agreed source."""
+
+
+def _bucket_minimums(strict=True):
+    """The bucket ownership floors, read from policy and cross-checked against the code default.
+
+    Refuses rather than guesses. Every failure mode below used to be a silent fall-through to
+    DEFAULT_BUCKET_MIN, which is why a 3pp disagreement survived unnoticed:
+      * file unreadable          -> no source for the floor at all
+      * legacy field name present-> the rename is half-applied; the value read may not be the one meant
+      * a bucket with a code default carries no policy value
+      * policy and code default disagree
+    `strict=False` restores the old fall-back and exists only for callers that must not raise.
+    """
+    path = os.path.join(HERE, "target_weights.json")
     try:
-        tw = json.load(open(os.path.join(HERE, "target_weights.json"), encoding="utf-8"))
-        b = {}
-        for k, v in (tw.get("buckets") or {}).items():
-            m = (v or {}).get("min_return") or (v or {}).get("return_minimum")
-            if m is not None:
-                b[k] = float(m)
-        if b:
-            return b
-    except Exception:
-        pass
-    return dict(DEFAULT_BUCKET_MIN)
+        tw = json.load(open(path, encoding="utf-8"))
+    except Exception as e:                                       # noqa: BLE001
+        if strict:
+            raise BucketFloorDivergence(
+                f"target_weights.json unreadable ({type(e).__name__}: {e}) — the ownership floor "
+                f"has no source; refusing to substitute a code default silently") from e
+        return dict(DEFAULT_BUCKET_MIN)
+
+    pol, legacy = {}, []
+    for k, v in (tw.get("buckets") or {}).items():
+        v = v or {}
+        if v.get(BUCKET_FLOOR_FIELD) is not None:
+            pol[k] = float(v[BUCKET_FLOOR_FIELD])
+        elif any(v.get(f) is not None for f in BUCKET_FLOOR_LEGACY_FIELDS):
+            legacy.append(k)
+
+    problems = []
+    if legacy:
+        problems.append(
+            f"buckets {sorted(legacy)} still carry a legacy floor field "
+            f"{list(BUCKET_FLOOR_LEGACY_FIELDS)} — rename to `{BUCKET_FLOOR_FIELD}` (D-13)")
+    missing = sorted(set(DEFAULT_BUCKET_MIN) - set(pol))
+    if missing:
+        problems.append(f"buckets {missing} carry a code default but no `{BUCKET_FLOOR_FIELD}` in policy")
+    disagree = {k: (round(pol[k], 6), DEFAULT_BUCKET_MIN[k])
+                for k in DEFAULT_BUCKET_MIN if k in pol
+                and abs(pol[k] - DEFAULT_BUCKET_MIN[k]) > 1e-9}
+    if disagree:
+        problems.append(f"policy vs code default disagree (policy, code): {disagree}")
+    if problems:
+        if strict:
+            raise BucketFloorDivergence("; ".join(problems))
+        return dict(DEFAULT_BUCKET_MIN)
+    return pol
 
 
 def _anchor_floor():
@@ -559,6 +637,17 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
     # ── FRS components ─────────────────────────────────────────────────────────────
     eff_pool = [held[k]["sharpe_like"] for k in keys]
 
+    # Mandate drift, computed ONCE for the whole sleeve (ISA-0332). One home: benchmark_registry
+    # owns "what is this fund supposed to track", so it owns "has it stopped tracking it".
+    # ⚑ A failure here leaves EVERY fund UNSCORED on the component rather than silently 5/10.
+    try:
+        import benchmark_registry as _breg
+        drift_by_sedol = _breg.all_mandate_drift()
+    except Exception as _e:                                        # noqa: BLE001
+        drift_by_sedol = {}
+        print(f"  mandate drift unavailable ({type(_e).__name__}: {_e}) — the component is "
+              f"UNSCORED for every fund, never defaulted")
+
     # Pre-pass: the stretch level must be known before ANY fund is scored, or the first fund
     # would be graded against a different scale from the last.
     _pre = {}
@@ -730,11 +819,21 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                        + (f" = £{excess / 100.0 * val:,.0f}/yr of avoidable fee"
                           if (val and excess) else ""))
 
-        # 5. mandate integrity (10) — no drift evidence available yet; NEUTRAL and SAID SO,
-        #    never full marks by default (a default of 10/10 would flatter every fund and make
-        #    the component decorative)
-        parts["mandate_integrity"] = WEIGHTS["mandate_integrity"] * 0.5
-        unmeasured.append("mandate drift not yet measured — scored NEUTRAL (5/10), not full")
+        # 5. mandate integrity (10) — MEASURED from 13-Aug-2026 (ISA-0332). Until today this was
+        #    hard-coded to 5/10 for every fund, so a tenth of the FRS was decorative: it could
+        #    neither promote nor demote anything. The input now exists because every fund carries
+        #    a sourced mandate benchmark (ISA-0320) and `t4_mandate_for` resolves the basis.
+        #    ⚑ UNSCORED is NOT 5/10. A fund with too little history is EXCLUDED from the
+        #    denominator, exactly as return_adequacy and risk_efficiency are — "we could not
+        #    measure it" and "it is mid-table" must never render the same (R2.10).
+        _dr = (drift_by_sedol or {}).get(sedol)
+        if not _dr or _dr.get("status") != "MEASURED":
+            parts["mandate_integrity"] = None
+            unmeasured.append("mandate drift UNSCORED — "
+                              + str((_dr or {}).get("reason", "no drift measurement available")))
+        else:
+            parts["mandate_integrity"] = _dr["points_fraction"] * WEIGHTS["mandate_integrity"]
+            why.append(f"mandate integrity: {_dr['why']} → severity {_dr['severity']:.2f}")
 
         got = {k: v for k, v in parts.items() if v is not None}
         avail = sum(WEIGHTS[k] for k in got)
@@ -1185,7 +1284,7 @@ def _selftest():
     assert FRS_HOLD_ADD > FRS_RETAIN_ONLY
     # a fund with no measurable components must be UNSCORED, never DEAD MONEY
     empty = {"return_adequacy": None, "risk_efficiency": None, "diversification": None,
-             "fee_efficiency": None, "mandate_integrity": 5.0}
+             "fee_efficiency": None, "mandate_integrity": None}
     avail = sum(WEIGHTS[k] for k, v in empty.items() if v is not None)
     assert avail < 50, "an all-missing fund must fall below the measurement threshold"
 

@@ -130,8 +130,16 @@ CLASS_CONVERSIONS = {
 }
 
 # Tickers classified as FUND for sleeve purposes even if exchange-listed.
-# Mirrors extract_portfolio.FUND_OVERRIDE_TICKERS.
-FUND_OVERRIDE_TICKERS = {"SMT", "VUAG", "IWMO", "SGLN"}
+# ONE HOME: extract_portfolio (R4.4). This module previously kept its own copy under a
+# comment claiming it mirrored that one — {SMT, VUAG, IWMO, SGLN} against {SMT, VUAG}.
+# A comment asserting agreement is not agreement (FC-B); the two must be one object.
+try:
+    from extract_portfolio import FUND_OVERRIDE_TICKERS
+except ImportError as _exc:  # pragma: no cover - environment, not logic
+    raise ImportError(
+        "extract_transactions needs extract_portfolio.FUND_OVERRIDE_TICKERS. Refusing to fall "
+        "back to a local copy: the local copy is exactly the defect this import removed "
+        "(R4.4, R4.3)") from _exc
 
 
 # ---------------------------------------------------------------------------

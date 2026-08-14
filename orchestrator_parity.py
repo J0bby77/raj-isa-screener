@@ -235,11 +235,82 @@ def unreachable_config_reads(core_src=None, local_src=None, config_src=None):
                       f"{LIVE_ENTRY[0]}:{LIVE_ENTRY[1]} — they are declared operative and are not"}
 
 
+# ── D-24 §1.3 (09-Aug-2026): THE SAME CHECK, APPLIED TO A CONTRACT SURFACE ───────────────────
+# `expected_return`'s docstring claimed two consumers. On disk there were NINE, and every one
+# called `expected_return_for_row(row)` with no context — so adding an anchor-table parameter to
+# one leaves the other eight silently running the defective behaviour. That is capability parity
+# again, except the thing that diverges is a CALLER SET rather than a code path. The defence is
+# the same shape: declare the set, and fail until a newcomer is declared too.
+ER_MODULE = "expected_return"
+
+
+def _er_importers(root=None):
+    """Every .py under the analysis dir that imports `expected_return`, by AST — not by grep."""
+    root = root or HERE
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Live code only. Dated backup folders (`_bak_*`) and `.PRE_*` snapshots are frozen
+        # copies of code that has already been superseded — they cannot call anything, and
+        # requiring them in the manifest would turn a control into a chore and get it suppressed.
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("__pycache__", "tests_jul2026", ".git",
+                                    "calibration_pathc_jul2026")
+                       and not d.startswith("_bak") and not d.startswith(".PRE_")]
+        for fn in filenames:
+            if not fn.endswith(".py") or fn == ER_MODULE + ".py" or ".PRE_" in fn:
+                continue
+            fp = os.path.join(dirpath, fn)
+            try:
+                tree = ast.parse(open(fp, encoding="utf-8").read())
+            except Exception:                                # noqa: BLE001
+                continue
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Import) and any(a.name == ER_MODULE for a in n.names):
+                    found.add(os.path.relpath(fp, root).replace(os.sep, "/"))
+                elif isinstance(n, ast.ImportFrom) and n.module == ER_MODULE:
+                    found.add(os.path.relpath(fp, root).replace(os.sep, "/"))
+    return found
+
+
+def er_callsite_manifest(root=None, manifest=None):
+    """Importers of `expected_return` MUST equal scoring_config.ER_CALLSITE_MANIFEST."""
+    if manifest is None:
+        sys.path.insert(0, HERE)
+        import scoring_config as _cfg
+        manifest = dict(getattr(_cfg, "ER_CALLSITE_MANIFEST", {}) or {})
+    found = _er_importers(root)
+    declared = set(manifest)
+    undeclared = sorted(found - declared)          # a tenth caller nobody registered
+    absent = sorted(declared - found)              # declared but no longer importing
+    blank = sorted(k for k, v in manifest.items() if not str(v or "").strip())
+    ok = not undeclared and not absent and not blank
+    return {"ok": ok, "declared": sorted(declared), "found": sorted(found),
+            "undeclared_callers": undeclared, "declared_but_absent": absent,
+            "blank_reason": blank,
+            "reason": None if ok else
+                      (f"E[r] caller set != ER_CALLSITE_MANIFEST — undeclared {undeclared}, "
+                       f"absent {absent}, blank {blank}. Every caller must decide explicitly "
+                       f"whether it receives the anchor table (D-24 §1.3).")}
+
+
+def er_reachability(): 
+    """D-24 §6 — the fundamentals evidence route must be ACHIEVABLE at all."""
+    sys.path.insert(0, HERE)
+    import expected_return as _er
+    r = _er.assert_er_route_reachable(raise_on_fail=False)
+    return {"ok": bool(r["ok"]), "max_attainable": r["max_attainable"], "floor": r["floor"],
+            "reason": None if r["ok"] else r["message"]}
+
+
 def check_all():
     a = capability_diff()
     b = unreachable_config_reads()
-    return {"schema_version": SCHEMA_VERSION, "ok": bool(a["ok"] and b["ok"]),
-            "capability_parity": a, "config_reachability": b}
+    c = er_callsite_manifest()
+    d = er_reachability()
+    return {"schema_version": SCHEMA_VERSION,
+            "ok": bool(a["ok"] and b["ok"] and c["ok"] and d["ok"]),
+            "capability_parity": a, "config_reachability": b,
+            "er_callsite_manifest": c, "er_reachability": d}
 
 
 # ── SELFTEST ─────────────────────────────────────────────────────────────────────────────────

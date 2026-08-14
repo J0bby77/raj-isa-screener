@@ -656,15 +656,26 @@ def build_top10_table(strong_buys):
             pass
         if ticker in _held_tickers():
             _gate_label = "HELD | " + _gate_label
+        # ⚑ D-24 §1.2 (09-Aug-2026). build_email RECOMPUTES E[r] independently, at REVIEW time,
+        # and had no screen anchor table in scope. Left alone it would fall back to the old path
+        # and the monthly review email would disagree with the screen that produced the candidate
+        # — the email-desync disease, in the number that gates capital. It now reads the PERSISTED
+        # anchor table; where there is none it declares `unmeasured` (marked "?") rather than
+        # silently publishing a different E[r].
         _er_raw = sf(get_field(row, "expected_return_12_24m"))
+        _er_unmeas = str(get_field(row, "er_status") or "") == "unmeasured"
         if _er_raw is None:
             try:
                 import expected_return as _erm
-                _er_raw = sf(_erm.expected_return_for_row(
-                    row, get=lambda r, k: get_field(r, k)).get("expected_return_12_24m"))
+                _tbl = _erm.load_anchor_table(required=False)
+                _rec = _erm.expected_return_for_row(
+                    row, get=lambda r, k: get_field(r, k), anchor_table=_tbl,
+                    allow_missing_anchor_table=True)
+                _er_raw = sf(_rec.get("expected_return_12_24m"))
+                _er_unmeas = _rec.get("er_status") == "unmeasured"
             except Exception:
                 _er_raw = None
-        er_str = f"{_er_raw:.1f}%" if _er_raw is not None else "—"
+        er_str = (f"{_er_raw:.1f}%" + ("?" if _er_unmeas else "")) if _er_raw is not None else "—"
 
         cell_style = f'padding:7px 6px;border-bottom:1px solid #e8e8e8;background:{bg};font-size:12px;text-align:center'
 
