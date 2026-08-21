@@ -143,9 +143,25 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         days_to_catalyst=days_to_catalyst, signal_count=signal_count,
         revision_velocity=revision_velocity, weights=weights)
 
+    # ── ISA-0171 (V-2). A COUNTDOWN TO AN UNNAMED EVENT MAY NOT MOVE A SIZE. ────────────────
+    # days_to_catalyst shrinks the position via size_for(); catalyst_type selects p_thesis and L
+    # via lookup_priors(). Measured 16-Aug-2026: all 9 live names carry the days and none carries
+    # the type, so one half of the pair was moving capital while the other silently defaulted.
+    # R4.3 - a control fed a null BLOCKS. The days are refused, and the refusal is stated.
+    try:
+        import vci_integrity as _vi
+        _coh = _vi.catalyst_coherence({"days_to_catalyst": days_to_catalyst,
+                                       "catalyst_type": catalyst_type})
+    except Exception as _e:                                          # noqa: BLE001
+        _coh = {"state": f"CHECK_UNAVAILABLE: {type(_e).__name__}", "days_usable": days_to_catalyst,
+                "blocks": False}
+    _days_for_sizing = _coh.get("days_usable")
+    if _coh.get("blocks"):
+        reasons.append(f"catalyst_incoherent:{_coh['state']}")
+
     # 5) size (E5 liquidity-capped)
     size_pct, size_note, liq_capped, liq_status = size_for(
-        acs, signal_count, days_to_catalyst, deploy_eligible,
+        acs, signal_count, _days_for_sizing, deploy_eligible,
         adv_usd=adv_usd, portfolio_value=portfolio_value)
     if liq_status == "UNKNOWN" and size_pct:
         # V-1: an unevaluable control never certifies a size. It escalates to a human instead.
@@ -176,6 +192,7 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         "adv_usd": adv_usd, "expected_loss_pct_isa": expected_loss,
         "asymmetry_compression_cause": cause,
         "days_to_catalyst": days_to_catalyst, "signal_count": signal_count,
+        "catalyst_coherence": _coh, "days_to_catalyst_used_for_sizing": _days_for_sizing,
     }
 
 

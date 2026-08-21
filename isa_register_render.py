@@ -349,7 +349,7 @@ def render_backlog(items, as_of, today) -> str:
                 "**Computed on read, never typed.** The 08-Aug-2026 hand-compiled backlog is "
                 "retired: within one day it was stale, and it sent a session to an already-closed "
                 "item (ISA-0024). A hand-maintained rank is a second thing to keep in sync.", as_of)
-    for code, label in [(c, l) for _f, c, l in R.TIERS]:
+    for code, label in [(c, l) for _f, c, l in R.PRIORITY_TIERS]:
         name = f"{code} \u2014 {label}"
         rows = [i for i in ranked if R.tier(i, today)[0] == code]
         L += [f"## {name} — {len(rows)}", ""]

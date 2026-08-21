@@ -40,7 +40,11 @@ EXPECTED COLUMN NAMES in full_data.csv (see FIELD_MAP below for aliases):
   Overlays : est_rev_direction |
              wacc_pct | roic_vs_wacc_spread |
              val_hist_pe_premium_disc | val_hist_pfcf_premium_disc |
-             trailing_pe | val_hist_pe_status | overlay_status
+             trailing_pe | val_hist_pe_status | overlay_status |
+             overlays_unresolved | overlay_population_basis
+             (19-Aug-2026: populated for EVERY gate-passer, not a score-selected subset — so the
+              CANDIDATES tab now carries them too, and a blank overlay cell means the overlay ran
+              and came back empty rather than "this name was never looked at")
   Other    : qualitative_commentary | gate_code | gate_reason | sector_bucket |
              book_to_bill_trailing_2q | backlog_ttm | backlog_ev_ratio |
              b2b_applicable | book_to_bill_status | backlog_ev_status
@@ -295,6 +299,19 @@ def pp_fmt(v):
     except _FMT_EXC as e:
         _fmt_guard("pp_fmt", v, e); return s(v)
 
+def overlay_gaps_fmt(v):
+    """"No gaps" and "we never looked" must not render the same (R2.10). The generic `s()`
+    formatter turns an empty string into "N/A", which is the reading that cost this framework
+    three retrospectives — so the gaps column gets its own formatter: an overlay that ran and
+    resolved everything says "none"; a row with no overlay at all says "not run"."""
+    if v is None or (isinstance(v, float) and v != v):
+        return "not run"
+    t = str(v).strip()
+    if t in ("", "nan", "None", "N/A"):
+        return "none"
+    return t
+
+
 def trailing_pe_fmt(v):
     try:
         f = float(v)
@@ -433,16 +450,24 @@ SUMMARY_COLS = [
     ("",                           "Analyst Rating",     "analyst_rating",           s,                 True),
     ("",                           "# Analysts",         "num_analysts",             score_int,         False),
     ("",                           "Next Earnings",      "next_earnings",            s,                 True),
-    # Group 5 — High-Score Overlays (6 overlays + commentary)
+    # Group 5 — Overlays (4 overlays, 6 columns + commentary)
     # organic_rev_growth, recurring_rev_pct, peg_3yr removed 10-Jun-26 (not yfinance-obtainable).
+    # "High-Score" dropped from the label 19-Aug-2026: the score-based population is retired
+    # (ISA-0022), so the same overlays now appear on CANDIDATES for every gate-passer.
     # P/E & P/FCF vs 3yr avg use pct_already (values are stored x100 by screener_core).
-    ("Group 5 — High-Score Overlays", "Est Rev Direction",   "est_rev_direction",        s,             True),
+    ("Group 5 — Overlays",            "Est Rev Direction",   "est_rev_direction",        s,             True),
     ("",                               "WACC %",              "wacc_pct",                 lambda v: num(v, 1, "%"), False),
     ("",                               "ROIC vs WACC",        "roic_vs_wacc_spread",      lambda v: num(v, 1, "pp"), False),
     ("",                               "P/E vs 3yr Avg",      "val_hist_pe_premium_disc", pct_already,   False),
     ("",                               "P/FCF vs 3yr Avg",    "val_hist_pfcf_premium_disc", pct_already, False),
     ("",                               "Trailing P/E",        "trailing_pe",              trailing_pe_fmt, False),
     ("",                               "Valuation Profile",   "__valprofile__",           None,          True),
+    # 19-Aug-2026: a blank WACC used to be unreadable — it could mean the overlay ran and the
+    # vendor had nothing, or that the overlay never ran for this name. 55 of 271 SUMMARY rows
+    # across 18 workbooks were the second, and three retrospectives read them as the first.
+    # These two columns make the frame say which (R2.10).
+    ("",                               "Overlay",             "overlay_status",           s,             True),
+    ("",                               "Overlay Gaps",        "overlays_unresolved",      overlay_gaps_fmt, True),
     ("",                               "Commentary",          "qualitative_commentary",   s,             True),
 ]
 
@@ -491,7 +516,7 @@ def build_summary(wb, df_full, run_date, group):
                 "Group 2 — Scores":            FILL_GRP2,
                 "Group 3 — Growth Quality":    FILL_GRP3,
                 "Group 4 — Valuation & Risk":  FILL_GRP4,
-                "Group 5 — High-Score Overlays": FILL_GRP5,
+                "Group 5 — Overlays": FILL_GRP5,
             }
             grp_start[current_grp] = {"start": col_idx, "fill": fill_map.get(grp, FILL_HDR_DARK)}
 
@@ -665,9 +690,24 @@ CAND_COLS = [
     ("EV/EBITDA",       "ev_ebitda",            mult),
     ("Net Debt/EBITDA", "net_debt_ebitda",      mult),
     ("Next Earnings",   "next_earnings",        s),
+    # ── Overlays, 19-Aug-2026 (ISA-0022) ──────────────────────────────────────────────────────
+    # These used to exist only for the score-selected subset that reached SUMMARY, which is why
+    # this tab never showed them. The population is now every gate-passer, so the tab that IS
+    # every gate-passer is where they belong: the ranking below the SUMMARY cut can finally be
+    # read on the same basis as the ranking above it.
+    ("Est Rev Direction", "est_rev_direction",  s),
+    ("WACC %",          "wacc_pct",             lambda v: num(v, 1, "%")),
+    ("ROIC vs WACC",    "roic_vs_wacc_spread",  lambda v: num(v, 1, "pp")),
+    ("P/E vs 3yr Avg",  "val_hist_pe_premium_disc",  pct_already),
+    ("P/FCF vs 3yr Avg","val_hist_pfcf_premium_disc", pct_already),
+    ("Trailing P/E",    "trailing_pe",          trailing_pe_fmt),
+    ("Overlay",         "overlay_status",       s),
+    ("Overlay Gaps",    "overlays_unresolved",  overlay_gaps_fmt),
 ]
 
-TEXT_CAND_COLS = {1, 2, 3, 4, 5, 6, 7, 19}  # 1-indexed positions that are text/left-aligned
+# 1-indexed positions that are text/left-aligned: identity + Next Earnings + the two overlay
+# verdict columns at the end.
+TEXT_CAND_COLS = {1, 2, 3, 4, 5, 6, 7, 19, 20, 26, 27}
 
 
 def build_candidates(wb, df_full, group, run_date):
@@ -1117,8 +1157,12 @@ def build_diagnostics(wb, df_full, df_constituent, df_run_qa, df_tech_fails, gro
         ("Scoring v2","CapEx scoring: hardware/equipment INVERTED — 8-25% intensity = 2pts (capacity investment). Default unchanged."),
         ("",         "Op margin scoring: semiconductor_equipment strong>=12%/acceptable>=5%; semiconductor_hardware strong>=12%/acceptable>=6%."),
         ("",         "Sector bucket field in output: classifies each company as software_saas | semiconductor_fabless | semiconductor_hardware | semiconductor_equipment | default."),
-        ("Overlays","7 overlays for the SUMMARY-eligible + Source>=floor set: Organic Rev, Recurring Rev, Est Revisions, ROIC vs WACC,"),
-        ("",        "PEG 3yr Fwd, Valuation vs Own History (P/E + P/FCF), Trailing P/E. Max 8 min retrieval."),
+        ("Overlays","4 overlays, computed for EVERY gate-passer (OVERLAY_POPULATION=all_gate_passers, 19-Aug-2026): Est Revisions,"),
+        ("",        "ROIC vs WACC, Valuation vs Own History (P/E + P/FCF), Trailing P/E. On SUMMARY and on CANDIDATES."),
+        ("",        "Organic Rev, Recurring Rev and PEG 3yr Fwd were removed 10-Jun-26 — not obtainable from the vendor."),
+        ("",        "Score-gated retrieval (and its 8-minute cap) is RETIRED: the overlay produced val_hist, val_hist fed the"),
+        ("",        "Source Score, and the Source Score chose who got the overlay. 'Overlay' / 'Overlay Gaps' columns say, per"),
+        ("",        "row, whether an overlay ran and which parts of it resolved — a blank is now a measurement, not a silence."),
         ("Sources", "yfinance primary. US fallbacks: Finnhub -> Finviz -> StockAnalysis -> GuruFocus -> Alpha Vantage."),
         ("",        "EU/CA fallbacks: Finnhub -> MarketScreener -> GuruFocus -> TradingView -> Alpha Vantage."),
         ("",        "BR/MX: yfinance -> MarketScreener -> GuruFocus -> TradingView -> Alpha Vantage."),

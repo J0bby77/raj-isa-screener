@@ -988,6 +988,346 @@ def main():
         warnings.append(f"Step 6.07 (concentration_clusters): {type(_e).__name__}: {_e}")
         print(f"  FAILED (non-fatal): {_e}")
 
+    # ── Step 6.09 — SOURCE-SIDE concentration, strategic allocation and T4 (19-Aug-2026) ──
+    # ⚑ WHY THIS STEP EXISTS AT ALL. `process_concentration` (ISA-0329), `strategic_allocation`
+    # (ISA-0333) and the T4 mandate-drift trigger (ISA-0165) were all built, all green in the
+    # battery, and NONE of them was called by this orchestrator. That is the second failure class
+    # exactly: an absent execution that reported success. A module the monthly run never invokes
+    # is not part of the framework, however many assertions it passes.
+    #
+    # ⚑ WHAT EACH ONE ANSWERS, and why they are grouped: they are the three questions about the
+    # fund sleeve that the output-side measures cannot answer.
+    #   6.07 (above)  "how much of my RISK rides on one factor?"      — output side, correlation
+    #   6.09a         "how much of my MONEY rides on one PROCESS?"    — source side
+    #   6.09b         "which bets am I running against a reference?"  — exposure side
+    #   6.09c         "has a fund stopped doing what it was bought for?"
+    # R6.2: 6.07 and 6.09a are PUBLISHED SIDE BY SIDE and never blended — they disagree about
+    # which exposure is largest, and that disagreement is the information.
+    print("\n[6.09] Source-side concentration, strategic allocation and T4 mandate drift...")
+    _mf_begin("6.09", "process_concentration + strategic_allocation + t4")
+    _s609 = []
+    try:
+        import process_concentration as _pc
+        _pcr = _pc.build(out_path=os.path.join(SCRIPT_DIR,
+                                               f"process_concentration_{month_label}.json"))
+        if _pcr.get("state") == "OK":
+            _sp = _pcr["source_side"]["process"]
+            summary["process_concentration"] = {
+                "largest_process": _sp["largest"],
+                "largest_pct_of_fund_sleeve": _sp["largest_pct_of_fund_sleeve"],
+                "declared_coverage_pct": _sp["declared_coverage_pct_of_sleeve"],
+                "n_eff_declared": _sp["n_eff_declared"]}
+            _s609.append("process %s %.1f%% of sleeve (coverage %.0f%%)"
+                         % (_sp["largest"], _sp["largest_pct_of_fund_sleeve"] or 0,
+                            _sp["declared_coverage_pct_of_sleeve"]))
+            if _sp["coverage_state"] != "OK":
+                warnings.append(
+                    "Step 6.09 PROCESS COVERAGE: only %.1f%% of the fund sleeve has a DECLARED "
+                    "investment process (%s undeclared). The concentration figures describe the "
+                    "declared portion; the rest is UNKNOWN, not diversified (ISA-0329)."
+                    % (_sp["declared_coverage_pct_of_sleeve"],
+                       ", ".join(u["key"] for u in _sp["undeclared"])))
+            if _sp["material_groups"]:
+                warnings.append(
+                    "Step 6.09 PROCESS CONCENTRATION: %s. %s"
+                    % ("; ".join("%s = %.1f%% of the fund sleeve across %d fund(s)"
+                                 % (g["key"], g["pct_of_fund_sleeve"], g["n_funds"])
+                                 for g in _sp["groups"] if g["material"]),
+                       _pcr["readings_disagree"]["verdict"]))
+        else:
+            warnings.append("Step 6.09a: process_concentration %s" % _pcr.get("state"))
+    except Exception as _e:
+        warnings.append(f"Step 6.09a (process_concentration): {type(_e).__name__}: {_e}")
+        print(f"  process_concentration FAILED (non-fatal): {_e}")
+
+    try:
+        import strategic_allocation as _sa
+        _sar = _sa.build(xray_path=os.path.join(SCRIPT_DIR, f"xray_data_{month_label}.json"),
+                         out_path=os.path.join(SCRIPT_DIR,
+                                               f"strategic_allocation_{month_label}.json"))
+        if _sar.get("state") == "OK":
+            summary["strategic_allocation"] = {
+                "reference_authority": _sar["reference"]["authority"],
+                "active_share_pct": _sar["active_share_pct"],
+                "unauthorised_material_bets": _sar["unauthorised_material_bets"]}
+            _s609.append("active share " + ", ".join("%s %.1f%%" % (k, v)
+                         for k, v in (_sar["active_share_pct"] or {}).items()))
+            for _dim, _bets in (_sar["unauthorised_material_bets"] or {}).items():
+                if _bets:
+                    _b = {r["key"]: r["active_pp"]
+                          for r in _sar["dimensions"][_dim]["bets"] if r["key"] in _bets}
+                    warnings.append(
+                        "Step 6.09 UNAUTHORISED BETS (%s): %s. These are the emergent residue of "
+                        "twelve fund choices measured against the X-Ray's own benchmark column — "
+                        "a REFERENCE, not a target. None has a stated rationale or a declared cap "
+                        "(ISA-0333/ISA-0200/ISA-0203)."
+                        % (_dim, ", ".join("%s %+.2fpp" % (k, v) for k, v in sorted(
+                            _b.items(), key=lambda t: -abs(t[1])))))
+            for _dim, _why in (_sar.get("blocked_dimensions") or {}).items():
+                warnings.append("Step 6.09 SAA %s dimension BLOCKED: %s" % (_dim, _why[:160]))
+    except Exception as _e:
+        warnings.append(f"Step 6.09b (strategic_allocation): {type(_e).__name__}: {_e}")
+        print(f"  strategic_allocation FAILED (non-fatal): {_e}")
+
+    try:
+        import fund_rotation_analysis as _fra
+        _t4r = _fra.t4_mandate_drift()
+        if _t4r.get("state") == "MEASURED":
+            summary["t4_mandate_drift"] = {
+                "firing": _t4r["firing"], "watch": _t4r["watch"], "refused": _t4r["refused"],
+                "fire_rate_band": _t4r["fire_rate_band"]}
+            _s609.append("T4 firing on %d, watch %d, refused %d"
+                         % (len(_t4r["firing"]), len(_t4r["watch"]), len(_t4r["refused"])))
+            for _sd in _t4r["firing"]:
+                _row = next(r for r in _t4r["funds"] if r["sedol"] == _sd)
+                warnings.append(
+                    "Step 6.09 T4 MANDATE DRIFT FIRING — %s: %s. T4 raises a flag; it does not "
+                    "sell, trim or replace. The look is Step 6.6 (ISA-0165)."
+                    % (_sd, _row["claim"]))
+            for _sd in _t4r["refused"]:
+                _row = next(r for r in _t4r["funds"] if r["sedol"] == _sd)
+                warnings.append("Step 6.09 T4 REFUSED %s — %s. Not tested is not the same as "
+                                "tested and fine (R2.10)." % (_sd, _row["reason"][:140]))
+            _band = _t4r["fire_rate_band"]
+            if _band.get("state") not in ("OK", "REFUSED"):
+                warnings.append("Step 6.09 R15.2 — " + _band.get("raise_item", ""))
+        else:
+            warnings.append("Step 6.09c: T4 %s" % _t4r.get("state"))
+    except Exception as _e:
+        warnings.append(f"Step 6.09c (t4_mandate_drift): {type(_e).__name__}: {_e}")
+        print(f"  t4_mandate_drift FAILED (non-fatal): {_e}")
+
+    _mf_measure(status=("OK" if _s609 else "DEGRADED"),
+                note=("; ".join(_s609) if _s609 else "no source-side measure produced a result"))
+    print("  " + ("; ".join(_s609) if _s609 else "no result"))
+
+    # ── Step 6.10 — THE MARGINAL-POUND ROUTER (20-Aug-2026) ───────────────────────────────────
+    # ⚑ WHY THIS STEP EXISTS. `capital_destination` was built 16-Aug-2026, closed five register
+    # items, carried 22 green assertions — and was called by NOTHING. Same shape as the three
+    # modules Step 6.09 rescued the day before, and the framework's second failure class: an
+    # absent execution that reported success. ISA-0386 / ISA-0387 / ISA-0388 / ISA-0390 all land
+    # inside this module, so wiring it is part of shipping them; a router nobody runs allocates
+    # nothing and would have gone stale exactly as quietly.
+    #   6.10a  the per-fund exposure vectors the router's C1 reads (ISA-0392) — a REPORT of the
+    #          artefact's age and provenance. It is NOT refreshed here: the capture needs network
+    #          and this run has none, and a step that pretends to refresh is worse than one that
+    #          declares it cannot.
+    #   6.10b  the destination itself: sleeve split, ranking, allocation, idle capital priced.
+    #   6.10c  the waiting-room / recall position (ISA-0390).
+    print("\n[6.10] Marginal-pound router: sleeve split, estimation-free ranking, recall leg...")
+    _mf_begin("6.10", "capital_destination + fund_exposure_vectors + waiting_room")
+    _s610 = []
+    try:
+        import fund_exposure_vectors as _fev
+        _fv = json.load(open(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json"))) \
+            if os.path.exists(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json")) else None
+        if _fv is None:
+            warnings.append(
+                "Step 6.10a: fund_exposure_vectors.json is ABSENT, so the router's C1 runs at "
+                "DECLARED-MANDATE resolution (one-hot on the fund's own benchmark) instead of "
+                "look-through. That is a degradation, not a failure — but ISA-0333 / ISA-0160 / "
+                "ISA-0328 stay BLOCKED until the capture is re-run (ISA-0392). The capture needs "
+                "network and this run has none.")
+        else:
+            _sp = _fv.get("as_of_spread_days") or {}
+            summary["fund_exposure_vectors"] = {
+                "n_funds": len(_fv.get("vectors") or {}), "stale": _fv.get("stale"),
+                "age_days": _sp, "corroboration": _fv.get("corroboration"),
+                "share_class_substitutions": _fv.get("share_class_substitutions")}
+            _s610.append("exposure vectors %d funds, %d-%d days old"
+                         % (len(_fv.get("vectors") or {}), _sp.get("min", -1), _sp.get("max", -1)))
+            if _fv.get("stale"):
+                warnings.append(
+                    "Step 6.10a EXPOSURE VECTORS STALE for %s (older than %d days). The router "
+                    "still ranks on them; a stale vector is a fact about the capture, not a "
+                    "reason to fall back silently (ISA-0392)."
+                    % (", ".join(_fv["stale"]), _fev.STALE_AFTER_DAYS))
+            if _fv.get("share_class_substitutions"):
+                warnings.append(
+                    "Step 6.10a EXPOSURE VECTORS use a DIFFERENT SHARE CLASS for %s — same "
+                    "portfolio, different fee or distribution line. Named so it is a known "
+                    "substitution rather than an assumed identity (R6.1)."
+                    % ", ".join(_fv["share_class_substitutions"]))
+    except Exception as _e:
+        warnings.append(f"Step 6.10a (fund_exposure_vectors): {type(_e).__name__}: {_e}")
+        print(f"  fund_exposure_vectors FAILED (non-fatal): {_e}")
+
+    try:
+        import capital_destination as _cd
+        _cdr = _cd.build(out_path=os.path.join(SCRIPT_DIR,
+                                               f"capital_destination_{month_label}.json"))
+        if _cdr.get("state") == "OK":
+            _sl, _fa = _cdr["sleeve_split"], _cdr["fund_allocation"]
+            summary["capital_destination"] = {
+                "state": _cdr["state"],
+                "stock_max_gbp": _sl.get("stock_max_gbp"),
+                "freeze_basis": (_sl.get("scaling_freeze") or {}).get("basis"),
+                "executability": (_sl.get("executability") or {}).get("state"),
+                "fund_allocation_state": _fa.get("state"),
+                "unallocated_gbp": _fa.get("unallocated_gbp"),
+                "c1_resolution": (_cdr["ranking"]["criteria"]["c1"] or {}).get("resolution"),
+                "idle_cost_net_gbp":
+                    (_cdr["residual"] or {}).get("annual_opportunity_cost_net_of_waiting_room_gbp"),
+            }
+            _s610.append("router %s, stock cap GBP %.2f [%s], funds %s, idle GBP %.2f"
+                         % (_cdr["state"], _sl.get("stock_max_gbp") or 0.0,
+                            (_sl.get("scaling_freeze") or {}).get("basis"), _fa.get("state"),
+                            _fa.get("unallocated_gbp") or 0.0))
+            if (_sl.get("executability") or {}).get("state") == "NOT_EXECUTABLE":
+                warnings.append(
+                    "Step 6.10b STOCK CAP IS NOT EXECUTABLE: GBP %.2f is below the smallest "
+                    "position size the framework declares (GBP %.2f, %s). A cap that cannot open "
+                    "a position is GBP 0 of executable capital reported as a non-zero number "
+                    "(ISA-0387)."
+                    % (_sl["executability"]["stock_max_gbp"],
+                       _sl["executability"]["smallest_declared_position_gbp"] or 0.0,
+                       _sl["executability"]["smallest_declared_position_basis"]))
+            if (_cdr["residual"] or {}).get("unallocated_gbp", 0) > 0:
+                warnings.append(
+                    "Step 6.10b IDLE CAPITAL GBP %.2f (%.1f%% of what was offered), priced at GBP "
+                    "%s/yr net of the waiting-room yield. Idle capital is a DECISION with a stated "
+                    "price, never a default."
+                    % (_cdr["residual"]["unallocated_gbp"],
+                       _cdr["residual"].get("pct_of_capital_offered") or 0.0,
+                       _cdr["residual"].get("annual_opportunity_cost_net_of_waiting_room_gbp")))
+            _db = _cdr.get("declared_bands") or {}
+            if _db.get("not_repaired"):
+                warnings.append(
+                    "Step 6.10b DECLARED PER-FUND BAND BREACH not repaired: %s. Band restoration "
+                    "is C5, the tie-break (Raj, 19-Aug-2026 / ISA-0386), so a breach is repaired "
+                    "only if the fund also wins on C1-C4. Whether a declared band is a preference "
+                    "or a limit has NOT been decided — stated, not resolved by implementation."
+                    % ", ".join(_db["not_repaired"]))
+            if not (_cdr["verification"]["parity"] or {}).get("pass"):
+                warnings.append("Step 6.10b ROUTER PARITY FAILED: inert criteria %s"
+                                % (_cdr["verification"]["parity"].get("inert_criteria")))
+        else:
+            warnings.append("Step 6.10b: capital_destination %s" % _cdr.get("state"))
+    except Exception as _e:
+        warnings.append(f"Step 6.10b (capital_destination): {type(_e).__name__}: {_e}")
+        print(f"  capital_destination FAILED (non-fatal): {_e}")
+
+    try:
+        import waiting_room as _wr
+        _park = _wr.outstanding()
+        _fz = _wr.freeze_state()
+        summary["waiting_room"] = {"parked_gbp": _park.get("parked_gbp"),
+                                   "lots_live": _park.get("lots_live"),
+                                   "recall": _fz.get("state")}
+        _s610.append("waiting room GBP %.2f parked, recall %s"
+                     % (_park.get("parked_gbp") or 0.0, _fz.get("state")))
+        if _fz.get("state") in ("BARRED", "REFUSED") and (_park.get("parked_gbp") or 0) > 0:
+            warnings.append(
+                "Step 6.10c PARKED CAPITAL IS LOCKED IN: GBP %.2f sits in funds as a TIMING "
+                "decision and the recall leg is %s — %s Parking under an active freeze is not a "
+                "reversible decision (ISA-0390 x ISA-0387)."
+                % (_park["parked_gbp"], _fz["state"], _fz.get("reason", "")))
+    except Exception as _e:
+        warnings.append(f"Step 6.10c (waiting_room): {type(_e).__name__}: {_e}")
+        print(f"  waiting_room FAILED (non-fatal): {_e}")
+
+    _mf_measure(status=("OK" if _s610 else "DEGRADED"),
+                note=("; ".join(_s610) if _s610 else "the marginal-pound router produced no result"))
+    print("  " + ("; ".join(_s610) if _s610 else "no result"))
+
+    # ── Step 6.11 — THE REGIONAL M LAYER AND THE FUND STRUCTURAL E[r] (20-Aug-2026) ───────────
+    # ⚑ 6.11a regional_m (ISA-0160)  ·  6.11b fund_expected_return (ISA-0328).
+    # Placed BETWEEN 6.10 (which produces the per-fund exposure vectors) and 6.08 (which consumes
+    # the result), because that is the dependency order. Wired in the SAME change that built them:
+    # `capital_destination` closed five items, carried 22 green assertions and was called by
+    # nothing for four days, and `strategic_allocation.attribution` was built and unreached for
+    # four days more. A module the monthly run never invokes is not part of the framework however
+    # many assertions it passes.
+    # ⚑ BOTH SHIP BEHAVIOUR-NEUTRAL. With the net buyback yield undeclared every M_k is UNMEASURED
+    # and every fund E[r] refuses; `fund_expected_return.OPERATIVE` is False and
+    # `return_architecture.ER_BASIS_OPERATIVE` is untouched. Nothing here moves a verdict today.
+    print("\n[6.11] Regional M layer and fund structural E[r]...")
+    _mf_begin("6.11", "regional_m + fund_expected_return")
+    _s611 = []
+    try:
+        import regional_m as _rm
+        _rmr = _rm.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
+        st = _rmr.get("state")
+        if st == "NO_CAPTURE":
+            warnings.append(
+                "Step 6.11a: regional_m_inputs.json is ABSENT — every M_k is UNMEASURED and every "
+                "consumer refuses. This is the honest state, not a failure, but the layer is doing "
+                "nothing until the capture is restored (assisted Cowork step; the device has no "
+                "network).")
+        elif st == "DISABLED":
+            warnings.append("Step 6.11a: regional_m is DISABLED by its rollback constant.")
+        else:
+            _wi = _rmr.get("world_identity") or {}
+            _s611.append("regional_m %s, world identity %s" % (st, _wi.get("verdict")))
+            _blocked = ((_rmr.get("m") or {}).get("blocked_cells") or [])
+            if _blocked:
+                warnings.append(
+                    "Step 6.11a REGIONAL M PARTIAL: %d of 7 cells UNMEASURED (%s). %s"
+                    % (len(_blocked), ", ".join(_blocked), _rmr.get("partial_reason", "")[:240]))
+            for _c in ((_rmr.get("age") or {}).get("stale_cells") or []):
+                warnings.append(
+                    "Step 6.11a REGIONAL M CAPTURE STALE for cell %s (older than %d days). The "
+                    "refresh is an ASSISTED Cowork step, never a pre-run step." % (_c, _rm.STALE_AFTER_DAYS))
+            for _c in ((_rmr.get("corroboration") or {}).get("breaches") or []):
+                warnings.append(
+                    "Step 6.11a CORROBORATION BREACH on cell %s — more than %.1fpp from the "
+                    "declared external capital-market assumption. Published, never blended (R6.2)."
+                    % (_c, _rm.CORROBORATION_TOL_PP))
+            _pl = _rmr.get("plausibility") or {}
+            if _pl.get("state") == "MEASURED" and not _pl.get("within_band"):
+                warnings.append(
+                    "Step 6.11a PLAUSIBILITY: implied real PER-SHARE growth %.2f%% against a "
+                    "measured historical reference of %.2f%%. Above the reference means the "
+                    "construction is GENEROUS; far above it is the signature of the ISA-0405 "
+                    "aggregate-vs-per-share double-count."
+                    % (_pl["implied_real_per_share_growth_pct"],
+                       _pl["historical_reference"]["value"]))
+            summary["regional_m"] = {
+                "state": st, "world_identity": _wi.get("verdict"),
+                "blocked_cells": _blocked,
+                "specification": (_rmr.get("m") or {}).get("operative_specification")}
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.11a (regional_m): {type(_e).__name__}: {_e}")
+
+    try:
+        import fund_expected_return as _fer
+        _ferr = _fer.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
+        if _ferr.get("state") == "DISABLED":
+            warnings.append("Step 6.11b: fund_expected_return is DISABLED by its rollback constant.")
+        else:
+            _sl = _ferr.get("sleeve") or {}
+            _un = _ferr.get("unmeasured") or []
+            _s611.append("fund E[r] %s (%d/%d measured)"
+                         % (_ferr.get("state"), len(_ferr.get("funds") or {}) - len(_un),
+                            len(_ferr.get("funds") or {})))
+            if _un:
+                warnings.append(
+                    "Step 6.11b FUND E[r] PARTIAL: %d of %d funds UNMEASURED. Every one NAMES what "
+                    "it is blocked on and none is given a sleeve average (R2.10)." % (len(_un), len(_ferr.get("funds") or {})))
+            if _sl.get("state") == "MEASURED":
+                warnings.append(
+                    "Step 6.11b FUND SLEEVE FORWARD E[r] %.2f%% over %.1f%% covered weight. ⚑ This "
+                    "is PUBLISHED, not OPERATIVE: return_architecture.ER_BASIS_OPERATIVE is "
+                    "unchanged and no verdict moves on it (D-13's null-behaviour-delta pattern)."
+                    % (_sl["structural_er_pct"], 100 * _sl["covered_weight"]))
+            _od = _ferr.get("ordering_diagnostic") or {}
+            if _od.get("state") == "MEASURED" and _od.get("dilution_pp") is not None:
+                warnings.append(
+                    "Step 6.11b ORDERING DIAGNOSTIC (NON-BINDING): the marginal pound's "
+                    "money-weighted forward E[r] is %.2f%% against a sleeve of %.2f%% (%+.2fpp). "
+                    "Not evidence the ordering is wrong — it is what C1 does when it closes the US "
+                    "underweight. One month is an anecdote; a persistent sign belongs to ISA-0333."
+                    % (_od["money_weighted_er_pct"], _od["sleeve_er_pct"], _od["dilution_pp"]))
+            summary["fund_expected_return"] = {
+                "state": _ferr.get("state"), "operative": _ferr["_meta"]["operative"],
+                "sleeve_pct": _sl.get("structural_er_pct"), "n_unmeasured": len(_un)}
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.11b (fund_expected_return): {type(_e).__name__}: {_e}")
+
+    _mf_measure(status=("OK" if _s611 else "DEGRADED"),
+                note=("; ".join(_s611) if _s611 else "the regional M layer produced no result"))
+    print("  " + ("; ".join(_s611) if _s611 else "no result"))
+
     # ── Step 6.08 — return architecture (ranked build item #1, 06-Aug-2026) ──────────
     # ⚑ Section C — the one number that answers "is this on track for £1m" — has NEVER been
     # computed. It shipped as `total_return: null, status: "pending_section_a"` and rendered as
@@ -2493,9 +2833,20 @@ def main():
                             continue
                         _row["est_return_pct"] = _ri["est_return_pct"]
                         _row["est_return_source"] = _ri.get("source")
+                        _row["est_basis"] = _ri.get("basis")
                         _mr = _row.get("min_return_pct")
                         if _mr is not None:
-                            _row["below_threshold"] = bool(_ri["est_return_pct"] < _mr)
+                            # ⚑ ISA-0401/ISA-0402: `below_threshold` compares an estimate to a FORWARD hurdle, so it may
+                            # only be set when the estimate's declared basis IS forward. A trailing 3-year return read as
+                            # "below the hurdle" is not a finding, it is a category error — and it drove a live SELL.
+                            if _fr.basis_is_forward(_row.get("est_basis")):
+                                _row["below_threshold"] = bool(_ri["est_return_pct"] < _mr)
+                            else:
+                                _row["below_threshold"] = None
+                                _row["below_threshold_refused"] = (
+                                    "basis `%s` is not a forward decomposition; comparing it to "
+                                    "the forward `min_expected_return` hurdle is refused "
+                                    "(ISA-0401)" % (_row.get("est_basis") or "unknown"))
                         _touched += 1
                 # Section A verdict per D8 bands (A11): PASS >= bands.pass /
                 # INCONCLUSIVE bands.inconclusive..pass / FAIL < bands.inconclusive.
@@ -2543,13 +2894,81 @@ def main():
                     _rap = os.path.join(SCRIPT_DIR, f"return_architecture_{month_label}.json")
                     with open(_rap, encoding="utf-8") as _f:
                         _rar = json.load(_f)
-                    _bad_inv = [i for i in _rar.get("invariants", []) if not i.get("holds")]
-                    if _bad_inv:
+                    # ⚑ ISA-0409 (20-Aug-2026). THIS BLOCK USED TO READ "any failing invariant"
+                    # and, on failure, LEAVE Sections A/B/C on the est_return basis — the input
+                    # register C4 proved INVERTED. Two things were wrong and both are fixed at
+                    # their own level:
+                    #   (a) the gate was ALL-OR-NOTHING across unrelated quantities. I-RA-8 guards
+                    #       the M* golden fixture (ISA-0383) and says nothing about whether
+                    #       Sections A/B/C reconcile, yet it withdrew them. The gate is now SCOPED
+                    #       and the scope is owned by return_architecture, READ here and never
+                    #       re-derived (R4.4).
+                    #   (b) the fallback substituted a WORSE input. A refusal that hands the
+                    #       decision to something the framework has already proven inverted is a
+                    #       silent downgrade, not caution. Sections A/B/C now publish UNMEASURED
+                    #       with the failing invariant NAMED (R2.10/R4.3).
+                    # ⚑ MEASURED AT THE TIME: I-RA-5 had been failing since 12-Aug and I-RA-8
+                    # since 19-Aug, so the 05-Sep pre-run would have published the headline
+                    # verdict off twelve hand-typed estimates dated 2026-07-05. The 01-Aug run
+                    # escaped only because it carried SIX invariants and neither existed yet.
+                    _gate = _rar.get("adoption_gate")
+                    if not isinstance(_gate, dict):
+                        # An older artefact with no gate: REFUSE rather than guessing the scope.
+                        _gate = {"adoptable": False, "blocking_invariants": ["NO_ADOPTION_GATE"],
+                                 "on_refusal": "UNMEASURED_INVARIANT_FAILED",
+                                 "blocking_detail": {"NO_ADOPTION_GATE": (
+                                     "return_architecture emitted no adoption_gate, so which "
+                                     "invariants withhold Sections A/B/C is unknown. Refusing "
+                                     "rather than assuming (R4.7).")}}
+                    for _c, _d in (_gate.get("failing_out_of_scope") or {}).items():
                         warnings.append(
-                            "A11/6.08: return_architecture invariants FAILED — Section A/B/C "
-                            "left on the est_return basis rather than adopting arithmetic that "
-                            "does not reconcile: "
-                            + "; ".join(i["invariant"] for i in _bad_inv))
+                            "A11/6.08 %s FAILED but is scoped `%s`, so it withdraws that quantity "
+                            "and NOT Sections A/B/C: %s"
+                            % (_c, _d.get("scope"), str(_d.get("detail"))[:200]))
+                    if _gate.get("unscoped_invariants"):
+                        errors.append(
+                            "A11/6.08: invariant(s) %s carry no declared scope. A new invariant "
+                            "that nobody classified must not silently inherit 'does not matter' — "
+                            "declare it in return_architecture.INVARIANT_SCOPE (R4.7)."
+                            % _gate["unscoped_invariants"])
+                    if not _gate.get("adoptable"):
+                        _bad = _gate.get("blocking_invariants") or []
+                        _why = "; ".join("%s: %s" % (k, str(v)[:160])
+                                         for k, v in (_gate.get("blocking_detail") or {}).items())
+                        # ⚑ REFUSE. Do NOT substitute est_return.
+                        for _sec in ("section_a", "section_b", "section_c"):
+                            _blk = dict(_ana.get(_sec) or {})
+                            _prior = {k: _blk.get(k) for k in
+                                      ("weighted_avg_return", "value_pct", "total_return",
+                                       "verdict", "result")}
+                            _blk.update({
+                                "status": "UNMEASURED",
+                                "verdict": None,
+                                "basis": _gate.get("on_refusal", "UNMEASURED_INVARIANT_FAILED"),
+                                "unmeasured_reason": (
+                                    "return_architecture invariant(s) %s FAILED, so the arithmetic "
+                                    "does not reconcile and no verdict is issued. ⚑ est_return is "
+                                    "NOT substituted: register C4 proved it inverted and it is "
+                                    "retained only as est_basis_corroborator. 'I could not compute "
+                                    "it' and 'here is a number from an inverted input' must never "
+                                    "produce the same output (ISA-0409, R2.10)." % ", ".join(_bad)),
+                                "failing_invariants": _bad,
+                                "failing_detail": _why,
+                                "est_basis_corroborator": {
+                                    **(_blk.get("est_basis_corroborator") or {}),
+                                    **{k: v for k, v in _prior.items() if v is not None},
+                                    "role": ("RETIRED as a decision input (register C4) — shown so "
+                                             "the evidence keeps accumulating; NOT operative"),
+                                },
+                                "source": "return_architecture (Step 6.08) — REFUSED",
+                            })
+                            for _k in ("weighted_avg_return", "value_pct", "total_return"):
+                                _blk[_k] = None
+                            _ana[_sec] = _blk
+                        errors.append(
+                            "A11/6.08 SECTIONS A/B/C UNMEASURED — invariant(s) %s failed and the "
+                            "architecture REFUSES rather than falling back to est_return, which "
+                            "register C4 proved inverted. %s" % (", ".join(_bad), _why))
                     else:
                         _sa_new, _sb_new = _rar["section_a"], _rar["section_b"]
                         _sc_new = _rar["section_c"]

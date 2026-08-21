@@ -70,7 +70,16 @@ SCHEMA_VERSION = 1
 # ── BASIS SELECTION ─────────────────────────────────────────────────────────────────────
 # One home. Reversible in one line. Every basis is computed every run regardless.
 ER_BASIS_OPERATIVE = "declared_prior"        # "declared_prior" | "realised" | "shrunk"
-ER_BASES = ("declared_prior", "realised", "shrunk")
+ER_BASES = ("declared_prior", "realised", "shrunk", "exposure_forward")
+# ⚑ `exposure_forward` ADDED 20-Aug-2026 (ISA-0328). The FORWARD STRUCTURAL return built bottom-up
+# from exposures: sum_k w_k*M_k + geometric adjustment - OCF + alpha(=0), read from
+# fund_expected_return_[yyyy_mm].json. It is COMPUTED EVERY RUN and PUBLISHED in basis_study, and
+# ER_BASIS_OPERATIVE is DELIBERATELY UNCHANGED at `declared_prior`.
+# ⚑ WHY IT IS NOT OPERATIVE ON DAY ONE. On the 31-Jul-2026 book it moves Section A 11.0853 -> 6.16
+# (INCONCLUSIVE -> FAIL), Section C 10.9860 -> ~6.86 and the shortfall +2.914 -> ~+7.040pp, and it
+# puts ALL TWELVE funds below their declared floor — every bit of it 100% METHOD, 0% DATA (R2.3).
+# Not one fund changed. The framework has a recorded name for shipping a policy move as the side
+# effect of a measurement repair: D-C(ii). Switching the headline is Raj's, in one constant.
 
 # ⚑ UNCALIBRATED (register H5). Consumed by the `shrunk` basis ONLY, which is not operative.
 ER_SHRINK_WEIGHT = 0.35      # weight on realised evidence; 1-w on the declared prior
@@ -84,6 +93,46 @@ SECTION_C_WATCH_OFFSET_PP  = -0.9    # anchor - 0.9 = 13.0  (legacy total_isa_wa
 STOCK_SLEEVE_PREMIUM_PP    = 4.1     # anchor + 4.1 = 18.0  (legacy stock_sleeve_on_track)
 STOCK_SLEEVE_WATCH_OFFSET_PP = 1.1   # anchor + 1.1 = 15.0  (legacy stock_sleeve_watch_low)
 THRESHOLD_PARITY_TOL_PP    = 0.15    # beyond this a derived/legacy pair is a DIVERGENCE
+
+# ── ISA-0409 (20-Aug-2026) — WHAT A FAILING INVARIANT WITHDRAWS ───────────────────────────────
+# ⚑ THE DEFECT. `monthly_isa_prerun` treated ANY failing invariant as grounds to leave Sections
+# A/B/C "on the est_return basis" — the input register C4 proved not merely noisy but INVERTED
+# (Scottish Mortgage 14.0% est against a realised 5-year of 0.22%, the highest in its bucket), and
+# whose cache self-labels 8 of its 12 rows `[trailing 3yr]` under a header claiming they are
+# forward (ISA-0402). Refusing arithmetic that does not reconcile is right. SUBSTITUTING AN INPUT
+# THE FRAMEWORK HAS ALREADY PROVEN INVERTED IS NOT A REFUSAL, IT IS A SILENT DOWNGRADE — R4.3's
+# obvious sibling, which had never been written down: a control that FIRES must not hand the
+# decision to a worse input.
+#
+# ⚑ AND THE GATE WAS ALL-OR-NOTHING ACROSS UNRELATED QUANTITIES. I-RA-8 guards the M* golden
+# fixture and says nothing about whether Sections A/B/C reconcile, yet it withdrew them. Every
+# invariant now declares the SCOPE it guards, and only `sections`-scoped failures can withhold
+# Sections A/B/C. An invariant withdraws the quantity it guards, and nothing else.
+#
+# ⚑ I-RA-5 IS SCOPED `thresholds`, AND THAT IS NOT A WIDENED TOLERANCE. Its own divergence note
+# already states the conclusion: "the DERIVED value is operative (A19 invariant 6) and the legacy
+# constant is now stale prose". A stale piece of prose cannot invalidate arithmetic that
+# reconciles. The check is UNCHANGED — same pairs, same 0.15pp tolerance, still reported on every
+# run — only what its failure DOES has changed. The frozen constants in target_weights.json are
+# Raj's declared policy numbers and are deliberately NOT edited here (R2.14).
+INVARIANT_SCOPE = {
+    "I-RA-1": "sections",    # weights sum to 1 — a dropped sleeve corrupts every average
+    "I-RA-2": "sections",    # Section C's two aggregation paths agree
+    "I-RA-3": "sections",    # per-holding shortfall sums to the Section C shortfall
+    "I-RA-4": "sections",    # no unmeasured holding carries a number
+    "I-RA-5": "thresholds",  # derived vs frozen-constant parity — REPORTS staleness, gates nothing
+    "I-RA-6": "sections",    # the declared prior was READ for every fund that carries one
+    "I-RA-7": "mstar",       # M* substituted back reproduces the anchor
+    "I-RA-8": "mstar",       # the M* golden fixture has not silently moved (ISA-0383)
+}
+ADOPTION_SCOPE = "sections"  # the only scope that may withhold Sections A/B/C
+
+# ⚑ AND WHAT HAPPENS INSTEAD. Where a `sections`-scoped invariant fails, Sections A/B/C are
+# published UNMEASURED with the failing invariant NAMED. `est_return` stays where it already
+# correctly sits — as `est_basis_corroborator` — and may not become operative for anything.
+# "I could not compute it" and "here is a number from an inverted input" must never produce the
+# same output (R2.10).
+ADOPTION_REFUSAL_BASIS = "UNMEASURED_INVARIANT_FAILED"
 
 # ── COVERAGE ────────────────────────────────────────────────────────────────────────────
 # ⚑ "missing" cannot be a number. Below this, no verdict is issued at all.
@@ -347,6 +396,40 @@ def _shrunk(prior, realised):
     return min(v, prior + ER_EXCESS_CAP_PP)
 
 
+_EF_CACHE = {}
+
+
+def _exposure_forward_pct(sedol):
+    """The fund's forward STRUCTURAL E[r] from fund_expected_return (ISA-0328), or None.
+
+    ⚑ NOT `expected_return_12_24m`. That is a 12-24 month SINGLE-NAME total return reading +53.4%
+    on AVGO; this is an ~11-year structural return reading +3.06% on Polar. This module already
+    documents having nearly been caught by that confusion once — see stock_inputs()."""
+    global _EF_CACHE
+    if not _EF_CACHE:
+        _EF_CACHE = {"_loaded": True, "rows": {}}
+        try:
+            import re as _re
+            pat = _re.compile(r"^fund_expected_return_(\d{4})_(\d{2})\.json$")
+            best, key = None, None
+            for f in os.listdir(HERE):
+                m = pat.match(f)
+                if m:
+                    k = (int(m.group(1)), int(m.group(2)))
+                    if key is None or k > key:
+                        best, key = f, k
+            if best:
+                with open(os.path.join(HERE, best), encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                if doc.get("state") != "DISABLED":
+                    _EF_CACHE["rows"] = {sd: r.get("structural_er_pct")
+                                         for sd, r in (doc.get("funds") or {}).items()
+                                         if r.get("state") == "MEASURED"}
+        except Exception:                                      # noqa: BLE001
+            pass
+    return _EF_CACHE.get("rows", {}).get(sedol)
+
+
 def fund_inputs(frs_rows, tw, total_value):
     """Fund E[r] inputs.
 
@@ -379,7 +462,10 @@ def fund_inputs(frs_rows, tw, total_value):
                          "choice for this fund and is reported with that caveat")
         er = {"declared_prior": prior,
               "realised": realised,
-              "shrunk": _shrunk(prior, realised)}
+              "shrunk": _shrunk(prior, realised),
+              # ⚑ READ from the artefact, never recomputed here — one home (R4.4). Absent or
+              # UNMEASURED stays None and is reported as UNMEASURED, never as zero (R4.1).
+              "exposure_forward": _exposure_forward_pct(sedol)}
         conf = ("high" if prior is not None and realised is not None and not r.get("window_split")
                 else "medium" if prior is not None else None)
         out.append(_mk(
@@ -857,7 +943,9 @@ def check_invariants(inputs, sect, attrib, thr, tw, frs_rows):
     out = []
 
     def _add(code, ok, detail):
-        out.append({"invariant": code, "holds": bool(ok), "detail": detail})
+        out.append({"invariant": code, "holds": bool(ok), "detail": detail,
+                    "scope": INVARIANT_SCOPE.get(code, "sections"),
+                    "withholds_sections": (INVARIANT_SCOPE.get(code, "sections") == ADOPTION_SCOPE)})
 
     w = sum(i["weight"] or 0.0 for i in inputs)
     _add("I-RA-1", abs(w - 1.0) < 1e-6,
@@ -903,12 +991,54 @@ def check_invariants(inputs, sect, attrib, thr, tw, frs_rows):
           f"{im['status']} — a refusal is a pass here, a computed value failing the "
           f"substitution is not"))
     # ── I-RA-8. The register's published M* and this module's must not drift apart. ───────
+    # ⚑ I-RA-8 RE-FOUNDED 19-Aug-2026 (ISA-0378) — see I-D23-5. The D-8 divergence is still
+    #    published on every run under d8_reconciliation.basis = RETIRED_WITH_CAUSE; what is
+    #    ASSERTED is the golden fixture, which names any input that has moved.
     d8 = im.get("d8_reconciliation") or {}
-    _add("I-RA-8", (im["status"] != "computed") or d8.get("holds") is True,
-         (f"headline α mode {d8.get('headline_mode')!r} reproduces D-8's published "
-          f"{d8.get('d8_published_m_star_pct')}% (reproduced_by={d8.get('reproduced_by')}) "
-          f"within {d8.get('tolerance_pp')}pp"))
+    # `betas` is not in scope here; read them the same way _implied_m_block does, so the
+    # invariant and the block it judges cannot diverge on which alpha set they used.
+    _betas, _ = fund_betas()
+    gold = (mstar_golden_check(inputs, _betas) if _betas is not None
+            else {"status": "NO_BETAS", "holds": None, "detail": "no measured betas on disk"})
+    _add("I-RA-8", (im["status"] != "computed") or gold.get("holds") is True,
+         (gold.get("detail") or "") +
+         (f" | D-8's published {d8.get('d8_published_m_star_pct')}% is "
+          f"{d8.get('basis')}, still published, no longer asserted"))
     return out
+
+
+def adoption_gate(invariants):
+    """ONE HOME for 'may Sections A/B/C be adopted this run, and if not, what happens instead'.
+
+    ⚑ ISA-0409. The consumer (monthly_isa_prerun Step 9d) READS this and never re-derives it, so
+    the module that owns the invariants owns what they withdraw — the alternative is two homes for
+    one rule, which is how the all-or-nothing gate survived unnoticed in the first place (R4.4)."""
+    unknown = sorted({i.get("invariant") for i in invariants
+                      if i.get("invariant") not in INVARIANT_SCOPE})
+    blocking = [i for i in invariants
+                if not i["holds"] and i.get("scope") == ADOPTION_SCOPE]
+    other = [i for i in invariants if not i["holds"] and i.get("scope") != ADOPTION_SCOPE]
+    return {
+        "adoption_scope": ADOPTION_SCOPE,
+        "adoptable": not blocking and not unknown,
+        "blocking_invariants": [i["invariant"] for i in blocking],
+        "blocking_detail": {i["invariant"]: i["detail"] for i in blocking},
+        "failing_out_of_scope": {i["invariant"]: {"scope": i.get("scope"), "detail": i["detail"]}
+                                 for i in other},
+        # ⚑ An invariant with no declared scope BLOCKS. A new invariant that nobody classified
+        # must not silently inherit "does not matter" (R4.7 — a contract change RAISES).
+        "unscoped_invariants": unknown,
+        "on_refusal": ADOPTION_REFUSAL_BASIS,
+        "refusal_semantics": (
+            "Sections A/B/C publish UNMEASURED with the failing invariant NAMED. `est_return` is "
+            "NOT substituted: it is retired as a decision input (register C4 proved it inverted) "
+            "and stays only as `est_basis_corroborator`. A refusal that hands the decision to a "
+            "worse input is a downgrade wearing the appearance of caution (ISA-0409, R2.10/R4.3)."),
+        "note": ("an invariant withdraws the quantity it GUARDS and nothing else. I-RA-7/I-RA-8 "
+                 "guard M* and withdraw M*; I-RA-5 reports that a frozen constant in "
+                 "target_weights.json has gone stale against the operative anchor and gates "
+                 "nothing, because the module already declares the derived value operative."),
+    }
 
 
 def basis_study(inputs, thr, anchor_pct, tw, frs_rows, portfolio):
@@ -1061,6 +1191,41 @@ def _horizon_years(as_of):
 D8_PUBLISHED_M_STAR_PCT = 11.91
 D8_PUBLISHED_AT_ANCHOR_PCT = 14.1
 D8_RECONCILIATION_TOL_PP = 0.35
+
+# ⚑⚑ ISA-0378 (19-Aug-2026). THE D-8 RECONCILIATION IS RETIRED WITH CAUSE, and the cause is that
+# it stopped being INDEPENDENT — not that it stopped agreeing.
+#
+# It pinned two of its three inputs: the anchor (14.1%) and the weights (portfolio_data_jul_2026).
+# It did not pin the ALPHAS. `beta_alpha_study_aug2026.json` is stamped 2026-08-13T10:59:58 — the
+# mandate-benchmark build that closed ISA-0322 (Polar benchmarked against a US-only S&P sector ETF
+# labelled "MSCI World Info Tech") and ISA-0323 (4 of 27 benchmark series defective, two silently
+# missing distributions). D-8's 11.91% therefore INHERITS those defects, and a check that compares
+# corrected alphas against a figure built from a defective mapping is not measuring drift, it is
+# measuring the correction.
+#
+# It cannot be restored: re-running the reconciliation against the pre-correction store preserved
+# in `_bak_benchmark_20260813/` returns INSUFFICIENT_COVERAGE in both alpha modes, because that
+# study could not compute M* at all until Polar had a NAV series (ISA-0307). The route that
+# produced 11.91% no longer exists in the code or on disk.
+#
+# ⚑ WHAT IS **NOT** DONE HERE. The tolerance is NOT widened, and 11.91% is NOT restated to
+# whatever the code currently prints — that would be fitting the target to the output and would
+# delete the invariant while appearing to keep it. The divergence stays PUBLISHED, with its cause,
+# on every run (R6.2: publish the disagreement).
+#
+# WHAT REPLACES IT: a GOLDEN FIXTURE, which is the process rule the engineering standard already
+# states. The fixture freezes the INPUTS' IDENTITY as well as the output, so the next time any
+# input changes the battery reports a DIFF naming the input — rather than a permanently red
+# assertion nobody can act on. That is the generalisable form; D-8's figure never had it.
+D8_RECONCILIATION_BASIS = "RETIRED_WITH_CAUSE"
+D8_RETIREMENT_CAUSE = (
+    "The alphas were corrected by ISA-0322 / ISA-0323 on 13-Aug-2026, after D-8's figure was "
+    "published. The reconciliation's two derivations are no longer independent of each other's "
+    "defects, and the pre-correction inputs cannot be reproduced (INSUFFICIENT_COVERAGE from the "
+    "13-Aug backup). Superseded by the M* golden fixture; see ISA-0378.")
+
+MSTAR_GOLDEN_FIXTURE_FILE = "mstar_golden_fixture.json"
+MSTAR_GOLDEN_TOL_PP = 0.35          # unchanged from D8_RECONCILIATION_TOL_PP, deliberately
 
 
 class ImpliedMError(RuntimeError):
@@ -1340,6 +1505,104 @@ def _anchor_as_derived_on(as_of, state=None, expect_value_gbp=None):
             "note": ("the anchor AS DERIVED on this valuation, not the anchor as it stands today")}
 
 
+def _beta_store_identity(base_dir=None):
+    """The alpha set's IDENTITY, not its contents. A fixture that pins an output without pinning
+    the identity of every input is what ISA-0378 was: it detects nothing until it detects
+    everything. `generated_at` is what changed on 13-Aug-2026; the digest catches an edit that
+    forgets to move it."""
+    import hashlib
+    p = BETA_STUDY_PATH if base_dir is None else os.path.join(base_dir, "beta_alpha_study_aug2026.json")
+    if not os.path.exists(p):
+        return {"path": os.path.basename(p), "status": "ABSENT",
+                "generated_at": None, "sha256_12": None}
+    raw = open(p, "rb").read()
+    try:
+        _d = json.loads(raw.decode("utf-8"))
+        # `generated_at` sits at the TOP LEVEL of beta_alpha_study_aug2026.json, not under
+        # `_meta` — reading the wrong key would have made the identity check silently blind to
+        # the very field that moved on 13-Aug-2026 (ISA-0378).
+        gen = _d.get("generated_at") or (_d.get("_meta") or {}).get("generated_at")
+    except Exception:                                                       # noqa: BLE001
+        gen = None
+    return {"path": os.path.basename(p), "status": "PRESENT", "generated_at": gen,
+            "sha256_12": hashlib.sha256(raw).hexdigest()[:12]}
+
+
+def _golden_path(base_dir=None):
+    return os.path.join(base_dir or HERE, MSTAR_GOLDEN_FIXTURE_FILE)
+
+
+def mstar_golden_freeze(inputs, betas, *, portfolio_file, anchor_pct=None, base_dir=None,
+                        frozen_on=None, note=None) -> dict:
+    """Freeze the CURRENT M* computation — inputs' identity and output together — as the fixture
+    the battery asserts against from now on (ISA-0378).
+
+    ⚑ This is NOT a claim that today's M* is correct. It is a claim that the computation is
+    STABLE, and that any future move in it has a named cause. The two are different assertions and
+    conflating them is exactly how the D-8 check died.
+    """
+    a = D8_PUBLISHED_AT_ANCHOR_PCT if anchor_pct is None else anchor_pct
+    modes = {}
+    for am in IMPLIED_M_ALPHA_MODES:
+        r = implied_market_return(inputs, a, betas, alpha_mode=am)
+        modes[am] = {"m_star_pct": r.get("m_star_pct"), "status": r["status"]}
+    return {
+        "frozen_on": frozen_on or "UNSET",
+        "anchor_pct": a,
+        "portfolio_file": portfolio_file,
+        "beta_store": _beta_store_identity(base_dir),
+        "headline_mode": IMPLIED_M_ALPHA_MODE_HEADLINE,
+        "by_alpha_mode": modes,
+        "tolerance_pp": MSTAR_GOLDEN_TOL_PP,
+        "supersedes": "D-8 reconciliation (ISA-0378)",
+        "note": note or ("Frozen inputs AND output. A change in any of them must show up here as a "
+                         "DIFF that names the input, not as a permanently red assertion."),
+    }
+
+
+def mstar_golden_check(inputs, betas, *, portfolio_file=None, base_dir=None) -> dict:
+    """Assert the frozen fixture. Returns {status, holds, diffs, ...}.
+
+    status ABSENT is NOT a pass and NOT a failure — it is 'no fixture has been frozen', which the
+    caller must handle explicitly. A missing fixture silently reading as green would reproduce the
+    class this whole item is about.
+    """
+    p = _golden_path(base_dir)
+    if not os.path.exists(p):
+        return {"status": "ABSENT", "holds": None, "diffs": [],
+                "detail": f"no {MSTAR_GOLDEN_FIXTURE_FILE} on disk; freeze one with "
+                          f"mstar_golden_freeze()"}
+    fx = json.loads(open(p, encoding="utf-8").read())
+    diffs = []
+    live_store = _beta_store_identity(base_dir)
+    for k in ("generated_at", "sha256_12"):
+        if (fx.get("beta_store") or {}).get(k) != live_store.get(k):
+            diffs.append(f"beta_store.{k}: frozen {(fx.get('beta_store') or {}).get(k)!r} "
+                         f"vs live {live_store.get(k)!r}")
+    if portfolio_file is not None and fx.get("portfolio_file") != portfolio_file:
+        diffs.append(f"portfolio_file: frozen {fx.get('portfolio_file')!r} vs live {portfolio_file!r}")
+    live = {}
+    for am in IMPLIED_M_ALPHA_MODES:
+        r = implied_market_return(inputs, fx.get("anchor_pct", D8_PUBLISHED_AT_ANCHOR_PCT),
+                                  betas, alpha_mode=am)
+        live[am] = {"m_star_pct": r.get("m_star_pct"), "status": r["status"]}
+        want = ((fx.get("by_alpha_mode") or {}).get(am) or {}).get("m_star_pct")
+        got = r.get("m_star_pct")
+        tol = fx.get("tolerance_pp", MSTAR_GOLDEN_TOL_PP)
+        if want is None or got is None:
+            if want != got:
+                diffs.append(f"{am}: frozen {want} vs live {got}")
+        elif abs(got - want) > tol:
+            diffs.append(f"{am}: frozen {want}% vs live {got}% ({got - want:+.4f}pp, tol {tol}pp)")
+    return {"status": "CHECKED", "holds": not diffs, "diffs": diffs,
+            "frozen_on": fx.get("frozen_on"), "anchor_pct": fx.get("anchor_pct"),
+            "frozen": fx.get("by_alpha_mode"), "live": live,
+            "beta_store_frozen": fx.get("beta_store"), "beta_store_live": live_store,
+            "detail": ("the M* computation reproduces its frozen fixture" if not diffs else
+                       "the M* computation has MOVED and every moved input is named: "
+                       + "; ".join(diffs))}
+
+
 def d8_reconciliation(inputs, betas):
     """⚑ TWO INDEPENDENT DERIVATIONS OF THE SAME PUBLISHED NUMBER (R5.2).
 
@@ -1361,10 +1624,24 @@ def d8_reconciliation(inputs, betas):
             "tolerance_pp": D8_RECONCILIATION_TOL_PP,
             "by_alpha_mode": out, "reproduced_by": hit,
             "headline_mode": IMPLIED_M_ALPHA_MODE_HEADLINE,
+            # ⚑ ISA-0378. `holds` is still COMPUTED and still PUBLISHED — the divergence is a fact
+            # about the framework and hiding it would be worse than the red suite was. It is no
+            # longer ASSERTED: see basis/cause. The invariant it used to carry now sits on the
+            # golden fixture (mstar_golden_check), which pins the inputs D-8's figure never did.
+            "basis": D8_RECONCILIATION_BASIS,
+            "cause": D8_RETIREMENT_CAUSE,
+            "beta_store_now": _beta_store_identity(),
+            "asserted": False,
             "holds": bool(IMPLIED_M_ALPHA_MODE_HEADLINE in hit),
-            "note": ("this is what selected the headline α mode. It is an assertion, not a "
-                     "description: if the register's number and this module's number stop "
-                     "agreeing, the battery says so")}
+            "note": ("this is what SELECTED the headline α mode in Aug-2026, and it is kept for "
+                     "that provenance. It is no longer an assertion: ISA-0378 established that "
+                     "the two derivations stopped being independent when ISA-0322/0323 corrected "
+                     "the benchmark mapping D-8's figure was built on, and that the "
+                     "pre-correction inputs cannot be reproduced. The DIVERGENCE is published "
+                     "here every run; what the battery asserts is mstar_golden_check()")}
+
+
+import datetime as _dt
 
 
 def _implied_m_block(inputs, anchor_pct, as_of=None):
@@ -1377,7 +1654,34 @@ def _implied_m_block(inputs, anchor_pct, as_of=None):
     m = implied_market_return(inputs, anchor_pct, betas,
                              alpha_mode=IMPLIED_M_ALPHA_MODE_HEADLINE,
                              horizon_years=_horizon_years(as_of))
+
+    # ── ISA-0306. CAPTURE IS A PROPERTY OF PRODUCING THE ARTEFACT (R4.11). ───────────────────
+    # M* is the first falsifiable forward statement the framework produces. Recording it in prose
+    # would make the series depend on someone remembering (R14.1), so the emitter writes it. A
+    # month already on file is NOT overwritten - a prediction is written once (R6.4).
+    _capture = {"state": "SKIPPED", "reason": "M* not solved"}
+    if m.get("m_star_pct") is not None:
+        _stamp = (as_of.isoformat() if hasattr(as_of, "isoformat")
+                  else (as_of or _dt.date.today().isoformat()))
+        try:
+            import forward_record as _fr
+            _fr.record_m_star(as_of=str(_stamp), m_star_pct=m.get("m_star_pct"),
+                              leverage_lambda=m.get("leverage_lambda"),
+                              intercept_pct=m.get("intercept_pct"),
+                              coverage_pct=(m.get("coverage") or {}).get("pct")
+                              if isinstance(m.get("coverage"), dict) else m.get("coverage"),
+                              anchor_pct=_round(anchor_pct, 4),
+                              alpha_mode=IMPLIED_M_ALPHA_MODE_HEADLINE,
+                              source="return_architecture._implied_m_block")
+            _capture = {"state": "RECORDED", "as_of": str(_stamp)}
+        except ValueError as _e:
+            _capture = {"state": "ALREADY_ON_FILE", "as_of": str(_stamp), "note": str(_e)}
+        except Exception as _e:                                       # noqa: BLE001
+            # R2.10 - a failure to CAPTURE must never look like an absence of predictions.
+            _capture = {"state": "CAPTURE_FAILED", "error": f"{type(_e).__name__}: {_e}"}
+
     return {"status": m["status"], "m_star_pct": m.get("m_star_pct"),
+            "history_capture": _capture,
             "anchor_pct": _round(anchor_pct, 4),
             "leverage_lambda": m.get("leverage_lambda"),
             "leverage_note": m.get("leverage_note"),
@@ -1470,6 +1774,7 @@ def retrospective_section_c(as_of=None, portfolio=None, tw=None, metrics=None, s
         "implied_m_star": mstar,
         "sensitivity": grid,
         "d8_reconciliation": d8_reconciliation(inputs, betas),
+        "mstar_golden": mstar_golden_check(inputs, betas),
         "consistency_with_anchor": {
             "anchor_derived_at": anchor.get("derived_at"),
             "anchor_solved_on_value_gbp": anchor.get("portfolio_value_gbp"),
@@ -1490,11 +1795,16 @@ def retrospective_section_c(as_of=None, portfolio=None, tw=None, metrics=None, s
                            abs(float(anchor["portfolio_value_gbp"]) - total_value) < 0.51),
              "detail": ("the anchor read here was DERIVED on this same valuation — the one thing "
                         "D-23 exists to establish")},
+            # ⚑ I-D23-5 RE-FOUNDED 19-Aug-2026 (ISA-0378). It used to assert that the headline
+            #    α mode reproduced D-8's published 11.91%. That figure was computed before the
+            #    ISA-0322/0323 benchmark corrections and cannot be reproduced from anything on
+            #    disk, so the assertion had become a test of how much the framework had improved.
+            #    It now asserts a GOLDEN FIXTURE that pins the inputs' identity as well as the
+            #    output — so a moved input is reported as a named DIFF, not as a standing failure.
+            #    An ABSENT fixture is NOT a pass: it fails, and says to freeze one.
             {"invariant": "I-D23-5",
-             "holds": bool((d8_reconciliation(inputs, betas) or {}).get("holds")),
-             "detail": ("the headline α mode reproduces D-8's published M* of "
-                        f"{D8_PUBLISHED_M_STAR_PCT}% at a {D8_PUBLISHED_AT_ANCHOR_PCT}% anchor "
-                        f"within {D8_RECONCILIATION_TOL_PP}pp")},
+             "holds": bool((mstar_golden_check(inputs, betas) or {}).get("holds") is True),
+             "detail": (mstar_golden_check(inputs, betas) or {}).get("detail")},
             # ── I-D23-4 INVERTED 13-Aug-2026 (ISA-0310 CLOSED). It previously asserted that NO
             #    verdict existed, which was the correct assertion while the band was undeclared.
             #    It now asserts the opposite AND re-derives it independently, so a silently
@@ -1584,6 +1894,8 @@ def build(as_of=None, portfolio=None, frs=None, tw=None, metrics=None, out_path=
         "implied_market_return": _implied_m_block(inputs, a_pct),
         "bucket_minimum_divergence": bucket_minimum_divergence(tw),
         "invariants": inv,
+        # ⚑ ISA-0409 — the consumer READS this and never re-derives it (R4.4).
+        "adoption_gate": adoption_gate(inv),
         "defects_observed": ([{
             "code": "ER-ZERO-CONF",
             "detail": (f"expected_return.compute_expected_return returned 0.0 with "
@@ -1767,6 +2079,60 @@ def _selftest():
     inv_b = check_invariants(broken, s, at, t, tw, frs_rows)
     ok(not next(i for i in inv_b if i["invariant"] == "I-RA-1")["holds"],
        "NEGATIVE CONTROL: a dropped weight must break I-RA-1")
+
+    # ── ISA-0409: the adoption gate ─────────────────────────────────────────────────
+    ok(all(i.get("scope") for i in inv),
+       "every invariant emitted by check_invariants declares the SCOPE it guards")
+    ok(all((i["scope"] == ADOPTION_SCOPE) == i["withholds_sections"] for i in inv),
+       "only ADOPTION_SCOPE invariants are marked as withholding Sections A/B/C")
+    ok(set(i["invariant"] for i in inv) <= set(INVARIANT_SCOPE),
+       "every invariant this module emits is classified in INVARIANT_SCOPE")
+    # ⚑ The gate is tested on a CONSTRUCTED invariant list, not on the fixture's own: the synthetic
+    # fixture legitimately fails I-RA-5..8 (no target_state, no betas on a 100-unit toy book), and
+    # a control must perturb exactly the thing it claims to test and nothing else.
+    inv = [{"invariant": c, "holds": True, "detail": "fixture",
+            "scope": INVARIANT_SCOPE[c],
+            "withholds_sections": INVARIANT_SCOPE[c] == ADOPTION_SCOPE}
+           for c in INVARIANT_SCOPE]
+    g = adoption_gate(inv)
+    ok(g["adoptable"] is True and not g["blocking_invariants"],
+       "with every invariant holding, Sections A/B/C are adoptable")
+    # an out-of-scope failure must NOT withhold the sections
+    inv_m = [dict(i) for i in inv]
+    for i in inv_m:
+        if i["invariant"] == "I-RA-8":
+            i["holds"] = False
+    g_m = adoption_gate(inv_m)
+    ok(g_m["adoptable"] is True and "I-RA-8" in (g_m["failing_out_of_scope"] or {}),
+       "ISA-0409 CONTROL: an M*-scoped failure (I-RA-8 / ISA-0383) is REPORTED and does NOT "
+       "withhold Sections A/B/C — an invariant withdraws the quantity it guards, and nothing else")
+    inv_t = [dict(i) for i in inv]
+    for i in inv_t:
+        if i["invariant"] == "I-RA-5":
+            i["holds"] = False
+    ok(adoption_gate(inv_t)["adoptable"] is True,
+       "ISA-0409 CONTROL: a stale frozen constant (I-RA-5) is REPORTED and does not withhold the "
+       "sections — the module already declares the derived value operative, and stale prose cannot "
+       "invalidate arithmetic that reconciles. The CHECK and its tolerance are unchanged.")
+    # an in-scope failure MUST withhold, and the refusal must not name est_return as a substitute
+    inv_s = [dict(i) for i in inv]
+    for i in inv_s:
+        if i["invariant"] == "I-RA-2":
+            i["holds"] = False
+    g_s = adoption_gate(inv_s)
+    ok(g_s["adoptable"] is False and g_s["blocking_invariants"] == ["I-RA-2"],
+       "ISA-0409 CONTROL: a sections-scoped failure DOES withhold Sections A/B/C")
+    ok(g_s["on_refusal"] == ADOPTION_REFUSAL_BASIS
+       and "est_return" in g_s["refusal_semantics"] and "NOT" in g_s["refusal_semantics"],
+       "ISA-0409: the refusal names UNMEASURED as the outcome and states explicitly that "
+       "est_return is NOT substituted (R2.10)")
+    inv_u = [dict(i) for i in inv] + [{"invariant": "I-RA-99", "holds": True,
+                                       "detail": "new", "scope": None,
+                                       "withholds_sections": False}]
+    ok(adoption_gate(inv_u)["adoptable"] is False
+       and "I-RA-99" in adoption_gate(inv_u)["unscoped_invariants"],
+       "ISA-0409 CONTROL: an invariant with NO declared scope BLOCKS — a new invariant nobody "
+       "classified must not silently inherit 'does not matter' (R4.7)")
 
     print(f"return_architecture SELF-TEST OK — {n} assertions")
     return n

@@ -621,8 +621,19 @@ def run_analytics(
                 if _ri.get("est_return_pct") is not None:
                     _row["est_return_pct"] = _ri["est_return_pct"]
                     _row["est_return_source"] = _ri["source"]
+                    _row["est_basis"] = _ri.get("est_basis") or _ri.get("basis")
                     if _row.get("min_return_pct") is not None:
-                        _row["below_threshold"] = _ri["est_return_pct"] < _row["min_return_pct"]
+                        # ⚑ ISA-0401/ISA-0402: `below_threshold` compares an estimate to a FORWARD hurdle, so it may
+                        # only be set when the estimate's declared basis IS forward. A trailing 3-year return read as
+                        # "below the hurdle" is not a finding, it is a category error — and it drove a live SELL.
+                        if _fr is not None and _fr.basis_is_forward(_row.get("est_basis")):
+                            _row["below_threshold"] = _ri["est_return_pct"] < _row["min_return_pct"]
+                        else:
+                            _row["below_threshold"] = None
+                            _row["below_threshold_refused"] = (
+                                "basis `%s` is not a forward decomposition; comparing it to the "
+                                "forward `min_expected_return` hurdle is refused (ISA-0401)"
+                                % (_row.get("est_basis") or "unknown"))
                 _fa = _fr.classify_fund_action(_row, _ri)
                 if _fa:
                     fund_actions.append(_fa)

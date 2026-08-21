@@ -796,7 +796,18 @@ def ranked(today: date = None) -> list:
 # ONE HOME (R4.4). isa_register_render and isa_register_export both read these; they were
 # previously typed into the renderer only, which is how a label drifts from the score it names.
 
-TIERS = (
+# ⚑ RENAMED 15-Aug-2026 (ISA-0314) from `TIERS` to `PRIORITY_TIERS`. Three unrelated
+# vocabularies shared the name `TIERS` - conviction_capture's T1/T2/T3 candidate tiers (strings),
+# intelligence_store's source tiers 1/2/3 (ints), and this P0-P3 priority ladder (tuples) - and
+# the Atlas reopened the duplicate-home triage every run because the accepted reason named only
+# two of the three. Re-accepting would have DOCUMENTED the collision; renaming REMOVES it, and
+# this is the one of the three that was misnamed: it is a priority ladder, not a tier set.
+# Call sites on disk at the time of the change: isa_register.tier() and
+# isa_register_render.py:352. NO back-compat alias: a `TIERS = PRIORITY_TIERS` line was written
+# first and then REMOVED, because it left the duplicate home exactly where it was and the Atlas
+# went on reopening the triage - a rename that keeps the old name is a comment, not a change.
+# R4.7: an unenumerated reader must FAIL, not silently keep the old behaviour.
+PRIORITY_TIERS = (
     (1000, "P0", "blocks the next scheduled run"),
     (500,  "P1", "irreversible: another cycle destroys data permanently"),
     (200,  "P2", "changes where capital goes"),
@@ -807,10 +818,11 @@ TIERS = (
 def tier(item, today=None):
     """(code, label) from the computed rank score. Never typed on the item."""
     sc = rank_score(item, today)
-    for floor, code, label in TIERS:
+    for floor, code, label in PRIORITY_TIERS:
         if sc >= floor:
             return code, label
     return "P3", "correctness and robustness"
+
 
 
 # ISA-0304. `domain` says WHICH AREA an item concerns; it never said whether the analysis was

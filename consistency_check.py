@@ -1278,6 +1278,446 @@ def pair_register_fourc_complete(items=None):
     return errs
 
 
+
+def pair_target_weights_bucket_reconciliation(tw=None):
+    """The per-fund targets in a bucket MUST sum to that bucket's declared total. (20-Aug-2026)
+
+    ⚑ WHY THIS EXISTS. `target_weights.json` declares the same quantity twice — once per fund and
+    once per bucket — and NOTHING checked that the two agree. They do not: B3's per-fund targets
+    sum to 21.0% against a declared bucket target of 16.0%, over-subscribed by EXACTLY Scottish
+    Mortgage's 5.0%. SMT was classified B3 with a 5% target and the bucket total was never
+    re-derived; SMT does not appear in `project_isa_target_weights.md` §3 at all, so the memory
+    that is declared to be the source of truth still describes a TWO-fund B3.
+
+    The consequence was not cosmetic. It is the whole of ISA-0394: M&G Asian and Invesco Asian read
+    BELOW their 6% floors only because those floors were calibrated when the two of them WERE the
+    bucket. Under any reconciliation that respects the 16% bucket target, both are IN BAND. The
+    framework spent an item on a breach that was arithmetic, not allocation.
+
+    ⚑ It also makes the per-fund targets UNREACHABLE: 21.0% is above the bucket's own band_high of
+    19.0%, so all three funds cannot simultaneously sit at target without breaching the bucket.
+    A target nobody can reach is not a target.
+
+    ⚑ THIS DETECTS; IT DOES NOT RECONCILE. Which reading is right — scale the per-fund targets to
+    the bucket, raise the bucket, or re-bucket SMT — is Raj's (R4.8: an uninformed tie-break is
+    REFUSED, not guessed). Pending funds (`status` set) and pending sales are excluded, because
+    they are declared as not-yet-live rather than as part of the standing allocation.
+    """
+    errs = []
+    if tw is None:
+        try:
+            tw = json.loads(_read("target_weights.json"))
+        except Exception as e:                                       # noqa: BLE001
+            return [f"TW1: target_weights.json unreadable ({type(e).__name__}: {e})"]
+    funds = tw.get("funds") or {}
+    totals = tw.get("bucket_totals") or {}
+    by_bucket = {}
+    for sd, f in funds.items():
+        if not isinstance(f, dict) or f.get("status") or f.get("pending_sale"):
+            continue
+        by_bucket.setdefault(f.get("bucket"), []).append((sd, f))
+    for b, rows in sorted(by_bucket.items()):
+        if b not in totals:
+            errs.append(f"TW1: bucket {b} has funds but no declared bucket_totals entry")
+            continue
+        s_t = sum(float(f.get("target_pct") or 0.0) for _, f in rows)
+        b_t = float(totals[b].get("phase1_target_pct") or 0.0)
+        b_hi = float(totals[b].get("phase1_band_high") or 0.0)
+        if abs(s_t - b_t) > 0.0005:
+            errs.append(
+                "TW1: bucket %s per-fund targets sum to %.1f%% against a declared bucket target of "
+                "%.1f%% (%+.1fpp over %d funds: %s). The same quantity is declared twice and the "
+                "two homes disagree - this is the arithmetic behind ISA-0394."
+                % (b, s_t * 100, b_t * 100, (s_t - b_t) * 100, len(rows),
+                   ", ".join(sorted(sd for sd, _ in rows))))
+        if s_t - b_hi > 0.0005:
+            errs.append(
+                "TW1: bucket %s per-fund targets sum to %.1f%%, ABOVE the bucket's own band_high of "
+                "%.1f%% - every fund cannot sit at its target without breaching the bucket, so at "
+                "least one declared target is unreachable."
+                % (b, s_t * 100, b_hi * 100))
+    return errs
+
+
+_READINESS_CLAIM = re.compile(r"^\s*(?:\u2691\s*)?(BUILD[-\s]READY|ANALYSIS[-\s]FIRST)", re.I)
+
+
+def pair_build_readiness_declared(items=None):
+    """An item's corrective_action may not assert a readiness its own field contradicts. (ISA-0399)
+
+    ⚑ RAJ FOUND THIS BY READING TWO COLUMNS OF THE RENDERED REGISTER AGAINST EACH OTHER, 20-Aug-2026
+    — the read the framework never does on itself. Exactly two items out of 275 contradicted
+    themselves, and they pointed in OPPOSITE directions, which is why neither was obvious:
+    ISA-0333 (CRITICAL) read ANALYSIS_FIRST while its analysis was done and its measurement half was
+    already running, so it sorted as not-yet-startable while being the most startable CRITICAL item
+    on the register; ISA-0328 opened 'BUILD-READY.' while its central input M_k does not exist
+    anywhere, so a build started from the prose would have stalled on ISA-0160 mid-flight.
+
+    ⚑ WHAT THIS CANNOT DO, said plainly so the gap is a fact and not an oversight: it detects the
+    field and the prose DISAGREEING. It cannot detect a `build_readiness_basis` that has gone stale
+    because the blocker it names has since CLOSED — that needs a dependency graph between items,
+    which does not exist. Until it does, the discipline is: when an item closes, grep the register
+    for its id and re-read every item that names it.
+    """
+    if items is None:
+        try:
+            import isa_register as R
+            items = R.read_all()
+        except Exception as e:                                        # noqa: BLE001
+            return [f"BR1: register unreadable ({type(e).__name__}: {e})"]
+    errs = []
+    for it in items:
+        if str(it.get("state", "")).startswith("CLOSED") or it.get("state") == "SUPERSEDED":
+            continue
+        m = _READINESS_CLAIM.match(str(it.get("corrective_action") or ""))
+        if not m:
+            continue
+        claimed = "BUILD_READY" if m.group(1).upper().startswith("BUILD") else "ANALYSIS_FIRST"
+        field = it.get("build_readiness")
+        if field and field != claimed and field in ("BUILD_READY", "ANALYSIS_FIRST"):
+            errs.append(
+                "BR1: %s corrective_action opens by asserting %s but build_readiness = %s. One of "
+                "the two is wrong and the ranked backlog reads the FIELD, so a stale field hides a "
+                "startable item and stale prose starts an unbuildable one (ISA-0399)."
+                % (it.get("id"), claimed, field))
+    return errs
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0408 — the contract layer for the regional-M / fund-E[r] stack (20-Aug-2026).
+# ⚑ EVERY property below IS already asserted inside each module's own selftest. That is evidence
+# about the MODULE and never about the FRAMEWORK (R5.4/R5.7). These are the framework's copies.
+# ⚑ XR1 IS SEQUENCED FIRST ON PURPOSE: fund_exposure_vectors.json DECLARES that its magnitude
+# admissibility is "withdrawn_if XR1 fails its declared tolerance" — until XR1 exists, that
+# withdrawal condition cannot fire and the promise is prose.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+XR1_MEAN_TOL_PP = 1.0     # mean |diff| across matched countries
+XR1_MAX_TOL_PP  = 2.0     # any country at or above 2% in either derivation
+XR1_MATERIAL_PCT = 2.0
+
+
+def _j(name):
+    p = os.path.join(HERE, name)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+_MONTH_ORD = {m: i + 1 for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+
+
+def _latest_j(prefix):
+    """The most recent monthly artefact, ORDERED BY DATE not by string.
+
+    ⚑ Two monthly conventions live in this folder: `_YYYY_MM` and `_mmm_yyyy`. Sorting the second
+    ALPHABETICALLY is wrong and fails SILENTLY by returning a real, plausible, older file — aug
+    sorts before jul, so `portfolio_data_jul_2026.json` won and XR1 fired a 2.30pp United States
+    breach that was entirely an artefact of reading last month's weights against this month's
+    X-Ray. Third occurrence this session of a 'latest' selector picking the wrong file (the others
+    were fund_expected_return._latest matching its own capture file, and the same module matching
+    only one of the two conventions). A selector that returns a WRONG file is worse than one that
+    returns none, because nothing downstream can tell."""
+    import re as _re
+    pat = _re.compile(r"^" + _re.escape(prefix)
+                      + r"_(?:(\d{4})_(\d{2})|([a-z]{3})_(\d{4}))\.json$", _re.I)
+    best, best_key = None, None
+    for f in os.listdir(HERE):
+        m = pat.match(f)
+        if not m:
+            continue
+        if m.group(1):
+            key = (int(m.group(1)), int(m.group(2)))
+        else:
+            mo = _MONTH_ORD.get(m.group(3).lower())
+            if not mo:
+                continue
+            key = (int(m.group(4)), mo)
+        if best_key is None or key > best_key:
+            best, best_key = f, key
+    return _j(best) if best else None
+
+
+def pair_lookthrough_xray_reconciliation():
+    """XR1 — the per-fund exposure vectors, aggregated by GBP weight, must reproduce the X-Ray's
+    whole-portfolio Morningstar country table.
+
+    ⚑ THIS IS THE CONTRACT THE MAGNITUDE ADMISSIBILITY OF EVERY w_k RESTS ON. ISA-0392 declared
+    the vectors SINGLE_SOURCE and "NOT admissible alone as a magnitude verdict that moves capital";
+    ISA-0407 lifted that on a MEASURED reconciliation against an independent provider. An
+    admissibility that rests on a measurement must be RE-MEASURED, not recalled — so if this pair
+    fails, the magnitude use lapses automatically rather than by anyone remembering."""
+    errs = []
+    fev, xr = _j("fund_exposure_vectors.json"), _latest_j("xray_data")
+    port = _latest_j("portfolio_data")
+    if not (fev and xr and port):
+        return errs                       # nothing to compare is not a breach
+    ma = fev.get("magnitude_admissibility") or {}
+    val = {f["ticker"]: f["value_gbp"] for f in (port.get("funds") or [])}
+    sv = {t["ticker"]: t["value_gbp"] for t in (port.get("stocks") or [])}
+    stock_country = {"AVGO": "United States", "MU": "United States",
+                     "ONT": "United Kingdom", "ABCL": "Canada"}
+    eq = sum(val.values()) + sum(sv.values())
+    if not eq:
+        return errs
+    agg = {}
+    for sd, vec in (fev.get("vectors") or {}).items():
+        w = val.get(sd, 0.0) / eq
+        for c, f in vec.items():
+            agg[c] = agg.get(c, 0.0) + w * f * 100.0
+    for t, c in stock_country.items():
+        if t in sv:
+            agg[c] = agg.get(c, 0.0) + 100.0 * sv[t] / eq
+    rows = [r for r in (xr.get("country_exposure") or []) if r.get("country") != "Other"]
+    if not rows:
+        return errs
+    diffs, worst = [], (None, 0.0)
+    for r in rows:
+        c, x = r["country"], r.get("equity_pct")
+        if x is None:
+            continue
+        d = abs(agg.get(c, 0.0) - x)
+        diffs.append(d)
+        if max(x, agg.get(c, 0.0)) >= XR1_MATERIAL_PCT and d > worst[1]:
+            worst = (c, d)
+    if not diffs:
+        return errs
+    mean = sum(diffs) / len(diffs)
+    if mean > XR1_MEAN_TOL_PP:
+        errs.append(
+            "A18/XR1: the look-through vectors and the X-Ray disagree by a mean of %.3fpp over %d "
+            "matched countries, above the declared %.1fpp. fund_exposure_vectors.json declares its "
+            "MAGNITUDE admissibility 'withdrawn_if XR1 fails' (ISA-0407) — so fund_expected_return "
+            "must stop treating w_k as a magnitude until this is resolved, and the withdrawal is "
+            "this failure, not a memo." % (mean, len(diffs), XR1_MEAN_TOL_PP))
+    if worst[0] and worst[1] > XR1_MAX_TOL_PP:
+        errs.append(
+            "A18/XR1: %s differs by %.2fpp between the two derivations, above the declared %.1fpp "
+            "for a country at or above %.0f%%. Two independent sources for one quantity have "
+            "stopped agreeing (R5.2)." % (worst[0], worst[1], XR1_MAX_TOL_PP, XR1_MATERIAL_PCT))
+    if ma.get("granted") and not (ma.get("contract") and ma.get("withdrawn_if")):
+        errs.append(
+            "A18/XR1: fund_exposure_vectors.json GRANTS magnitude admissibility without naming the "
+            "contract that withdraws it. An admissibility with no withdrawal condition is a "
+            "permanent grant made on a temporary measurement (R6.3).")
+    return errs
+
+
+def pair_regional_m_contracts():
+    """RM1-RM4 — partition, world identity, inflation single-home, basis parity."""
+    errs = []
+    rm = _latest_j("regional_m")
+    if not rm or rm.get("state") in ("DISABLED", "NO_CAPTURE"):
+        return errs
+    p = rm.get("partition") or {}
+    if not p.get("is_partition"):
+        errs.append("A18/RM1: the regional_m cell map is NOT a partition (duplicates %s, cells "
+                    "outside the declared set %s). sum_k w_k*M_k over a non-partition DOUBLE-COUNTS "
+                    "— the category error ISA-0160 exists to fix."
+                    % (p.get("duplicate_countries"), p.get("cells_outside_declared_set")))
+    if not p.get("is_total"):
+        errs.append("A18/RM1: country labels reach regional_m with no cell and no UNRESOLVED "
+                    "declaration: %s. They were COUNTED, not dropped (R4.9), and must be mapped."
+                    % p.get("unmapped_labels"))
+    wi = rm.get("world_identity") or {}
+    if wi.get("state") == "MEASURED" and wi.get("verdict") != "PASS":
+        errs.append("A18/RM2: the cell dividend yields no longer reproduce the PRINTED world "
+                    "dividend yield (%.4f outside %s). A transcription has drifted and the capture "
+                    "is not admissible (R4.10)."
+                    % (wi.get("printed_world_dy_pct", 0), wi.get("interval_pct")))
+    try:
+        sys.path.insert(0, HERE)
+        import mstar_plausibility as _MPB
+        declared = ((getattr(_MPB, "DECLARED", {}) or {}).get("inflation_pct") or {}).get("value")
+        cells = (rm.get("m") or {}).get("cells") or {}
+        for c, row in cells.items():
+            t = (row.get("terms") or {}).get("inflation_gbp") or {}
+            if t.get("value") is None:
+                continue
+            if abs(float(t["value"]) - float(declared)) > 1e-9:
+                errs.append("A18/RM3: cell %s carries an inflation term of %.4f against the ONE "
+                            "declared home mstar_plausibility.DECLARED['inflation_pct'] = %.4f. "
+                            "Two homes for one quantity is FC-D (R4.4)." % (c, t["value"], declared))
+                break
+            if "mstar_plausibility" not in str(t.get("source", "")):
+                errs.append("A18/RM3: cell %s's inflation term does not name mstar_plausibility as "
+                            "its source, so a second declaration has appeared (R4.4)." % c)
+                break
+        basis = (rm.get("basis") or {}).get("quantity", "")
+        mb = getattr(_MPB, "MSTAR_BASIS", "")
+        if basis and mb and ("nominal_gbp_geometric" not in basis or "nominal_gbp_geometric" not in mb):
+            errs.append("A18/RM4: regional_m publishes basis %r against MSTAR_BASIS %r. M_k exists "
+                        "to be commensurable with M*; a basis that differs is a different quantity "
+                        "wearing the same name (R2.6)." % (basis, mb))
+    except Exception as _e:                                    # noqa: BLE001
+        errs.append("A18/RM3-RM4 could not run: %s: %s" % (type(_e).__name__, _e))
+    return errs
+
+
+def pair_fund_expected_return_contracts():
+    """FE1-FE4 — coverage denominator, naming, operative neutrality, report-only reconciliation."""
+    errs = []
+    fer = _latest_j("fund_expected_return")
+    if not fer or fer.get("state") == "DISABLED":
+        return errs
+    funds = fer.get("funds") or {}
+    for sd, r in funds.items():
+        cov = r.get("coverage") or {}
+        if cov.get("field_read") != "attributed_pct_of_fund":
+            errs.append("A18/FE1: fund %s's coverage gate reads %r, not `attributed_pct_of_fund`. "
+                        "ISA-0403: a fund can be unattributed two ways and the wrong field counts "
+                        "only one — Ranmore read -0.00 on 9.87%%." % (sd, cov.get("field_read")))
+            break
+    blob = json.dumps(funds)
+    if "expected_return_12_24m" in blob or '"expected_return"' in blob:
+        errs.append("A18/FE2: the fund E[r] artefact carries a key named `expected_return` or "
+                    "`expected_return_12_24m`. That is a 12-24 MONTH SINGLE-NAME return (+53.4%% on "
+                    "AVGO); this is an ~11-YEAR STRUCTURAL return (+3.06%% on Polar). Near-identical "
+                    "names, quantities an order of magnitude apart — FC-B.")
+    for sd, r in funds.items():
+        if r.get("structural_er_pct") is not None and r.get("horizon_basis") != "long_run_structural_not_12_24m":
+            errs.append("A18/FE2: fund %s publishes a structural E[r] without its horizon_basis." % sd)
+            break
+    try:
+        sys.path.insert(0, HERE)
+        import return_architecture as _RA
+        op = (fer.get("_meta") or {}).get("operative")
+        if op is False and getattr(_RA, "ER_BASIS_OPERATIVE", None) == "exposure_forward":
+            errs.append("A18/FE3: fund_expected_return declares operative=False while "
+                        "return_architecture.ER_BASIS_OPERATIVE is already `exposure_forward`. The "
+                        "two disagree about whether the layer decides anything, and the switch "
+                        "moves Section A to FAIL and triples the Section C shortfall on a BASIS "
+                        "change (100%% method, 0%% data) — D-C(ii).")
+    except Exception:                                          # noqa: BLE001
+        pass
+    for sd, r in funds.items():
+        rc = r.get("declared_floor_reconciliation") or {}
+        if rc.get("derived_structural_er_pct") is not None and rc.get("REPORT_ONLY") is not True:
+            errs.append("A18/FE4: fund %s's declared/derived reconciliation is not REPORT_ONLY. "
+                        "Deriving a floor and writing it back would move a policy limit as the "
+                        "side effect of a measurement (D-C(ii))." % sd)
+            break
+    tw = _j("target_weights.json")
+    if tw and funds:
+        for sd, r in funds.items():
+            rc = r.get("declared_floor_reconciliation") or {}
+            d = ((tw.get("funds") or {}).get(sd) or {}).get("min_expected_return")
+            if d is not None and rc.get("declared_min_expected_return_pct") is not None:
+                if abs(float(d) * 100.0 - rc["declared_min_expected_return_pct"]) > 1e-6:
+                    errs.append("A18/FE4: fund %s reconciles against a declared floor of %.4f%% "
+                                "while target_weights.json says %.4f%% — the reconciliation is "
+                                "reading a stale copy (R4.4)."
+                                % (sd, rc["declared_min_expected_return_pct"], float(d) * 100.0))
+                    break
+    return errs
+
+
+def pair_adoption_gate_refuses():
+    """ISA-0409 — a failing invariant must REFUSE, not substitute an input proven inverted.
+
+    ⚑ Three properties, asserted on the FRAMEWORK rather than inside return_architecture's own
+    selftest. (a) every invariant the module emits carries a declared SCOPE, and one with none
+    BLOCKS; (b) the pre-run READS `adoption_gate` and does not re-derive it; (c) the old
+    all-or-nothing fallback string is GONE from the orchestrator. (c) is the one that matters:
+    the defect was not a wrong number, it was a code path, and a code path is what has to be
+    asserted."""
+    errs = []
+    ra = _read("return_architecture.py")
+    pre = _read("monthly_isa_prerun.py")
+    if not ra or not pre:
+        return errs
+    if "INVARIANT_SCOPE" not in ra or "def adoption_gate" not in ra:
+        errs.append("A18/ISA-0409: return_architecture declares no INVARIANT_SCOPE / adoption_gate. "
+                    "Without a scope every invariant withdraws every quantity, which is how an M*"
+                    "-fixture failure came to withhold Sections A/B/C.")
+    if "adoption_gate" not in pre:
+        errs.append("A18/ISA-0409: monthly_isa_prerun does not read `adoption_gate`. The rule for "
+                    "what a failing invariant withdraws has ONE home and the consumer must read it "
+                    "rather than re-deriving it (R4.4).")
+    if "left on the est_return basis" in pre:
+        errs.append("A18/ISA-0409: monthly_isa_prerun still contains the fallback that leaves "
+                    "Sections A/B/C 'on the est_return basis' when an invariant fails. That input "
+                    "is register C4's INVERTED one — a refusal that substitutes a worse input is a "
+                    "silent downgrade, not caution (R2.10/R4.3).")
+    if "UNMEASURED_INVARIANT_FAILED" not in pre:
+        errs.append("A18/ISA-0409: monthly_isa_prerun has no UNMEASURED refusal path for a failing "
+                    "sections-scoped invariant. 'I could not compute it' and 'here is a number from "
+                    "an inverted input' must not produce the same output.")
+    ra_json = _latest_j("return_architecture")
+    if ra_json:
+        g = ra_json.get("adoption_gate")
+        if not isinstance(g, dict):
+            errs.append("A18/ISA-0409: the return_architecture artefact carries no adoption_gate, "
+                        "so the consumer cannot tell what a failure withdraws and must refuse.")
+        else:
+            if g.get("unscoped_invariants"):
+                errs.append("A18/ISA-0409: invariant(s) %s carry no declared scope. A new invariant "
+                            "nobody classified must not silently inherit 'does not matter' (R4.7)."
+                            % g["unscoped_invariants"])
+            for i in (ra_json.get("invariants") or []):
+                if not i.get("scope"):
+                    errs.append("A18/ISA-0409: invariant %s is emitted without a scope."
+                                % i.get("invariant"))
+                    break
+    return errs
+
+
+def pair_return_basis_declared():
+    """ISA-0402 / ISA-0401 — the basis is a FIELD, and a forward hurdle may only meet a forward
+    estimate.
+
+    ⚑ The cache once declared in its header that every row was a forward decomposition while eight
+    of twelve said `[trailing 3yr]` in their own source strings — a basis in free prose cannot be
+    asserted, so the two drifted indefinitely. And the trailing rows were load-bearing: they drove
+    a live SELL on JPM UK Equity Core."""
+    errs = []
+    fr = _read("fund_returns.py")
+    if fr and "def classify_basis" not in fr:
+        errs.append("A18/ISA-0402: fund_returns declares no classify_basis — the measurement basis "
+                    "is back in free prose and cannot be asserted (R4.2).")
+    if fr and "basis_is_forward" not in fr:
+        errs.append("A18/ISA-0401: fund_returns declares no basis_is_forward — the question 'may "
+                    "this value meet a FORWARD hurdle?' needs one home (R4.4).")
+    cache = _j("fund_returns_cache.json")
+    if cache:
+        rows = cache.get("returns") or {}
+        missing = sorted(k for k, v in rows.items()
+                         if not isinstance(v, dict) or not v.get("basis"))
+        if missing:
+            errs.append("A18/ISA-0402: %d cache row(s) carry no declared basis: %s. A row whose "
+                        "basis is unstated must read `unknown` and BLOCK, never be read as forward."
+                        % (len(missing), ", ".join(missing[:6])))
+        hdr = str(cache.get("_comment") or "")
+        if "not trailing" in hdr and "CORRECTED" not in hdr:
+            errs.append("A18/ISA-0402: the cache header still asserts its rows are forward and not "
+                        "trailing. A FILE-LEVEL claim about PER-ROW provenance is the wrong shape — "
+                        "it cannot be checked and it is how the header and the rows drifted apart.")
+        trailing = [k for k, v in rows.items()
+                    if isinstance(v, dict) and str(v.get("basis", "")).startswith("trailing")]
+        if trailing and "not trailing" in hdr and "CORRECTED" not in hdr:
+            errs.append("A18/ISA-0402: %d row(s) declare a TRAILING basis under a header claiming "
+                        "the file is forward." % len(trailing))
+    ana = _latest_j("analytics_data")
+    if ana:
+        for fa in (ana.get("fund_actions") or []):
+            rt = fa.get("return_test") or {}
+            if fa.get("action") == "SELL" and rt.get("state") != "APPLIED":
+                errs.append("A18/ISA-0401: a SELL is published for %s whose return test is %r. SELL "
+                            "is the strongest verb in the action language and it may not rest on a "
+                            "comparison between a TRAILING estimate and a FORWARD hurdle — that is "
+                            "not a comparison (R2.6)."
+                            % (fa.get("ticker"), rt.get("state") or "absent"))
+            if fa.get("action") == "SELL" and fa.get("est_basis") and not str(
+                    fa["est_basis"]).startswith("forward"):
+                errs.append("A18/ISA-0401: SELL published for %s on an estimate whose declared "
+                            "basis is `%s`." % (fa.get("ticker"), fa["est_basis"]))
+    return errs
+
+
 def check_all():
     errs = []
     run_ctx = _read("Run_Context_ISA_Growth_Stock_Analysis.md")
@@ -1292,6 +1732,13 @@ def check_all():
     errs += pair_benchmark_registry()             # ISA-0320 / ISA-0307 (13-Aug-2026)
     errs += pair_no_informational_in_register()  # ISA-0336 (13-Aug-2026)
     errs += pair_register_fourc_complete()       # ISA-0337 (13-Aug-2026)
+    errs += pair_target_weights_bucket_reconciliation()   # ISA-0394 root (20-Aug-2026)
+    errs += pair_build_readiness_declared()      # ISA-0399 (20-Aug-2026)
+    errs += pair_lookthrough_xray_reconciliation()        # XR1 — ISA-0407 (20-Aug-2026)
+    errs += pair_regional_m_contracts()                   # RM1-RM4 — ISA-0160 (20-Aug-2026)
+    errs += pair_fund_expected_return_contracts()         # FE1-FE4 — ISA-0328 (20-Aug-2026)
+    errs += pair_adoption_gate_refuses()                  # ISA-0409 (20-Aug-2026)
+    errs += pair_return_basis_declared()                  # ISA-0402 / ISA-0401 (20-Aug-2026)
     errs += pair_orchestrator_parity()
     errs += pair_er_callsite_manifest()          # D-24 §1.3 (09-Aug-2026)
     errs += pair_score_panel_date_format()       # D-15 (09-Aug-2026)
@@ -1560,6 +2007,41 @@ def _selftest():
     # ...and the exemption must not become a hole: a genuine instruction still FAILS.
     assert pair_monthly_retired(good_m + "\nAt Step 12, source fresh metrics for the candidate."), \
         "ISA-0228 negative control: a real instruction to use a retired step must still FAIL"
+    # BR1 — the readiness field vs what the prose claims, BOTH directions.
+    _ok = [{"id": "X-1", "state": "OPEN", "build_readiness": "BUILD_READY",
+            "corrective_action": "BUILD-READY. Spec written."},
+           {"id": "X-2", "state": "OPEN", "build_readiness": "ANALYSIS_FIRST",
+            "corrective_action": "ANALYSIS FIRST - the input does not exist."},
+           {"id": "X-3", "state": "OPEN", "build_readiness": "ANALYSIS_FIRST",
+            "corrective_action": "Do the thing."}]                      # no claim -> not checked
+    assert not pair_build_readiness_declared(_ok), "BR1 must pass when field and prose agree"
+    assert pair_build_readiness_declared(_ok + [{"id": "X-4", "state": "OPEN",
+        "build_readiness": "ANALYSIS_FIRST", "corrective_action": "BUILD-READY. Spec written."}]), \
+        "BR1 negative control: prose BUILD-READY against an ANALYSIS_FIRST field must FAIL"
+    assert pair_build_readiness_declared(_ok + [{"id": "X-5", "state": "OPEN",
+        "build_readiness": "BUILD_READY", "corrective_action": "ANALYSIS-FIRST until X lands."}]), \
+        "BR1 negative control: the reverse direction must FAIL too"
+    assert not pair_build_readiness_declared(_ok + [{"id": "X-6", "state": "CLOSED_FIXED",
+        "build_readiness": "ANALYSIS_FIRST", "corrective_action": "BUILD-READY. Spec written."}]), \
+        "BR1: a CLOSED item is history, not a backlog entry"
+
+    # TW1 — the two homes for one quantity. A reconciled book must PASS...
+    _tw_ok = {"funds": {"a": {"bucket": "B1", "target_pct": 0.20},
+                        "b": {"bucket": "B1", "target_pct": 0.10}},
+              "bucket_totals": {"B1": {"phase1_target_pct": 0.30, "phase1_band_high": 0.35}}}
+    assert not pair_target_weights_bucket_reconciliation(_tw_ok), \
+        "TW1 must PASS on a book whose per-fund targets sum to the bucket target"
+    # ...and an over-subscribed one must FAIL (the live B3 shape).
+    _tw_bad = json.loads(json.dumps(_tw_ok))
+    _tw_bad["funds"]["c"] = {"bucket": "B1", "target_pct": 0.05}
+    assert pair_target_weights_bucket_reconciliation(_tw_bad), \
+        "TW1 negative control: an over-subscribed bucket must FAIL"
+    # ...and a fund declared PENDING is not yet part of the standing allocation.
+    _tw_pend = json.loads(json.dumps(_tw_ok))
+    _tw_pend["funds"]["c"] = {"bucket": "B1", "target_pct": 0.05, "status": "PENDING_DECISION"}
+    assert not pair_target_weights_bucket_reconciliation(_tw_pend), \
+        "TW1: a fund with a declared pending status must not count toward the bucket sum"
+
     # M5 — an executed stage with no row in the table (the 1.5/6.5/9b.5/9c/9d defect).
     assert pair_monthly_prerun_stages(good_m.replace("| **9d** | x |\n", ""), good_prerun)
     # M6 — heading count vs the list it heads.

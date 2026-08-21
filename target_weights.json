@@ -1,11 +1,11 @@
 {
   "_meta": {
-    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes \u2014 they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
+    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes — they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
     "version": "1.0",
-    "last_updated": "2026-05-31",
+    "last_updated": "2026-08-20",
     "source_memory": "project_isa_target_weights.md",
     "current_phase": 1,
-    "changelog": " | 26-Jul-26: WP-4 scaling_freeze added; WP-5 SGLN hedge entry (PILOT_PENDING_PRECLEARANCE); WP-6 IWMO B2 5% entry (PENDING_AUG_DECISION); hedge bucket defined (excluded from return math). Audit BuildSpec Jul-2026."
+    "changelog": " | 26-Jul-26: WP-4 scaling_freeze added; WP-5 SGLN hedge entry (PILOT_PENDING_PRECLEARANCE); WP-6 IWMO B2 5% entry (PENDING_AUG_DECISION); hedge bucket defined (excluded from return math). Audit BuildSpec Jul-2026. | 20-Aug-26: ISA-0387 scaling_freeze.basis DECLARED = reallocation_only (Raj). ISA-0388: phase1_band_high is now READ by the fund router — the bands are the limit on fund capital, not the point targets. | 20-Aug-26: ISA-0398 B3 RECONCILED - per-fund targets scaled x0.7619 to the declared 16% bucket (M&G 6.10%, Invesco 6.10%, SMT 3.80%); bands and phase-2 scaled with them. B3 held 2 funds when 8/8 was set; SMT was added at 5% and the bucket was never re-derived. Raj 20-Aug-26: B3 stays 16%, SMT stays B3. TW1 asserts it from now on."
   },
   "return_objective": {
     "isa_target_low": 1000000,
@@ -32,7 +32,9 @@
     "typical_stock_position_low": 0.015,
     "typical_stock_position_high": 0.035,
     "cash_buffer_min": 150,
-    "cash_buffer_max": 200
+    "cash_buffer_max": 200,
+    "stage1_probe_pct": 0.0075,
+    "_stage1_probe_pct_note": "The pre-registered Stage-1 PROBE size from the staged deployment ramp (Raj/Claude, 01-Aug-2026, ISA_Stock_Sleeve_Confidence_Roadmap_Aug2026.md): 1 position at ~0.75% after 3 clean run manifests + reproducibility green, scheduled Sep-2026. Recorded here so it is the SMALLEST DECLARED POSITION SIZE the framework can test a derived cap against (ISA-0387). It is a size, not a mandate to trade."
   },
   "buckets": {
     "B1": {
@@ -92,7 +94,7 @@
       "band_high": 0.125,
       "min_expected_return": 0.09,
       "phase2_target_pct": 0.09,
-      "notes": "UCITS ETF \u2014 no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
+      "notes": "UCITS ETF — no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
     },
     "B50MZ94": {
       "name": "Vanguard Japan Stock Index GBP Acc",
@@ -103,7 +105,7 @@
       "band_high": 0.06,
       "min_expected_return": 0.08,
       "phase2_target_pct": 0.03,
-      "notes": "Passive Japan index \u2014 8% minimum (not 9%) as demanding for this mandate."
+      "notes": "Passive Japan index — 8% minimum (not 9%) as demanding for this mandate."
     },
     "B2PLJM6": {
       "name": "Artemis SmartGARP UK Eq I Acc GBP",
@@ -158,29 +160,31 @@
       "band_high": 0.1,
       "min_expected_return": 0.13,
       "phase2_target_pct": 0.07,
-      "notes": "Higher minimum return (13%) due to tech-focused mandate \u2014 B2 but with B3 return expectations."
+      "notes": "Higher minimum return (13%) due to tech-focused mandate — B2 but with B3 return expectations."
     },
     "B6SQYF4": {
       "name": "M&G Asian GBP I Acc",
       "ticker": "B6SQYF4",
       "bucket": "B3",
-      "target_pct": 0.08,
-      "band_low": 0.06,
-      "band_high": 0.1,
+      "target_pct": 0.061,
+      "band_low": 0.0457,
+      "band_high": 0.0762,
       "min_expected_return": 0.13,
-      "phase2_target_pct": 0.07,
-      "notes": ""
+      "phase2_target_pct": 0.0544,
+      "notes": "",
+      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
     },
     "B8N44Q8": {
       "name": "Invesco Asian UK Z Acc",
       "ticker": "B8N44Q8",
       "bucket": "B3",
-      "target_pct": 0.08,
-      "band_low": 0.06,
-      "band_high": 0.1,
+      "target_pct": 0.061,
+      "band_low": 0.0457,
+      "band_high": 0.0762,
       "min_expected_return": 0.13,
-      "phase2_target_pct": 0.07,
-      "notes": ""
+      "phase2_target_pct": 0.0544,
+      "notes": "",
+      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
     },
     "B5B71Q7": {
       "name": "Vanguard U.S. Equity Index GBP Acc",
@@ -191,7 +195,7 @@
       "band_high": 0.0,
       "min_expected_return": 0.09,
       "phase2_target_pct": 0.0,
-      "notes": "CONSOLIDATION PENDING \u2014 target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
+      "notes": "CONSOLIDATION PENDING — target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
       "consolidation_target": "VUAG",
       "pending_sale": true
     },
@@ -199,12 +203,13 @@
       "name": "Scottish Mortgage Ord",
       "ticker": "SMT",
       "bucket": "B3",
-      "target_pct": 0.05,
-      "band_low": 0.03,
-      "band_high": 0.07,
+      "target_pct": 0.038,
+      "band_low": 0.0229,
+      "band_high": 0.0533,
       "min_expected_return": 0.13,
-      "phase2_target_pct": 0.04,
-      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes \u2014 not counted in stock sleeve %. SpaceX ~19% of NAV \u2014 below 25% threshold so BROAD-BASED. No preclearance required."
+      "phase2_target_pct": 0.0312,
+      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes — not counted in stock sleeve %. SpaceX ~19% of NAV — below 25% threshold so BROAD-BASED. No preclearance required.",
+      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
     },
     "SGLN": {
       "name": "iShares Physical Gold ETC",
@@ -290,7 +295,7 @@
     "watch_return": "Within band BUT estimated return below bucket minimum (first time)",
     "research_trigger": "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
     "watch_drift": "Outside band by <= 2%",
-    "rebalancing_candidate": "Outside band by > 2% \u2014 escalate to Step 10 Category 7",
+    "rebalancing_candidate": "Outside band by > 2% — escalate to Step 10 Category 7",
     "drift_watch_threshold": 0.02,
     "drift_rebalance_threshold": 0.02
   },
@@ -300,6 +305,15 @@
     "clock_start": "2026-08-02",
     "earliest_unfreeze_override": "2026-11-01",
     "earliest_unfreeze_mechanical": "2026-12-01",
-    "set_by": "Institutional audit Jul-2026 item 4; window reduced 6->3-4 months by Raj 22-Jul-26"
+    "set_by": "Institutional audit Jul-2026 item 4; window reduced 6->3-4 months by Raj 22-Jul-26",
+    "basis": "reallocation_only",
+    "basis_declared_by": "Raj, 20-Aug-2026 (ISA-0387)",
+    "basis_declared_on": "2026-08-20",
+    "basis_semantics": {
+      "reallocation_only": "The freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A new subscription, and uninvested account cash, are not 'scaling' for the purposes of the freeze. stock_max is therefore the amount that restores the declared stock-sleeve band FLOOR, capped by the capital on offer. ⚑ CONSEQUENCE THAT TRAVELS WITH THE CHOICE: the ISA-0390 recall leg (trim funds -> buy stocks) IS a disposal from the fund sleeve and is therefore BARRED while the freeze is active, until 2026-11-01 (override) or 2026-12-01 (mechanical).",
+      "weight": "stock_max holds the sleeve's PRE-SUBSCRIPTION weight exactly, so a subscription takes no new PROPORTIONAL exposure to the unproven process. Measured 20-Aug-2026 on the September case: GBP 891.90 = 0.591% of the post-subscription total, which is BELOW every declared position size in the framework (Stage-1 probe 0.75%, typical 1.5-3.5%, max 5.0%) — a cap that cannot fund a compliant new position, only a top-up. NOT CHOSEN, and the reason is recorded so the measurement is not lost.",
+      "pounds": "stock_max = 0. The freeze is an absolute bar on pounds entering the sleeve and the resulting dilution (0.591pp on the September case, repeating on every subscription) is ACCEPTED and recorded as a chosen cost. NOT CHOSEN."
+    },
+    "basis_note": "⚑ R4.4 / ISA-0387. This field declares the UNIT the freeze is measured in. The NUMBER is DERIVED by capital_destination.sleeve_split() from this basis on every run and is never typed here. Changing this string is the whole rollback."
   }
 }

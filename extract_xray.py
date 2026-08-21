@@ -56,6 +56,8 @@ SECTOR_MAP = {
     "Utilities":             "utilities",
 }
 
+_SECTOR_NAME = {v: k for k, v in SECTOR_MAP.items()}
+
 
 # ---------------------------------------------------------------------------
 # File discovery
@@ -216,60 +218,345 @@ def parse_country_exposure(text: str) -> list:
     return unique
 
 
+# ISA-0367. The X-Ray's world-region block is a TREE: the three continent nodes contain
+# the country/sub-region nodes beneath them, which is why the block sums to ~177pp. It is
+# declared here once so no consumer has to infer it (one home per rule).
+WORLD_REGION_PARENT = {
+    "united_kingdom":          "greater_europe",
+    "western_europe":          "greater_europe",
+    "emerging_europe":         "greater_europe",
+    "middle_east___africa":    "greater_europe",
+    "united_states":           "americas",
+    "canada":                  "americas",
+    "central_and_latin_america": "americas",
+    "japan":                   "greater_asia",
+    "australasia":             "greater_asia",
+    "emerging_4_tigers":       "greater_asia",
+    "emerging_asia":           "greater_asia",
+    "greater_europe":          None,
+    "americas":                None,
+    "greater_asia":            None,
+}
+WORLD_REGION_DEPTH = {k: (0 if v is None else 1) for k, v in WORLD_REGION_PARENT.items()}
+WORLD_REGION_LEAVES = frozenset(k for k, v in WORLD_REGION_PARENT.items() if v is not None)
+
+
+class RegionHierarchyError(ValueError):
+    """The world-region tree does not reconcile: a parent does not equal the sum of its
+    children (ISA-0367). Three sub-regions were silently absent for eight months --
+    Western Europe (printed as two wrapped rows, 'Western Europe - Euro' and
+    '... - Non Euro'), Central & Latin America and Emerging Asia - Ex 4 Tigers -- because
+    each printed label carries a trailing fragment the old fixed-name regex could not
+    match. Nothing checked that the children reconciled to the parent, so 14.17pp of
+    Greater Europe, 1.09pp of the Americas and 7.32pp of Greater Asia read as absent
+    exposure rather than unread exposure."""
+
+
+# The printed label(s) that carry each region's numbers. A tuple means the region is
+# printed as more than one row (Western Europe is split Euro / Non-Euro) and the rows are
+# SUMMED -- summing rows that share a parent is order-independent, so no layout
+# assumption is encoded (ISA-0367).
+REGION_PATTERNS = {
+    "greater_europe":            (r"Greater Europe",),
+    "americas":                  (r"Americas",),
+    "greater_asia":              (r"Greater Asia",),
+    "united_kingdom":            (r"United Kingdom",),
+    "western_europe":            (r"Western Europe\s*-",),
+    "emerging_europe":           (r"Emerging Europe",),
+    "middle_east___africa":      (r"Middle East\s*/\s*Africa", r"Middle East"),
+    "united_states":             (r"United States",),
+    "canada":                    (r"Canada",),
+    "central_and_latin_america": (r"Central & Latin",),
+    "japan":                     (r"Japan",),
+    "australasia":               (r"Australasia",),
+    "emerging_4_tigers":         (r"Emerging 4 Tigers",),
+    "emerging_asia":             (r"Emerging Asia\s*-?\s*Ex",),
+}
+_REGION_DISPLAY = {
+    "greater_europe": "Greater Europe", "americas": "Americas", "greater_asia": "Greater Asia",
+    "united_kingdom": "United Kingdom", "western_europe": "Western Europe",
+    "emerging_europe": "Emerging Europe", "middle_east___africa": "Middle East / Africa",
+    "united_states": "United States", "canada": "Canada",
+    "central_and_latin_america": "Central & Latin America", "japan": "Japan",
+    "australasia": "Australasia", "emerging_4_tigers": "Emerging 4 Tigers",
+    "emerging_asia": "Emerging Asia - Ex 4 Tigers",
+}
+REGION_ROLLUP_TOL_PP = 0.11   # 3-4 rounded children against a rounded parent
+
+
+def _region_block(text: str) -> str:
+    """The World Regions block only. 'United Kingdom' also appears in the country
+    exposure table further down the document, so a whole-document findall double-counts
+    it -- the same whole-document-search cause as the sector defect (ISA-0367)."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if re.search(r"\bWorld Regions?\b", ln):
+            return "\n".join(lines[i:i + 16])
+    raise RegionHierarchyError(
+        "world_regions: no 'World Regions' block found in the X-Ray text -- the PDF "
+        "layout has changed and the region tree must not be guessed at")
+
+
 def parse_world_regions(text: str) -> dict:
-    """Extract world region breakdown {region: {equity_pct, benchmark_pct}}."""
+    """Extract the world-region breakdown as a RECONCILED TREE.
+
+    Returns {region_key: {name, equity_pct, benchmark_pct, depth, parent, is_leaf}} plus
+    a `_structure` node. Raises RegionHierarchyError when a parent does not equal the sum
+    of its children -- which is the only thing that can detect a sub-region the PDF
+    printed and the parser did not read (ISA-0367).
+    """
+    block = _region_block(text)
     regions = {}
-    # Pattern: "Greater Europe 34.73 19.34"
-    region_names = [
-        "Greater Europe", "Americas", "Greater Asia",
-        "United Kingdom", "Western Europe",
-        "United States", "Canada",
-        "Japan", "Australasia",
-        "Emerging 4 Tigers", "Emerging Asia",
-        "Emerging Europe", "Middle East / Africa",
-        "Central & Latin America",
-    ]
-    for rn in region_names:
-        m = re.search(
-            rf"{re.escape(rn)}\s+([\d.]+)\s+([\d.]+)", text
-        )
-        if m:
-            key = rn.lower().replace(" ", "_").replace("/", "_").replace("&", "and")
-            regions[key] = {
-                "name":          rn,
-                "equity_pct":    safe_float(m.group(1)),
-                "benchmark_pct": safe_float(m.group(2)),
-            }
+    for key, pats in REGION_PATTERNS.items():
+        eq = bench = None
+        rows = 0
+        for pat in pats:
+            found = re.findall(pat + r"\s+(\d+\.\d+)\s+(\d+\.\d+)", block)
+            if found:
+                eq = sum(safe_float(a) or 0.0 for a, _ in found)
+                bench = sum(safe_float(b) or 0.0 for _, b in found)
+                rows = len(found)
+                break
+        if eq is None:
+            continue
+        regions[key] = {
+            "name":          _REGION_DISPLAY[key],
+            "equity_pct":    round(eq, 2),
+            "benchmark_pct": round(bench, 2),
+            # ISA-0367: this dimension is a TREE, not a partition. `depth`/`parent` travel
+            # with every node so no consumer can sum it by accident -- the whole block
+            # sums to ~177pp precisely because parents contain their children.
+            "depth":         WORLD_REGION_DEPTH.get(key, 0),
+            "parent":        WORLD_REGION_PARENT.get(key),
+            "is_leaf":       key in WORLD_REGION_LEAVES,
+            "printed_rows":  rows,
+        }
+
+    # THE HIERARCHY CONTRACT. Every parent must equal the sum of its children on BOTH
+    # columns. This is the tree's version of the sector tiling contract, and it is what
+    # makes an unread sub-region impossible to mistake for a zero exposure.
+    breaches = []
+    for parent in (k for k, v in WORLD_REGION_PARENT.items() if v is None):
+        if parent not in regions:
+            continue
+        kids = [k for k, v in WORLD_REGION_PARENT.items() if v == parent and k in regions]
+        for col in ("equity_pct", "benchmark_pct"):
+            got = sum(regions[k][col] for k in kids)
+            want = regions[parent][col]
+            if abs(got - want) > REGION_ROLLUP_TOL_PP:
+                breaches.append("%s.%s: children sum to %.2f, parent prints %.2f "
+                                "(children read: %s)" % (parent, col, got, want, kids))
+    if breaches:
+        raise RegionHierarchyError(
+            "world_regions does not reconcile -- an unread sub-region is not a zero "
+            "exposure:\n  - " + "\n  - ".join(breaches))
+
+    leaf_total = {c: round(sum(v[c] for k, v in regions.items() if v["is_leaf"]), 2)
+                  for c in ("equity_pct", "benchmark_pct")}
+    regions["_structure"] = {
+        "kind":            "hierarchy",
+        "is_partition":    False,
+        "note":            ("world_regions is HIERARCHICAL (americas contains united_states "
+                            "and canada, and so on) and the whole block sums to ~177pp. Do "
+                            "NOT sum it. world_regions_partition() returns the depth-0 "
+                            "continents and world_regions_leaves() the depth-1 sub-regions; "
+                            "each of those IS a partition and each is asserted to reconcile "
+                            "to the other."),
+        "leaf_keys":       sorted(k for k, v in regions.items() if k != "_structure" and v["is_leaf"]),
+        "partition_keys":  sorted(k for k, v in regions.items() if k != "_structure" and not v["is_leaf"]),
+        "leaf_total":      leaf_total,
+        "reconciled":      True,
+    }
     return regions
 
 
-def parse_sector_weights(text: str) -> dict:
+def world_regions_partition(regions: dict) -> dict:
+    """The depth-0 (continent) partition of the hierarchical world_regions block."""
+    return {k: v for k, v in (regions or {}).items()
+            if isinstance(v, dict) and v.get("depth") == 0}
+
+
+def world_regions_leaves(regions: dict) -> dict:
+    """The depth-1 (sub-region) partition of the hierarchical world_regions block."""
+    return {k: v for k, v in (regions or {}).items()
+            if isinstance(v, dict) and v.get("is_leaf")}
+
+
+class SectorPartitionError(ValueError):
+    """Raised when the Stock Sectors block cannot be read as a complete partition.
+
+    ISA-0367 (19-Aug-2026). The previous parser searched the WHOLE document once per
+    canonical sector name and took the first match. Two consequences, both silent:
+
+      * a label the PDF's 3-column layout had truncated ("Communicatio" for
+        "Communication Services") matched nothing and the sector was simply ABSENT,
+        so a 6.50% exposure read as a 0% exposure;
+      * two rows whose visible label was the same truncated word ("Consumer", twice)
+        both resolved to the FIRST match, so consumer_cyclical and consumer_defensive
+        were both written with 4.72/4.51 when the true cyclical figures are 9.62/8.68.
+
+    Every individual number stayed plausible, which is why eight months of runs did not
+    notice. The evidence sat in PARSE_WARNINGS the whole time and nothing read it
+    (R4.12: audit trails are EXERCISED, not merely recorded).
+
+    The fix is a CONTRACT, not a hand-patch of one month's values: the block is read
+    POSITIONALLY, each canonical sector may be assigned at most once, the eleven
+    sectors must tile the book on BOTH columns, and the assignment must reproduce the
+    PDF's own Cyclical/Sensitive/Defensive super-sector totals (two independent
+    derivations must agree). Ambiguity is RESOLVED by that second derivation rather
+    than by document order, so no month's layout is encoded as a rule.
     """
-    Extract stock sector weights vs benchmark.
-    Returns {sector_key: {name, portfolio_pct, benchmark_pct}}.
-    """
-    sectors = {}
-    # Pattern lines: "sConsumer 5.59 5.16" or "yFinancial 17.42 16.54"
-    # The PDF prefixes each sector with a single letter icon — strip it.
-    for sector_name, key in SECTOR_MAP.items():
-        # Match the sector name (possibly with leading letter/icon) followed by two numbers
-        m = re.search(
-            rf".{{0,3}}{re.escape(sector_name)}\s+([\d.]+)\s+([\d.]+)", text
-        )
-        if not m:
-            # Try abbreviated name (first word only for communication services etc.)
-            short = sector_name.split()[0]
-            m = re.search(rf".{{0,3}}{re.escape(short)}\w*\s+([\d.]+)\s+([\d.]+)", text)
+
+
+# Morningstar super-sectors. The X-Ray prints these three totals on its own line, which
+# makes them an INDEPENDENT derivation of the same eleven numbers -- used both to
+# disambiguate truncated labels and to assert the finished vector (ISA-0367).
+SUPER_SECTORS = {
+    "Cyclical":  ("basic_materials", "consumer_cyclical", "financial_services", "real_estate"),
+    "Sensitive": ("communication_services", "energy", "industrials", "technology"),
+    "Defensive": ("consumer_defensive", "healthcare", "utilities"),
+}
+
+SECTOR_TILING_TOL_PP = 1.50   # 11 rounded rows against 100; observed residual 0.15-0.68pp
+SECTOR_ROLLUP_TOL_PP = 0.15   # super-sector rollup against the PDF's own printed total
+_SECTOR_MIN_FRAGMENT = 5      # a label fragment shorter than this cannot identify a sector
+
+
+def _sector_block(text: str) -> str:
+    """The Stock Sectors block only. Bounding the search is what makes the parse
+    positional rather than document-wide -- the whole-document re.search is the
+    proximate cause of ISA-0367."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if re.search(r"\bStock Sectors?\b", ln):
+            return "\n".join(lines[i:i + 20])
+    raise SectorPartitionError(
+        "sector_weights: no 'Stock Sectors' block found in the X-Ray text -- "
+        "the PDF layout has changed and the sector vector must not be guessed at")
+
+
+def _sector_candidates(label):
+    """Canonical sectors this (icon-prefixed, possibly truncated) label fragment could
+    name. Returns (longest_matching_fragment, {keys})."""
+    toks = label.split()
+    best = ("", set())
+    for i in range(len(toks)):
+        frag = " ".join(toks[i:])
+        for variant in (frag, frag[1:]):      # the PDF glues a 1-char icon glyph to the label
+            variant = variant.strip()
+            if len(variant) < _SECTOR_MIN_FRAGMENT:
+                continue
+            hits = {k for name, k in SECTOR_MAP.items() if name.startswith(variant)}
+            if hits and len(variant) > len(best[0]):
+                best = (variant, hits)
+    return best
+
+
+def _parse_super_sectors(block):
+    out = {}
+    for name in SUPER_SECTORS:
+        m = re.search(name + r"\s+(\d+\.\d+)\s+(\d+\.\d+)", block)
         if m:
-            sectors[key] = {
-                "name":          sector_name,
-                "portfolio_pct": safe_float(m.group(1)),
-                "benchmark_pct": safe_float(m.group(2)),
-                "vs_benchmark":  round(
-                    (safe_float(m.group(1)) or 0) - (safe_float(m.group(2)) or 0), 2
-                ),
-            }
-    return sectors
+            out[name] = (float(m.group(1)), float(m.group(2)))
+    return out
+
+
+def _rollup_ok(assigned, supers):
+    for name, members in SUPER_SECTORS.items():
+        if name not in supers:
+            continue
+        if any(m not in assigned for m in members):
+            return False
+        for idx, col in enumerate(("portfolio_pct", "benchmark_pct")):
+            got = sum(assigned[m][col] for m in members)
+            if abs(got - supers[name][idx]) > SECTOR_ROLLUP_TOL_PP:
+                return False
+    return True
+
+
+def parse_sector_weights(text: str) -> dict:
+    """Extract stock sector weights vs benchmark as a VERIFIED PARTITION.
+
+    Returns {sector_key: {name, portfolio_pct, benchmark_pct, vs_benchmark}}.
+    Raises SectorPartitionError rather than returning a short or double-written vector
+    (ISA-0367) -- an unread sector is not a zero exposure.
+    """
+    block = _sector_block(text)
+
+    rows = []
+    for m in re.finditer(r"([A-Za-z][A-Za-z&/.\- ]*?)\s+(\d+\.\d+)\s+(\d+\.\d+)", block):
+        frag, hits = _sector_candidates(m.group(1).strip())
+        if hits:
+            rows.append({"frag": frag, "hits": hits,
+                         "p": float(m.group(2)), "b": float(m.group(3))})
+
+    assigned, ambiguous, claimed = {}, [], set()
+    for r in rows:
+        if len(r["hits"]) == 1:
+            k = next(iter(r["hits"]))
+            if k in claimed:
+                raise SectorPartitionError(
+                    "sector_weights: %s matched two rows in the Stock Sectors block "
+                    "(%s and %s). A sector may be assigned at most once -- writing the "
+                    "first match twice is ISA-0367."
+                    % (k, assigned[k]["portfolio_pct"], r["p"]))
+            claimed.add(k)
+            assigned[k] = {"name": _SECTOR_NAME[k], "portfolio_pct": r["p"],
+                           "benchmark_pct": r["b"]}
+        else:
+            ambiguous.append(r)
+
+    supers = _parse_super_sectors(block)
+    if ambiguous:
+        if not supers:
+            raise SectorPartitionError(
+                "sector_weights: rows with ambiguous truncated labels %s and no "
+                "Cyclical/Sensitive/Defensive line to resolve them against -- refusing "
+                "to guess by document order" % [r["frag"] for r in ambiguous])
+        import itertools
+        open_keys = sorted({k for r in ambiguous for k in r["hits"]} - claimed)
+        viable = []
+        for perm in itertools.permutations(open_keys, len(ambiguous)):
+            if any(k not in r["hits"] for k, r in zip(perm, ambiguous)):
+                continue
+            trial = dict(assigned)
+            for k, r in zip(perm, ambiguous):
+                trial[k] = {"name": _SECTOR_NAME[k], "portfolio_pct": r["p"],
+                            "benchmark_pct": r["b"]}
+            if _rollup_ok(trial, supers):
+                viable.append(perm)
+        if len(viable) != 1:
+            raise SectorPartitionError(
+                "sector_weights: %d assignments of the ambiguous rows %s reproduce the "
+                "printed super-sector totals %s; exactly one is required"
+                % (len(viable), [r["frag"] for r in ambiguous], supers))
+        for k, r in zip(viable[0], ambiguous):
+            assigned[k] = {"name": _SECTOR_NAME[k], "portfolio_pct": r["p"],
+                           "benchmark_pct": r["b"]}
+
+    # THE TILING CONTRACT -- a dimension declared as a partition must tile the book on
+    # BOTH columns and carry every declared member. A short vector renormalises every
+    # consumer's denominator invisibly, which is why eight months of it went unseen.
+    missing = [k for k in SECTOR_MAP.values() if k not in assigned]
+    if missing:
+        raise SectorPartitionError(
+            "sector_weights: %d sector(s) absent from the parse: %s. An unread sector "
+            "is not a zero exposure." % (len(missing), missing))
+    for col, lab in (("portfolio_pct", "portfolio"), ("benchmark_pct", "benchmark")):
+        tot = sum(v[col] for v in assigned.values())
+        if abs(tot - 100.0) > SECTOR_TILING_TOL_PP:
+            raise SectorPartitionError(
+                "sector_weights: the %s column sums to %.2f, outside 100 +/- %.2fpp -- "
+                "the sector vector does not tile the book" % (lab, tot, SECTOR_TILING_TOL_PP))
+    if supers and not _rollup_ok(assigned, supers):
+        raise SectorPartitionError(
+            "sector_weights: the parsed sectors do not reproduce the X-Ray's own "
+            "Cyclical/Sensitive/Defensive totals %s within %.2fpp"
+            % (supers, SECTOR_ROLLUP_TOL_PP))
+
+    for v in assigned.values():
+        v["vs_benchmark"] = round(v["portfolio_pct"] - v["benchmark_pct"], 2)
+    return {k: assigned[k] for k in SECTOR_MAP.values()}
 
 
 def parse_trailing_returns(text: str) -> dict:

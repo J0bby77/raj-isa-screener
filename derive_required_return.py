@@ -212,6 +212,64 @@ def flow_adjusted_mean(observations, flows, months=None):
                                         "mean plus the mean adjustment")}}
 
 
+VALUATION_AGREEMENT_TOL_GBP = 0.005   # ISA-0312: two derivations of one quantity must agree (R5.2)
+
+def _spot_valuation(state, portfolio_value=None, value_date=None, observations=None):
+    """The single home for "what is the portfolio worth". Returns (value, date, source).
+
+    Precedence, and each step SAYS which it took:
+      1. an explicit caller override (a test or a what-if)
+      2. the valuation store's latest admissible month-end observation  <- GOLDEN SOURCE (R6.1)
+      3. target_state.portfolio_value_gbp                               <- FALLBACK, flagged
+
+    R6.2 - where 2 and 3 disagree beyond tolerance the disagreement is PUBLISHED, never blended
+    and never silently resolved in favour of whichever was read first.
+    """
+    if portfolio_value is not None:
+        return float(portfolio_value), _d(value_date or state["portfolio_value_date"]), "caller_override"
+    obs = observations
+    if obs is None:
+        try:
+            obs = (json.loads(open(os.path.join(HERE, "anchor_valuation_history.json"), encoding="utf-8").read())
+                   .get("observations") or [])
+        except Exception:                                            # noqa: BLE001
+            obs = []
+    adm = [o for o in obs if o.get("admissible") and o.get("value_gbp") is not None]
+    hand_v = state.get("portfolio_value_gbp")
+    hand_d = state.get("portfolio_value_date")
+    if not adm:
+        if hand_v is None:
+            raise AnchorCadenceError(
+                "no admissible valuation observation and no fallback value - refusing to "
+                "invent one (R4.1/R4.3)")
+        return float(hand_v), _d(value_date or hand_d), "target_state_fallback_store_empty"
+    latest = max(adm, key=lambda o: o["month_end"])
+    v, d = float(latest["value_gbp"]), _d(value_date or latest["month_end"])
+    if hand_v is not None and str(hand_d) == str(latest["month_end"]):
+        delta = abs(float(hand_v) - v)
+        if delta > VALUATION_AGREEMENT_TOL_GBP:
+            try:
+                import disagreement_log as _dl
+                _dl.record(
+                    quantity="portfolio_value_gbp",
+                    subject="ISA anchor valuation",
+                    derivation_a="target_state.portfolio_value_gbp (hand-written at each derivation)",
+                    value_a=float(hand_v),
+                    derivation_b="anchor_valuation_history.json latest admissible month-end",
+                    value_b=v,
+                    tolerance=VALUATION_AGREEMENT_TOL_GBP,
+                    tolerance_basis="two derivations of ONE quantity must agree to the penny; "
+                                    "0.005 GBP is half the smallest representable unit (R5.2)",
+                    domain="analysis",
+                    register_item="ISA-0312",
+                    note=f"same date {latest['month_end']}, delta GBP {delta:.2f}. "
+                         "The store is operative; target_state's copy is retired as an input.")
+            except Exception:                                        # noqa: BLE001
+                pass
+    return v, d, f"anchor_valuation_history:{latest['month_end']}"
+
+
+
 def valuation_basis(observations=None, flows=None, spot_value=None, spot_date=None):
     """The value the anchor is solved on, with its basis stated. Never a bare float (R4.1/R4.2).
 
@@ -579,8 +637,14 @@ def derive(state: dict, portfolio_value=None, value_date=None, as_of=None,
         flows, flow_meta = external_flows()
 
     # ── D-3: what value do we solve on? ─────────────────────────────────────────────────────
-    spot_v = float(portfolio_value if portfolio_value is not None else state["portfolio_value_gbp"])
-    spot_d = _d(value_date or state["portfolio_value_date"])
+    # ── ISA-0312. ONE HOME FOR THE PORTFOLIO VALUATION (R4.4, R6.1). ────────────────────────
+    # `target_state.portfolio_value_gbp` was hand-written at each derivation and held 139738.0,
+    # while `anchor_valuation_history.json` derives 139738.39 from the broker file for the SAME
+    # date. GBP 0.39 rounds away at the anchor's 1dp - and that is precisely why it was
+    # registered: two stored values for one quantity, both plausible, disagreeing silently. The
+    # store is now the golden source and target_state is a FALLBACK that says so.
+    spot_v, spot_d, _spot_src = _spot_valuation(state, portfolio_value, value_date,
+                                                observations=observations)
     vb = valuation_basis(observations=observations, flows=(flows or []),
                          spot_value=spot_v, spot_date=spot_d)
     if vb.get("value_gbp") is None:

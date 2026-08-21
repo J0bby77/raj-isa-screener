@@ -147,7 +147,7 @@ FORWARD_ELIG_PART_A_FLOOR         = 10    # growth VIABILITY floor = bottom of "
 # Gate for the pre-registered rule above, read by calibration_report.py (no magic numbers).
 CALIBRATION_MIN_MATURED_3M = 200
 
-SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}
+SOURCE_WEIGHTS = {"forward": 0.60, "revisions": 0.15, "deployability": 0.10, "quality": 0.05, "analyst": 0.10}  # PROVISIONAL (Raj) - basis + pre-registered change rule: see the block at lines 140-148 and ledger RATIONALE:SOURCE_WEIGHTS
 
 # --- VCI forward-led (Jul-2026) — VCI_Forward_Led_Framework_Implementation_Jul2026.md -------
 VCI_FV_ASYMMETRY_MIN_PLATFORM = 2.0     # §9.1 tiered floor — platform / multi-shot names
@@ -273,6 +273,50 @@ ER_ANCHOR_MIN_ROWS       = 30            # ⚑ below this the WHOLE TABLE is not
                                          # anchors anything.
 ER_ANCHOR_AGREE_BAND     = 0.25          # |xs/own - 1| above this = DIVERGENCE, published
 ER_ANCHOR_MODE           = "cross_sectional_primary"  # | "own_history_primary" | "own_history_only"
+
+# ── ISA-0377 (19-Aug-2026) — THE E[r] GROWTH BOUND: CROSS-SECTIONAL BASIS, MONOTONE SHAPE ──────
+# THE DEFECT, MEASURED by er_clamp_diagnostic across the six retained frames: a single absolute
+# +50pp knee is the 71st percentile of Nasdaq's own forward-growth distribution and the 86th of
+# STOXX 600's. The same constant is a DIFFERENT STATEMENT in every universe it is applied to
+# (scope leakage by constant), and because it was a FLAT CUT it did not merely shape the top of
+# the screen, it REPLACED it: 14-20 of the top 20 saturated on all six frames and the top 20 held
+# ONE distinct growth value on four of them. A saturated value was being ranked as though it were
+# measured.
+#
+# THE FIX SEPARATES TWO JOBS THE CONSTANT 50 WAS DOING AT ONCE:
+#   * the CEILING (the level) — unchanged at 50pp, and deliberately so. Six overlapping frames
+#     with no forward outcomes cannot calibrate a LEVEL (D-18/D-19), so the maximum admissible
+#     growth contribution is NOT being re-estimated here. It is now an ASYMPTOTE the transform
+#     approaches and never reaches, rather than a value names are pinned to.
+#   * the KNEE (where compression begins) — now CROSS-SECTIONAL: the frame's own quantile, so the
+#     same statistical statement holds in every universe.
+#
+# ⚑ THE REGISTER'S STATED BASIS (p90) IS NOT IMPLEMENTABLE AND THE MEASUREMENT SAYS SO. p90 of
+# forward EPS growth is 65.6 / 71.6 / 141.7 / 144.1 / 206.9 / 231.7 pp on the six retained frames
+# — ABOVE the 50pp ceiling on every one. A knee above the asymptote is not a knee, and clamping it
+# back to a declared bound makes it the constant 40 on 0 of 6 frames' interior, i.e. a constant in
+# disguise: exactly the defect being fixed. The knee is therefore declared at the TOP TERCILE,
+# which is interior (neither floor- nor ceiling-bound) on 4 of the 6 frames. See ISA-0381.
+ER_GROWTH_CAP_PP         = 50.0     # asymptote. NOT recalibrated — the level is out of scope.
+ER_GROWTH_FLOOR_PP       = -25.0    # absolute, and it STAYS absolute — see the downside note.
+ER_GROWTH_KNEE_ENABLED   = True     # R4.13 ROLLBACK: False -> the legacy flat cut at the bounds.
+ER_GROWTH_KNEE_QUANTILE  = 66.667   # top tercile. Interiority measured 4/6; p75 4/6; p90 0/6.
+ER_GROWTH_KNEE_FLOOR_PP  = 15.0     # a knee below this would compress the ORDINARY MIDDLE of an
+                                    # equity universe (observed frame medians 5.6-18.0pp).
+ER_GROWTH_KNEE_CEIL_PP   = 40.0     # the transform needs a band between knee and the 50pp
+                                    # asymptote wide enough to ORDER names; 10pp is the narrowest
+                                    # band measured to keep the top 20 distinct (3-7 values vs 1).
+ER_GROWTH_KNEE_MIN_N     = 30       # below this the frame cannot state its own quantile, so the
+                                    # knee is REFUSED and the legacy absolute cut applies, named.
+# ⚑ THE DOWNSIDE STAYS ABSOLUTE, AND THAT IS A MEASURED REFUSAL, NOT AN OVERSIGHT. The growth
+# distribution is strongly right-skewed: the LOWER tercile is POSITIVE on 5 of the 6 frames
+# (+0.7 to +7.6pp), so a mirrored quantile lands nowhere near the floor and reduces to the
+# constant -15 on every frame — the same test that rejected p90 on the upside rejects it here.
+# The consequence is also bounded: the 7-15% of names below -25pp sit at the BOTTOM of the screen
+# and no capital is ever ranked out of there, so the information the flat floor destroys has no
+# decision attached to it. If a future frame's lower tercile ever lands interior, this refusal is
+# falsified and the item re-raises (asserted in tests_jul2026/test_er_growth_knee.py).
+
                                          # ROLLBACK (§11): "own_history_only" restores pre-D-24
                                          # behaviour EXACTLY. T8 asserts the 152/312 pass count.
 ER_XS_CONF_WEIGHT        = 0.20          # re-rate confidence credit from a cross-sectional anchor
@@ -305,6 +349,11 @@ ER_CALLSITE_MANIFEST = {
     # Not a computer of E[r], but a declared importer nonetheless:
     "orchestrator_parity.py":     "OBSERVER — runs the §6 reachability assertion; computes nothing",
     "test_session_02aug2026.py":  "root-level session test (C1 re-rate shape) — fixtures only",
+    # ISA-0028 / ISA-0029 (19-Aug-2026). Reads the LIVE clamp constants (_G_HI/_G_LO/_CAP) off
+    # `expected_return` so there is no second copy of them, and computes NOTHING: it measures
+    # saturation on retained frames that were already scored. No anchor table, by decision --
+    # re-anchoring a retained frame would change the very quantity it is measuring.
+    "er_clamp_diagnostic.py":     "OBSERVER — reads the clamp constants; computes no E[r], takes no anchor table",
 }
 # ⚑ THREE MODULES THE SPEC LISTED THAT DO **NOT** IMPORT `expected_return`, verified by AST
 # 09-Aug-2026 — and the manifest records the truth, not the spec:
@@ -451,7 +500,7 @@ REGIME_RULES = {                         # B7(1) — pure decision table: (vs-20
 # PRELIMINARY conviction brackets — DISPLAY ONLY (Claude refines to /100 at Step 9).
 # Expressed as FRACTIONS of each path's TOTAL_MAX so they auto-scale if the max changes.
 # ===========================================================================
-CONVICTION_FRACTIONS = [
+CONVICTION_FRACTIONS = [  # DISPLAY ONLY - see block above; ledger RATIONALE:CONVICTION_FRACTIONS (the gating bars are the /100 Step-9/10 >=60/>=75, not these)
     (0.92, "High Conviction",   "high",   "[Claude: refine to /100 at Step 9]"),
     (0.82, "Medium Conviction", "medium", "[Claude: refine to /100 at Step 9]"),
     (0.70, "Watch but Wait",    "low",    "[Claude: refine to /100 at Step 9]"),
@@ -490,7 +539,7 @@ FUND_MIN_COVERAGE      = 0.80    # need >= this fraction of fund-sleeve value co
 # until activated (flip True or pass rerank --action-stack).
 # ===========================================================================
 BUILD_ACTION_STACK     = True
-APS_FRESH_CAPITAL_BAR  = 65.0   # Source Score >= bar -> eligible for fresh capital (BUY / TOP-UP)
+APS_FRESH_CAPITAL_BAR  = 65.0   # Source Score >= bar -> eligible for fresh capital (BUY / TOP-UP)  # PROVISIONAL (Jun-26, S5 checklist) - ledger RATIONALE:APS_FRESH_CAPITAL_BAR
 APS_HOLD_FLOOR         = 50.0   # held name Source < floor -> TRIM / SELL-review
 APS_TOPUP_PENALTY      = 12.0   # TOP-UP APS = Source - penalty (§13.5 — prevents averaging down)
 APS_MANDATORY_SELL     = 95.0   # disqualifier/thesis-break SELL -> high fixed APS (capital protection first)
@@ -618,10 +667,10 @@ FORWARD_AXIS_BUCKET_WEIGHTS = {"estimates": 5/24, "margin": 11/24, "price": 1/3}
 # CAUTION: t=1.74 is below significance and contradicts the classic short-term-reversal literature;
 # this universe is a survivorship-biased growth screen. Blend is deliberately modest and logged.
 PRICE_MOM_LOOKBACK         = 252
-PRICE_MOM_SKIP             = 21
+PRICE_MOM_SKIP             = 21        # convention, NOT optimised - see block at 612-619; ledger RATIONALE:PRICE_MOM_SKIP
 PRICE_MOM_SHORT_LOOKBACK   = 21     # trailing 1 month
 PRICE_MOM_SHORT_SKIP       = 0      # no skip — this IS the recent-month signal
-PRICE_MOM_BLEND            = {"long": 0.50, "short": 0.50}
+PRICE_MOM_BLEND            = {"long": 0.50, "short": 0.50}  # BACKTESTED 29-Jul-26 pooled panel - see block at 625-635; ledger RATIONALE:PRICE_MOM_BLEND
 # CORRECTED 29-Jul-26 after the FULL cross-universe panel (978 names / 5 screeners / 45 formation
 # dates / ~43k stock-months). The earlier 0.35/0.65 lean-short was fitted to NASDAQ ONLY and does
 # NOT generalise: pooled 5y rank-IC -> fwd 1m is 12-1m +0.0254 vs 1m +0.0207 (i.e. the LONG window
@@ -673,6 +722,37 @@ SUMMARY_STAGE_EXCLUDE = ["Maturing", "Rolling over", "Flat/Down", "Marginal"]
 # genuine capital opportunity (the count-based top-N won't backfill with weak names). Excludes the
 # low-source tail (e.g. ADBE ~48). Screen-source scale (0.75 fwd / 0.05 quality / 0.20 valuation).
 SUMMARY_SOURCE_FLOOR = 70.0
+
+# ── OVERLAY POPULATION (ISA-0022 / ISA-0368, 19-Aug-2026) ────────────────────────────────────
+# WHO gets the four overlays (Estimate Revisions · WACC vs ROIC · Valuation vs own History ·
+# Trailing P/E). Read by screener_core.overlay_population_mode(); both orchestrators go through
+# that one function.
+#
+#   "all_gate_passers" (LIVE)   — every name that clears Gates 1-4. The overlays stop being a
+#                                 privilege granted by a score and become part of what "scored"
+#                                 means. This is what removes the defect rather than patching it:
+#                                 `val_hist_*` is an INPUT to the Source Score (via the FV
+#                                 composite) as well as an output of the overlay, so any gate
+#                                 built on that score was deciding who gets the evidence that
+#                                 decides the gate. Measured 15-Aug-2026 SP500: 100% of overlay
+#                                 rows priced off their own multiple, 100% of the rest off the
+#                                 analyst target — one ranking, two bases (R2.6).
+#   "summary_gated"  (ROLLBACK) — the pre-19-Aug behaviour: SUMMARY-eligible AND Source Score >=
+#                                 SUMMARY_SOURCE_FLOOR. Retained as the declared one-constant
+#                                 rollback (R4.13). It is NOT equivalent to the old code: the
+#                                 momentum restamp is now forced ahead of it in BOTH paths.
+#
+# COST, derived from the fetch layer rather than asserted (endpoint calls per ticker):
+#   phase1 info 1 · phase2 statements 3 · phase3 11 (2y history) or 12 (5y + recommendations).
+#   `upgrades_downgrades` was a 13th call read by nothing and is deleted.
+#   gated   = N*15 + H*13  (core)  /  N*15 + H*17  (local, which re-fetched phases 1 and 2 too)
+#   all     = N*16
+#   => all_gate_passers is CHEAPER whenever H > N/13 (core) or H > N/17 (local). On the four most
+#      recent screens H/N ran 3.6%-12.4%, so it is cheaper on NASDAQ and SP500, roughly neutral on
+#      STOXX600, and dearer by ~55 calls (+2.5%) on F250-SPI. Wall-clock is NOT claimed here: it
+#      was not measurable this session and run_qa["overlay_coverage"] plus the phase timings are
+#      what will settle it on the next live screen (R2.10 / R4.1).
+OVERLAY_POPULATION = "all_gate_passers"
 
 # ===========================================================================
 # JUL-26 FORWARD-LED CALIBRATION (implementation plan ISA_Forward_Calibration_..._Jul2026.md)
@@ -733,7 +813,7 @@ ENTRY_STABILITY_LOOKBACK_DAYS = 182
 ENTRY_STABILITY_FLOOR = 50.0     # reuse exit-floor level: check mirrors the rule policing the position
 ENTRY_STABILITY_MIN_SIGHTINGS = 2
 ENTRY_STABILITY_MIN_SPAN_DAYS = 60
-MIN_HOLD_DAYS = 182
+MIN_HOLD_DAYS = 182   # C-1 anti-churn fix, WP-3 26-Jul-26 - see block at 730-731; compliance.py R2 (NOT paused)
 MIN_HOLD_EXEMPT = ("hard_thesis_break", "drawdown_mandate", "preclearance")
 
 # --- H-6 (audit item #7, 26-Jul-26): known-store manifest - one authoritative list,

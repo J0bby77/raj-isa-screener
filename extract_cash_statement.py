@@ -80,7 +80,7 @@ SO_CLEAR_WORKING_DAYS = 3             # clears within ~3 working days of the 1st
 # ⚑ SINGLE HOME for the AJ Bell FX charge. Evidenced by two `FX Charge (0.50%)` rows in the
 # 2026-27 cash statement and by the COCO fill. Anything that models a USD trade cost reads THIS.
 FX_RATE_PCT = 0.50
-FX_RATE_FRACTION = FX_RATE_PCT / 100.0
+FX_RATE_FRACTION = FX_RATE_PCT / 100.0  # evidenced - see FX_RATE_SOURCE below and the block at 79-81
 FX_RATE_SOURCE = ("AJ Bell cash statement 2026-27, literal 'FX Charge (0.50%)' rows; "
                   "corroborated by COCO 03-Aug-2026 executing at GBP1,354.99 vs a "
                   "GBP1,384.75 estimate built on 0.75%")

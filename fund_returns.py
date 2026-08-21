@@ -31,7 +31,52 @@ try:
 except Exception:
     _alang = None
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+
+# ── ISA-0402 (20-Aug-2026) — THE BASIS IS A FIELD, NOT PROSE ──────────────────────────────────
+# ⚑ THE DEFECT. `fund_returns_cache.json` declared in its own header that "Sources are forward
+# E[r] decompositions, not trailing" while EIGHT of its twelve rows carried `[trailing 3yr]` in
+# their own source strings. The header described the file, the rows described themselves, and they
+# disagreed — indefinitely, because a basis recorded in FREE PROSE cannot be asserted. Every other
+# decision-grade artefact in this framework carries basis as a first-class field for exactly this
+# reason (er_basis, stamp_basis, window_basis, t4_basis, comparator_basis, return_adequacy_basis).
+#
+# ⚑ AND IT WAS LOAD-BEARING: the trailing rows are the ones feeding the SELL test in
+# `classify_fund_action` (ISA-0401), where they are compared to a FORWARD hurdle.
+#
+# ⚑ THE CLASSIFICATION IS MECHANICAL AND READS ONLY EXPLICIT TAGS. It does not infer a basis from
+# narrative — `[index]` and `[NAV-driven]` describe an instrument, not a measurement basis, so
+# those rows read UNKNOWN and BLOCK rather than being generously read as forward. Deriving the
+# field by judgement would have replaced one hand-set thing with another.
+BASIS_FORWARD   = "forward_decomposition"
+BASIS_TRAILING  = "trailing"          # + the window, e.g. trailing_3yr
+BASIS_UNKNOWN   = "unknown"
+BASIS_ENUM = (BASIS_FORWARD, "trailing_1yr", "trailing_3yr", "trailing_5yr",
+              "manual_declared", BASIS_UNKNOWN)
+
+
+def classify_basis(source: str) -> dict:
+    """Source prose -> a declared basis. Explicit tags only; silence is UNKNOWN, never forward."""
+    import re
+    txt = str(source or "")
+    m = re.search(r"\[\s*trailing\s*(\d+)\s*yr\s*\]", txt, re.I)
+    if m:
+        return {"basis": "trailing_%syr" % m.group(1), "basis_evidence": m.group(0),
+                "basis_derivation": "explicit tag in the row's own source string"}
+    if re.search(r"\b(fwd|forward)\b", txt, re.I):
+        return {"basis": BASIS_FORWARD, "basis_evidence": "fwd/forward named in the source",
+                "basis_derivation": "explicit tag in the row's own source string"}
+    return {"basis": BASIS_UNKNOWN,
+            "basis_evidence": None,
+            "basis_derivation": ("no explicit basis tag. ⚑ NOT read as forward: a narrative label "
+                                 "such as [index] or [NAV-driven] describes the INSTRUMENT, not the "
+                                 "measurement basis, and 'unstated' and 'forward' must not produce "
+                                 "the same output (R2.10)")}
+
+
+def basis_is_forward(basis: str) -> bool:
+    """The ONE home for 'may this value be compared to a FORWARD hurdle?' (R4.4)."""
+    return basis == BASIS_FORWARD
 
 
 def _g(key, default):
@@ -55,6 +100,15 @@ def load_cache(path: str) -> dict:
             d = json.load(fh)
         if isinstance(d, dict) and isinstance(d.get("returns"), dict):
             d.setdefault("schema_version", SCHEMA_VERSION)
+            # ⚑ ISA-0402. Stamp the basis on every row AS IT IS READ, derived mechanically from
+            # the row's own source string, so an older cache written before the field existed
+            # cannot be consumed as though its basis were known (R5.1 — the consumer asserts the
+            # semantics again as it reads).
+            for _k, _r in (d.get("returns") or {}).items():
+                if not isinstance(_r, dict):
+                    continue
+                if _r.get("basis") not in BASIS_ENUM:
+                    _r.update(classify_basis(_r.get("source")))
             return d
     except Exception:
         pass
@@ -179,22 +233,75 @@ def classify_fund_action(fund_row: dict, ret_info: dict) -> dict | None:
     est = (ret_info or {}).get("est_return_pct")
     overweight = (actual is not None and target is not None and actual > target)
 
+    basis = (ret_info or {}).get("basis") or BASIS_UNKNOWN
+
     action = reason = None
     if band_breach and overweight:
         action, reason = "TRIM", f"overweight {actual:.1f}% vs target {target:.1f}% — rebalance down"
     elif band_breach and not overweight:
         action, reason = "ADD", f"underweight {actual:.1f}% vs target {target:.1f}% — rebalance up"
-    if est is not None and min_ret is not None and est < min_ret:
-        # return below the fund's minimum-expected hurdle -> sell/replace review (overrides rebalance-add)
-        action, reason = "SELL", f"est return {est:.1f}% < min hurdle {min_ret:.1f}% — review for replacement"
-    if action is None:
+
+    # ── ISA-0401 (20-Aug-2026) — THE RETURN TEST MUST COMPARE LIKE WITH LIKE ─────────────────
+    # ⚑ THE DEFECT. This branch issued SELL — the strongest verb in the canonical action language
+    # ("Exit — disqualifier, thesis-break, or dead money with a funded replacement") — from
+    # `est_return_pct < min_return_pct`, where the two sides are DIFFERENT QUANTITIES: a TRAILING
+    # 3-year return on the left and a FORWARD structural hurdle on the right. It was LIVE in
+    # analytics_data_aug_2026.json on JPM UK Equity Core: "est return 11.0% < min hurdle 12.0%",
+    # where the 11.0 is a sentence typed in the July run, self-labelled `[trailing 3yr]`, dated
+    # 2026-07-05, and the 12.0 is a hand-set constant last revised 31-May-2026. The register
+    # already records the JPM UK reading as a K4 factual_error — this pair had produced a wrong
+    # call once before.
+    # ⚑ WHAT IS NOT DONE HERE, DELIBERATELY. The test is not re-pointed at ISA-0328's forward
+    # structural E[r]: that runs 3.06-7.62% against 12-13% hurdles and would fire on ALL TWELVE
+    # funds. Nor is it re-pointed at `return_adequacy_value` — that is the OWNERSHIP measure and
+    # changing which funds carry a SELL as the side effect of a basis repair is D-C(ii). The
+    # comparison is REFUSED and NAMED; choosing its replacement is a policy decision with its own
+    # item.
+    return_test = None
+    if est is not None and min_ret is not None:
+        if basis_is_forward(basis):
+            if est < min_ret:
+                action, reason = "SELL", (f"est return {est:.1f}% < min hurdle {min_ret:.1f}% "
+                                          f"— review for replacement [basis {basis}]")
+            return_test = {"state": "APPLIED", "basis": basis,
+                           "est_pct": est, "hurdle_pct": min_ret,
+                           "below": bool(est < min_ret)}
+        else:
+            # ⚑ COUNTED, NEVER DROPPED (R4.9). The row is emitted so the refusal is visible.
+            return_test = {
+                "state": "REFUSED_BASIS_MISMATCH", "basis": basis,
+                "est_pct": est, "hurdle_pct": min_ret,
+                "would_have_fired": bool(est < min_ret),
+                "reason": (f"the estimate's declared basis is `{basis}` and the hurdle "
+                           f"`min_expected_return` is a FORWARD structural expectation. A trailing "
+                           f"return compared to a forward hurdle is not a comparison, and it may "
+                           f"not produce a SELL (ISA-0401, R2.6/R5.1)."),
+                "what_would_resolve_it": ("re-source this fund's estimate on a forward "
+                                          "decomposition basis, or declare which measure the "
+                                          "ownership test should use — see the item")}
+            if action == "ADD" and est < min_ret:
+                # the old code let SELL override a rebalance-ADD. With the test refused, the ADD
+                # stands but the unresolved question travels with it rather than vanishing.
+                reason += " ⚑ return test REFUSED (basis mismatch) — not a clean bill of health"
+
+    if action is None and return_test is None:
         return None
+    if action is None:
+        # a refused return test with no rebalancing action still has to be VISIBLE
+        return {"ticker": fund_row.get("ticker"), "name": fund_row.get("name"), "route": "fund",
+                "action": None, "canonical_action": None,
+                "action_label": "NO ACTION — the return test was refused, see return_test",
+                "reason": return_test.get("reason"), "return_test": return_test,
+                "est_return_pct": est, "min_return_pct": min_ret, "est_basis": basis,
+                "actual_pct": actual, "target_pct": target,
+                "source_required": bool((ret_info or {}).get("pending"))}
     canon = _alang.normalize_action(action) if _alang else action
     label = _alang.label_for(action) if _alang else action
     return {
         "ticker": fund_row.get("ticker"), "name": fund_row.get("name"), "route": "fund",
         "action": action, "canonical_action": canon, "action_label": label,
         "reason": reason, "est_return_pct": est, "min_return_pct": min_ret,
+        "est_basis": basis, "return_test": return_test,
         "actual_pct": actual, "target_pct": target,
         "source_required": bool((ret_info or {}).get("pending")),
     }
@@ -212,6 +319,80 @@ def set_cached_return(path, ticker, return_pct, source="manual", date=None) -> d
     cache.setdefault("returns", {})[str(ticker).upper()] = entry
     save_cache(cache, path)
     return entry
+
+
+def selftest(verbose=True) -> int:
+    """ISA-0402 / ISA-0401. Every control must FAIL on the real defect it exists to catch (R5.8)."""
+    fails = []
+
+    def ck(name, cond):
+        if not cond:
+            fails.append(name)
+        if verbose:
+            print(("  ok   " if cond else "  FAIL ") + name)
+
+    # ── classify_basis reads EXPLICIT TAGS ONLY ──────────────────────────────────────────────
+    ck("an explicit [trailing 3yr] tag is classified trailing_3yr",
+       classify_basis("Est. return 11.0% (UK core [trailing 3yr])")["basis"] == "trailing_3yr")
+    ck("an explicit fwd tag is classified forward_decomposition",
+       classify_basis("(AI-supercycle tech earnings growth [Morningstar fwd proxy])")["basis"]
+       == BASIS_FORWARD)
+    ck("ISA-0402 CONTROL: a NARRATIVE label is NOT read as forward — [index] and [NAV-driven] "
+       "describe the instrument, not the basis, so they read `unknown` and BLOCK (R2.10)",
+       classify_basis("Japan index, corporate-reform tailwind [index]")["basis"] == BASIS_UNKNOWN
+       and classify_basis("High-growth + SpaceX/AI NAV uplift [NAV-driven]")["basis"] == BASIS_UNKNOWN)
+    ck("ISA-0402 CONTROL: an EMPTY source is unknown, never forward",
+       classify_basis(None)["basis"] == BASIS_UNKNOWN and classify_basis("")["basis"] == BASIS_UNKNOWN)
+    ck("basis_is_forward is the ONE home and is true for exactly one value (R4.4)",
+       basis_is_forward(BASIS_FORWARD)
+       and not any(basis_is_forward(b) for b in BASIS_ENUM if b != BASIS_FORWARD))
+
+    # ── the SELL may not rest on a basis mismatch ────────────────────────────────────────────
+    row = {"ticker": "TEST", "name": "T", "band_breach": "No", "actual_pct": 6.0,
+           "target_pct": 6.0, "min_return_pct": 12.0}
+    fwd = classify_fund_action(row, {"est_return_pct": 11.0, "basis": BASIS_FORWARD})
+    ck("a FORWARD estimate below a forward hurdle still produces SELL — the test is not disabled",
+       fwd and fwd["action"] == "SELL" and (fwd["return_test"] or {})["state"] == "APPLIED")
+    tr = classify_fund_action(row, {"est_return_pct": 11.0, "basis": "trailing_3yr"})
+    ck("ISA-0401 CONTROL: the SAME numbers on a TRAILING basis produce NO SELL — a trailing return "
+       "compared to a forward hurdle is not a comparison (R2.6)",
+       tr and tr["action"] is None
+       and tr["return_test"]["state"] == "REFUSED_BASIS_MISMATCH")
+    ck("ISA-0401: and the question is NOT dropped — the refusal records that it WOULD have fired "
+       "and names what would resolve it (R4.9)",
+       tr["return_test"]["would_have_fired"] is True
+       and tr["return_test"]["what_would_resolve_it"])
+    unk = classify_fund_action(row, {"est_return_pct": 11.0, "basis": BASIS_UNKNOWN})
+    ck("ISA-0401 CONTROL: an UNKNOWN basis refuses too — absent is not forward",
+       unk and unk["action"] is None
+       and unk["return_test"]["state"] == "REFUSED_BASIS_MISMATCH")
+    ck("ISA-0401 CONTROL: a missing basis key defaults to UNKNOWN and refuses, it does not default "
+       "to forward (R4.3)",
+       (classify_fund_action(row, {"est_return_pct": 11.0}) or {}).get("action") is None)
+
+    # ── the rebalancing path is UNTOUCHED by the basis question ──────────────────────────────
+    br = {"ticker": "T2", "name": "T2", "band_breach": "Yes", "actual_pct": 9.1,
+          "target_pct": 7.0, "min_return_pct": 12.0}
+    tb = classify_fund_action(br, {"est_return_pct": 12.0, "basis": "trailing_3yr"})
+    ck("a band-breach TRIM is unaffected by the return test being refused — the fix removes a "
+       "wrong SELL, it does not loosen rebalancing (D-C(ii))",
+       tb and tb["action"] == "TRIM")
+
+    # ── the live cache ───────────────────────────────────────────────────────────────────────
+    import os as _os
+    p = default_cache_path(_os.path.dirname(_os.path.abspath(__file__)))
+    if _os.path.exists(p):
+        c = load_cache(p)
+        rows = c.get("returns") or {}
+        ck("every row in the live cache carries a declared basis in the enum (R4.2)",
+           rows and all(r.get("basis") in BASIS_ENUM for r in rows.values()))
+        ck("ISA-0402: the header no longer makes a FILE-LEVEL claim contradicted by the rows",
+           "CORRECTED" in str(c.get("_comment") or "")
+           or "not trailing" not in str(c.get("_comment") or ""))
+
+    print("\nfund_returns selftest: %d failure(s)%s"
+          % (len(fails), (" -> " + ", ".join(fails)) if fails else " — 13 assertions green"))
+    return 1 if fails else 0
 
 
 def main():

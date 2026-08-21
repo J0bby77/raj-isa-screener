@@ -219,8 +219,11 @@ PART_A_STRONG_THRESHOLD   = _cfg.GROWTH_PART_A_STRONG       # 22  (scoring_confi
 PART_A_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_A_ACCEPTABLE   # 14
 PART_B_STRONG_THRESHOLD   = _cfg.GROWTH_PART_B_STRONG       # 16  (v27-recalibrated; was hardcoded 19 on the old /26 scale)
 PART_B_ACCEPTABLE_MIN     = _cfg.GROWTH_PART_B_ACCEPTABLE   # 11
-# OVERLAY_SCORE_TRIGGER retired (Jul-26 Part 5): overlay set is now SUMMARY-eligible + Source>=floor
-OVERLAY_TIME_CAP_SECS     = 480  # 8 minutes
+# OVERLAY_SCORE_TRIGGER retired (Jul-26 Part 5): overlay set was SUMMARY-eligible + Source>=floor.
+# RETIRED IN TURN 19-Aug-2026 (ISA-0022 / ISA-0368): that predicate reads a Source Score which does
+# not yet exist in its final form at the moment the gate runs, so the overlay set and the SUMMARY
+# set were drawn from two different values of the same fields. See overlay_population_mode().
+OVERLAY_TIME_CAP_SECS     = 480  # 8 minutes (legacy gated mode only)
 
 # ── Revenue anomaly multiple ──────────────────────────────────────────────────
 REV_ANOMALY_MULTIPLE = 3.0
@@ -1536,11 +1539,20 @@ def _fetch_ticker_statements(ticker_sym):
         return ticker_sym, None, str(e)
 
 
-def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
+def _fetch_ticker_scoring_data(ticker_sym, overlay_inputs=False):
     """Phase-3 fetch with throttle-resilient retry (wraps _once; retries on TOTAL failure only,
-    so partial-data tolerance in the body is preserved)."""
+    so partial-data tolerance in the body is preserved).
+
+    `overlay_inputs` (renamed 19-Aug-2026) requests the two extra things the overlays need and
+    nothing else needs: a 5-year price window instead of 2, and the analyst recommendation
+    summary. Its old name embedded the retired Part-A total-score cut that Jul-26 replaced with
+    the Source Score — ISA-0022 was raised against that NAME, which was the last live trace of a
+    quality-era threshold in a forward-led framework. The literal is deliberately not repeated
+    here: run_tests.t10_sweep greps the tree for retired thresholds and is right to fire on one,
+    in a comment as much as in code.
+    """
     def _pull():
-        sym, data, err = _fetch_ticker_scoring_data_once(ticker_sym, score_gt38)
+        sym, data, err = _fetch_ticker_scoring_data_once(ticker_sym, overlay_inputs)
         if err or data is None:
             raise RuntimeError(err or "empty_scoring (throttle?)")
         return data
@@ -1550,7 +1562,7 @@ def _fetch_ticker_scoring_data(ticker_sym, score_gt38=False):
         return ticker_sym, None, str(e)
 
 
-def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
+def _fetch_ticker_scoring_data_once(ticker_sym, overlay_inputs=False):
     """Fetch all incremental data needed for Part A/B scoring and optionally overlays."""
     try:
         tk = yf.Ticker(ticker_sym)
@@ -1600,7 +1612,7 @@ def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
                 data["next_earnings"] = "Unknown"
 
         # Price history
-        period = "5y" if score_gt38 else "2y"   # >=2y so the 12-1m price-momentum window (~273d) is always spannable
+        period = "5y" if overlay_inputs else "2y"   # >=2y so the 12-1m price-momentum window (~273d) is always spannable
         # D-25: the period is now carried WITH the data. compute_val_hist needs up to 5 annual
         # fiscal year-ends of price; a 2y window cannot span them, and until now nothing recorded
         # which window a row was computed under. HYPOTHESIS (not asserted): this split is why
@@ -1612,12 +1624,14 @@ def _fetch_ticker_scoring_data_once(ticker_sym, score_gt38=False):
             data["history"] = None
             data["history_error"] = f"{type(_he).__name__}: {_he}"
 
-        # High-score overlays (eps_revisions already fetched above for all gate-passers)
-        if score_gt38:
-            try:
-                data["upgrades_downgrades"] = tk.upgrades_downgrades
-            except Exception:
-                data["upgrades_downgrades"] = None
+        # Overlay inputs (eps_revisions already fetched above for all gate-passers).
+        # `upgrades_downgrades` was fetched here from the beginning and read by NOTHING — grep
+        # across the live tree returns only this assignment. One endpoint call per overlay ticker
+        # was being spent on a value no consumer has ever opened, so the fetch is deleted and the
+        # key retained as an explicit None: a future reader gets "we do not collect this", never a
+        # KeyError and never a silent absence (R4.1).
+        if overlay_inputs:
+            data["upgrades_downgrades"] = None   # deliberately not fetched — see comment above
             try:
                 data["recommendations_summary"] = tk.recommendations_summary
             except Exception:
@@ -1686,31 +1700,44 @@ def fetch_phase2_statements(tickers, group):
                       params["chunk"], params["workers"], params["cooldown"])
 
 
-def fetch_phase3_scoring(tickers, group, high_score_tickers=None):
+def fetch_phase3_scoring(tickers, group, overlay_inputs_for=None, high_score_tickers="__unset__"):
     """
     Fetch incremental scoring data for gate passers.
-    high_score_tickers: set of SUMMARY-eligible names at/above the Source floor (fetch 5yr history + overlay objects).
+
+    `overlay_inputs_for`: the tickers that must come back with the deeper (5y) price window and the
+    analyst recommendation summary. Under the default OVERLAY_POPULATION this is EVERY gate-passer,
+    so the run makes one pass and never fetches the same ticker twice (the second pass is what the
+    SUMMARY-gated design needed, and it cost a full re-fetch of phase 1/2/3 in screener_local).
+
+    `high_score_tickers` is the retired name. It is not silently accepted: a caller that has not
+    been updated RAISES rather than defaulting to the old split (R4.7).
     """
+    if high_score_tickers != "__unset__":
+        raise TypeError(
+            "fetch_phase3_scoring(high_score_tickers=...) was retired 19-Aug-2026 (ISA-0022). "
+            "The overlay population is no longer a 'high score' subset — pass overlay_inputs_for=, "
+            "normally the full gate-passer list. See screener_core.overlay_population_mode().")
+
     params  = BATCH_PARAMS.get(group, BATCH_PARAMS["OTHER"])
-    high_set = set(high_score_tickers or [])
-    log.info(f"Phase 3: fetching scoring data for {len(tickers)} tickers ({len(high_set)} high-score)...")
+    deep    = set(overlay_inputs_for or [])
+    log.info(f"Phase 3: fetching scoring data for {len(tickers)} tickers "
+             f"({len(deep & set(tickers))} with overlay inputs)...")
 
     results = {}
     errors  = {}
-    # Separate high-score (need 5y + overlay) from standard
-    standard = [t for t in tickers if t not in high_set]
-    high     = [t for t in tickers if t in high_set]
+    shallow = [t for t in tickers if t not in deep]
+    deep_l  = [t for t in tickers if t in deep]
 
-    if standard:
-        r, e = _run_batch(standard, _fetch_ticker_scoring_data,
+    if shallow:
+        r, e = _run_batch(shallow, _fetch_ticker_scoring_data,
                           params["chunk"], params["workers"], params["cooldown"],
-                          fn_kwargs={"score_gt38": False})
+                          fn_kwargs={"overlay_inputs": False})
         results.update(r); errors.update(e)
 
-    if high:
-        r, e = _run_batch(high, _fetch_ticker_scoring_data,
+    if deep_l:
+        r, e = _run_batch(deep_l, _fetch_ticker_scoring_data,
                           params["chunk"], params["workers"], params["cooldown"],
-                          fn_kwargs={"score_gt38": True})
+                          fn_kwargs={"overlay_inputs": True})
         results.update(r); errors.update(e)
 
     return results, errors
@@ -3141,6 +3168,33 @@ def overlay_estimate_revisions(ticker_sym, scoring_data, info):
     return out
 
 
+def merge_est_rev_direction(scored, info=None):
+    """Bug#4 fix (Jul-26): the SINGLE canonical `est_rev_direction`, by CONSERVATIVE MERGE of the
+    two sources — the revision-count "_raw" produced by the fetch/overlay layer and the scored
+    Est-Rev metric. Deteriorating if EITHER flags it (capital protection); improving only when
+    neither deteriorates and at least one improves.
+
+    ONE HOME (R4.4), and it is called TWICE on purpose. `overlay_estimate_revisions` can revise
+    `est_rev_direction_raw` once `recommendations_summary` is in hand, and that is fetched with the
+    overlay inputs — so a row scored before its overlays ran carried a direction derived from
+    strictly less evidence than a row scored after. Under the SUMMARY-gated design that asymmetry
+    fell along the gate, which means it fell along the very membership `est_rev_direction` helps
+    decide. Re-merging after overlays removes it.
+
+    Returns the merged value. Mutates `scored` in place.
+    """
+    src  = info or {}
+    _raw = str(src.get("est_rev_direction_raw") or scored.get("est_rev_direction_raw") or "").lower()
+    _scb = scored.get("score_b_est_rev")
+    if _raw == "deteriorating" or _scb == 0:
+        scored["est_rev_direction"] = "deteriorating"
+    elif _raw == "improving" or _scb == 2:
+        scored["est_rev_direction"] = "improving"
+    else:
+        scored["est_rev_direction"] = "neutral"
+    return scored["est_rev_direction"]
+
+
 def compute_wacc(ticker_sym, info, income_stmt, balance_sheet, part_a_out):
     """WACC per Section 2.10. Beta capped at 2.5, floored at 0.5."""
     out = {}
@@ -3351,8 +3405,190 @@ def run_overlays(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         ("val_hist", "val_hist_status"), ("trailing_pe", "trailing_pe_status"),
     ] if out.get(k) in ("unresolved", "beta_unresolved", "insufficient_history", "insufficient_analysts")]
     out["overlay_status"]      = "partial" if unresolved else "complete"
-    out["overlays_unresolved"] = ",".join(unresolved)
+    # "none", never "". An empty string survives the DataFrame -> CSV -> DataFrame round trip as
+    # NaN, which is indistinguishable from the row where no overlay ever ran — the precise
+    # confusion this build exists to end. A resolved overlay must SAY it resolved (R4.1).
+    out["overlays_unresolved"] = ",".join(unresolved) if unresolved else "none"
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 7b: WHO GETS OVERLAYS — one rule, one home (R4.4 / R4.5)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHAT THIS REPLACES AND WHY (ISA-0022 / ISA-0368, 19-Aug-2026)
+# ------------------------------------------------------------
+# Until today the overlay set was chosen by a predicate — `summary_eligible(r) and
+# source_score_for_row(r) >= SUMMARY_SOURCE_FLOOR` — evaluated part-way through the run, and the
+# SUMMARY tab was chosen by THE SAME predicate evaluated later. They did not return the same set,
+# for two independent reasons, and both are properties of gating at all rather than of any one
+# call site:
+#
+#   (1) SELF-REFERENCE. The Source Score's deployability term is the FV composite, and the FV
+#       composite prefers the stock's OWN historical multiple — which is `val_hist_*`, which is an
+#       OVERLAY OUTPUT. So the gate decided who gets the input that decides the gate. Measured on
+#       the 15-Aug-2026 SP500 frame: 100% of overlay rows priced off "own P/E"/"own P/FCF", 100%
+#       of non-overlay rows off "analyst target (no usable own multiple)". The ranking compared
+#       scores computed on two different bases (R2.6).
+#
+#   (2) ORDER. `forward_axis_score` carries 60% of the Source Score and is RESTAMPED by
+#       `apply_cross_sectional_momentum`. screener_core called that before the gate;
+#       screener_local called it after. Same code, same config, different set — reproduced
+#       bit-exactly against three retained frames (14-Aug NASDAQ, 15-Aug SP500, 08-Aug F250-SPI).
+#
+# Consequence, MEASURED across the 18 retained weekly workbooks: 55 of 271 SUMMARY rows (20.3%)
+# shipped with no WACC and no ROIC-vs-WACC. Worst runs were NASDAQ 26-Jun (35% covered) and
+# STOXX600 27-Jun (43%) — NOT, as three retrospectives recorded, a EU/UK vendor coverage gap.
+#
+# The fix is not a third patch to the predicate. There is no predicate: every gate-passer gets
+# overlays, so there is nothing left to be out of order or self-referential. `summary_gated` is
+# retained as the declared rollback (R4.13) and is the only path that still needs the old
+# ordering discipline.
+
+def overlay_population_mode():
+    """The declared overlay population. Read from config at call time so the rollback constant
+    takes effect without a code change (R4.13)."""
+    mode = str(getattr(_cfg, "OVERLAY_POPULATION", "all_gate_passers")).strip().lower()
+    if mode not in ("all_gate_passers", "summary_gated"):
+        raise ValueError(f"OVERLAY_POPULATION={mode!r} is not a declared mode "
+                         f"(all_gate_passers | summary_gated)")
+    return mode
+
+
+def wants_overlay_inputs(mode=None):
+    """True when the phase-3 fetch must carry the overlay inputs for EVERY gate-passer.
+
+    This is asked BEFORE any score exists, which is the whole point: a fetch that has to know the
+    Source Score to decide what to fetch is the self-reference described above."""
+    return (mode or overlay_population_mode()) == "all_gate_passers"
+
+
+def overlay_population(scored_rows, mode=None):
+    """The tickers that receive overlays, and the basis on which they were chosen.
+
+    Returns (tickers: list[str], basis: str). In `summary_gated` mode the caller MUST have run
+    `apply_cross_sectional_momentum` first — that is asserted mechanically by
+    tests_jul2026/test_overlay_population.py against both orchestrators, because the ordering bug
+    it guards against is invisible at runtime (every line executes, the run succeeds, and the set
+    is simply wrong)."""
+    mode = mode or overlay_population_mode()
+    if mode == "all_gate_passers":
+        return [r["ticker"] for r in scored_rows], "all_gate_passers"
+    import source_score as _ss
+    floor = float(getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 70.0))
+    return ([r["ticker"] for r in scored_rows
+             if _ss.summary_eligible(r) and (_ss.source_score_for_row(r) or 0) >= floor],
+            f"summary_gated(source>={floor})")
+
+
+def apply_overlays_inline(row, ticker, info, income_stmt, cashflow, balance_sheet,
+                          scoring_data, mode=None):
+    """THE one place a scored row acquires its overlays. Both orchestrators call this and nothing
+    else calls `run_overlays` on a screen path.
+
+    Called inside the scoring loop, while the fetched frames are still in hand. That matters for
+    screener_local specifically: its resumable state is JSON, DataFrames cannot survive it, and
+    that — not throughput — is why the gated design re-fetched phases 1, 2 AND 3 for the overlay
+    batch. Inline, that re-fetch does not exist.
+
+    Never raises: an overlay failure is recorded ON the row as `overlay_status`, because a row
+    with no overlay_status at all is the exact shape that read for months as a vendor outage
+    (R2.10 — "I could not measure it" and "it is bad" must not render the same, and neither may
+    render as silence).
+    """
+    mode = mode or overlay_population_mode()
+    if not wants_overlay_inputs(mode):
+        return False
+    pa_out = {k: v for k, v in row.items() if k.startswith("score_") or k == "roic"}
+    try:
+        row.update(run_overlays(ticker, info, income_stmt, cashflow, balance_sheet,
+                                scoring_data, pa_out, geography_group(ticker)))
+    except Exception as e:
+        row["overlay_status"] = f"error:{type(e).__name__}:{e}"
+        # NOT setdefault: _to_row pre-seeds every FIELD_MAP column to None, so setdefault would
+        # leave the None in place and the frame would say "nothing was unresolved" about a row
+        # on which everything failed.
+        row["overlays_unresolved"] = "est_rev,wacc,val_hist,trailing_pe"
+        row["overlay_population_basis"] = mode
+        log.warning(f"Overlay failed {ticker}: {e}")
+    # The overlay can revise est_rev_direction_raw now that recommendations_summary is in hand.
+    merge_est_rev_direction(row)
+    row["overlay_population_basis"] = mode
+    return True
+
+
+def overlay_coverage(scored_rows, mode=None):
+    """ARTEFACT-BOUNDARY CONTRACT (R5.1): every row that reaches the SUMMARY tab must carry a
+    verdict from every overlay, and under `all_gate_passers` so must every scored row.
+
+    Returns a dict; never raises. `verdict` is FAIL when a SUMMARY row has NO `overlay_status`
+    at all — the shape that produced 55 blank SUMMARY cells across 18 workbooks and was read,
+    three times, as a vendor coverage gap. A row whose overlays RAN and came back thin is a
+    different finding and is reported as `partial`, separately, on purpose (R2.10).
+
+    This is the check that had to exist before the population change could be called complete:
+    it fails on the OLD behaviour and passes on the new, which is the definition of a test that
+    can catch the defect it was written for (R5.5 / R5.8).
+    """
+    mode = mode or overlay_population_mode()
+    try:
+        import source_score as _ss
+        sel, _ = _ss.select_summary(scored_rows)
+        summary = {r.get("ticker") for r, _sc in sel}
+    except Exception as e:                                   # never let the check break the run
+        return {"verdict": "UNKNOWN", "reason": f"select_summary unavailable: {e}",
+                "mode": mode, "scored": len(scored_rows)}
+
+    def _has(r):
+        return bool(r.get("overlay_status"))
+
+    def _tk(r):
+        # A row with no ticker is itself a finding; it must be NAMED, never dropped and never
+        # crash the reporter (R4.9 — a reader that cannot match a row counts it).
+        t = r.get("ticker")
+        return str(t) if t not in (None, "") else "<no_ticker>"
+
+    scored_n   = len(scored_rows)
+    with_ovl   = [r for r in scored_rows if _has(r)]
+    summary_rows = [r for r in scored_rows if r.get("ticker") in summary]
+    missing_summary = sorted(_tk(r) for r in summary_rows if not _has(r))
+    missing_scored  = sorted(_tk(r) for r in scored_rows if not _has(r))
+    partial = sorted(_tk(r) for r in with_ovl if str(r.get("overlay_status")) == "partial")
+
+    rep = {
+        "mode": mode,
+        "scored": scored_n,
+        "with_overlays": len(with_ovl),
+        "summary": len(summary_rows),
+        "summary_missing_overlays": missing_summary,
+        "summary_coverage_pct": (round(100.0 * (len(summary_rows) - len(missing_summary))
+                                       / len(summary_rows), 1) if summary_rows else None),
+        "partial_overlays": len(partial),
+        "unresolved_by_overlay": {},
+    }
+    tally = {}
+    for r in with_ovl:
+        for name in str(r.get("overlays_unresolved") or "").split(","):
+            name = name.strip()
+            if name and name not in ("none", "nan", "N/A"):
+                tally[name] = tally.get(name, 0) + 1
+    rep["unresolved_by_overlay"] = dict(sorted(tally.items(), key=lambda kv: -kv[1]))
+
+    if missing_summary:
+        rep["verdict"] = "FAIL"
+        rep["message"] = (f"{len(missing_summary)} of {len(summary_rows)} SUMMARY rows carry NO "
+                          f"overlay_status — the overlays did not RUN for them: "
+                          f"{', '.join(missing_summary[:12])}")
+    elif mode == "all_gate_passers" and missing_scored:
+        rep["verdict"] = "WARN"
+        rep["message"] = (f"population is all_gate_passers but {len(missing_scored)} of {scored_n} "
+                          f"scored rows have no overlay_status: {', '.join(missing_scored[:12])}")
+    else:
+        rep["verdict"] = "PASS"
+        rep["message"] = (f"{len(summary_rows)}/{len(summary_rows)} SUMMARY rows and "
+                          f"{len(with_ovl)}/{scored_n} scored rows carry an overlay verdict "
+                          f"({len(partial)} partial)")
+    return rep
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3400,6 +3636,17 @@ FIELD_MAP = [
     "wacc_pct", "roic_vs_wacc_spread",
     "val_hist_pe_premium_disc", "val_hist_pfcf_premium_disc",
     "trailing_pe", "val_hist_pe_status", "overlay_status",
+    # 19-Aug-2026 (ISA-0022 / ISA-0369). save_full_data does `DataFrame(rows, columns=FIELD_MAP)`,
+    # so a field absent HERE is computed and discarded. `overlays_unresolved` has been produced by
+    # run_overlays since the overlays were built and has never once reached a frame: every
+    # diagnosis of "the overlays are thin" has therefore been made without the one field that says
+    # WHICH overlay was thin. `overlay_population_basis` makes each frame state, per row, the rule
+    # under which it was or was not enriched — so a frame spanning a config change cannot be
+    # silently averaged (same argument as `scoring_basis` above).
+    "overlays_unresolved", "overlay_population_basis",
+    "wacc_status", "wacc_computation_basis", "wacc_beta_used", "wacc_riskfree_used",
+    "est_rev_status", "est_rev_source", "est_rev_direction_raw",
+    "est_rev_eps_up_30d", "est_rev_eps_down_30d", "est_rev_consensus_trend",
     # ── Fix Pack Jul-26 (A1/A2/A6) — raw val-hist anchors (FV-composite inputs, previously
     # dropped here), unified Source-Score anatomy, and the E[r] block. Stamped post-overlay
     # by the run flow via source_score.source_score_components_for_row + expected_return.
@@ -3420,6 +3667,11 @@ FIELD_MAP = [
     "er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own", "er_anchor_operative",
     "er_anchor_divergence", "er_anchor_divergence_pct", "er_anchor_corroborated",
     "er_multiple_field", "er_multiple_value", "er_growth_clamped", "er_rerate_clamped",
+    # ISA-0377 (19-Aug-2026) — the growth bound is now cross-sectional and monotone, so the row
+    # must carry WHICH knee it was scored against and what its raw growth was. Without these the
+    # number cannot be audited after the fact and the two behaviours (cross-sectional vs the
+    # legacy flat cut) are indistinguishable on the frame.
+    "er_growth_raw", "er_growth_basis", "er_growth_knee_pp", "er_growth_compressed",
     "er_anchor_table_as_of", "er_anchor_table_group", "er_anchor_mode",
     "capital_signal_conflict", "fv_annualised_pct",
     "door", "door_admit_shadow", "regime_at_screen",
@@ -3632,7 +3884,52 @@ def save_run_qa(qa_dict, inv_analysis_dir, run_date, group, outputs_dir=None,
     return csv_path, tf_path
 
 
-def build_gate4_sector_summary(exclusions_df):
+# ISA-0262 / R12.3. Hoisted from an inline literal 16-Aug-2026 so it has ONE home and can carry a
+# rationale-ledger record. evidence_basis NO_RECORDED_RATIONALE - the honest answer: neither this
+# number nor its denominator was ever written down. The DENOMINATOR is now pinned and asserted by
+# test_gate4_concentration.py (max over SECTOR counts, taken BEFORE _total is inserted).
+# ⚑ ISA-0375 (19-Aug-2026). RETIRED AS THE WARNING TRIGGER, retained as a published statistic.
+# The raw-share measure it thresholds was falsified by its own pre-registered discrimination test
+# (isa_rationale_declarations.json asked for ">=6 screens with retained Gate-4 summaries"; six
+# exist and it named the most disproportionately excluded sector on none of them). Nothing reads
+# this to decide a warning any more -- see GATE4_CONCENTRATION_LIFT.
+GATE4_CONCENTRATION_THRESHOLD = 0.35
+
+# The operative Gate-4 concentration trigger. 2.0 == "this sector was excluded at TWICE the rate
+# of the frame as a whole". Scale-free and comparable across indices, unlike an absolute share.
+# The LEVEL is DECLARED, not fitted: 2x a base rate is a stated prior, and deliberately not tuned
+# to the six frames it was measured on (they are overlapping universes with no forward outcomes).
+# On those six it fires on 8 of 37 eligible sector-frame cells and on 4 of 6 frames.
+GATE4_CONCENTRATION_LIFT   = 2.0
+GATE4_LIFT_MIN_AT_RISK     = 15   # see build_gate4_sector_summary for the SE derivation
+GATE4_LIFT_MIN_EXCLUDED    = 5
+
+
+def build_gate4_sector_summary(exclusions_df, passers_df=None):
+    """Gate-4 sector summary.
+
+    ⚑ ISA-0375 (19-Aug-2026). This used to warn on RAW SHARE -- max(sector count) / total
+    Gate-4 exclusions > GATE4_CONCENTRATION_THRESHOLD. That statistic is dominated by how large
+    a sector is in the index, not by how hard Gate 4 hit it. Measured across the six retained
+    frames it named the most disproportionately excluded sector on ZERO of six, and the sector
+    it did name was excluded at a mean lift of 0.99 -- exactly the base rate. The clearest
+    failure is the 25-Jul-2026 STOXX 600 run: EVERY Consumer Cyclical name that reached Gate 4
+    was excluded (15 of 15, lift 2.82) and the warning was SILENT, because Industrials had the
+    larger raw share (20.8%, lift 0.70).
+
+    The warning now fires on EXCLUSION-RATE LIFT: a sector's Gate-4 exclusion rate among the
+    names that actually REACHED Gate 4, divided by the frame's own base rate. That is scale-free,
+    comparable across indices, and detects a small sector being cut wholesale -- which raw share
+    structurally cannot.
+
+    Raw share is still computed and published (`_raw_share_*`) so the two statistics can be read
+    against each other; it simply no longer decides the warning. `_warning_basis` always states
+    which statistic fired, because a summary that changes basis silently is worse than either.
+
+    passers_df is the at-risk complement (names that survived Gate 4). Without it the lift
+    denominator does not exist and the function falls back to raw share, SAYING SO -- an absent
+    denominator is not a denominator of one.
+    """
     if exclusions_df is None or exclusions_df.empty or "gate_code" not in exclusions_df.columns:
         return {}
     gate4 = exclusions_df[exclusions_df["gate_code"] == "Gate 4"]
@@ -3643,8 +3940,53 @@ def build_gate4_sector_summary(exclusions_df):
     # Fix 26-Jul-26 (STOXX600 retro item 3): max over SECTOR counts only, BEFORE _total is
     # inserted - previously _total entered its own max() so the warning fired unconditionally.
     max_sector = max(counts.values()) if counts else 0
+    raw_share = (max_sector / total) if total > 0 else 0.0
+    top_by_share = (max(counts, key=counts.get) if counts else None)
+
+    lift_rows, warn_sectors = {}, []
+    at_risk_total = None
+    if (passers_df is not None and not getattr(passers_df, "empty", True)
+            and "sector" in getattr(passers_df, "columns", [])):
+        pass_counts = passers_df["sector"].value_counts().to_dict()
+        at_risk = {s: int(counts.get(s, 0)) + int(pass_counts.get(s, 0))
+                   for s in set(counts) | set(pass_counts)}
+        at_risk_total = sum(at_risk.values())
+        base = (total / at_risk_total) if at_risk_total else 0.0
+        for s, n in sorted(at_risk.items()):
+            e = int(counts.get(s, 0))
+            rate = (e / n) if n else None
+            # MIN CELL SIZE, and it is derived rather than picked: at n = 15 and a base rate
+            # near 0.25 the standard error of the rate is sqrt(.25*.75/15) = 0.112, so the
+            # standard error of the lift is about 0.45 and a lift of 2.0 sits ~2.2 SE above 1.
+            # Below this the statistic cannot separate a wiped-out sector from three unlucky
+            # names, and firing on it would trade one non-discriminating warning for another.
+            eligible = (n >= GATE4_LIFT_MIN_AT_RISK and e >= GATE4_LIFT_MIN_EXCLUDED)
+            lift = ((rate / base) if (rate is not None and base) else None)
+            lift_rows[s] = {"at_risk": n, "excluded": e,
+                            "exclusion_rate": (None if rate is None else round(rate, 4)),
+                            "lift": (None if lift is None else round(lift, 2)),
+                            "eligible": bool(eligible)}
+            if eligible and lift is not None and lift >= GATE4_CONCENTRATION_LIFT:
+                warn_sectors.append(s)
+        warn_sectors.sort(key=lambda s: -lift_rows[s]["lift"])
+        warning = bool(warn_sectors)
+        basis = "exclusion_rate_lift"
+    else:
+        warning = (raw_share > GATE4_CONCENTRATION_THRESHOLD) if total > 0 else False
+        basis = "raw_share_FALLBACK_no_at_risk_denominator"
+
     counts["_total"]                  = total
-    counts["_concentration_warning"]  = (max_sector / total > 0.35) if total > 0 else False
+    counts["_concentration_warning"]  = warning
+    counts["_warning_basis"]          = basis
+    counts["_warning_sectors"]        = warn_sectors
+    counts["_lift"]                   = lift_rows
+    counts["_at_risk_total"]          = at_risk_total
+    counts["_base_rate"]              = (round(total / at_risk_total, 4) if at_risk_total else None)
+    # Published, never decisive (ISA-0375). Kept so the old statistic and the new one can be
+    # compared on live runs rather than only on the six frames the change was measured on.
+    counts["_raw_share_top_sector"]   = top_by_share
+    counts["_raw_share"]              = round(raw_share, 4)
+    counts["_raw_share_would_warn"]   = bool(total > 0 and raw_share > GATE4_CONCENTRATION_THRESHOLD)
     return counts
 
 
@@ -4040,17 +4382,7 @@ def _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df):
         scored["score_b_ev_g"]   = scored.get("score_b_ev_ebitda", 0) or 0
         scored["score_b_pfcf_g"] = scored.get("score_b_price_fcf", 0) or 0
     scored["score_b_est_rev"]   = _est_rev_score(info.get("eps_revisions"))
-    # Bug#4 fix: SINGLE canonical est_rev_direction via CONSERVATIVE MERGE of the two sources
-    # (revision-count "_raw" from the fetch layer + the scored Est-Rev metric). Deteriorating if EITHER
-    # flags it (capital protection); improving only when neither deteriorates and at least one improves.
-    _raw = str(info.get("est_rev_direction_raw") or scored.get("est_rev_direction_raw") or "").lower()
-    _scb = scored.get("score_b_est_rev")
-    if _raw == "deteriorating" or _scb == 0:
-        scored["est_rev_direction"] = "deteriorating"
-    elif _raw == "improving" or _scb == 2:
-        scored["est_rev_direction"] = "improving"
-    else:
-        scored["est_rev_direction"] = "neutral"
+    merge_est_rev_direction(scored, info)
     # Deprecated metrics dropped from the Part B sum (values may remain for display)
     for _dead in ("score_b_fcf_yield", "score_b_earn_yield", "score_b_52wk"):
         scored[_dead] = None
@@ -4177,11 +4509,13 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
         run_qa["phases_completed"].append("gates_nasdaq")
 
         # Gate4 sector concentration check
-        gate4_summary = build_gate4_sector_summary(exclusions_df)
+        gate4_summary = build_gate4_sector_summary(exclusions_df, passers_df)
         run_qa["gate4_sector_summary"] = gate4_summary
         if gate4_summary.get("_concentration_warning"):
             run_qa["gate4_sector_concentration_warning"] = True
-            log.warning("Gate4 sector concentration >35% detected")
+            log.warning("Gate4 sector concentration: %s excluded at >=%.1fx the base rate (%s)",
+                        gate4_summary.get("_warning_sectors"), GATE4_CONCENTRATION_LIFT,
+                        gate4_summary.get("_warning_basis"))
 
         # Save gate results
         save_gate_results(
@@ -4195,9 +4529,11 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
         run_qa["gate_variables"] = emit_gate_variables(
             constituents_df, info_map, stmt_map, gate_data, group, run_date)
 
-        # Phase 3 — scoring data for gate passers
+        # Phase 3 — scoring data for gate passers. Under the default overlay population the deeper
+        # inputs come back in THIS pass for every passer, so there is no second fetch (SECTION 7b).
         passers = passers_df["ticker"].tolist() if not passers_df.empty else []
-        phase3_results, phase3_errors = fetch_phase3_scoring(passers, group)
+        _deep = passers if wants_overlay_inputs() else []
+        phase3_results, phase3_errors = fetch_phase3_scoring(passers, group, overlay_inputs_for=_deep)
         run_qa["phases_completed"].append("phase3")
         run_qa["phase3_errors"]    = len(phase3_errors)
 
@@ -4215,6 +4551,7 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                         else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
                 row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+                apply_overlays_inline(row, ticker, info, inc, cf, bal, d)
                 scored_rows.append(row)
             except Exception as e:
                 tech_failures.append({"ticker": ticker, "reason": f"scoring_exception:{e}"})
@@ -4240,11 +4577,13 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
         run_qa["phases_completed"].append("gates_standard")
 
         # Gate4 sector concentration check
-        gate4_summary = build_gate4_sector_summary(exclusions_df)
+        gate4_summary = build_gate4_sector_summary(exclusions_df, passers_df)
         run_qa["gate4_sector_summary"] = gate4_summary
         if gate4_summary.get("_concentration_warning"):
             run_qa["gate4_sector_concentration_warning"] = True
-            log.warning("Gate4 sector concentration >35% detected")
+            log.warning("Gate4 sector concentration: %s excluded at >=%.1fx the base rate (%s)",
+                        gate4_summary.get("_warning_sectors"), GATE4_CONCENTRATION_LIFT,
+                        gate4_summary.get("_warning_basis"))
 
         # Save gate results
         save_gate_results(passers_df, exclusions_df, outputs_dir, run_date, group)
@@ -4253,9 +4592,10 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
         run_qa["gate_variables"] = emit_gate_variables(
             constituents_df, info_map, stmt_map, gate_data, group, run_date)
 
-        # Phase 3 — incremental scoring data
+        # Phase 3 — incremental scoring data (overlay inputs included in this pass — SECTION 7b)
         passers = passers_df["ticker"].tolist() if not passers_df.empty else []
-        phase3_results, phase3_errors = fetch_phase3_scoring(passers, group)
+        _deep = passers if wants_overlay_inputs() else []
+        phase3_results, phase3_errors = fetch_phase3_scoring(passers, group, overlay_inputs_for=_deep)
         run_qa["phases_completed"].append("phase3")
         run_qa["phase3_errors"] = len(phase3_errors)
 
@@ -4274,6 +4614,7 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                         else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
                 row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+                apply_overlays_inline(row, ticker, info, inc, cf, bal, d)
                 scored_rows.append(row)
             except Exception as e:
                 tech_failures.append({"ticker": ticker, "reason": f"scoring_exception:{e}"})
@@ -4284,54 +4625,50 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     run_qa["tech_failure_count"] = len(tech_failures)
     log.info(f"Scored: {len(scored_rows)} | Tech failures: {len(tech_failures)}")
 
-    # ── OVERLAYS (Jul-26 Part 5: SUMMARY-eligible AND Source Score >= floor, 8-min cap) ──
-    # Overlays are only shown for SUMMARY names, so gate on the SUMMARY-eligibility set + the single
-    # Source Score (>= SUMMARY_SOURCE_FLOOR) instead of the old fixed total-score cut, which missed
-    # high-forward / low-total names (e.g. MU: total 32 / source ~80).
-    # Fix Pack A6 (12-Jul-26): the score here is the UNIFIED source (deployability = FV-composite
-    # upside x conf; analyst real). At this pre-overlay point the FV composite runs on the
-    # analyst-target basis (val_hist arrives WITH the overlay fetch); the FINAL screen_source is
-    # re-stamped post-overlay below — "Source final before overlays" no longer holds by design.
-    # WP-M: cross-sectional momentum percentiles + forward-axis restamp. MUST run before the
-    # overlay gate and the Source stamp below — both read forward_axis_score.
+    # ── CROSS-SECTIONAL MOMENTUM ──────────────────────────────────────────────────────────────
+    # WP-M: percentile restamp of forward_axis_score. MUST run before ANY consumer of that field —
+    # the Source stamp below, and (in the `summary_gated` rollback mode only) the overlay
+    # population. screener_local called it AFTER its overlay gate for eight days and produced a
+    # different overlay set from the same code and config; the ordering is now asserted
+    # mechanically for both orchestrators by tests_jul2026/test_overlay_population.py.
     apply_cross_sectional_momentum(scored_rows)
 
-    import source_score as _ss
-    _ov_floor = getattr(_cfg, "SUMMARY_SOURCE_FLOOR", 70.0)
-    high_score_tickers = [
-        r["ticker"] for r in scored_rows
-        if _ss.summary_eligible(r) and _ss.source_score_for_row(r) >= _ov_floor
-    ]
-    log.info(f"High-score overlay candidates: {len(high_score_tickers)}")
-
-    if high_score_tickers:
-        hs_results, _ = fetch_phase3_scoring(high_score_tickers, group,
-                                             high_score_tickers=high_score_tickers)
-        overlay_start = time.time()
-        for row in scored_rows:
-            ticker = row["ticker"]
-            if ticker not in high_score_tickers:
-                continue
-            if time.time() - overlay_start > 480:
-                log.warning("Overlay 8-min cap reached — remaining skipped")
-                for r2 in scored_rows:
-                    if r2["ticker"] in high_score_tickers and not r2.get("overlay_status"):
-                        r2["overlay_status"] = "session_limit_reached"
-                break
-            d      = hs_results.get(ticker) or {}
-            b_info = info_map.get(ticker) or {} if not is_nasdaq else {}
-            info   = {**b_info, **d}
-            inc    = stmt_map.get(ticker, {}).get("income_stmt")
-            cf     = stmt_map.get(ticker, {}).get("cashflow")
-            bal    = stmt_map.get(ticker, {}).get("balance_sheet")
-            pa_out = {k: v for k, v in row.items() if k.startswith("score_") or k == "roic"}
-            geo    = geography_group(ticker)
-            try:
-                ovl = run_overlays(ticker, info, inc, cf, bal, d, pa_out, geo)
-                row.update(ovl)
-            except Exception as e:
-                log.warning(f"Overlay failed {ticker}: {e}")
-                row["overlay_status"] = f"error:{e}"
+    # ── OVERLAYS ──────────────────────────────────────────────────────────────────────────────
+    # Default (`all_gate_passers`): already applied inline in the scoring loop above, with no
+    # second fetch. This block is the declared rollback path and nothing else (SECTION 7b).
+    if wants_overlay_inputs():
+        run_qa["overlay_population_basis"] = "all_gate_passers"
+        run_qa["overlay_attempted"] = sum(1 for r in scored_rows if r.get("overlay_status"))
+        log.info(f"Overlays applied inline to {run_qa['overlay_attempted']}/{len(scored_rows)} "
+                 f"scored rows (population: all_gate_passers, no second fetch)")
+    else:
+        gated, _basis = overlay_population(scored_rows)
+        run_qa["overlay_population_basis"] = _basis
+        log.info(f"Overlay candidates ({_basis}): {len(gated)}")
+        if gated:
+            hs_results, _ = fetch_phase3_scoring(gated, group, overlay_inputs_for=gated)
+            overlay_start = time.time()
+            for row in scored_rows:
+                ticker = row["ticker"]
+                if ticker not in gated:
+                    continue
+                if time.time() - overlay_start > OVERLAY_TIME_CAP_SECS:
+                    log.warning("Overlay 8-min cap reached — remaining skipped")
+                    for r2 in scored_rows:
+                        if r2["ticker"] in gated and not r2.get("overlay_status"):
+                            r2["overlay_status"] = "session_limit_reached"
+                            r2["overlay_population_basis"] = _basis
+                    break
+                d      = hs_results.get(ticker) or {}
+                b_info = info_map.get(ticker) or {} if not is_nasdaq else {}
+                info   = {**b_info, **d}
+                inc    = stmt_map.get(ticker, {}).get("income_stmt")
+                cf     = stmt_map.get(ticker, {}).get("cashflow")
+                bal    = stmt_map.get(ticker, {}).get("balance_sheet")
+                apply_overlays_inline(row, ticker, info, inc, cf, bal, d,
+                                      mode="all_gate_passers")   # force: membership already decided
+                row["overlay_population_basis"] = _basis
+        run_qa["overlay_attempted"] = sum(1 for r in scored_rows if r.get("overlay_status"))
 
     run_qa["phases_completed"].append("overlays")
 
@@ -4388,6 +4725,16 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                         f"(floor {_sqa['summary_floor']})")
         log.info(f"SUMMARY (floor-based, A1): {_sqa['summary_count']} rows "
                  f"(eligible {_sqa['summary_eligible_count']}, cap {_sqa['summary_cap']})")
+        # R5.1 — assert the overlay contract HERE, the first point at which SUMMARY membership is
+        # final. Asserting it earlier is exactly the mistake the old gate made.
+        _ovc = overlay_coverage(scored_rows)
+        run_qa["overlay_coverage"] = _ovc
+        if _ovc["verdict"] == "FAIL":
+            log.error("OVERLAY COVERAGE FAIL — " + _ovc["message"])
+        elif _ovc["verdict"] == "WARN":
+            log.warning("OVERLAY COVERAGE WARN — " + _ovc["message"])
+        else:
+            log.info("Overlay coverage: " + _ovc["message"])
         run_qa["phases_completed"].append("fixpack_stamp")
     except Exception as _e:
         log.warning(f"Fix-Pack stamping failed (non-fatal, rows keep pre-stamp fields): {_e}")
@@ -4451,8 +4798,8 @@ def run_intramonth(tickers: list, run_date: str, outputs_dir: str, inv_analysis_
     info_map, _ = fetch_phase1_info(tickers, group)
     # Phase 2
     stmt_map, _ = fetch_phase2_statements(tickers, group)
-    # Phase 3
-    phase3_results, _ = fetch_phase3_scoring(tickers, group)
+    # Phase 3 — overlay inputs in the same pass (SECTION 7b); the old second fetch is gone
+    phase3_results, _ = fetch_phase3_scoring(tickers, group, overlay_inputs_for=tickers)
 
     for ticker in tickers:
         d = phase3_results.get(ticker)
@@ -4469,29 +4816,14 @@ def run_intramonth(tickers: list, run_date: str, outputs_dir: str, inv_analysis_
             inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                     else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
             row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+            # Intramonth has ALWAYS overlaid every ticker it looks at — it is the existing
+            # precedent for the population the weekly screen now adopts. It re-fetched to do it;
+            # it no longer needs to.
+            apply_overlays_inline(row, ticker, info, inc, cf, bal, d, mode="all_gate_passers")
             scored_rows.append(row)
         except Exception as e:
             tech_failures.append({"ticker": ticker, "reason": f"scoring_exception:{e}"})
             log.warning(f"Intramonth scoring failed {ticker}: {e}")
-
-    # Overlays for all tickers (intramonth runs are small — skip 8-min cap)
-    if scored_rows:
-        hs_results, _ = fetch_phase3_scoring(tickers, group, high_score_tickers=tickers)
-        for row in scored_rows:
-            ticker = row["ticker"]
-            d      = hs_results.get(ticker) or {}
-            base_info = info_map.get(ticker) or {}
-            info   = {**base_info, **d}
-            inc    = stmt_map.get(ticker, {}).get("income_stmt")
-            cf     = stmt_map.get(ticker, {}).get("cashflow")
-            bal    = stmt_map.get(ticker, {}).get("balance_sheet")
-            pa_out = {k: v for k, v in row.items() if k.startswith("score_") or k == "roic"}
-            geo    = geography_group(ticker)
-            try:
-                ovl = run_overlays(ticker, info, inc, cf, bal, d, pa_out, geo)
-                row.update(ovl)
-            except Exception as e:
-                log.warning(f"Intramonth overlay failed {ticker}: {e}")
 
     run_qa = {
         "group": group, "run_date": run_date,

@@ -292,7 +292,13 @@ def main():
             if _gv.get("error"):
                 print(f"WARN GATE_VARS batch {nxt}: {_gv['error']}")
             passers = passers_df["ticker"].tolist() if not passers_df.empty else []
-            ph3, _e = (_fg.with_backoff(core.fetch_phase3_scoring, passers, pg) if _fg else core.fetch_phase3_scoring(passers, pg))  # H-5
+            # SECTION 7b: under the default overlay population the deeper inputs come back in
+            # THIS pass, so the overlay stage below no longer re-fetches phases 1, 2 and 3 for a
+            # second time. It re-fetched all three because this path's resume state is JSON and
+            # DataFrames cannot survive it — the cost was structural, not incidental.
+            _deep = passers if core.wants_overlay_inputs() else []
+            ph3, _e = (_fg.with_backoff(core.fetch_phase3_scoring, passers, pg, overlay_inputs_for=_deep)
+                       if _fg else core.fetch_phase3_scoring(passers, pg, overlay_inputs_for=_deep))  # H-5
             scored, techfail = [], []
             for t in passers:
                 d = ph3.get(t)
@@ -307,6 +313,7 @@ def main():
                     inc_q = _iq if (_iq is not None and not (hasattr(_iq, "empty") and _iq.empty)) \
                         else stmt_map.get(t, {}).get("income_stmt_quarterly")
                     row = core._score_ticker(t, info, inc, cf, bal, inc_q, cdf)
+                    core.apply_overlays_inline(row, t, info, inc, cf, bal, d)
                     scored.append(row)
                 except Exception as e:
                     techfail.append({"ticker": t, "reason": f"scoring_exception:{e}"})
@@ -325,18 +332,36 @@ def main():
                 print(f"FALLBACK_TO_COMPOSIO: cumulative fetch failure {fr:.0%} > {a.max_fail_rate:.0%}"); sys.exit(3)
             if remaining > 0:
                 print(f"NOT_DONE - {remaining} score batch(es) left. Call again."); return
-        # Jul-26 Part 5: overlay-enrich the SUMMARY-eligible set whose Source Score >= floor (replaces the
-        # retired fixed total-score trigger), so forward-admitted lower-total reversals get their overlay data.
-        import source_score as _ss
-        _ov_floor = getattr(getattr(core, "_cfg", None), "SUMMARY_SOURCE_FLOOR", 70.0)
-        hs = [r["ticker"] for r in state["scored"]
-              if _ss.summary_eligible(r) and _ss.source_score_for_row(r) >= _ov_floor]
-        ob = a.overlay_batch
-        state["overlay_plan"] = [hs[i:i + ob] for i in range(0, len(hs), ob)]
-        state["overlay_done"] = {}
+        # ── OVERLAY POPULATION (SECTION 7b) ───────────────────────────────────────────────────
+        # Default `all_gate_passers`: already applied inline in the batch loop above — no plan, no
+        # second fetch, and nothing that can be evaluated in the wrong order.
+        #
+        # ⚑ THE ORDER BELOW IS LOAD-BEARING, and getting it wrong here is precisely the defect
+        # this section replaces. From 07-Aug-2026 to 19-Aug-2026 this path computed the gate from
+        # `source_score_for_row` BEFORE `core.apply_cross_sectional_momentum` restamped
+        # forward_axis_score — 60% of that score. Every line ran, the run succeeded, and the
+        # overlay set simply was not the SUMMARY set: 5 of 8 SUMMARY names on the 08-Aug F250-SPI
+        # screen and 5 of 40 on 15-Aug SP500 shipped with no overlays at all. The restamp is
+        # therefore invoked HERE, before the population is read, in the rollback path too.
+        if core.wants_overlay_inputs():
+            state["overlay_plan"] = []
+            state["overlay_done"] = {}
+            _n_ovl = sum(1 for r in state["scored"] if r.get("overlay_status"))
+            print(f"SCORING_DONE overlays_inline={_n_ovl}/{len(state['scored'])} "
+                  f"population=all_gate_passers overlay_batches=0")
+        else:
+            for _r in state["scored"]:
+                _r.setdefault("forward_axis_score_bands", _r.get("forward_axis_score"))
+                _r.setdefault("score_f_price_mom_blend_bands", _r.get("score_f_price_mom_blend"))
+            core.apply_cross_sectional_momentum(state["scored"])
+            hs, _pop_basis = core.overlay_population(state["scored"])
+            ob = a.overlay_batch
+            state["overlay_plan"] = [hs[i:i + ob] for i in range(0, len(hs), ob)]
+            state["overlay_done"] = {}
+            print(f"SCORING_DONE gated={len(hs)} basis={_pop_basis} "
+                  f"overlay_batches={len(state['overlay_plan'])}")
         state["stage"] = "overlay"
         save_state(state, partial)
-        print(f"SCORING_DONE high_score={len(hs)} overlay_batches={len(state['overlay_plan'])}")
 
     if state["stage"] == "overlay":
         oplan = state.get("overlay_plan", []); on = len(oplan)
@@ -344,7 +369,7 @@ def main():
         if onx is not None:
             obatch = oplan[onx]
             scored_by_t = {r["ticker"]: r for r in state["scored"]}
-            hs_results, _ = core.fetch_phase3_scoring(obatch, pg, high_score_tickers=obatch)
+            hs_results, _ = core.fetch_phase3_scoring(obatch, pg, overlay_inputs_for=obatch)
             info_map, _ = core.fetch_phase1_info(obatch, pg)
             stmt_map, _ = core.fetch_phase2_statements(obatch, pg)
             for t in obatch:
@@ -356,13 +381,10 @@ def main():
                 inc = stmt_map.get(t, {}).get("income_stmt")
                 cf = stmt_map.get(t, {}).get("cashflow")
                 bal = stmt_map.get(t, {}).get("balance_sheet")
-                pa_out = {k: v for k, v in row.items() if (k.startswith("score_") or k == "roic")}
-                try:
-                    geo = core.geography_group(t)
-                    ovl = core.run_overlays(t, info, inc, cf, bal, d, pa_out, geo)
-                    row.update(native_dict(ovl))
-                except Exception as e:
-                    row["overlay_status"] = f"error:{e}"
+                core.apply_overlays_inline(row, t, info, inc, cf, bal, d,
+                                           mode="all_gate_passers")   # membership already decided
+                for _k, _v in list(row.items()):
+                    row[_k] = native(_v)
             state["scored"] = list(scored_by_t.values())
             state["overlay_done"][str(onx)] = 1
             save_state(state, partial)
@@ -457,6 +479,15 @@ def main():
               f"(eligible {_sqa_fin['summary_eligible_count']}, floor {_sqa_fin['summary_floor']:g}, "
               f"cap {_sqa_fin['summary_cap']})"
               + (" SUMMARY_THIN_WARNING" if _sqa_fin.get("summary_thin_warning") else ""))
+        # R5.1 — the overlay contract, at the first point where SUMMARY membership is final.
+        # Both orchestrators call the SAME check, so "it passed in core" can never again mean
+        # something different from "it passed on the path that actually runs every week."
+        _ovc = core.overlay_coverage(scored)
+        print(f"OVERLAY_COVERAGE {_ovc['verdict']} basis={_ovc['mode']} "
+              f"summary={_ovc['summary']} missing={len(_ovc['summary_missing_overlays'])} "
+              f"with_overlays={_ovc['with_overlays']}/{_ovc['scored']} "
+              f"partial={_ovc['partial_overlays']} unresolved={_ovc['unresolved_by_overlay']} "
+              f"| {_ovc['message']}")
     except Exception as _e:
         print(f"WARN fixpack stamping failed (non-fatal, rows keep pre-stamp fields): {_e}")
     passers_df = pd.DataFrame(state["passers"]) if state["passers"] else pd.DataFrame()
@@ -464,7 +495,10 @@ def main():
     core.save_full_data(scored, a.outputs, run_date, group)
     core.save_gate_results(passers_df, excl_df, a.outputs, run_date, group)
     try:
-        g4 = core.build_gate4_sector_summary(excl_df)
+        # ISA-0375 + ISA-0368: the at-risk denominator must be passed HERE TOO, or this path
+        # silently falls back to the retired raw-share basis. Parity of presence is not parity
+        # of arguments.
+        g4 = core.build_gate4_sector_summary(excl_df, passers_df)
     except Exception:
         g4 = {}
     total = len(state["const"])

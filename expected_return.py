@@ -54,6 +54,7 @@ Stdlib only (pandas/numpy NEVER imported here). Self-test: python3 expected_retu
 from __future__ import annotations
 
 import json as _json
+import math as _math
 import os as _os
 
 try:
@@ -72,7 +73,15 @@ _NEUTRAL_BAND = float(_c("ER_RERATE_NEUTRAL_BAND", 0.05))
 _REGIME_DAMPING = dict(_c("ER_RERATE_REGIME_DAMPING", {}) or {}) or {
     "RISK_ON": 0.25, "LATE_CYCLE": 0.50, "RISK_OFF": 1.00, "RECOVERY": 1.00}
 
-_G_HI, _G_LO = 50.0, -25.0          # growth sanity clamp, mirrors the Part B g-cap doctrine
+# ISA-0377. ONE HOME: these were module literals; they are now read from scoring_config like
+# every other operative threshold. _G_HI is now an ASYMPTOTE, not a value names are pinned to.
+_G_HI = float(_c("ER_GROWTH_CAP_PP", 50.0))
+_G_LO = float(_c("ER_GROWTH_FLOOR_PP", -25.0))
+_KNEE_ON = bool(_c("ER_GROWTH_KNEE_ENABLED", True))
+_KNEE_Q = float(_c("ER_GROWTH_KNEE_QUANTILE", 66.667))
+_KNEE_FLOOR = float(_c("ER_GROWTH_KNEE_FLOOR_PP", 15.0))
+_KNEE_CEIL = float(_c("ER_GROWTH_KNEE_CEIL_PP", 40.0))
+_KNEE_MIN_N = int(_c("ER_GROWTH_KNEE_MIN_N", 30))
 
 
 class AnchorTableMissing(RuntimeError):
@@ -136,6 +145,133 @@ def _median(vals):
     return float(s[n // 2]) if n % 2 else float((s[n // 2 - 1] + s[n // 2]) / 2.0)
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0377 — THE GROWTH BOUND: cross-sectional basis, monotone shape
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def growth_transform(g, knee=None, hi=None, lo=None):
+    """Map raw forward growth to the growth term. Returns (value, basis).
+
+    THREE PROPERTIES, and each one is asserted rather than asserted-in-prose:
+      MONOTONE   strictly increasing in g above the knee, so two names that differ in growth
+                 differ in E[r]. The flat cut this replaces mapped an 80-16,971% span to a point.
+      BOUNDED    tanh -> 1, so the value approaches `hi` and never reaches it. The LEVEL is
+                 therefore unchanged: nothing can contribute more growth than the old cap allowed.
+      IDENTITY   below the knee the function is g. The ordinary middle of the distribution is
+                 untouched, so this is not a re-scoring of the whole universe.
+
+    `knee=None`, a knee outside (lo, hi), or ER_GROWTH_KNEE_ENABLED=False all fall back to the
+    LEGACY FLAT CUT — named in the basis, never silent (R4.13 rollback, and the honest state when
+    a frame is too small to state its own quantile).
+    """
+    if g is None:
+        return None, "MISSING"
+    hi = _G_HI if hi is None else float(hi)
+    lo = _G_LO if lo is None else float(lo)
+    g = float(g)
+    if g < lo:
+        # The downside stays a flat floor and that is a MEASURED refusal (scoring_config, ISA-0377):
+        # the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists
+        # down here, and no capital is ever ranked out of the bottom of a screen.
+        return lo, "FLOOR_ABSOLUTE"
+    if not _KNEE_ON or knee is None or not (lo < float(knee) < hi):
+        return (hi, "CEIL_ABSOLUTE") if g > hi else (g, "RAW")
+    knee = float(knee)
+    if g <= knee:
+        return g, "RAW"
+    span = hi - knee
+    # ⚑ THE SHAPE IS arctan, NOT tanh, AND THE REASON IS MEASURED — see ISA-0381. Both have unit
+    # slope at the knee (so the join is smooth) and both approach 1, but `tanh(u)` REACHES 1.0 in
+    # double precision at u = 19.06. On the two Nasdaq frames the knee sits at the 40pp ceiling, so
+    # span = 10pp and tanh saturates at raw growth of 230pp — which is the 90th percentile of that
+    # very frame. The named transform would have reinstated the flat cut across the top decile of
+    # the universe where the defect was worst. (2/pi)*arctan(pi*u/2) has the same unit slope and
+    # does not reach 1.0 until u ~ 3.7e15, i.e. never on any real frame.
+    u = (g - knee) / span
+    v = (2.0 / _math.pi) * _math.atan(_math.pi * u / 2.0)
+    out = knee + span * v
+    if not out < hi:
+        # Unreachable on any real frame, but a value that HAS saturated must never be reported as
+        # though it were measured -- that is the whole defect. It is named, not silently returned.
+        return hi, "CEIL_SATURATED"
+    return out, "COMPRESSED_XS"
+
+
+def _row_growth_pct(row, get=None):
+    """The growth INPUT in percent units, resolved exactly as the row adapter resolves it.
+
+    ⚑ One home. `fwd_eps_growth` is a FRACTION in the frame and `er_growth` is a PERCENT; reading
+    one as the other understates the distribution by ~100x, which is the first thing
+    er_clamp_diagnostic got wrong. The scale factors live in _KEYS and are read from there.
+    """
+    g = get or (lambda r, k: r.get(k) if hasattr(r, "get") else None)
+    for k, scale in _KEYS["fwd_eps_growth_pct"]:
+        v = _num(g(row, k))
+        if v is not None:
+            return v * scale
+    for k, scale in _KEYS["rev_growth_pct"]:
+        v = _num(g(row, k))
+        if v is not None:
+            return v * scale * 0.8
+    return None
+
+
+def _quantile(sorted_vals, q_pct):
+    """Linear-interpolation quantile. No numpy dependency on the screen path."""
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    if n == 1:
+        return sorted_vals[0]
+    pos = (q_pct / 100.0) * (n - 1)
+    lo_i = int(_math.floor(pos))
+    hi_i = min(lo_i + 1, n - 1)
+    frac = pos - lo_i
+    return sorted_vals[lo_i] * (1 - frac) + sorted_vals[hi_i] * frac
+
+
+def build_growth_bounds(rows, get=None):
+    """The frame's own growth knee, published beside the anchor table (ISA-0377).
+
+    `knee_state` is the FALSIFIER and it is stored, not inferred later: a knee that is
+    FLOOR_BOUND or CEIL_BOUND on a majority of frames means the cross-sectional basis has
+    collapsed back into a constant and the item must re-raise.
+    """
+    vals = sorted(v for v in (_row_growth_pct(r, get) for r in (rows or [])) if v is not None)
+    n = len(vals)
+    out = {"quantile": _KNEE_Q, "n_growth": n, "min_n": _KNEE_MIN_N,
+           "hi_pp": _G_HI, "lo_pp": _G_LO, "shape": "tanh", "enabled": _KNEE_ON,
+           "knee_floor_pp": _KNEE_FLOOR, "knee_ceil_pp": _KNEE_CEIL,
+           "downside_basis": ("ABSOLUTE — measured refusal: the lower tercile is positive on 5 of "
+                              "6 retained frames, so no cross-sectional knee exists below zero"),
+           "built_by": "expected_return.build_growth_bounds (ISA-0377)"}
+    if n < _KNEE_MIN_N or not _KNEE_ON:
+        # R2.10 — "I could not measure it" and "it is average" must not produce the same output.
+        out.update({"knee_pp": None, "quantile_value_pp": (round(_quantile(vals, _KNEE_Q), 3)
+                                                           if n else None),
+                    "knee_state": ("DISABLED" if not _KNEE_ON else "INSUFFICIENT_N"),
+                    "basis": "ABSOLUTE_LEGACY",
+                    "reason": ("the frame cannot state its own quantile from %d growth values "
+                               "(ER_GROWTH_KNEE_MIN_N=%d), so the legacy flat cut applies and says "
+                               "so on every row" % (n, _KNEE_MIN_N)) if _KNEE_ON else
+                              "ER_GROWTH_KNEE_ENABLED is False (R4.13 rollback)"})
+        return out
+    qv = _quantile(vals, _KNEE_Q)
+    knee = min(max(qv, _KNEE_FLOOR), _KNEE_CEIL)
+    out.update({
+        "quantile_value_pp": round(qv, 3),
+        "knee_pp": round(knee, 3),
+        "knee_state": ("INTERIOR" if _KNEE_FLOOR < qv < _KNEE_CEIL else
+                       ("FLOOR_BOUND" if qv <= _KNEE_FLOOR else "CEIL_BOUND")),
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": round(100.0 * sum(1 for v in vals if v > knee) / n, 2),
+        "share_above_hi_pct": round(100.0 * sum(1 for v in vals if v > _G_HI) / n, 2),
+        "share_below_lo_pct": round(100.0 * sum(1 for v in vals if v < _G_LO) / n, 2),
+        "median_pp": round(_quantile(vals, 50.0), 3),
+    })
+    return out
+
+
 def build_anchor_table(rows, *, run_date, group, get=None):
     """Build the cross-sectional anchor table ONCE per screen, from the whole frame.
 
@@ -194,6 +330,10 @@ def build_anchor_table(rows, *, run_date, group, get=None):
         # JSON-native (lists, not tuples) — a table that does not survive persist->load unchanged
         # is not the same table, and the pre-run reads the PERSISTED copy.
         "sanity_bands": {k: list(v) for k, v in (_c("ER_MULTIPLE_SANITY", {}) or {}).items()},
+        # ISA-0377 — the frame's own growth knee travels WITH the table, for the same reason the
+        # anchor evidence does: the pre-run reads the persisted copy weeks later and must apply
+        # the SCREEN's cross-section, never one recomputed from a handful of pre-run rows (§3.3).
+        "growth_bounds": build_growth_bounds(rows, get=get),
         "min_sector_n": min_n,
         "min_rows": int(_c("ER_ANCHOR_MIN_ROWS", 30)),
         # ⚑ FIT FOR ANCHORING. A cross-sectional anchor built from a handful of rows is not a
@@ -281,6 +421,7 @@ def load_anchor_table(group=None, base_dir=None, as_of=None, required=True, fit_
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 
 def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
+                            growth_knee_pp=None,
                             current_multiple=None, median_5y_multiple=None,
                             dividend_yield_pct=None, sharecount_change_3y_pct_pa=None,
                             regime=None,
@@ -311,12 +452,20 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
             g = rg * 0.8; basis.append("growth=rev_x0.8_fallback"); present += 0.3
         else:
             g = 0.0; basis.append("growth=MISSING")
+    # ── the bound (ISA-0377) ──────────────────────────────────────────────────────────────────
+    # `er_growth_clamped` KEEPS ITS ORIGINAL MEANING — raw growth outside the absolute bounds —
+    # because it is a stored column with downstream readers, and quietly redefining a stored field
+    # is the failure class this framework exists to prevent. What is NEW is a separate field.
+    g_raw = g
     g_clamped = bool(g > _G_HI or g < _G_LO)
-    g = max(min(g, _G_HI), _G_LO)
-    if g_clamped:
-        # §7 F9: on the 07-Aug SP500 g == 50.0 EXACTLY for STX, WDC, BMY, VRT, PLTR and -25.0 for
-        # DAL. The ordering at the top of the screen is then set by the CLAMP, not by the data.
-        # A saturated value must never be ranked as though it were measured.
+    g, g_shape = growth_transform(g, knee=growth_knee_pp)
+    g_compressed = bool(abs(g - g_raw) > 1e-9)
+    if g_shape == "COMPRESSED_XS":
+        # §7 F9 was: on the 07-Aug SP500 g == 50.0 EXACTLY for STX, WDC, BMY, VRT and PLTR — the
+        # ordering at the top of the screen was set by the CLAMP, not by the data. Above the knee
+        # the value is now strictly increasing in raw growth, so those five names order again.
+        basis.append(f"growth_COMPRESSED@knee{growth_knee_pp:g}->{g:.1f}")
+    elif g_shape in ("CEIL_ABSOLUTE", "FLOOR_ABSOLUTE"):
         basis.append(f"growth_CLAMPED@{g:g}")
 
     # ── re-rate: two anchors, and they must agree ─────────────────────────────────────────────
@@ -436,6 +585,10 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
             "er_multiple_field": multiple_field,
             "er_multiple_value": cur,
             "er_growth_clamped": g_clamped,
+            "er_growth_raw": (None if g_raw is None else round(g_raw, 1)),
+            "er_growth_basis": g_shape,
+            "er_growth_knee_pp": growth_knee_pp,
+            "er_growth_compressed": g_compressed,
             "er_rerate_clamped": bool(rer_clamped),
             "er_anchor_table_as_of": anchor_table_as_of,
             "er_anchor_table_group": anchor_table_group,
@@ -585,6 +738,10 @@ def expected_return_for_row(row, get=None, regime=None, anchor_table=None,
         kw["anchor_table_as_of"] = (anchor_table or {}).get("as_of")
         kw["anchor_table_group"] = (anchor_table or {}).get("group")
 
+    # ISA-0377 — the knee is a property of the FRAME, so it arrives with the frame's table and
+    # is never recomputed per row. No table in scope -> no knee -> the legacy flat cut, named in
+    # er_growth_basis rather than assumed.
+    kw["growth_knee_pp"] = ((anchor_table or {}).get("growth_bounds") or {}).get("knee_pp")
     kw["regime"] = regime if regime is not None else current_market_regime()
     return compute_expected_return(**kw)
 

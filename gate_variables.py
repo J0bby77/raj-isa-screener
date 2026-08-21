@@ -138,6 +138,21 @@ def assert_ranges(records, strict=True):
                     f"{col}={v!r} outside plausible range [{lo}, {hi}] ({unit}). "
                     f"If this is a distance-below-threshold, it is in the wrong column — "
                     f"gate_variables stores LEVELS ONLY.")
+    # ── ISA-0130. Capture is a property of PRODUCING the artefact, not a prose step (R4.11).
+    # Before this, the warn was raised and the breaching VALUE was thrown away, so "act only if
+    # the frequency rises" was a rule nothing could evaluate and SKHY (ISA-0341) became
+    # permanently undiagnosable. Retention runs BEFORE the raise, so a strict failure retains
+    # its own evidence.
+    if viol:
+        try:
+            import plausibility_watch as _pw
+            _grp = next((r.get("group") for r in records if r.get("group")), None)
+            _rd = next((r.get("run_date") for r in records if r.get("run_date")), None)
+            _pw.capture_violations(viol, group=_grp, run_date=_rd, rows_scanned=len(records))
+        except Exception as _e:                                     # noqa: BLE001
+            # R2.10 — a failure to RETAIN must never be confused with an absence of warns.
+            viol.append(f"PLAUSIBILITY_CAPTURE_FAILED: {type(_e).__name__}: {_e}")
+
     if viol and strict:
         raise GateVariableRangeError(viol[0] + f"  (+{len(viol)-1} more)" if len(viol) > 1
                                      else viol[0])
