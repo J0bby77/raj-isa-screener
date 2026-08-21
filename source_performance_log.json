@@ -1,8 +1,8 @@
 {
-  "_description": "ISA Growth Stock Analysis \u2014 Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts \u2014 they accumulate across runs to build reliable signal.",
+  "_description": "ISA Growth Stock Analysis — Source Performance Log. Read at start of every run to dynamically reorder source waterfalls. Updated at end of every run with observed success rates. Never reset counts — they accumulate across runs to build reliable signal.",
   "_coverage_target": "99% of all constituents screened and scored per run",
   "_waterfall_rule": "For each index+metric combination, sort sources by success_rate descending before attempting. Demote sources with success_rate < 0.50. The default waterfall in the Data Sourcing Policy is overridden by observed rates in this file.",
-  "last_updated": "2026-08-14",
+  "last_updated": "2026-08-21",
   "indices": {
     "S&P 500": {
       "sector": {
@@ -211,113 +211,171 @@
     "S&P MidCap 400": {
       "sector": {
         "primary_source": "yfinance",
-        "attempts": 1626,
-        "successes": 1626,
+        "attempts": 1839,
+        "successes": 1839,
         "success_rate": 1.0,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "sector"
       },
       "gross_margin": {
         "primary_source": "yfinance",
-        "attempts": 1357,
-        "successes": 1346,
-        "success_rate": 0.9919,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 1570,
+        "successes": 1559,
+        "success_rate": 0.993,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "gross_margin"
       },
       "fcf_positivity": {
         "primary_source": "yfinance",
-        "attempts": 1357,
-        "successes": 1346,
-        "success_rate": 0.9919,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 1570,
+        "successes": 1559,
+        "success_rate": 0.993,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "fcf_positive_years"
       },
       "revenue_cagr": {
         "primary_source": "yfinance",
-        "attempts": 1357,
-        "successes": 1346,
-        "success_rate": 0.9919,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 1570,
+        "successes": 1559,
+        "success_rate": 0.993,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "rev_cagr"
       },
       "roic": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 747,
-        "success_rate": 0.992,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 960,
+        "success_rate": 0.9938,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "roic"
       },
       "forward_pe": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 748,
-        "success_rate": 0.9934,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 960,
+        "success_rate": 0.9938,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 212,
+        "last_run_rate": 0.9953,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "fwd_pe"
       },
       "ev_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 744,
-        "success_rate": 0.988,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 955,
+        "success_rate": 0.9886,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 211,
+        "last_run_rate": 0.9906,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "ev_ebitda"
       },
       "net_debt_ebitda": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 749,
-        "success_rate": 0.9947,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 958,
+        "success_rate": 0.9917,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 209,
+        "last_run_rate": 0.9812,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "net_debt_ebitda"
       },
       "target_price": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 750,
-        "success_rate": 0.996,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 963,
+        "success_rate": 0.9969,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "target_price_mean"
       },
       "52w_range": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 753,
+        "attempts": 966,
+        "successes": 966,
         "success_rate": 1.0,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "position_52wk"
       },
       "fcf_margin": {
         "primary_source": "yfinance",
-        "attempts": 753,
-        "successes": 749,
-        "success_rate": 0.9947,
-        "last_run": "2026-07-17",
-        "last_run_attempts": 214,
-        "last_run_successes": 214,
-        "last_run_rate": 1.0
+        "attempts": 966,
+        "successes": 962,
+        "success_rate": 0.9959,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 213,
+        "last_run_rate": 1.0,
+        "basis": "measured_from_frame",
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "fcf_margin"
+      },
+      "overlay_quotesummary": {
+        "primary_source": "yfinance",
+        "attempts": 213,
+        "successes": 199,
+        "basis": "measured_from_frame",
+        "success_rate": 0.9343,
+        "last_run": "2026-08-21",
+        "last_run_attempts": 213,
+        "last_run_successes": 199,
+        "last_run_rate": 0.9343,
+        "last_frame": "20260821_MIDCAP400_full_data.csv",
+        "last_index_code": null,
+        "measured_column": "overlay_status"
       }
     },
     "FTSE 100": {
@@ -826,7 +884,7 @@
         "last_run_attempts": 200,
         "last_run_successes": 198,
         "last_run_rate": 0.99,
-        "note": "Constituent feed sourced via iShares CHSPI CSV (live) \u2014 success rate has continued to improve since the May-09 curated-list run."
+        "note": "Constituent feed sourced via iShares CHSPI CSV (live) — success rate has continued to improve since the May-09 curated-list run."
       },
       "gross_margin": {
         "primary_source": "yfinance",
@@ -1143,7 +1201,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq&download=true",
         "parse_path": "r.json()[\"data\"][\"rows\"]",
         "filter": "marketCap > $2bn applied at sourcing time",
-        "expected_count": "~1,100\u20131,300 post-filter",
+        "expected_count": "~1,100–1,300 post-filter",
         "status": "confirmed_working",
         "confirmed_date": "2026-05-22",
         "notes": "Returns all ~4,141 Nasdaq-listed stocks; $2bn market cap filter applied during fetch reduces to ~1,131. First used as fallback on 2026-05-22 run after ONEQ WAF block; now designated primary."
@@ -1153,7 +1211,7 @@
         "url": "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq",
         "parse_path": "r.json()[\"data\"][\"table\"][\"rows\"]",
         "status": "confirmed_working",
-        "notes": "Same endpoint without download=true param \u2014 different JSON parse path."
+        "notes": "Same endpoint without download=true param — different JSON parse path."
       },
       "dead_sources": [
         {
@@ -1189,10 +1247,10 @@
         "name": "stoxx_com_html_scrape",
         "url": "https://stoxx.com/index/sxxp/?components=true",
         "format": "HTML_table",
-        "fields": "Company, Supersector, Country, Weight \u2014 NO ISINs or tickers",
+        "fields": "Company, Supersector, Country, Weight — NO ISINs or tickers",
         "expected_count": "600 rows",
         "status": "confirmed_working_limited",
-        "notes": "Last resort only \u2014 no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
+        "notes": "Last resort only — no ISINs or tickers; requires unreliable name-to-ticker resolution. Log CONSTITUENT_SOURCE_FALLBACK=stoxx_html in RUN_QA if used."
       },
       "dead_sources": [
         {
@@ -1217,7 +1275,7 @@
       ]
     }
   },
-  "_last_run_notes": "STOXX600 run 2026-07-25 (isa-eu-a-sat4, forward-led LOCAL, constituent-hybrid via Composio dump + GitHub bridge): 598 constituents, 271 scored, 0 tech fails, 19 SUMMARY eligible (floor 70, cap 40, of 65 viability-eligible). Top Source Score IFX.DE 92 (Fwd 100/100). Top Total: KCR.HE/FTK.DE 45/50. Gate4 sector-concentration flag fired (structurally always True per a pre-existing calc bug in build_gate4_sector_summary \u2014 not fixed this run, see retrospective). GH_PAT was missing from the persistent Composio /mnt/files/isa_env/.env and had to be added mid-run before the constituent-hybrid GitHub bridge push would authenticate. Excel + retrospective + CSVs delivered to Investment Analysis folder; score panel logged (store_total=1246); drawdown/regime check RISK_ON, no tranche trigger.",
+  "_last_run_notes": "STOXX600 run 2026-07-25 (isa-eu-a-sat4, forward-led LOCAL, constituent-hybrid via Composio dump + GitHub bridge): 598 constituents, 271 scored, 0 tech fails, 19 SUMMARY eligible (floor 70, cap 40, of 65 viability-eligible). Top Source Score IFX.DE 92 (Fwd 100/100). Top Total: KCR.HE/FTK.DE 45/50. Gate4 sector-concentration flag fired (structurally always True per a pre-existing calc bug in build_gate4_sector_summary — not fixed this run, see retrospective). GH_PAT was missing from the persistent Composio /mnt/files/isa_env/.env and had to be added mid-run before the constituent-hybrid GitHub bridge push would authenticate. Excel + retrospective + CSVs delivered to Investment Analysis folder; score panel logged (store_total=1246); drawdown/regime check RISK_ON, no tranche trigger.",
   "runs": [
     {
       "run_date": "2026-08-08",
@@ -1292,7 +1350,7 @@
       "gate4_excluded": 59,
       "gate_data_unresolved": 16,
       "technical_source_failure": 135,
-      "technical_failure_cause": "yfinance 401 Invalid Crumb cascade \u2014 sequential Composio calls without inter-batch sleep; crumb expiry not recovered for ~27% of scoring batches",
+      "technical_failure_cause": "yfinance 401 Invalid Crumb cascade — sequential Composio calls without inter-batch sleep; crumb expiry not recovered for ~27% of scoring batches",
       "scored": 236,
       "candidate_rankable": 208,
       "mandatory_minimum_fails": 27,
@@ -1310,7 +1368,7 @@
       "gate4_largest_sector": "Technology",
       "gate4_largest_sector_pct": 20.3,
       "excel_file": "Growth Stock Analysis SP500 W-e 04-Jul-26.xlsx",
-      "excel_location": "Composio /mnt/files/isa_screener/ \u2014 OneDrive not connected",
+      "excel_location": "Composio /mnt/files/isa_screener/ — OneDrive not connected",
       "retrospective_file": "20260704_SP500_retrospective.md",
       "dq_flags": [
         {
@@ -1326,7 +1384,7 @@
         {
           "severity": "M",
           "event": "LOCAL_BASH_VM_DOWN",
-          "detail": "VM service not running \u2014 forced Composio fallback for entire run."
+          "detail": "VM service not running — forced Composio fallback for entire run."
         }
       ],
       "notes": "First run with significant tech failure rate (27%). Composio 401 crumb cascade; add inter-batch sleep for future Composio loops. Email sent. Excel delivery pending OneDrive reconnection."
@@ -1435,7 +1493,7 @@
         {
           "severity": "H",
           "event": "CONSTITUENT_SOURCE_FAILURE",
-          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward \u2014 Xtrackers XLSX now primary)"
+          "detail": "STOXX CSV and iShares both 404; used Wikipedia (prohibited going forward — Xtrackers XLSX now primary)"
         },
         {
           "severity": "M",
@@ -1674,14 +1732,14 @@
       "gate4_largest_sector_pct": 40.0,
       "excel_file": "Growth Stock Analysis Nasdaq W-e 10-Jul-26.xlsx",
       "retrospective_file": "20260710_NASDAQ_retrospective.md",
-      "notes": "First S5 forward-led NASDAQ run. 888 constituents (+43 vs Jun-26 run), 435 scored (vs 229 in v27 \u2014 90% pool expansion from gate relaxation). 0% tech fail rate. NVDA/DXCM 50/50 perfect total; APP 48/50 + 100/100 fwd axis. AUPH Igniting stage. Gate4 Technology concentration 40% (structural for Nasdaq)."
+      "notes": "First S5 forward-led NASDAQ run. 888 constituents (+43 vs Jun-26 run), 435 scored (vs 229 in v27 — 90% pool expansion from gate relaxation). 0% tech fail rate. NVDA/DXCM 50/50 perfect total; APP 48/50 + 100/100 fwd axis. AUPH Igniting stage. Gate4 Technology concentration 40% (structural for Nasdaq)."
     },
     {
       "run_date": "2026-07-11",
       "group": "F250-SPI",
       "task_id": "isa-eu-b-sat2",
       "run_mode": "local_primary_constituent_hybrid",
-      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) \u2014 no manual flag flip needed.",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) — no manual flag flip needed.",
       "constituent_source": "Composio_constituent_hybrid_dump_via_GitHub",
       "constituents_fetched": 449,
       "accounted": 449,
@@ -1719,14 +1777,14 @@
         "LOCAL_RESUME_CACHE_RESET_ONCE_MIDRUN",
         "QUOTESUMMARY_404_EU_UK_OVERLAYS"
       ],
-      "notes": "Forward-led (live framework, no manual flag flip). 449 constituents, 138 scored, 127 rankable, 19 SUMMARY-eligible by Source Score, 0 tech fails. Top total TRN.L/TEMN.SW 46/50; top Source Score KLR.L 85 (100/100 fwd axis). Gate4 Industrials concentration 45.7% (up from 43.9% Jun-28). sync_repo_to_github.py aborted (unrelated VCI script syntax errors: build_vci_email.py, vci_acs_scorer.py) \u2014 GitHub fallback mirror not refreshed this run, but all F250-SPI-relevant scripts verified compiling and unaffected. Local resume cache reset once after a tool timeout (~batch 28/30), forcing a full batch restart \u2014 re-scored deterministically, no data loss, just extra calls. Composio /mnt/files/isa_env/.env missing again, recreated per protocol (third consecutive EU run to hit this)."
+      "notes": "Forward-led (live framework, no manual flag flip). 449 constituents, 138 scored, 127 rankable, 19 SUMMARY-eligible by Source Score, 0 tech fails. Top total TRN.L/TEMN.SW 46/50; top Source Score KLR.L 85 (100/100 fwd axis). Gate4 Industrials concentration 45.7% (up from 43.9% Jun-28). sync_repo_to_github.py aborted (unrelated VCI script syntax errors: build_vci_email.py, vci_acs_scorer.py) — GitHub fallback mirror not refreshed this run, but all F250-SPI-relevant scripts verified compiling and unaffected. Local resume cache reset once after a tool timeout (~batch 28/30), forcing a full batch restart — re-scored deterministically, no data loss, just extra calls. Composio /mnt/files/isa_env/.env missing again, recreated per protocol (third consecutive EU run to hit this)."
     },
     {
       "run_date": "2026-07-17",
       "group": "MIDCAP400",
       "task_id": "isa-sp-midcap400-fri3",
       "run_mode": "local",
-      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) \u2014 no manual flag flip needed. First MIDCAP400 run under floor-based SUMMARY.",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) — no manual flag flip needed. First MIDCAP400 run under floor-based SUMMARY.",
       "constituent_source": "SSGA_SPDR_MDY_XLSX",
       "constituents_fetched": 400,
       "accounted": 400,
@@ -1763,7 +1821,7 @@
       "group": "SP500",
       "task_id": "isa-sp500-sat3",
       "run_mode": "local",
-      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) \u2014 no manual flag flip needed.",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) — no manual flag flip needed.",
       "constituent_source": "SPY_SSGA_XLSX",
       "constituents_fetched": 503,
       "accounted": 503,
@@ -1792,14 +1850,14 @@
       "gate4_largest_sector_pct": 19.4,
       "excel_file": "Growth Stock Analysis SP500 W-e 18-Jul-26.xlsx",
       "retrospective_file": "20260718_SP500_retrospective.md",
-      "notes": "Clean run: 0 technical failures across 34 local score batches + 2 overlay batches. sync_repo_to_github.py: NOTHING_TO_SYNC. 503 constituents (within 490-515 band). 309 scored, 261 rankable, 10 SUMMARY-eligible by Source Score (floor-based, Fix Pack A1); top Source Score APP 93 (100/100 fwd axis, 48/50 total). NVDA/DXCM top total 50/50 and 49/50. Gate4 elimination breakdown: Technology 18 (19.4%), Industrials 18 (19.4%) \u2014 tied largest, below 35% single-sector threshold on Gate4 eliminations specifically. score_panel_logger store_total=552. drawdown_monitor: -1.9% from 252d high, 0/3 tranches, regime RISK_ON, no trigger."
+      "notes": "Clean run: 0 technical failures across 34 local score batches + 2 overlay batches. sync_repo_to_github.py: NOTHING_TO_SYNC. 503 constituents (within 490-515 band). 309 scored, 261 rankable, 10 SUMMARY-eligible by Source Score (floor-based, Fix Pack A1); top Source Score APP 93 (100/100 fwd axis, 48/50 total). NVDA/DXCM top total 50/50 and 49/50. Gate4 elimination breakdown: Technology 18 (19.4%), Industrials 18 (19.4%) — tied largest, below 35% single-sector threshold on Gate4 eliminations specifically. score_panel_logger store_total=552. drawdown_monitor: -1.9% from 252d high, 0/3 tranches, regime RISK_ON, no trigger."
     },
     {
       "run_date": "2026-07-24",
       "group": "NASDAQ",
       "task_id": "isa-nasdaq-fri4",
       "run_mode": "local",
-      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) \u2014 no manual flag flip needed.",
+      "run_mode_note": "Forward-led framework live (Jul-2026 go-live) — no manual flag flip needed.",
       "constituent_source": "nasdaq_screener_api",
       "constituents_fetched": 863,
       "accounted": 863,
@@ -1834,7 +1892,7 @@
       "issues": [
         "FV_COMPOSITE_ANALYST_SIGNAL_NAN_BUG_FIXED"
       ],
-      "notes": "863 constituents (post-$2bn filter), 100% accounted. 423 scored across 58 local score batches + 2 overlay batches, 0 technical failures. DXCM/NVDA top total 50/50. Top Source Score NVDA 89.6 (100/100 fwd axis). SUMMARY: 56 eligible pre-cap, 15 selected (floor 70, cap 40). Gate4 Technology concentration 37.8% (structural, consistent with prior Nasdaq runs ~40%). Bug found+fixed this run: fv_composite.py analyst_signal() crashed on NaN analyst_rating (float NaN is truthy, so 'rating or \\\"\\\"' didn't catch it) \u2014 fixed to isinstance-check, verified fix, pushed to GitHub via sync_repo_to_github.py. score_panel_logger store_total=975. drawdown_monitor: -1.9% from 252d high, 0/3 tranches, regime RISK_ON, no trigger."
+      "notes": "863 constituents (post-$2bn filter), 100% accounted. 423 scored across 58 local score batches + 2 overlay batches, 0 technical failures. DXCM/NVDA top total 50/50. Top Source Score NVDA 89.6 (100/100 fwd axis). SUMMARY: 56 eligible pre-cap, 15 selected (floor 70, cap 40). Gate4 Technology concentration 37.8% (structural, consistent with prior Nasdaq runs ~40%). Bug found+fixed this run: fv_composite.py analyst_signal() crashed on NaN analyst_rating (float NaN is truthy, so 'rating or \\\"\\\"' didn't catch it) — fixed to isinstance-check, verified fix, pushed to GitHub via sync_repo_to_github.py. score_panel_logger store_total=975. drawdown_monitor: -1.9% from 252d high, 0/3 tranches, regime RISK_ON, no trigger."
     },
     {
       "run_date": "2026-07-25",
@@ -1904,7 +1962,15 @@
       "summary_selected": 40,
       "summary_floor": 70,
       "summary_cap": 40,
-      "top_source_score_tickers": ["STX", "DGII", "CHEF", "LFST", "CORT", "NESR", "BKR"],
+      "top_source_score_tickers": [
+        "STX",
+        "DGII",
+        "CHEF",
+        "LFST",
+        "CORT",
+        "NESR",
+        "BKR"
+      ],
       "top_source_score": 100,
       "top_total_score": 46,
       "top_total_score_ticker": "STX",
@@ -1941,5 +2007,6 @@
       ],
       "notes": "896 constituents (post-$2bn filter), 100% accounted, 0 technical failures. 60 local score batches + 6 overlay batches, no Composio fallback triggered. SUMMARY: 143 eligible pre-cap, 40 selected (floor 70, cap 40). Top Source Score ties at 100 (STX, DGII, CHEF, LFST, CORT, NESR, BKR); Top Total STX 46/50 (24 Part A / 22 Part B). Gate4 Technology concentration 35.8% (just above 35% flag threshold, consistent with prior NASDAQ runs ~32-40%). Regime capture initially stamped live_stale_source (drawdown_state lag 6d) — ran drawdown_monitor.py then re-captured to upgrade to live, verified ok=True. Two fixture checks (X-A1, X-A2) failed on pre-existing test-harness/maintenance issues unrelated to this run's scoring — logged to item register, not fixed (out of scheduled-run scope). universe_hygiene PASS (no non-common instruments at/above SUMMARY floor). 4 findings recorded in item register via isa_retrospective_intake.py."
     }
-  ]
+  ],
+  "_basis_note": "Rows with basis='measured_from_frame' were computed by source_performance_writer.py from the named retained frame. Rows with basis='hand_entered' predate that writer (ISA-0370) and were typed up by hand from a prose step in the weekly SKILL.md; they are NOT measurements and no band should be derived from them without saying so."
 }
