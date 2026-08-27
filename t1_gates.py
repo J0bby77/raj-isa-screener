@@ -24,9 +24,16 @@ series (both-window estimate revisions = confirmation over time that already hap
     AND stage in {Igniting, Accelerating, Sustained}
     OR  screen_sightings >= 2 spaced >= EVIDENCE_SIGHTING_GAP_DAYS (D19: 7d) — the alternative
         route for thin-fundamentals names (sightings counted from score_panel.csv, live since A8).
-  size_mode: "full" (normal 1.5-3.5% band — Step 10 additionally requires conviction >= 75)
-             | "starter" (STARTER_SIZE_CAP_PCT, D19: 1.5% — scale-up trigger recorded at entry).
-Sizing NEVER blocks a deploy; it caps it. cycles_seen / screen_sightings remain LOGGED data —
+  ⚑ THIS MODULE NO LONGER PUBLISHES A SIZE (ISA-0442, Raj option (a), 26-Aug-2026). It used to
+  return `size_mode` full|starter with a `starter_cap_pct` of 1.5% and a docstring claim that
+  "full additionally requires Step-10 conviction >= 75". The conviction sentence was never
+  implemented in this file — no line here has ever read a conviction score — but the size_mode
+  WAS live, and it was a SECOND authority for how big a position is, against V2.1's ladder in
+  `position_sizing.target_pct(evidence_state)`. Its 1.5% sat BELOW the ladder's 3.5% STARTER, so
+  on the next forward-led buy the smaller of two numbers would have won silently. What this
+  module certifies is EVIDENCE; what decides pounds is the ladder, and there is now exactly one
+  path from a qualified candidate to a position size.
+Evidence NEVER blocks a deploy. cycles_seen / screen_sightings remain LOGGED data —
 pre-registered calibration rule (A8 pattern): if first-sighting full-size entries underperform
 confirmed-sighting entries at 3m over >=2 quarters of ledger data, tighten EVIDENCE_ER_CONF_MIN.
 
@@ -49,6 +56,15 @@ except Exception:                     # standalone/self-test safety — mirrors 
 
 def _c(name, default):
     return getattr(_cfg, name, default) if _cfg is not None else default
+
+
+# ── ISA-0432: the guarded accessor for anchor-derived thresholds ──────────────────────────
+# These quantities are DERIVED from the portfolio value and the contribution schedule and move
+# whenever either does. A literal default here is a shadow copy that stops tracking on the day it
+# is written, so this delegates to isa_policy.derived(), which RAISES rather than substituting one.
+def _policy_derived(_name, _cfg_override=None):
+    import isa_policy as _pol
+    return _pol.derived(_name, cfg=_cfg_override)
 
 
 NS_FLOOR = 60.0   # existing removal floor (step9 assign_main_tier hard floor) — referenced, not new
@@ -266,12 +282,12 @@ def min_hold_until(entry_date):
 def evidence(entry, scored_row=None, ref_date=None):
     """A5 v3 — evidence-based sizing (D18/D19). MECHANICAL, computable at first sighting;
     NEVER blocks (sizing only). Returns:
-      {evidence_confirmed, size_mode: 'full'|'starter', starter_cap_pct, basis: {...}}
+      {evidence_confirmed, size_authority, basis: {...}}   -- NO SIZE (ISA-0442)
     Fundamentals route: er_confidence >= EVIDENCE_ER_CONF_MIN AND revisions improving on BOTH
     windows (30d canonical direction AND 90d eps-trend trajectory > 0) AND early/mid stage.
     Sightings route: screen_sightings >= EVIDENCE_SIGHTING_MIN (>=7d apart, from score_panel).
-    'full' additionally requires Step-10 conviction >= 75 — that is the SESSION's side; the
-    machine only certifies the evidence side here."""
+    ⚑ It CERTIFIES; it does not size. `position_sizing.target_pct(evidence_state)` is the one
+    home for how big a position is (ISA-0442)."""
     e = entry or {}
     s = scored_row or {}
 
@@ -296,10 +312,13 @@ def evidence(entry, scored_row=None, ref_date=None):
     sightings_ok = sightings is not None and sightings >= int(_c("EVIDENCE_SIGHTING_MIN", 2))
 
     confirmed = bool(fundamentals_ok or sightings_ok) and not er_unmeasured
-    return {
+    out = {
         "evidence_confirmed": confirmed,
-        "size_mode": "full" if confirmed else "starter",
-        "starter_cap_pct": float(_c("STARTER_SIZE_CAP_PCT", 1.5)),
+        # ⚑ ISA-0442 — a POINTER, not a size. Anything downstream that needs pounds asks the one
+        # home; anything that only needs to know whether the evidence side is satisfied reads
+        # `evidence_confirmed`. There is no third answer available from this module.
+        "size_authority": ("position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. "
+                           "t1_gates certifies evidence and publishes NO size (ISA-0442)."),
         "basis": {
             "route": ("unconfirmed_er_unmeasured" if er_unmeasured else
                       "fundamentals" if fundamentals_ok else
@@ -310,10 +329,25 @@ def evidence(entry, scored_row=None, ref_date=None):
             "rev_both_windows_ok": rev_ok,
             "stage": stage, "stage_ok": stage_ok,
             "screen_sightings": sightings, "sightings_ok": sightings_ok,
-            "note": ("full size additionally requires Step-10 conviction >= 75; starter entries "
-                     "record their scale-up trigger at entry (what must confirm, by when)"),
+            "note": ("evidence certification only. The position TARGET is the ladder rung for "
+                     "this name's evidence_state, from position_sizing — this module has no "
+                     "opinion on pounds and no conviction input (ISA-0442)."),
         },
     }
+    if not _c("SIZE_AUTHORITY_SINGLE", True):
+        # R4.13 ROLLBACK. ⚑ Note what it restores and what it does NOT: the size_mode LABEL comes
+        # back, read from the ladder. The 1.5% literal does not come back on any path — it was the
+        # defect, not the behaviour.
+        try:
+            import position_sizing as _ps
+            _lad = _ps.ladder()
+            out["size_mode"] = "full" if confirmed else "starter"
+            out["starter_rung_pct"] = _lad.get("STARTER")
+            out["rollback_note"] = ("SIZE_AUTHORITY_SINGLE is False: the legacy label is restored, "
+                                    "sourced from the ladder. The stale 1.5%% constant is gone.")
+        except Exception as _e:                                       # noqa: BLE001
+            out["size_mode_error"] = "%s: %s" % (type(_e).__name__, _e)
+    return out
 
 
 def evaluate(entry, scored_row=None, ref_date=None):
@@ -338,7 +372,7 @@ def evaluate(entry, scored_row=None, ref_date=None):
     dq = list(e.get("disqualifier_flags") or s.get("disqualifier_flags") or [])
     reversal = bool(e.get("reversal_unresolved")) or (
         "recent_reversal_vs_12_1m" in (e.get("review_flags") or s.get("review_flags") or []))
-    er_floor = float(_c("ER_DEPLOY_FLOOR", 15.9))
+    er_floor = _policy_derived("ER_DEPLOY_FLOOR")   # ISA-0432: no literal fallback
     er_status = str(g("er_status") or "")
     er_unmeasured = (er_status == "unmeasured")
 
@@ -366,10 +400,13 @@ def evaluate(entry, scored_row=None, ref_date=None):
     detail["t1_qualified"] = all(detail[k]["pass"] for k in gates)
     detail["stage_gate"] = st_state
     detail["late_cycle_flag"] = late
-    # A5 v3: sizing verdict (never blocks) + logged tenure data for the ledger/calibration
+    # A5 v3: EVIDENCE certification (never blocks) + logged tenure data for the ledger and
+    # calibration. ⚑ No size is produced here — ISA-0442.
     detail["evidence"] = evidence(e, s, ref_date)
     detail["evidence_confirmed"] = detail["evidence"]["evidence_confirmed"]
-    detail["size_mode"] = detail["evidence"]["size_mode"]
+    detail["size_authority"] = detail["evidence"]["size_authority"]
+    if "size_mode" in detail["evidence"]:                 # rollback path only (ISA-0442)
+        detail["size_mode"] = detail["evidence"]["size_mode"]
     detail["cycles_seen"] = _num(g("cycles_seen"))
     detail["screen_sightings"] = detail["evidence"]["basis"]["screen_sightings"]
     return detail
@@ -410,19 +447,22 @@ if __name__ == "__main__":
     fresh = dict(base, cycles_seen=1, er_confidence=0.9, est_rev_direction="improving",
                  eps_trend_mom_pct=4.2)
     d = evaluate(fresh, ref_date=ref)
-    assert d["t1_qualified"] and d["evidence_confirmed"] and d["size_mode"] == "full", d["evidence"]
+    assert d["t1_qualified"] and d["evidence_confirmed"], d["evidence"]
+    assert "size_mode" not in d and "starter_cap_pct" not in d["evidence"], (
+        "ISA-0442: t1_gates must publish NO size. A size field here is a second authority.")
+    assert "position_sizing.target_pct" in d["size_authority"]
     assert d["evidence"]["basis"]["route"] == "fundamentals"
     # 5. thin evidence -> STARTER, still qualified (sizing caps, never blocks)
     thin = dict(base, cycles_seen=1, er_confidence=0.4, est_rev_direction="neutral")
     d = evaluate(thin, ref_date=ref)
-    assert d["t1_qualified"] and d["size_mode"] == "starter", d["evidence"]
+    assert d["t1_qualified"] and not d["evidence_confirmed"], d["evidence"]
     # 5b. one window improving is NOT both-window confirmation
     onew = dict(base, er_confidence=0.9, est_rev_direction="improving", eps_trend_mom_pct=-1.0)
-    assert evaluate(onew, ref_date=ref)["size_mode"] == "starter"
+    assert evaluate(onew, ref_date=ref)["evidence_confirmed"] is False
     # 6. sightings route: thin fundamentals but 2 spaced screen sightings -> full
     seen2 = dict(thin, screen_sightings=2)
     d = evaluate(seen2, ref_date=ref)
-    assert d["size_mode"] == "full" and d["evidence"]["basis"]["route"] == "sightings"
+    assert d["evidence_confirmed"] and d["evidence"]["basis"]["route"] == "sightings"
     # 7. reversal + disqualifier + late-cycle still block; late-cycle documented case unblocks
     assert not evaluate(dict(base, review_flags=["recent_reversal_vs_12_1m"]), ref_date=ref)["t1_qualified"]
     assert not evaluate(dict(base, disqualifier_flags=["revision_cut"]), ref_date=ref)["t1_qualified"]
@@ -439,7 +479,7 @@ if __name__ == "__main__":
                  {"revision_stage": "Accelerating", "val_hist_pe_premium_disc": 10,
                   "er_confidence": 1.0, "est_rev_direction": "improving",
                   "eps_trend_mom_pct": 6.0}, ref_date=ref)
-    assert d["t1_qualified"] and d["stage_gate"] == "OK" and d["size_mode"] == "full"
+    assert d["t1_qualified"] and d["stage_gate"] == "OK" and d["evidence_confirmed"]
     # 10. sightings gap logic (pure csv helper) — synthetic panel
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
@@ -456,7 +496,7 @@ if __name__ == "__main__":
                        er_rerate_status="UNMEASURED", er_confidence=1.0,
                        est_rev_direction="improving", eps_trend_mom_pct=6.0), ref_date=ref)
     assert um["er"]["state"] == "NO_DATA_UNMEASURED" and um["er"]["pass"], um["er"]
-    assert um["t1_qualified"] and um["size_mode"] == "starter", um
+    assert um["t1_qualified"] and um["evidence_confirmed"] is False, um
     assert um["evidence"]["basis"]["route"] == "unconfirmed_er_unmeasured", um["evidence"]
     # (gate_status_for_screen_row is defined below this self-test block — its D-24 label
     #  assertion lives in tests_jul2026/test_d24_expected_return.py)
@@ -473,7 +513,7 @@ def gate_status_for_screen_row(row, get=None):
     stage = g(row, "revision_stage")
     _st_state, st_blocked = stage_gate(stage)
     er = _num(g(row, "expected_return_12_24m"))
-    er_floor = float(_c("ER_DEPLOY_FLOOR", 15.9))
+    er_floor = _policy_derived("ER_DEPLOY_FLOOR")   # ISA-0432: no literal fallback
     late = late_cycle_flag(_num(g(row, "val_hist_pe_premium_disc")), stage)
     reasons = []
     if st_blocked:

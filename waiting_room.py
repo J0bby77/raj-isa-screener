@@ -22,9 +22,13 @@ the opposite of what Raj asked for. A waiting room with no exit is a destination
   1  PARKED IS A TAG, NOT A MOOD. Capital placed in funds for want of a qualifying stock candidate
      is written to the ledger with its amount, its date and its destinations, so it is visible as a
      TIMING decision. Nothing else distinguishes it from an allocation.
-  2  THE DONOR IS THE RANKING RUN IN REVERSE. Sell first what the estimation-free ranking
-     (capital_destination.rank_inputs, ISA-0386) would buy LAST. One home for the ordering — a
-     second, "sell-side" ranking would be a parallel mechanism and would drift (R4.4/R4.5).
+  2  THE DONOR ORDERING IS READ, NOT DECIDED HERE. ⚑ SUPERSEDED 26-Aug-2026 by A7 (ISA-0440).
+     It used to be "the buy ranking run in reverse", and that is wrong for an arithmetic reason
+     rather than a stylistic one: `_rank_key` puts band deviation LAST on purpose, so reversing it
+     puts "how far above its own declared band this money sits" LAST on the sell side. A7 puts it
+     FIRST and demotes FRS to a vote, because L-1/ISA-0351 measured alpha rank persistence at
+     -0.482 in this sleeve. The sell rule now has exactly one home —
+     `capital_destination.donor_order` — and this function READS it (R4.4/R4.5).
   3  THE ROUND TRIP IS PRICED BEFORE IT IS TAKEN, from the DEALING RECORD rather than a rate card:
      observed sell/buy costs by asset class out of transaction_ledger.json, plus AJ Bell's own FX
      charge for a USD leg. Below the framework's declared minimum economic trade the recall is
@@ -269,30 +273,37 @@ def freeze_state(policy=None) -> dict:
                        "barred by it")}
 
 
-def donor_order(portfolio=None, universe=None, ranking=None, policy=None) -> dict:
-    """-> the donor ranking: the ISA-0386 buy ordering, REVERSED.
+def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by_sedol=None):
+    """-> the donor ranking, READ from `capital_destination.donor_order` (A7 / ISA-0440).
 
-    R4.4/R4.5 — there is exactly one ordering rule in the capital path and this reads it. Building
-    a separate sell-side ranking would be a hand-maintained copy of an orchestration path, and it
-    would be a defect on the day it was created.
+    ⚑ THIS USED TO REVERSE THE BUY KEY, AND THAT WAS WRONG IN A WAY R4.4 DOES NOT CATCH. The old
+    basis line — "one ordering rule, read not copied (ISA-0386)" — was sound about copies and
+    unsound about this decision: `_rank_key` puts band deviation LAST on purpose, so reversing it
+    puts "how far above its own declared band this money sits" last on the SELL side, where C1 and
+    C2 have already decided the order. A7 makes it first. R4.4 forbids two homes for ONE rule; the
+    buy rule and the sell rule are two rules, and the sell one now has exactly one home, which
+    this function READS rather than reimplements (R4.5).
+
+    Everything this function adds on top is about the WAITING ROOM specifically and belongs
+    nowhere else: what is PARKED, and how far a fund can be sold before it breaches its declared
+    `band_low`.
     """
     import capital_destination as CD
     portfolio = portfolio or json.load(open(HERE / "portfolio_data_aug_2026.json"))
     universe = universe or json.load(open(HERE / "fund_universe.json"))
     tw = policy or json.load(open(HERE / "target_weights.json"))
-    ranking = ranking or CD.rank_inputs(universe)
     total = float(portfolio["summary"]["total_value_gbp"])
-    vals = {f["ticker"]: float(f["value_gbp"]) for f in portfolio.get("funds", [])}
     parked = (outstanding().get("by_fund_gbp") or {})
+    a7 = CD.donor_order(portfolio=portfolio, universe=universe, ranking=ranking, policy=tw,
+                        frs_by_sedol=frs_by_sedol, nav_gbp=total)
 
     cands = []
-    for sd, v in vals.items():
-        r = (ranking.get("rows") or {}).get(sd)
-        if r is None:
-            continue
+    for d in a7["donors"]:
+        sd = d["sedol"]
         b = (tw["funds"].get(sd) or {})
         lo = b.get("band_low")
         floor_gbp = (lo * total) if lo is not None else 0.0
+        v = d["value_gbp"]
         cands.append({
             "sedol": sd, "value_gbp": round(v, 2),
             "weight_pct": round(v / total * 100, 2),
@@ -301,17 +312,15 @@ def donor_order(portfolio=None, universe=None, ranking=None, policy=None) -> dic
             # create the band breach the framework would then have to repair.
             "sellable_to_band_low_gbp": round(max(v - floor_gbp, 0.0), 2),
             "band_low_pct": (None if lo is None else lo * 100),
-            "buy_rank_key": CD._rank_key({"sedol": sd, "bucket_shortfall_pct": 0.0,
-                                          "weight_pct": v / total, "rank": r}),
-            "rank": r,
+            "donor_rank": d["donor_rank"],
+            "why": d["why"],
+            "rank": d["rank"],
         })
-    # sell first what the ranking would buy LAST
-    cands.sort(key=lambda c: c["buy_rank_key"], reverse=True)
-    for i, c in enumerate(cands, 1):
-        c["donor_rank"] = i
-        c.pop("buy_rank_key", None)
-    return {"state": "MEASURED", "as_of": _today(), "basis": ("capital_destination._rank_key "
-            "REVERSED — one ordering rule, read not copied (ISA-0386)"), "donors": cands,
+    return {"state": a7["state"], "as_of": _today(),
+            "basis": ("capital_destination.donor_order — the A7 sell-side ordering, READ not "
+                      "copied (ISA-0440). %s" % a7["basis"]),
+            "a7_order": a7["order"], "a7_enabled": a7["enabled"],
+            "frs_supplied": a7["frs_supplied"], "donors": cands,
             "parked_first": ("a lot that was PARKED is recalled from the funds it was parked in "
                              "before any other donor is touched: it is the capital whose stay was "
                              "always conditional")}
@@ -383,9 +392,10 @@ def recall(amount_gbp: float, *, portfolio=None, universe=None, ranking=None, po
     out["shortfall_gbp"] = round(remaining, 2)
     out["state"] = "RECALL_PLANNED" if remaining <= 0.005 else "RECALL_PARTIAL"
     out["reason"] = (
-        "donors are the ISA-0386 ranking reversed — the framework sells first what it would buy "
-        "last — taking PARKED capital before any other headroom, and never below a declared "
-        "band_low.")
+        "donors are the A7 sell-side ordering (ISA-0440): pounds above the declared band_high "
+        "first, then look-through and concentration relief, then cost to keep, with FRS as a "
+        "VOTE and never as authority — taking PARKED capital before any other headroom, and "
+        "never below a declared band_low.")
     return out
 
 
@@ -420,11 +430,86 @@ def report(doc=None) -> str:
     return "\n".join(L)
 
 
+def _cd_above_band_high(order_out):
+    """-> [(sedol, pounds above declared band_high)] for the A7 assertions, derived INDEPENDENTLY.
+
+    ⚑ R5.2 — this recomputes P1 from `target_weights.json` and the portfolio rather than reading
+    the `p1` block the module under test produced, so the assertion is a second derivation and not
+    a restatement of the first.
+    """
+    tw = json.load(open(HERE / "target_weights.json"))
+    portfolio = json.load(open(HERE / "portfolio_data_aug_2026.json"))
+    total = float(portfolio["summary"]["total_value_gbp"])
+    out = []
+    for d in order_out["donors"]:
+        hi = (tw["funds"].get(d["sedol"]) or {}).get("band_high")
+        out.append((d["sedol"],
+                    0.0 if hi is None else max(float(d["value_gbp"]) - float(hi) * total, 0.0)))
+    return out
+
+
+def _a7_rollback_moves_the_order(tw2) -> bool:
+    """R4.13 + reachability: flipping A7 OFF must produce a DIFFERENT head of the donor order.
+
+    ⚑ THIS ASSERTS THE ORDER MOVES, NOT THAT THE HEAD MOVES, AND THE DIFFERENCE IS A MEASUREMENT.
+    On the August book A7 and the rule it replaces AGREE on donor #1 — B2PLJD7 is both the fund
+    furthest above its band_high and the fund the reversed buy key ranked first — and they differ
+    at positions 5/6 and 8/10. Requiring the head to move would make this assertion fail for a
+    reason that is about the book rather than about the build. That P1 can DECIDE the head is a
+    separate, stronger control: `_a7_p1_is_decisive`. ⚑ And if this one ever goes green on
+    equality — on != off becoming false — A7 has gone inert and ISA-0440's `falsified_by` clause
+    ("A7's reordering changes no donor across three consecutive runs") is being met.
+    """
+    import capital_destination as CD
+    was = CD.A7_DONOR_ORDER_ENABLED
+    try:
+        on = [d["sedol"] for d in donor_order(policy=tw2)["donors"]]
+        CD.A7_DONOR_ORDER_ENABLED = False
+        off = [d["sedol"] for d in donor_order(policy=tw2)["donors"]]
+    finally:
+        CD.A7_DONOR_ORDER_ENABLED = was
+    return on != off
+
+
+def _a7_p1_is_decisive(tw2) -> bool:
+    """NEGATIVE CONTROL for A7's P1, and it had to be built as a FIXTURE rather than read off the
+    live book.
+
+    ⚑ WHY, AND THIS IS THE POINT OF THE ASSERTION. On the August book the fund that is over its
+    band_high (B2PLJD7, GBP 197 above a 9.00% ceiling) is ALSO the fund the old reversed-buy rule
+    put first, so "did the head of the order change?" answers NO and proves nothing either way.
+    An assertion that cannot distinguish "P1 decided this" from "P1 agreed with what already
+    happened" is not a control. So the fixture drops the band_high of the fund the OLD rule ranks
+    LAST until it is over its ceiling, and asserts A7 promotes it to #1 while the rollback leaves
+    it where it was.
+    """
+    import capital_destination as CD
+    portfolio = json.load(open(HERE / "portfolio_data_aug_2026.json"))
+    total = float(portfolio["summary"]["total_value_gbp"])
+    was = CD.A7_DONOR_ORDER_ENABLED
+    try:
+        CD.A7_DONOR_ORDER_ENABLED = False
+        old_order = [d["sedol"] for d in donor_order(policy=tw2)["donors"]]
+        target = old_order[-1]
+        val = next(float(f["value_gbp"]) for f in portfolio["funds"]
+                   if f["ticker"] == target)
+        tw3 = json.loads(json.dumps(tw2))
+        # put it just over its ceiling, and leave every other declared band untouched
+        tw3["funds"][target]["band_high"] = (val / total) * 0.90
+        still_last = [d["sedol"] for d in donor_order(policy=tw3)["donors"]][-1] == target
+        CD.A7_DONOR_ORDER_ENABLED = True
+        promoted = [d["sedol"] for d in donor_order(policy=tw3)["donors"]][0] == target
+    finally:
+        CD.A7_DONOR_ORDER_ENABLED = was
+    return bool(promoted and still_last)
+
+
 def selftest(verbose=True) -> int:
     import tempfile
-    fails = []
+    fails, ran = [], []
 
     def ck(name, cond):
+        ran.append(name)
         if not cond:
             fails.append(name)
         if verbose:
@@ -493,9 +578,21 @@ def selftest(verbose=True) -> int:
                                  for d in donor_order(policy=tw2)["donors"]
                                  if d["sedol"] == row["sedol"]) + 0.01
            for row in r2["plan"]))
-    ck("donors are the BUY ranking reversed — the last fund the router would buy is donor #1",
-       (lambda o: o["donors"][0]["donor_rank"] == 1
-        and o["donors"][0]["sedol"] != o["donors"][-1]["sedol"])(donor_order(policy=tw2)))
+    # ⚑ R5.8 — the assertion this replaces ("donors are the BUY ranking reversed") checked only
+    # that a rank 1 existed and differed from the last row. It could not have failed on any real
+    # reordering defect, and it did NOT fail when A7 changed the rule underneath it. These do.
+    _a7 = donor_order(policy=tw2)
+    ck("A7: the donor ordering is READ from capital_destination, not decided here (R4.5)",
+       "capital_destination.donor_order" in _a7["basis"] and _a7["a7_enabled"] is True)
+    _over = [x for x in _cd_above_band_high(_a7) if x[1] > 0]
+    ck("A7: donor #1 is the fund furthest above its OWN declared band_high, whenever one is over",
+       (not _over) or _a7["donors"][0]["sedol"] == max(_over, key=lambda x: x[1])[0])
+    ck("A7: on the LIVE book the reorder changes the donor ORDER — measured, not assumed",
+       _a7_rollback_moves_the_order(tw2))
+    ck("A7 negative control: P1 is DECISIVE — a fund the OLD rule ranked low is promoted to "
+       "donor #1 as soon as it sits above its declared band_high, and the rollback does not "
+       "promote it (ISA-0388: the criterion must MOVE capital, not decorate the order)",
+       _a7_p1_is_decisive(tw2))
     small = recall(100.0, policy=tw2, ledger_path=tmp)
     ck("a recall below the declared minimum economic trade is REFUSED, with the price stated",
        small["state"] == "REFUSED_UNECONOMIC" and "round trip" in small["reason"])
@@ -516,8 +613,12 @@ def selftest(verbose=True) -> int:
        and park(1.0, {"VUAG": 1.0}, reason="x")["state"] == "DISABLED")
     ENABLED = True
 
+    # ⚑ the count is COUNTED, not typed. It read "20 assertions green" as a literal while the
+    # suite ran 23 — the project's own smallest instance of a figure that says one thing and IS
+    # another, in the one place a reader trusts without checking (R4.2 / FC-B).
     print("\nwaiting_room selftest: %d failure(s)%s"
-          % (len(fails), (" -> " + ", ".join(fails)) if fails else " — 20 assertions green"))
+          % (len(fails), (" -> " + ", ".join(fails)) if fails
+             else " — %d assertions green" % len(ran)))
     return 1 if fails else 0
 
 

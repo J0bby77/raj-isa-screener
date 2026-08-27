@@ -1,319 +1,374 @@
 {
-  "_meta": {
-    "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes — they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
-    "version": "1.0",
-    "last_updated": "2026-08-20",
-    "source_memory": "project_isa_target_weights.md",
-    "current_phase": 1,
-    "changelog": " | 26-Jul-26: WP-4 scaling_freeze added; WP-5 SGLN hedge entry (PILOT_PENDING_PRECLEARANCE); WP-6 IWMO B2 5% entry (PENDING_AUG_DECISION); hedge bucket defined (excluded from return math). Audit BuildSpec Jul-2026. | 20-Aug-26: ISA-0387 scaling_freeze.basis DECLARED = reallocation_only (Raj). ISA-0388: phase1_band_high is now READ by the fund router — the bands are the limit on fund capital, not the point targets. | 20-Aug-26: ISA-0398 B3 RECONCILED - per-fund targets scaled x0.7619 to the declared 16% bucket (M&G 6.10%, Invesco 6.10%, SMT 3.80%); bands and phase-2 scaled with them. B3 held 2 funds when 8/8 was set; SMT was added at 5% and the bucket was never re-derived. Raj 20-Aug-26: B3 stays 16%, SMT stays B3. TW1 asserts it from now on."
-  },
-  "return_objective": {
-    "isa_target_low": 1000000,
-    "isa_target_high": 1500000,
-    "horizon_years": 12,
-    "annual_contribution": 20000,
-    "starting_value_may2026": 138000,
-    "required_return_low": 0.12,
-    "required_return_high": 0.16,
+ "_meta": {
+  "description": "Machine-readable encoding of project_isa_target_weights.md. Update this file whenever project_isa_target_weights.md changes — they must remain in sync. Used by portfolio_analytics.py at every pre-run.",
+  "version": "1.0",
+  "last_updated": "2026-08-20",
+  "source_memory": "project_isa_target_weights.md",
+  "current_phase": 1,
+  "changelog": " | 26-Jul-26: WP-4 scaling_freeze added; WP-5 SGLN hedge entry (PILOT_PENDING_PRECLEARANCE); WP-6 IWMO B2 5% entry (PENDING_AUG_DECISION); hedge bucket defined (excluded from return math). Audit BuildSpec Jul-2026. | 20-Aug-26: ISA-0387 scaling_freeze.basis DECLARED = reallocation_only (Raj). ISA-0388: phase1_band_high is now READ by the fund router — the bands are the limit on fund capital, not the point targets. | 20-Aug-26: ISA-0398 B3 RECONCILED - per-fund targets scaled x0.7619 to the declared 16% bucket (M&G 6.10%, Invesco 6.10%, SMT 3.80%); bands and phase-2 scaled with them. B3 held 2 funds when 8/8 was set; SMT was added at 5% and the bucket was never re-derived. Raj 20-Aug-26: B3 stays 16%, SMT stays B3. TW1 asserts it from now on."
+ },
+ "return_objective": {
+  "isa_target_low": 1000000,
+  "isa_target_high": 1500000,
+  "horizon_years": 12,
+  "annual_contribution": 20000,
+  "starting_value_may2026": 138000,
+  "stock_sleeve_return_assumption": 0.18,
+  "_inert_constants_removed_26aug2026": {
+   "removed": {
     "working_target": 0.14,
+    "total_isa_working_target": 0.14,
     "fund_sleeve_weighted_avg_threshold": 0.12,
-    "stock_sleeve_return_assumption": 0.18,
-    "total_isa_working_target": 0.14
-  },
-  "thresholds": {
-    "fund_sleeve_weighted_avg_min": 0.12,
-    "stock_sleeve_on_track": 0.18,
-    "stock_sleeve_watch_low": 0.15,
-    "total_isa_on_track": 0.14,
-    "total_isa_watch_low": 0.13,
-    "phase_transition_pct": 0.15,
-    "max_single_fund_pct": 0.125,
-    "max_stock_position_pct": 0.05,
-    "typical_stock_position_low": 0.015,
-    "typical_stock_position_high": 0.035,
-    "cash_buffer_min": 150,
-    "cash_buffer_max": 200,
-    "stage1_probe_pct": 0.0075,
-    "_stage1_probe_pct_note": "The pre-registered Stage-1 PROBE size from the staged deployment ramp (Raj/Claude, 01-Aug-2026, ISA_Stock_Sleeve_Confidence_Roadmap_Aug2026.md): 1 position at ~0.75% after 3 clean run manifests + reproducibility green, scheduled Sep-2026. Recorded here so it is the SMALLEST DECLARED POSITION SIZE the framework can test a derived cap against (ISA-0387). It is a size, not a mandate to trade."
-  },
-  "buckets": {
-    "B1": {
-      "name": "Core Global Equity",
-      "role": "Stable backbone. Diversified, quality, lower vol. Reliable compounding.",
-      "ownership_floor_return": 0.12,
-      "max_weight_pct": 0.35
-    },
-    "B2": {
-      "name": "Active Growth Equity",
-      "role": "Primary return engine. Active management premium. GARP, quality growth.",
-      "ownership_floor_return": 0.12,
-      "max_weight_pct": 0.45
-    },
-    "B3": {
-      "name": "High-Growth / Structural Theme",
-      "role": "Highest expected return, highest vol. Structural tailwinds.",
-      "ownership_floor_return": 0.13,
-      "max_weight_pct": 0.25
-    },
-    "hedge": {
-      "name": "Tail Hedge",
-      "role": "Risk reduction only (gold). NO expected-return claim under the 14% formula - excluded from ALL return-bucket math and the Section-A gate.",
-      "ownership_floor_return": null,
-      "max_weight_pct": 0.12
-    }
-  },
-  "funds": {
-    "BF93W97": {
-      "name": "Royal London Global Equity Select M Acc",
-      "ticker": "BF93W97",
-      "bucket": "B1",
-      "target_pct": 0.08,
-      "band_low": 0.06,
-      "band_high": 0.1,
-      "min_expected_return": 0.09,
-      "phase2_target_pct": 0.07,
-      "notes": ""
-    },
-    "BR2Q8G6": {
-      "name": "Ranmore Global Equity Institutional GBP",
-      "ticker": "BR2Q8G6",
-      "bucket": "B1",
-      "target_pct": 0.08,
-      "band_low": 0.06,
-      "band_high": 0.1,
-      "min_expected_return": 0.09,
-      "phase2_target_pct": 0.07,
-      "notes": ""
-    },
-    "VUAG": {
-      "name": "Vanguard S&P 500 ETF USD Acc GBP",
-      "ticker": "VUAG",
-      "bucket": "B1",
-      "target_pct": 0.1,
-      "band_low": 0.08,
-      "band_high": 0.125,
-      "min_expected_return": 0.09,
-      "phase2_target_pct": 0.09,
-      "notes": "UCITS ETF — no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
-    },
-    "B50MZ94": {
-      "name": "Vanguard Japan Stock Index GBP Acc",
-      "ticker": "B50MZ94",
-      "bucket": "B1",
-      "target_pct": 0.04,
-      "band_low": 0.02,
-      "band_high": 0.06,
-      "min_expected_return": 0.08,
-      "phase2_target_pct": 0.03,
-      "notes": "Passive Japan index — 8% minimum (not 9%) as demanding for this mandate."
-    },
-    "B2PLJM6": {
-      "name": "Artemis SmartGARP UK Eq I Acc GBP",
-      "ticker": "B2PLJM6",
-      "bucket": "B2",
-      "target_pct": 0.09,
-      "band_low": 0.07,
-      "band_high": 0.11,
-      "min_expected_return": 0.12,
-      "phase2_target_pct": 0.08,
-      "notes": ""
-    },
-    "B2PLJD7": {
-      "name": "Artemis SmartGARP European Eq I Acc GBP",
-      "ticker": "B2PLJD7",
-      "bucket": "B2",
-      "target_pct": 0.07,
-      "band_low": 0.05,
-      "band_high": 0.09,
-      "min_expected_return": 0.12,
-      "phase2_target_pct": 0.06,
-      "notes": ""
-    },
-    "B55QSH0": {
-      "name": "JPM UK Equity Core E Net Acc",
-      "ticker": "B55QSH0",
-      "bucket": "B2",
-      "target_pct": 0.06,
-      "band_low": 0.04,
-      "band_high": 0.08,
-      "min_expected_return": 0.12,
-      "phase2_target_pct": 0.05,
-      "notes": ""
-    },
-    "B5TP8W8": {
-      "name": "MI Thornbridge Global Opps C Acc",
-      "ticker": "B5TP8W8",
-      "bucket": "B2",
-      "target_pct": 0.07,
-      "band_low": 0.05,
-      "band_high": 0.09,
-      "min_expected_return": 0.12,
-      "phase2_target_pct": 0.06,
-      "notes": ""
-    },
-    "B42W4J8": {
-      "name": "Polar Capital Global Tech I Inc GBP",
-      "ticker": "B42W4J8",
-      "bucket": "B2",
-      "target_pct": 0.08,
-      "band_low": 0.06,
-      "band_high": 0.1,
-      "min_expected_return": 0.13,
-      "phase2_target_pct": 0.07,
-      "notes": "Higher minimum return (13%) due to tech-focused mandate — B2 but with B3 return expectations."
-    },
-    "B6SQYF4": {
-      "name": "M&G Asian GBP I Acc",
-      "ticker": "B6SQYF4",
-      "bucket": "B3",
-      "target_pct": 0.061,
-      "band_low": 0.0457,
-      "band_high": 0.0762,
-      "min_expected_return": 0.13,
-      "phase2_target_pct": 0.0544,
-      "notes": "",
-      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
-    },
-    "B8N44Q8": {
-      "name": "Invesco Asian UK Z Acc",
-      "ticker": "B8N44Q8",
-      "bucket": "B3",
-      "target_pct": 0.061,
-      "band_low": 0.0457,
-      "band_high": 0.0762,
-      "min_expected_return": 0.13,
-      "phase2_target_pct": 0.0544,
-      "notes": "",
-      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
-    },
-    "B5B71Q7": {
-      "name": "Vanguard U.S. Equity Index GBP Acc",
-      "ticker": "B5B71Q7",
-      "bucket": "B1",
-      "target_pct": 0.0,
-      "band_low": 0.0,
-      "band_high": 0.0,
-      "min_expected_return": 0.09,
-      "phase2_target_pct": 0.0,
-      "notes": "CONSOLIDATION PENDING — target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
-      "consolidation_target": "VUAG",
-      "pending_sale": true
-    },
-    "SMT": {
-      "name": "Scottish Mortgage Ord",
-      "ticker": "SMT",
-      "bucket": "B3",
-      "target_pct": 0.038,
-      "band_low": 0.0229,
-      "band_high": 0.0533,
-      "min_expected_return": 0.13,
-      "phase2_target_pct": 0.0312,
-      "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes — not counted in stock sleeve %. SpaceX ~19% of NAV — below 25% threshold so BROAD-BASED. No preclearance required.",
-      "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
-    },
-    "SGLN": {
-      "name": "iShares Physical Gold ETC",
-      "ticker": "SGLN.L",
-      "bucket": "hedge",
-      "target_pct": 0.1,
-      "band_low": 0.08,
-      "band_high": 0.12,
-      "min_expected_return": null,
-      "phase2_target_pct": 0.1,
-      "notes": "audit item 5 - 2 tranches (T1 ~7.2k at Aug run, T2 Sep or -5% gold entry); hedge bucket = excluded from return math; freeze-EXEMPT (risk reduction)",
-      "status": "PILOT_PENDING_PRECLEARANCE"
-    },
-    "IWMO": {
-      "name": "iShares Edge MSCI World Momentum Factor UCITS ETF",
-      "ticker": "IWMO.L",
-      "bucket": "B2",
-      "target_pct": 0.05,
-      "band_low": 0.04,
-      "band_high": 0.06,
-      "min_expected_return": 0.12,
-      "phase2_target_pct": 0.05,
-      "notes": "audit item 6 - B2 satellite; E[r] >=12% per MSCI World Momentum long-run excess (audit Part 3); funded from weakest B2 holding named at Aug run (6.6 comparison); live twin of the A14 IWMO challenger",
-      "status": "PENDING_AUG_DECISION"
-    }
-  },
-  "bucket_totals": {
-    "B1": {
-      "phase1_target_pct": 0.3,
-      "phase1_band_low": 0.28,
-      "phase1_band_high": 0.35
-    },
-    "B2": {
-      "phase1_target_pct": 0.37,
-      "phase1_band_low": 0.33,
-      "phase1_band_high": 0.42
-    },
-    "B3": {
-      "phase1_target_pct": 0.16,
-      "phase1_band_low": 0.13,
-      "phase1_band_high": 0.19
-    },
-    "hedge": {
-      "phase1_target_pct": 0.0,
-      "phase1_band_low": 0.0,
-      "phase1_band_high": 0.12,
-      "note": "0 until SGLN ACTIVE post-trade; then 0.10 target. Excluded from B1/B2/B3 return sums."
-    }
-  },
-  "macro_tilt_rules": {
-    "Expansion": {
-      "B1": "allow_drift_lower",
-      "B2": "allow_drift_upper",
-      "B3": "allow_drift_upper"
-    },
-    "Slowdown": {
-      "B1": "move_toward_upper",
-      "B2": "hold_mid_band",
-      "B3": "move_toward_lower"
-    },
-    "Contraction": {
-      "B1": "hold_at_upper",
-      "B2": "hold_at_lower",
-      "B3": "hold_at_lower_no_new_capital"
-    },
-    "Recovery": {
-      "B1": "allow_drift_lower",
-      "B2": "move_toward_upper",
-      "B3": "move_toward_upper"
-    }
-  },
-  "stock_sleeve": {
-    "phase1_target_low": 0.1,
-    "phase1_target_high": 0.15,
-    "phase2_target_low": 0.15,
-    "phase2_target_high": 0.3,
-    "return_assumption": 0.18,
-    "transition_trigger_pct": 0.15,
-    "transition_requires_consecutive_months": 2
-  },
-  "signal_logic": {
-    "hold": "Within band AND estimated return >= bucket minimum",
-    "watch_return": "Within band BUT estimated return below bucket minimum (first time)",
-    "research_trigger": "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
-    "watch_drift": "Outside band by <= 2%",
-    "rebalancing_candidate": "Outside band by > 2% — escalate to Step 10 Category 7",
-    "drift_watch_threshold": 0.02,
-    "drift_rebalance_threshold": 0.02
-  },
-  "scaling_freeze": {
-    "active": true,
-    "rule": "sleeve must beat VUAG AND IWMO ex-MU over 4 consecutive months (A14 log); override unfreeze permitted at 3 via A13 entry",
-    "clock_start": "2026-08-02",
-    "earliest_unfreeze_override": "2026-11-01",
-    "earliest_unfreeze_mechanical": "2026-12-01",
-    "set_by": "Institutional audit Jul-2026 item 4; window reduced 6->3-4 months by Raj 22-Jul-26",
-    "basis": "reallocation_only",
-    "basis_declared_by": "Raj, 20-Aug-2026 (ISA-0387)",
-    "basis_declared_on": "2026-08-20",
-    "basis_semantics": {
-      "reallocation_only": "The freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A new subscription, and uninvested account cash, are not 'scaling' for the purposes of the freeze. stock_max is therefore the amount that restores the declared stock-sleeve band FLOOR, capped by the capital on offer. ⚑ CONSEQUENCE THAT TRAVELS WITH THE CHOICE: the ISA-0390 recall leg (trim funds -> buy stocks) IS a disposal from the fund sleeve and is therefore BARRED while the freeze is active, until 2026-11-01 (override) or 2026-12-01 (mechanical).",
-      "weight": "stock_max holds the sleeve's PRE-SUBSCRIPTION weight exactly, so a subscription takes no new PROPORTIONAL exposure to the unproven process. Measured 20-Aug-2026 on the September case: GBP 891.90 = 0.591% of the post-subscription total, which is BELOW every declared position size in the framework (Stage-1 probe 0.75%, typical 1.5-3.5%, max 5.0%) — a cap that cannot fund a compliant new position, only a top-up. NOT CHOSEN, and the reason is recorded so the measurement is not lost.",
-      "pounds": "stock_max = 0. The freeze is an absolute bar on pounds entering the sleeve and the resulting dilution (0.591pp on the September case, repeating on every subscription) is ACCEPTED and recorded as a chosen cost. NOT CHOSEN."
-    },
-    "basis_note": "⚑ R4.4 / ISA-0387. This field declares the UNIT the freeze is measured in. The NUMBER is DERIVED by capital_destination.sleeve_split() from this basis on every run and is never typed here. Changing this string is the whole rollback."
+    "required_return_low": 0.12,
+    "required_return_high": 0.16
+   },
+   "why": "ISA-0432 Form 4. Each of these restated a quantity that derive_required_return.py DERIVES from the live portfolio value and the contribution schedule, and NOTHING on disk read any of them. A number sitting in a policy file that governs nothing is eventually read as though it governs something - which is exactly how the 13.9-vs-13.8 confusion reached Raj as a false decision.",
+   "authority_now": "target_state.json (written by derive_required_return.py); read via isa_policy.derived('REQUIRED_RETURN_MID') / ('FUND_GATE_PCT')",
+   "live_values_at_removal": {
+    "REQUIRED_RETURN_MID_pct": 13.8,
+    "FUND_GATE_PCT_pct": 11.9,
+    "anchor_next_derivation_due": "2026-09-30"
+   },
+   "note": "Retained here as a record rather than deleted outright so a grep for the old key still lands on the explanation (R6.4: never delete, relabel)."
   }
+ },
+ "thresholds": {
+  "fund_sleeve_weighted_avg_min": 0.12,
+  "stock_sleeve_on_track": 0.18,
+  "stock_sleeve_watch_low": 0.15,
+  "total_isa_on_track": 0.14,
+  "total_isa_watch_low": 0.13,
+  "phase_transition_pct": 0.15,
+  "max_single_fund_pct": 0.125,
+  "max_stock_position_pct": 0.065,
+  "typical_stock_position_low": 0.035,
+  "typical_stock_position_high": 0.065,
+  "cash_buffer_min": 150,
+  "cash_buffer_max": 200,
+  "_isa0427_note": "Raised from 0.05 / 0.015-0.035 on 26-Aug-2026 IN THE SAME CHANGE as the V2.1 fixed ladder, per ISA_V2_1_BUILD_SPEC_CLEAN_23Aug2026.md s1. max_stock_position_pct is read at portfolio_analytics.py:377 as max_new_position_size and the ladder's EARNED_MAX (6.5%) breached the old 0.05 by 1.5pp. consistency_check.pair_stock_ladder_reconciles() asserts ladder max == max_stock_position_pct exactly, so the two can never drift again.",
+  "_stage1_probe_superseded_26aug2026": {
+   "was_pct": 0.75,
+   "superseded_by": "stock_sleeve.sizing_ladder_pct.STARTER = 3.5%",
+   "decision": "Raj, 26-Aug-2026 (D5). The clean spec s1 - 'a position reaches 3.5% or it does not exist. No sub-scale holdings.' - is the build authority and supersedes the 0.75% Stage-1 probe pre-registered on 01-Aug-2026 in ISA_Stock_Sleeve_Confidence_Roadmap_Aug2026.md. The two were TWO HOMES FOR ONE RULE (D5, open since 22-Aug) and the ladder wins.",
+   "what_is_given_up": "The staged de-risking ramp. This is a real cost, recorded rather than glossed: ISA-0429 measured the stock sleeve trailing VUAG by ~22pp ex-MU since April, so the caution the probe encoded was well founded. The replacement control is NOT size - it is QUALIFICATION (evidence state, s6) plus the correlation gate (s7) plus the step-down ratchet (s3). If those do not hold, nothing is protecting the sleeve, because the percentage ceiling was removed in the same change.",
+   "note": "Retained as a record rather than deleted so a grep for stage1_probe_pct lands here."
+  }
+ },
+ "buckets": {
+  "B1": {
+   "name": "Core Global Equity",
+   "role": "Stable backbone. Diversified, quality, lower vol. Reliable compounding.",
+   "ownership_floor_return": 0.12,
+   "max_weight_pct": 0.35
+  },
+  "B2": {
+   "name": "Active Growth Equity",
+   "role": "Primary return engine. Active management premium. GARP, quality growth.",
+   "ownership_floor_return": 0.12,
+   "max_weight_pct": 0.45
+  },
+  "B3": {
+   "name": "High-Growth / Structural Theme",
+   "role": "Highest expected return, highest vol. Structural tailwinds.",
+   "ownership_floor_return": 0.13,
+   "max_weight_pct": 0.25
+  },
+  "hedge": {
+   "name": "Tail Hedge",
+   "role": "Risk reduction only (gold). NO expected-return claim under the 14% formula - excluded from ALL return-bucket math and the Section-A gate.",
+   "ownership_floor_return": null,
+   "max_weight_pct": 0.12
+  }
+ },
+ "funds": {
+  "BF93W97": {
+   "name": "Royal London Global Equity Select M Acc",
+   "ticker": "BF93W97",
+   "bucket": "B1",
+   "target_pct": 0.08,
+   "band_low": 0.06,
+   "band_high": 0.1,
+   "min_expected_return": 0.09,
+   "phase2_target_pct": 0.07,
+   "notes": ""
+  },
+  "BR2Q8G6": {
+   "name": "Ranmore Global Equity Institutional GBP",
+   "ticker": "BR2Q8G6",
+   "bucket": "B1",
+   "target_pct": 0.08,
+   "band_low": 0.06,
+   "band_high": 0.1,
+   "min_expected_return": 0.09,
+   "phase2_target_pct": 0.07,
+   "notes": ""
+  },
+  "VUAG": {
+   "name": "Vanguard S&P 500 ETF USD Acc GBP",
+   "ticker": "VUAG",
+   "bucket": "B1",
+   "target_pct": 0.1,
+   "band_low": 0.08,
+   "band_high": 0.125,
+   "min_expected_return": 0.09,
+   "phase2_target_pct": 0.09,
+   "notes": "UCITS ETF — no preclearance required. Do not let VUAG + Vanguard US Eq combined exceed 12.5%."
+  },
+  "B50MZ94": {
+   "name": "Vanguard Japan Stock Index GBP Acc",
+   "ticker": "B50MZ94",
+   "bucket": "B1",
+   "target_pct": 0.04,
+   "band_low": 0.02,
+   "band_high": 0.06,
+   "min_expected_return": 0.08,
+   "phase2_target_pct": 0.03,
+   "notes": "Passive Japan index — 8% minimum (not 9%) as demanding for this mandate."
+  },
+  "B2PLJM6": {
+   "name": "Artemis SmartGARP UK Eq I Acc GBP",
+   "ticker": "B2PLJM6",
+   "bucket": "B2",
+   "target_pct": 0.09,
+   "band_low": 0.07,
+   "band_high": 0.11,
+   "min_expected_return": 0.12,
+   "phase2_target_pct": 0.08,
+   "notes": ""
+  },
+  "B2PLJD7": {
+   "name": "Artemis SmartGARP European Eq I Acc GBP",
+   "ticker": "B2PLJD7",
+   "bucket": "B2",
+   "target_pct": 0.07,
+   "band_low": 0.05,
+   "band_high": 0.09,
+   "min_expected_return": 0.12,
+   "phase2_target_pct": 0.06,
+   "notes": ""
+  },
+  "B55QSH0": {
+   "name": "JPM UK Equity Core E Net Acc",
+   "ticker": "B55QSH0",
+   "bucket": "B2",
+   "target_pct": 0.06,
+   "band_low": 0.04,
+   "band_high": 0.08,
+   "min_expected_return": 0.12,
+   "phase2_target_pct": 0.05,
+   "notes": ""
+  },
+  "B5TP8W8": {
+   "name": "MI Thornbridge Global Opps C Acc",
+   "ticker": "B5TP8W8",
+   "bucket": "B2",
+   "target_pct": 0.07,
+   "band_low": 0.05,
+   "band_high": 0.09,
+   "min_expected_return": 0.12,
+   "phase2_target_pct": 0.06,
+   "notes": ""
+  },
+  "B42W4J8": {
+   "name": "Polar Capital Global Tech I Inc GBP",
+   "ticker": "B42W4J8",
+   "bucket": "B2",
+   "target_pct": 0.08,
+   "band_low": 0.06,
+   "band_high": 0.1,
+   "min_expected_return": 0.13,
+   "phase2_target_pct": 0.07,
+   "notes": "Higher minimum return (13%) due to tech-focused mandate — B2 but with B3 return expectations."
+  },
+  "B6SQYF4": {
+   "name": "M&G Asian GBP I Acc",
+   "ticker": "B6SQYF4",
+   "bucket": "B3",
+   "target_pct": 0.061,
+   "band_low": 0.0457,
+   "band_high": 0.0762,
+   "min_expected_return": 0.13,
+   "phase2_target_pct": 0.0544,
+   "notes": "",
+   "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
+  },
+  "B8N44Q8": {
+   "name": "Invesco Asian UK Z Acc",
+   "ticker": "B8N44Q8",
+   "bucket": "B3",
+   "target_pct": 0.061,
+   "band_low": 0.0457,
+   "band_high": 0.0762,
+   "min_expected_return": 0.13,
+   "phase2_target_pct": 0.0544,
+   "notes": "",
+   "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
+  },
+  "B5B71Q7": {
+   "name": "Vanguard U.S. Equity Index GBP Acc",
+   "ticker": "B5B71Q7",
+   "bucket": "B1",
+   "target_pct": 0.0,
+   "band_low": 0.0,
+   "band_high": 0.0,
+   "min_expected_return": 0.09,
+   "phase2_target_pct": 0.0,
+   "notes": "CONSOLIDATION PENDING — target weight 0%. Proceeds directed to VUAG. Until sold: treat as B1 at actual weight. Do not let VUAG + this fund combined exceed 12.5%.",
+   "consolidation_target": "VUAG",
+   "pending_sale": true
+  },
+  "SMT": {
+   "name": "Scottish Mortgage Ord",
+   "ticker": "SMT",
+   "bucket": "B3",
+   "target_pct": 0.038,
+   "band_low": 0.0229,
+   "band_high": 0.0533,
+   "min_expected_return": 0.13,
+   "phase2_target_pct": 0.0312,
+   "notes": "Listed closed-end investment trust (LSE:SMT). Classified as FUND for sleeve purposes — not counted in stock sleeve %. SpaceX ~19% of NAV — below 25% threshold so BROAD-BASED. No preclearance required.",
+   "weight_basis": "RECONCILED 20-Aug-2026 (ISA-0398, Raj). B3's per-fund targets summed to 21.0% against a declared bucket target of 16.0% - over-subscribed by exactly SMT's 5.0% and ABOVE the bucket's own 19.0% band_high, so the three funds could not all sit at target. The original 8/8/5 numbers were cut when B3 held TWO funds. Scaled by 16/21 (x0.7619); phase 2 by 14/18 (x0.7778). Raj, 20-Aug-2026: B3 stays at 16% and SMT stays in B3 - its own 13% return hurdle and the bucket definition ('highest expected return, highest vol, structural tailwinds') both already placed it there. consistency_check.pair_target_weights_bucket_reconciliation (TW1) now asserts the reconciliation on every run."
+  },
+  "SGLN": {
+   "name": "iShares Physical Gold ETC",
+   "ticker": "SGLN.L",
+   "bucket": "hedge",
+   "target_pct": 0.1,
+   "band_low": 0.08,
+   "band_high": 0.12,
+   "min_expected_return": null,
+   "phase2_target_pct": 0.1,
+   "notes": "audit item 5 - 2 tranches (T1 ~7.2k at Aug run, T2 Sep or -5% gold entry); hedge bucket = excluded from return math; freeze-EXEMPT (risk reduction)",
+   "status": "PILOT_PENDING_PRECLEARANCE"
+  },
+  "IWMO": {
+   "name": "iShares Edge MSCI World Momentum Factor UCITS ETF",
+   "ticker": "IWMO.L",
+   "bucket": "B2",
+   "target_pct": 0.05,
+   "band_low": 0.04,
+   "band_high": 0.06,
+   "min_expected_return": 0.12,
+   "phase2_target_pct": 0.05,
+   "notes": "audit item 6 - B2 satellite; E[r] >=12% per MSCI World Momentum long-run excess (audit Part 3); funded from weakest B2 holding named at Aug run (6.6 comparison); live twin of the A14 IWMO challenger",
+   "status": "PENDING_AUG_DECISION"
+  }
+ },
+ "bucket_totals": {
+  "B1": {
+   "phase1_target_pct": 0.3,
+   "phase1_band_low": 0.28,
+   "phase1_band_high": 0.35
+  },
+  "B2": {
+   "phase1_target_pct": 0.37,
+   "phase1_band_low": 0.33,
+   "phase1_band_high": 0.42
+  },
+  "B3": {
+   "phase1_target_pct": 0.16,
+   "phase1_band_low": 0.13,
+   "phase1_band_high": 0.19
+  },
+  "hedge": {
+   "phase1_target_pct": 0.0,
+   "phase1_band_low": 0.0,
+   "phase1_band_high": 0.12,
+   "note": "0 until SGLN ACTIVE post-trade; then 0.10 target. Excluded from B1/B2/B3 return sums."
+  }
+ },
+ "macro_tilt_rules": {
+  "Expansion": {
+   "B1": "allow_drift_lower",
+   "B2": "allow_drift_upper",
+   "B3": "allow_drift_upper"
+  },
+  "Slowdown": {
+   "B1": "move_toward_upper",
+   "B2": "hold_mid_band",
+   "B3": "move_toward_lower"
+  },
+  "Contraction": {
+   "B1": "hold_at_upper",
+   "B2": "hold_at_lower",
+   "B3": "hold_at_lower_no_new_capital"
+  },
+  "Recovery": {
+   "B1": "allow_drift_lower",
+   "B2": "move_toward_upper",
+   "B3": "move_toward_upper"
+  }
+ },
+ "stock_sleeve": {
+  "phase1_target_low": 0.1,
+  "phase1_target_high": 0.15,
+  "phase2_target_low": 0.15,
+  "phase2_target_high": 0.3,
+  "return_assumption": 0.18,
+  "policy_version": "ISA_V2_1",
+  "sizing_ladder_pct": {
+   "STARTER": 3.5,
+   "NORMAL": 4.5,
+   "HIGH": 5.5,
+   "EARNED_MAX": 6.5
+  },
+  "sizing_ladder_basis": "FIXED, not derived from any rung (Raj, 22-Aug-2026, Option 2). Applies to EVERY direct-stock position, forward-led and VCI alike. A position reaches 3.5% or it does not exist - there are no sub-scale holdings. The A1 diversification multiplier (x d) is WITHDRAWN: the ladder is the ladder.",
+  "evidence_state_to_rung": {
+   "DEGRADED_UNMEASURED": "HOLD_AT_CURRENT",
+   "DEGRADED_REVERSED": "STARTER",
+   "THIN": "STARTER",
+   "CONFIRMED": "NORMAL",
+   "STRONG": "HIGH",
+   "EARNED_MAX": "EARNED_MAX"
+  },
+  "evidence_state_to_rung_basis": "A16 declares 'STRONG unlocks HIGH', which fixes the four measured states onto the four rungs. DEGRADED splits per Raj 26-Aug-2026 (ISA-0437 D13) because R2.10 forbids 'I could not measure it' and 'it is bad' producing the same output: DEGRADED_UNMEASURED holds at its current target, receives no new capital and does NOT enter challenger comparison (an unmeasured incumbent vs a measured challenger is decided by measurability, not quality), escalating to REVERSED after 2 consecutive failed runs; DEGRADED_REVERSED enters the pairwise comparison THAT RUN and trims to STARTER when no challenger qualifies.",
+  "sleeve_ceiling": null,
+  "sleeve_ceiling_basis": "REMOVED as policy, 26-Aug-2026 (clean spec s2). Sleeve size is an OUTCOME, not a cap: it equals what qualifies x what it costs, bounded by the capital on offer. Removed with it: the Phase-1 10-15% band AS A CAP, A3's N_eff rung ladder, the Phase-1->Phase-2 transition test, and the one-new-position-per-run cap. Capital is the governor - at a GBP 156,321 post-subscription NAV a STARTER is GBP 5,471, so GBP 11,250 funds 2.06 positions and the arithmetic already binds. THE TRADE THIS MAKES: with no percentage ceiling, QUALIFICATION is the only thing between capital and a bad position, so the evidence state and the correlation gate are not refinements - they are the replacement control and must be live before this is safe at scale.",
+  "_removed_caps_26aug2026": {
+   "transition_trigger_pct": 0.15,
+   "transition_requires_consecutive_months": 2
+  },
+  "phase1_target_basis": "RETAINED FOR REPORTING ONLY - phase1_target_low/high are no longer a cap on new capital. They remain as the band the monthly email reports position against, and phase1_target_low (10%) is the ratchet FLOOR in the s3 step-down rule.",
+  "stepdown_ratchet": {
+   "replaces": "the D6 probation rule at email_prefill.py:1514",
+   "population": "forward_led_framework_decisions_only",
+   "trigger": "trails VUAG by >5pp cumulative over 12 months with >=3 positions",
+   "consequence": "new_ceiling = floor(current_sleeve_weight_pct / 5) * 5",
+   "ratchet_floor_pct": 10.0,
+   "increment_routing": "capital_destination",
+   "basis": "The forward-led framework went live ~05-Jul-2026. AVGO, MU and ONT predate it; ABCL was an A13 override; QBTS is VCI/Path B. COCO (02-Aug) is the only forward-led decision, so n=1 and the rule CANNOT FIRE YET - which is correct, not a loophole. Measuring the framework on a book it did not assemble is measuring the wrong thing, in either direction."
+  },
+  "funding_sources": {
+   "new_subscription": "AVAILABLE_IN_FULL",
+   "stock_to_stock_recycling": "PERMITTED",
+   "fund_to_stock_recall": "BARRED_UNTIL_2026-11-01_OVERRIDE_2026-12-01_MECHANICAL",
+   "basis": "clean spec s4. stock_max is NOT capped at the band floor (ISA-0430): the reallocation_only semantics exempted a subscription from the freeze and then bound it to the band FLOOR, which is tighter than the unfrozen policy - GBP 548 against GBP 8,364, a 15.3x difference from one word."
+  }
+ },
+ "signal_logic": {
+  "hold": "Within band AND estimated return >= bucket minimum",
+  "watch_return": "Within band BUT estimated return below bucket minimum (first time)",
+  "research_trigger": "Within band BUT estimated return below bucket minimum 2+ consecutive months OR underperformed benchmark >3% over 12m AND below threshold",
+  "watch_drift": "Outside band by <= 2%",
+  "rebalancing_candidate": "Outside band by > 2% — escalate to Step 10 Category 7",
+  "drift_watch_threshold": 0.02,
+  "drift_rebalance_threshold": 0.02
+ },
+ "scaling_freeze": {
+  "active": true,
+  "rule": "sleeve must beat VUAG AND IWMO ex-MU over 4 consecutive months (A14 log); override unfreeze permitted at 3 via A13 entry",
+  "clock_start": "2026-08-02",
+  "earliest_unfreeze_override": "2026-11-01",
+  "earliest_unfreeze_mechanical": "2026-12-01",
+  "set_by": "Institutional audit Jul-2026 item 4; window reduced 6->3-4 months by Raj 22-Jul-26",
+  "basis": "reallocation_only",
+  "basis_declared_by": "Raj, 20-Aug-2026 (ISA-0387)",
+  "basis_declared_on": "2026-08-20",
+  "basis_semantics": {
+   "reallocation_only": "The freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A new subscription, and uninvested account cash, are not 'scaling' for the purposes of the freeze. stock_max is therefore the amount that restores the declared stock-sleeve band FLOOR, capped by the capital on offer. ⚑ CONSEQUENCE THAT TRAVELS WITH THE CHOICE: the ISA-0390 recall leg (trim funds -> buy stocks) IS a disposal from the fund sleeve and is therefore BARRED while the freeze is active, until 2026-11-01 (override) or 2026-12-01 (mechanical).",
+   "weight": "stock_max holds the sleeve's PRE-SUBSCRIPTION weight exactly, so a subscription takes no new PROPORTIONAL exposure to the unproven process. Measured 20-Aug-2026 on the September case: GBP 891.90 = 0.591% of the post-subscription total, which is BELOW every declared position size in the framework (Stage-1 probe 0.75%, typical 1.5-3.5%, max 5.0%) — a cap that cannot fund a compliant new position, only a top-up. NOT CHOSEN, and the reason is recorded so the measurement is not lost.",
+   "pounds": "stock_max = 0. The freeze is an absolute bar on pounds entering the sleeve and the resulting dilution (0.591pp on the September case, repeating on every subscription) is ACCEPTED and recorded as a chosen cost. NOT CHOSEN."
+  },
+  "basis_note": "⚑ R4.4 / ISA-0387. This field declares the UNIT the freeze is measured in. The NUMBER is DERIVED by capital_destination.sleeve_split() from this basis on every run and is never typed here. Changing this string is the whole rollback."
+ }
 }

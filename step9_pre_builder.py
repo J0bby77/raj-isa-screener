@@ -628,6 +628,14 @@ def compute_t2_score(ticker_scored: dict, wt_entry: dict) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+# ── ISA-0432: the guarded accessor for anchor-derived thresholds ──────────────────────────
+# These quantities are DERIVED from the portfolio value and the contribution schedule and move
+# whenever either does. A literal default here is a shadow copy that stops tracking on the day it
+# is written, so this delegates to isa_policy.derived(), which RAISES rather than substituting one.
+def _policy_derived(_name, _cfg_override=None):
+    import isa_policy as _pol
+    return _pol.derived(_name, cfg=_cfg_override)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Step 9 pre-scored conviction output from watchlist_scored JSON."
@@ -838,10 +846,12 @@ def main():
                                         else _t1_detail["t1_qualified"]),
                 "stage_gate":      _t1_detail["stage_gate"],
                 "late_cycle_flag": _t1_detail["late_cycle_flag"],
-                # A5 v3 (D18/D19): evidence-based SIZING — 'full' needs Step-10 conviction >= 75
-                # on top; 'starter' caps at STARTER_SIZE_CAP_PCT with a recorded scale-up trigger
+                # A5 v3 (D18/D19): evidence CERTIFICATION.
+                # ⚑ ISA-0442 (26-Aug-2026): `size_mode` is gone and no size is recorded here. The
+                # position TARGET is the V2.1 ladder rung for this name's evidence_state, from
+                # `position_sizing.target_pct()` — one path from a qualified candidate to a size.
                 "evidence_confirmed": _t1_detail.get("evidence_confirmed"),
-                "size_mode":          _t1_detail.get("size_mode"),
+                "size_authority":     _t1_detail.get("size_authority"),
                 "screen_sightings":   _t1_detail.get("screen_sightings"),
                 "t1_gate_detail":  _t1_detail,
             })
@@ -1108,7 +1118,7 @@ def main():
                 -(entry.get("normalised_score") or 0.0),
                 str(entry.get("ticker", "")))
 
-    _ER_FLOOR = float(getattr(_cfg, "ER_DEPLOY_FLOOR", 15.9)) if _cfg else 15.9
+    _ER_FLOOR = _policy_derived("ER_DEPLOY_FLOOR", _cfg)   # ISA-0432: no literal fallback
 
     def _er_floor_status(entry: dict):
         e = entry.get("expected_return_12_24m")

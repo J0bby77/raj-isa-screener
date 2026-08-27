@@ -61,6 +61,10 @@ sys.path.insert(0, HERE)
 # there is evidence to set them against. Same logic as the concentration limit (register L1):
 # measure first, set the number after.
 FRS_HOLD_ADD, FRS_RETAIN_ONLY = 58.0, 43.0
+
+# ROLLBACK (R4.13) for A7 / ISA-0440: False -> the ranked agenda reverts to the pre-A7 FRS-led
+# key exactly (band -> value -> FRS). One constant, no code revert.
+A7_AGENDA_ENABLED = True
 FRS_BANDS_BASIS = ("rebased 06-Aug-2026 to preserve the 05-Aug band distribution across the "
                    "return-adequacy rescoring; uncalibrated, pending evidence (H5 / L1)")
 DOMINANCE_CORR = 0.80
@@ -248,15 +252,24 @@ def _bucket_minimums(strict=True):
 
 
 def _anchor_floor():
-    """The required-return floor. target_state.json is the authority (A19)."""
+    """The required-return floor. target_state.json is the authority (A19).
+
+    ⚑ ISA-0432 Form 2. This used to `except: pass` and then `return 13.9`. That literal was the
+    12-Jul-2026 derivation at a portfolio value of GBP 144,342.19; the live authority is 13.8 at
+    GBP 139,738.00 and it re-derives at the 30-Sep window. A stale floor here prices EVERY fund
+    action, so this now RAISES rather than pricing capital off a number nobody chose."""
     try:
         ts = json.load(open(os.path.join(HERE, "target_state.json"), encoding="utf-8"))
         v = ts.get("required_return_floor_pct")
         if v is not None:
             return float(v)
-    except Exception:
-        pass
-    return 13.9
+        raise ValueError("required_return_floor_pct is null in target_state.json")
+    except Exception as exc:
+        raise RuntimeError(
+            "fund_action_stack._anchor_floor: the required-return anchor is unavailable "
+            f"({exc}). Refusing to substitute a literal — the legacy 13.9 was correct at a "
+            "portfolio value that no longer holds (ISA-0432). Fix target_state.json."
+        ) from exc
 
 
 # ---------------------------------------------------------------- return series
@@ -1100,10 +1113,58 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                     key=lambda r: -r["return_per_unit_risk"])
 
     # ── the ranked agenda ──────────────────────────────────────────────────────────
+    # ⚑ A7 (ISA-0440, 26-Aug-2026) — THIS AGENDA NO LONGER LEADS ON FRS.
+    # It used to be ordered band-first: DEAD MONEY, WINDOW_SPLIT, RETAIN-ONLY, then value, then
+    # the FRS number. Every one of those terms is FRS. L-1 (ISA-0351) measured rank persistence
+    # in THIS sleeve at alpha -0.482 and information ratio -0.418, so an agenda that puts the
+    # persistently-worst-scoring fund at the top is, in expectation, telling Raj to sell low —
+    # and it was doing so with the authority of a ranked list. A7 leads on the criteria that do
+    # not depend on a persistence property at all (pounds above the declared band_high;
+    # look-through and concentration relief; cost to keep) and FRS VOTES at P4.
+    # ⚑ ONE HOME: the ordering is `capital_destination.donor_order`, READ not copied, the same
+    # function `waiting_room` reads. FRS is passed IN as the P4 vote — this module does not own
+    # the sell order and `capital_destination` does not import this module.
+    # ⚑ IT REFUSES RATHER THAN FALLING BACK SILENTLY. If the A7 order cannot be produced, the
+    # agenda is emitted in the OLD order with `donor_order_state: DEGRADED_*` naming the failure,
+    # because an agenda that quietly reverts to the rule A7 replaced is the worst of both (R4.3).
     order = {"DEAD MONEY": 0, "WINDOW_SPLIT": 1, "RETAIN-ONLY": 2, "UNSCORED": 3, "HOLD/ADD": 4}
-    stack = sorted(rows, key=lambda r: (order.get(r["band"], 9),
-                                        -(r["value_gbp"] or 0),
-                                        (r["frs"] if r["frs"] is not None else 999)))
+    _legacy_key = (lambda r: (order.get(r["band"], 9),
+                              -(r["value_gbp"] or 0),
+                              (r["frs"] if r["frs"] is not None else 999)))
+    donor_order_state, donor_order_basis, a7_rank = "DISABLED", None, {}
+    if A7_AGENDA_ENABLED:
+        try:
+            import capital_destination as _cd
+            _votes = {r["sedol"]: {
+                "frs": r["frs"], "band": r["band"], "dominated_by": r.get("dominated_by"),
+                "crystallisation_gbp": ((r.get("crystallisation") or {}).get("cost_gbp")
+                                        if isinstance(r.get("crystallisation"), dict) else None),
+            } for r in rows}
+            _a7 = _cd.donor_order(portfolio=portfolio, frs_by_sedol=_votes)
+            a7_rank = {d["sedol"]: d for d in _a7["donors"]}
+            _missing = [r["sedol"] for r in rows if r["sedol"] not in a7_rank]
+            if _missing:
+                # R4.9 — a reader that cannot match a row COUNTS it and fails; it does not rank
+                # the rows it did match and quietly drop the rest to the bottom.
+                donor_order_state = "DEGRADED_UNRANKED_ROWS"
+                donor_order_basis = ("A7 produced no donor row for %d of %d funds (%s), so the "
+                                     "agenda is NOT reordered: a partial reorder would put the "
+                                     "unmatched funds last for a reason that is not about them."
+                                     % (len(_missing), len(rows), ", ".join(sorted(_missing))))
+                a7_rank = {}
+            else:
+                donor_order_state = "MEASURED"
+                donor_order_basis = _a7["basis"]
+        except Exception as _e:                                          # noqa: BLE001
+            donor_order_state = "DEGRADED_%s" % type(_e).__name__
+            donor_order_basis = ("the A7 donor ordering could not be produced (%s: %s). The "
+                                 "agenda below is in the PRE-A7 FRS-led order and must be read "
+                                 "as such." % (type(_e).__name__, _e))
+            a7_rank = {}
+    if a7_rank:
+        stack = sorted(rows, key=lambda r: a7_rank[r["sedol"]]["donor_rank"])
+    else:
+        stack = sorted(rows, key=_legacy_key)
     dead_value = sum(r["value_gbp"] or 0 for r in rows if r["band"] == "DEAD MONEY")
     return {
         "as_of": as_of.isoformat(),
@@ -1165,6 +1226,20 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                 "bands it on its worst. Neither is derivable from the data — it is a statement "
                 "about how much a bad five years should count against a good three. The funds "
                 "listed in basis_sensitive are the ones where the answer changes a real verdict.")},
+        "donor_ordering": {
+            "state": donor_order_state, "enabled": A7_AGENDA_ENABLED,
+            "item": "ISA-0440 / A7", "basis": donor_order_basis,
+            "order": ["P1 pounds above declared band_high",
+                      "P2 look-through / concentration relief",
+                      "P3 cost to keep (ordinal)",
+                      "P4 FRS band, dominance, FRS — A VOTE, NOT AUTHORITY",
+                      "P5 value desc, sedol — determinism only"],
+            "frs_role": ("VOTE at P4. Retained, not discarded: L-1/ISA-0351 is not actionable in "
+                         "EITHER direction at SE 0.32 on n = 11, which is exactly why it may not "
+                         "be actioned implicitly by leading the agenda with it."),
+            "supersedes": ("the pre-A7 agenda key (FRS band -> value -> FRS), every term of "
+                           "which was FRS"),
+        },
         "fund_dominance": dominance,
         "dominance_window_conflicts": window_conflicts,
         "fund_retention_score": rows,
@@ -1175,6 +1250,8 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
              "realised_5y_ann": r["realised_5y_ann"],
              "bucket_minimum_pct": r["bucket_minimum_pct"],
              "dominated_by": r["dominated_by"],
+             "donor_why": ((a7_rank.get(r["sedol"]) or {}).get("why")
+                           if a7_rank else "PRE-A7 FRS-led order — see donor_ordering.state"),
              "action_required": ("Category 7 — dead money: state the retain-vs-redeploy case or "
                                  "redeploy" if r["band"] == "DEAD MONEY" else
                                  "Windows disagree — decide WHICH window represents the forward "

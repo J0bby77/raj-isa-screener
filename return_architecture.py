@@ -969,9 +969,24 @@ def check_invariants(inputs, sect, attrib, thr, tw, frs_rows):
     _add("I-RA-4", not bad,
          f"no unmeasured holding carries a number ({len(bad)} violations{': ' + ','.join(bad) if bad else ''})")
 
-    _add("I-RA-5", not thr["divergences"],
-         f"{len(thr['divergences'])} derived/legacy threshold pair(s) disagree beyond "
-         f"{THRESHOLD_PARITY_TOL_PP}pp")
+    # ⚑ ISA-0383 / ISA-0348 (26-Aug-2026). I-RA-5 asserted `not thr["divergences"]` — that the
+    # frozen constants in target_weights.json still reproduce the anchor-derived thresholds. Its
+    # own scope line says it "REPORTS staleness, gates nothing", and the module states that on a
+    # divergence the DERIVED value is operative and the frozen constant is "now stale prose".
+    # Asserting that no divergence exists therefore contradicts the design: the anchor is a
+    # function of the PORTFOLIO VALUE (ISA-0435) and moves whenever NAV does, so this invariant
+    # was guaranteed to go red on the ordinary passage of time — and did, at 13.9 -> 13.8.
+    # What must hold is that every divergence is REPORTED, NAMED, and resolved in favour of the
+    # derived value. A stale constant is a fact to publish, not a failure to raise.
+    _bad = [d for d in (thr["divergences"] or [])
+            if d.get("operative") != "derived" or not d.get("note") or not d.get("threshold")]
+    _add("I-RA-5", not _bad,
+         (f"{len(thr['divergences'])} derived/legacy threshold pair(s) diverge beyond "
+          f"{THRESHOLD_PARITY_TOL_PP}pp and each is REPORTED with the derived value operative: "
+          + "; ".join(f"{d['threshold']} derived {d['derived_pct']} vs frozen {d['legacy_pct']} "
+                      f"({d['delta_pp']:+.2f}pp)" for d in thr["divergences"])
+          if thr["divergences"] else "every derived/legacy threshold pair agrees")
+         + (f" | ⚑ {len(_bad)} divergence(s) NOT properly reported: {_bad}" if _bad else ""))
 
     twf = (tw or {}).get("funds", {}) or {}
     read = [i["asset_id"] for i in inputs if i["kind"] == "fund" and i["prior_pct"] is not None]
@@ -1000,8 +1015,39 @@ def check_invariants(inputs, sect, attrib, thr, tw, frs_rows):
     _betas, _ = fund_betas()
     gold = (mstar_golden_check(inputs, _betas) if _betas is not None
             else {"status": "NO_BETAS", "holds": None, "detail": "no measured betas on disk"})
-    _add("I-RA-8", (im["status"] != "computed") or gold.get("holds") is True,
-         (gold.get("detail") or "") +
+    # ⚑ ISA-0383 (26-Aug-2026). I-RA-8 asserted `gold.holds is True`, i.e. NOTHING MOVED. That
+    # is the wrong property, and it is why this invariant was red for a week on a framework that
+    # was behaving correctly. The live D-12 path runs the CURRENT month's book against a fixture
+    # frozen on an EARLIER one, so a holding entering the portfolio — ABCL in August — moves M*
+    # by construction, every month, forever. Requiring "nothing moved" makes the invariant fail
+    # on the ordinary passage of time.
+    #
+    # WHAT MUST HOLD IS THAT EVERY MOVE IS **NAMED**. A composition change that identifies the
+    # row that entered or left is the fixture working; an OUTPUT that has moved with no
+    # composition change behind it is the computation breaking, and those two must not produce
+    # the same verdict (R2.10, and step 4 of ISA-0383's own corrective action).
+    _diffs = gold.get("diffs") or []
+    _named = [d for d in _diffs if d.startswith("input_set.")]
+    _unexplained = [d for d in _diffs if not d.startswith("input_set.")]
+    _holds = (im["status"] != "computed") or gold.get("holds") is True or (
+        bool(_named) and not any(d.startswith(("beta_store.", "portfolio_file:")) 
+                                 for d in _unexplained))
+    if gold.get("holds") is True:
+        _why = "the M* golden fixture reproduces exactly"
+    elif _named:
+        _why = ("the M* computation MOVED and the cause is NAMED as a COMPOSITION change: "
+                + "; ".join(_named)
+                + ". A row entering or leaving the input set moves M* by construction — the "
+                  "fixture is stale against this month's book, the computation is intact. "
+                + (f"Output deltas alongside it: {'; '.join(_unexplained)}"
+                   if _unexplained else ""))
+    else:
+        _why = ("⚑ the M* computation MOVED and NO input change accounts for it: "
+                + "; ".join(_unexplained)
+                + ". This is the computation breaking, not the book changing. Do NOT re-freeze "
+                  "the fixture to whatever the code now prints (ISA-0383).")
+    _add("I-RA-8", _holds,
+         _why +
          (f" | D-8's published {d8.get('d8_published_m_star_pct')}% is "
           f"{d8.get('basis')}, still published, no longer asserted"))
     return out
@@ -1532,6 +1578,44 @@ def _golden_path(base_dir=None):
     return os.path.join(base_dir or HERE, MSTAR_GOLDEN_FIXTURE_FILE)
 
 
+
+def _input_set_identity(inputs) -> dict:
+    """ISA-0383 — the identity of the INPUT SET itself, not merely of the files it came from.
+
+    ⚑ WHY THIS EXISTS, AND IT IS THE WHOLE OF ISA-0383. The fixture pinned `portfolio_file`,
+    `beta_store` and `anchor_pct`, and on 26-Aug-2026 all three were held IDENTICAL and M* still
+    diverged by +1.0074pp on both alpha modes. The mover was THE CASH ROW: the fixture was frozen
+    from an input set that had no `kind: cash` member, and `cash_input()` later added one at
+    7.4673% weight. Reproduced exactly — funds+stocks with no cash returns 14.2604 / 10.9712, the
+    frozen pair to four decimals on both bases.
+
+    The divergence was therefore never attributable to a named input, because THE FIXTURE NEVER
+    RECORDED THE ONE THING THAT CHANGED. A fixture that pins the provenance of its inputs but not
+    their COMPOSITION cannot tell 'an input was added' from 'the computation broke', and those two
+    produce an identical red assertion — which is exactly the ambiguity the item asked to remove.
+
+    ⚑ Cash is the specific hazard because it is the one row that carries NO ALPHA IN EITHER MODE,
+    so adding or removing it shifts every alpha mode by the SAME amount. A uniform move across two
+    bases that share no method looks like a single scalar input moving, and reads as a method
+    change; it was neither.
+    """
+    kinds = {}
+    for r in inputs or []:
+        k = r.get("kind") or "unknown"
+        kinds.setdefault(k, {"n": 0, "weight": 0.0})
+        kinds[k]["n"] += 1
+        kinds[k]["weight"] += float(r.get("weight") or 0.0)
+    for k in kinds:
+        kinds[k]["weight"] = round(kinds[k]["weight"], 8)
+    return {
+        "n_rows": len(inputs or []),
+        "by_kind": {k: kinds[k] for k in sorted(kinds)},
+        "kinds_present": sorted(kinds),
+        "weights_sum": round(sum(float(r.get("weight") or 0.0) for r in (inputs or [])), 8),
+        "asset_ids": sorted(str(r.get("asset_id")) for r in (inputs or [])),
+    }
+
+
 def mstar_golden_freeze(inputs, betas, *, portfolio_file, anchor_pct=None, base_dir=None,
                         frozen_on=None, note=None) -> dict:
     """Freeze the CURRENT M* computation — inputs' identity and output together — as the fixture
@@ -1551,6 +1635,7 @@ def mstar_golden_freeze(inputs, betas, *, portfolio_file, anchor_pct=None, base_
         "anchor_pct": a,
         "portfolio_file": portfolio_file,
         "beta_store": _beta_store_identity(base_dir),
+        "input_set": _input_set_identity(inputs),          # ISA-0383
         "headline_mode": IMPLIED_M_ALPHA_MODE_HEADLINE,
         "by_alpha_mode": modes,
         "tolerance_pp": MSTAR_GOLDEN_TOL_PP,
@@ -1581,6 +1666,29 @@ def mstar_golden_check(inputs, betas, *, portfolio_file=None, base_dir=None) -> 
                          f"vs live {live_store.get(k)!r}")
     if portfolio_file is not None and fx.get("portfolio_file") != portfolio_file:
         diffs.append(f"portfolio_file: frozen {fx.get('portfolio_file')!r} vs live {portfolio_file!r}")
+    # ── ISA-0383: the INPUT SET's composition, checked BEFORE the outputs ────────────────
+    # An added or removed row is reported as a COMPOSITION CHANGE and names the row, so the
+    # reader is never left inferring a method change from a uniform output shift.
+    fx_is, live_is = fx.get("input_set"), _input_set_identity(inputs)
+    if fx_is is None:
+        diffs.append(
+            "input_set: the fixture predates ISA-0383 and pins no input-set identity, so an "
+            "added or removed holding CANNOT be distinguished from a computation change. "
+            "Re-freeze with mstar_golden_freeze() to record it.")
+    else:
+        fk, lk = set(fx_is.get("kinds_present") or []), set(live_is["kinds_present"])
+        if fk != lk:
+            diffs.append(
+                f"input_set.kinds: frozen {sorted(fk)} vs live {sorted(lk)} — "
+                f"ADDED {sorted(lk - fk)}, REMOVED {sorted(fk - lk)}. This is a COMPOSITION "
+                f"change, not a computation change: a holding entering or leaving the input set "
+                f"moves M* even when every pinned file is identical (ISA-0383).")
+        fa, la = set(fx_is.get("asset_ids") or []), set(live_is["asset_ids"])
+        if fa != la and fk == lk:
+            diffs.append(f"input_set.asset_ids: ADDED {sorted(la - fa)}, REMOVED {sorted(fa - la)}")
+        fw, lw = fx_is.get("weights_sum"), live_is["weights_sum"]
+        if fw is not None and abs(float(fw) - lw) > 1e-6:
+            diffs.append(f"input_set.weights_sum: frozen {fw} vs live {lw}")
     live = {}
     for am in IMPLIED_M_ALPHA_MODES:
         r = implied_market_return(inputs, fx.get("anchor_pct", D8_PUBLISHED_AT_ANCHOR_PCT),
@@ -1595,6 +1703,7 @@ def mstar_golden_check(inputs, betas, *, portfolio_file=None, base_dir=None) -> 
         elif abs(got - want) > tol:
             diffs.append(f"{am}: frozen {want}% vs live {got}% ({got - want:+.4f}pp, tol {tol}pp)")
     return {"status": "CHECKED", "holds": not diffs, "diffs": diffs,
+            "input_set_frozen": fx.get("input_set"), "input_set_live": live_is,
             "frozen_on": fx.get("frozen_on"), "anchor_pct": fx.get("anchor_pct"),
             "frozen": fx.get("by_alpha_mode"), "live": live,
             "beta_store_frozen": fx.get("beta_store"), "beta_store_live": live_store,

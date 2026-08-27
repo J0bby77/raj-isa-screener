@@ -1718,6 +1718,719 @@ def pair_return_basis_declared():
     return errs
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0432 / ISA-0433 — THE DERIVED-THRESHOLD SHADOW-COPY CLASS, killed in three forms.
+# Built 26-Aug-2026 (V2.1-A / ISA-0354).
+#
+# ⚑ WHY THREE CHECKS AND NOT ONE. The R4.6 enumeration found the class in FIVE syntactic forms
+# across TWO languages, and the two most damaging instances contain no `default` token at all:
+#   Form 1  _c("ER_DEPLOY_FLOOR", 15.9)              literal beside the name in a call
+#   Form 2  def _anchor_floor(): ... return 13.9      accessor with a bare numeric fallthrough
+#   Form 3  except: return {"..._pct": 13.9}          import-time fallback record
+#   Form 4  target_weights.json total_isa_on_track    a JSON policy file restating the quantity
+#   Form 5  X = derived(...)  ...  X = 12.0           the same name assigned twice in one module
+# A grep over *.py reaches 1-3 and reports success. Forms 4 and 5 were BOTH LIVE when this was
+# written: Form 5 had killed the fund gate's derivation (ISA-0433) and Form 4 was the reason
+# test_return_architecture was red in the delivered location.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+def pair_no_literal_fallback_for_derived_thresholds(py_texts=None):
+    """Forms 1-3. AST over the Python sources: no numeric literal may stand in for a threshold
+    that isa_policy declares DERIVED."""
+    import ast as _ast
+    errs = []
+    try:
+        import isa_policy as _pol
+    except Exception as e:                                     # noqa: BLE001
+        return [f"ISA-0432: isa_policy is unimportable ({e}) - the derived-threshold check "
+                f"could NOT run. Reported, never silently skipped (R4.9)"]
+    derived_names = set(_pol.DERIVED_THRESHOLDS)
+    # the JSON key names that carry the same quantities, for Form 3 fallback records
+    json_keys = {"required_return_operative_pct", "required_return_floor_pct",
+                 "required_return_stretch_pct"}
+    if py_texts is None:
+        py_texts = {fn: _read(fn) for fn in sorted(os.listdir(HERE))
+                    if fn.endswith(".py") and not fn.startswith("_")}
+    for fn, src in sorted(py_texts.items()):
+        if fn in ("isa_policy.py", "consistency_check.py"):
+            continue                      # the registry itself, and this checker's own fixtures
+        try:
+            tree = _ast.parse(src)
+        except SyntaxError:
+            continue
+        for node in _ast.walk(tree):
+            # Form 1 — a numeric default in ANY argument position after the name
+            if isinstance(node, _ast.Call):
+                for i, a in enumerate(node.args):
+                    if (isinstance(a, _ast.Constant) and a.value in derived_names
+                            and i + 1 < len(node.args)):
+                        d = node.args[i + 1]
+                        if (isinstance(d, _ast.Constant)
+                                and isinstance(d.value, (int, float))
+                                and not isinstance(d.value, bool)):
+                            errs.append(
+                                f"ISA-0432 Form 1: {fn}:{node.lineno} supplies literal "
+                                f"{d.value} as a fallback for {a.value!r}, which is DERIVED "
+                                f"({_pol.DERIVED_THRESHOLDS[a.value]['home']}). Call "
+                                f"isa_policy.derived() - it raises instead of defaulting.")
+            # Form 3 — a dict literal that assigns a number to an anchor key
+            if isinstance(node, _ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if (isinstance(k, _ast.Constant) and k.value in json_keys
+                            and isinstance(v, _ast.Constant)
+                            and isinstance(v.value, (int, float))
+                            and not isinstance(v.value, bool)):
+                        errs.append(
+                            f"ISA-0432 Form 3: {fn}:{node.lineno} builds a fallback record with "
+                            f"{k.value}={v.value}. An absent anchor must read None and RAISE at "
+                            f"use, not resolve to a stale number.")
+        # Form 2 — a function whose name marks it an accessor for a derived threshold, whose
+        # body contains a bare numeric return. Scoped to accessor-shaped names so this does not
+        # flag every helper in the codebase.
+        for f in [n for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef)]:
+            nm = f.name.lower()
+            if not any(t in nm for t in ("anchor", "floor", "hurdle", "gate_pct", "required_return")):
+                continue
+            for r in [n for n in _ast.walk(f) if isinstance(n, _ast.Return)]:
+                v = r.value
+                if (isinstance(v, _ast.Constant) and isinstance(v.value, (int, float))
+                        and not isinstance(v.value, bool) and v.value not in (0, 1, -1)):
+                    errs.append(
+                        f"ISA-0432 Form 2: {fn}:{r.lineno} def {f.name}() returns the bare "
+                        f"literal {v.value}. An accessor for a derived threshold must raise "
+                        f"when it cannot obtain the value.")
+    return errs
+
+
+def pair_no_derived_threshold_in_json(tw=None, cfg=None, reporter_texts=None):
+    """Form 4. A derived quantity restated in a JSON policy file.
+
+    ⚑ THE DISTINCTION THAT MAKES THIS CHECK CORRECT RATHER THAN NOISY. Not every stored copy is
+    a defect. `return_architecture.threshold_parity()` deliberately keeps four frozen constants
+    and compares them to the derived values EVERY RUN, publishing any gap in `divergences[]`
+    with the derived value declared operative. That is R5.2 working exactly as intended — two
+    independent derivations that must agree, with a stated tolerance — and flagging it would be
+    reporting a working instrument as a fault (R2.4).
+
+    So each alias declares a ROLE:
+      corroborator — something compares and PUBLISHES it. Legitimate. The check verifies the
+                     REPORTER STILL EXISTS, because a corroborator whose reporter is deleted
+                     silently becomes a shadow copy, and nothing would say so.
+      superseded   — structurally replaced, declared so, excluded from parity by name.
+                     Same reporter test.
+      shadow       — nothing on disk reads it. It sits in a policy file looking authoritative
+                     and governs nothing. THIS is the defect, and the fix is to delete it or
+                     mark it inert. return_architecture's own note says exactly that:
+                     "delete it or mark it, but do not let a future reader gate on it."
+    """
+    errs = []
+    try:
+        import isa_policy as _pol
+    except Exception as e:                                     # noqa: BLE001
+        return [f"ISA-0432 Form 4: isa_policy unimportable ({e}) - check did NOT run"]
+    loaded, reporter_src = {}, {}
+    for name, spec in sorted(_pol.DERIVED_THRESHOLDS.items()):
+        for alias in (spec.get("json_aliases") or []):
+            fname, path, unit, role = alias
+            if fname not in loaded:
+                if tw is not None and fname == "target_weights.json":
+                    loaded[fname] = tw
+                else:
+                    try:
+                        with open(os.path.join(HERE, fname), encoding="utf-8") as fh:
+                            loaded[fname] = json.load(fh)
+                    except Exception as e:                     # noqa: BLE001
+                        errs.append(f"ISA-0432 Form 4: {fname} unreadable ({e})")
+                        loaded[fname] = None
+            doc = loaded.get(fname)
+            if doc is None:
+                continue
+            node, dotted = doc, ".".join(path)
+            for key in path:
+                node = node.get(key) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if node is None:
+                continue      # removed from the policy file — the preferred fix. Nothing to say.
+            if role == "shadow":
+                errs.append(
+                    f"ISA-0432 Form 4 (shadow): {fname}:{dotted} = {node} restates {name}, "
+                    f"which is DERIVED, and NO code on disk reads it. A number in a policy file "
+                    f"that governs nothing will eventually be read as though it governs "
+                    f"something. Delete it, or mark it inert with a pointer to "
+                    f"isa_policy.derived({name!r}).")
+                continue
+            # corroborator / superseded: the value MAY diverge — that is the point. What must
+            # hold is that the instrument which publishes the divergence still exists.
+            rep = _pol.ALIAS_REPORTERS.get(role)
+            if not rep:
+                errs.append(f"ISA-0432 Form 4: {fname}:{dotted} declares unknown role {role!r}")
+                continue
+            rfile, rfunc, rfield = rep
+            if rfile not in reporter_src:
+                reporter_src[rfile] = (reporter_texts.get(rfile)
+                                       if reporter_texts is not None else _read(rfile))
+            body = reporter_src[rfile] or ""
+            if not body:
+                errs.append(
+                    f"ISA-0432 Form 4: {fname}:{dotted} is declared a {role} of {name}, but its "
+                    f"reporter file {rfile} is MISSING or empty. The stored copy is now "
+                    f"unreconciled and nothing would say so.")
+            elif f"def {rfunc}(" not in body:
+                errs.append(
+                    f"ISA-0432 Form 4: {fname}:{dotted} is declared a {role} of {name}, but its "
+                    f"reporter {rfile}:{rfunc}() NO LONGER EXISTS. Without the reporter this is "
+                    f"an undeclared shadow copy - the value diverges and nothing says so.")
+            elif f'"{rfield}"' not in body and f"'{rfield}'" not in body:
+                errs.append(
+                    f"ISA-0432 Form 4: {rfile}:{rfunc}() no longer emits {rfield!r}, so the "
+                    f"divergence of {fname}:{dotted} from {name} is computed and discarded.")
+    return errs
+
+
+def pair_stock_ladder_reconciles(tw=None):
+    """ISA-0427 / TW1 pattern. The sizing ladder's maximum IS `max_stock_position_pct`, and its
+    minimum IS `typical_stock_position_low`. Not "consistent with" — equal.
+
+    ⚑ Why an assertion and not a comment. `max_stock_position_pct` is read at
+    portfolio_analytics.py:377 as `max_new_position_size` and independently caps every new
+    position. Before 26-Aug-2026 it stood at 0.05 while the adopted ladder reached 0.065, so two
+    modules would have computed different targets for the same position and the smaller would
+    have won silently — failure class 1, and the third home for the position-size question that
+    nobody had checked."""
+    errs = []
+    if tw is None:
+        try:
+            with open(os.path.join(HERE, "target_weights.json"), encoding="utf-8") as fh:
+                tw = json.load(fh)
+        except Exception as e:                                 # noqa: BLE001
+            return [f"ISA-0427: target_weights.json unreadable ({e}) - ladder check did NOT run"]
+    ss = tw.get("stock_sleeve") or {}
+    th = tw.get("thresholds") or {}
+    ladder = ss.get("sizing_ladder_pct") or {}
+    if not ladder:
+        return ["ISA-0427: stock_sleeve.sizing_ladder_pct is absent - the V2.1 ladder is the "
+                "operative position-size policy and must be declared in target_weights.json"]
+    vals = [float(v) for v in ladder.values()]
+    lo, hi = min(vals), max(vals)
+    cap = th.get("max_stock_position_pct")
+    t_lo = th.get("typical_stock_position_low")
+    t_hi = th.get("typical_stock_position_high")
+    if cap is None:
+        errs.append("ISA-0427: thresholds.max_stock_position_pct is absent")
+    elif abs(float(cap) * 100.0 - hi) > 1e-9:
+        errs.append(f"ISA-0427: ladder max is {hi}% but max_stock_position_pct is {cap} "
+                    f"(= {float(cap)*100:.2f}%). portfolio_analytics.py:377 would cap every "
+                    f"position at the smaller of the two and say nothing.")
+    for label, v, want in (("typical_stock_position_low", t_lo, lo),
+                           ("typical_stock_position_high", t_hi, hi)):
+        if v is None:
+            errs.append(f"ISA-0427: thresholds.{label} is absent")
+        elif abs(float(v) * 100.0 - want) > 1e-9:
+            errs.append(f"ISA-0427: {label} is {v} (= {float(v)*100:.2f}%) but the ladder's "
+                        f"corresponding rung is {want}%. The declared typical range must BE the "
+                        f"ladder, not a stale description of it.")
+    # The ladder must be strictly increasing — two rungs paying the same is not a ladder.
+    ordered = list(ladder.values())
+    if any(float(b) <= float(a) for a, b in zip(ordered, ordered[1:])):
+        errs.append(f"ISA-0427: sizing_ladder_pct is not strictly increasing: {ordered}. "
+                    f"Two rungs that pay the same collapse an evidence distinction into nothing.")
+    # A position reaches STARTER or it does not exist (clean spec s1).
+    probe = th.get("stage1_probe_pct")
+    if probe is not None and float(probe) * 100.0 < lo:
+        errs.append(f"ISA-0427/D5: thresholds.stage1_probe_pct is {probe} "
+                    f"(= {float(probe)*100:.2f}%), BELOW the ladder's STARTER of {lo}%. The "
+                    f"clean spec s1 declares 'a position reaches 3.5% or it does not exist', so "
+                    f"the probe and the STARTER are two homes for one rule (D5, unresolved). "
+                    f"Reconcile them or mark the probe superseded.")
+    return errs
+
+
+def pair_no_duplicate_module_constant(py_texts=None, modules=("scoring_config.py",)):
+    """Form 5. No module-level name in a CONFIG module may be assigned more than once.
+
+    ⚑ This is the check that would have caught ISA-0433 four weeks earlier. `FUND_GATE_PCT` was
+    derived at scoring_config.py:426 and re-assigned to a literal 12.0 at :528, so the
+    derivation was dead and the comment on the live-looking line said the opposite. There is no
+    `default=` token to grep for and no import to trace: the only signal is the second Assign
+    node."""
+    import ast as _ast
+    import collections as _collections
+    errs = []
+    if py_texts is None:
+        py_texts = {fn: _read(fn) for fn in modules
+                    if os.path.exists(os.path.join(HERE, fn))}
+    for fn, src in sorted(py_texts.items()):
+        try:
+            tree = _ast.parse(src)
+        except SyntaxError as e:
+            errs.append(f"ISA-0432 Form 5: {fn} does not parse ({e})")
+            continue
+        seen = _collections.defaultdict(list)
+        for node in tree.body:                 # module level ONLY, never inside a function
+            if isinstance(node, _ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, _ast.Name) and t.id.isupper():
+                        seen[t.id].append(node.lineno)
+        for name, lines in sorted(seen.items()):
+            if len(lines) > 1:
+                errs.append(
+                    f"ISA-0432 Form 5: {fn} assigns {name} at lines "
+                    f"{', '.join(map(str, lines))}. The last assignment wins and every earlier "
+                    f"one is dead code - if either is a derivation it has been silently "
+                    f"disabled (ISA-0433). One home per rule (R4.4).")
+    return errs
+
+
+def pair_single_sizing_authority(module_texts=None):
+    """ISA-0442 — THERE IS EXACTLY ONE PATH FROM A QUALIFIED CANDIDATE TO A POSITION SIZE.
+
+    Raj authorised option (a) on 26-Aug-2026: `position_sizing.target_pct()`, driven by
+    `evidence_state`, is the only authority for how big a position is. `t1_gates` certifies
+    evidence and publishes no size.
+
+    ⚑ WHAT THIS CHECK IS FOR, IN ONE SENTENCE: a third door. The first was V2.1's own ladder, the
+    second was `t1_gates.size_mode` with a 1.5% cap BELOW the ladder's 3.5% STARTER — and the
+    second survived a build whose explicit purpose was to retire the first's predecessor, because
+    the R4.6 enumeration was scoped to the MODULE the spec discussed rather than to the QUANTITY.
+    So this asserts over the quantity: no module outside `position_sizing` may publish a position
+    size, whatever it calls it.
+
+    ⚑ AND IT IS NOT A GREP FOR ONE WORD. ISA-0433 is the reason: the shadow-copy class was 8
+    instances in 5 forms and a grep for `default` found 4 of them and REPORTED SUCCESS. The
+    check below looks for the FAMILY of names a size can wear.
+    """
+    errs = []
+    SIZE_FIELDS = ("size_mode", "starter_cap_pct", "STARTER_SIZE_CAP_PCT",
+                   "position_target_pct", "max_position_pct_for_entry")
+    # every module that is allowed to speak about pounds, and why
+    ALLOWED = {
+        "position_sizing.py": "THE one home — the ladder, the caps and the correlation floor",
+        "consistency_check.py": "this file names the forbidden fields in order to forbid them",
+        "t1_gates.py": ("the DECLARED R4.13 rollback branch only, guarded by "
+                        "scoring_config.SIZE_AUTHORITY_SINGLE"),
+    }
+    texts = module_texts if module_texts is not None else {}
+    if not texts:
+        import glob as _g
+        import os as _os
+        for fp in sorted(_g.glob(_os.path.join(HERE, "*.py"))):
+            nm = _os.path.basename(fp)
+            t = _read(nm)
+            if t:
+                texts[nm] = t
+    if not texts:
+        return ["ISA-0442: no module text could be read, so the single-sizing-authority check "
+                "could NOT run. Reported, never silently skipped (R4.9)."]
+
+    import re as _re
+    for nm, txt in sorted(texts.items()):
+        if nm in ALLOWED:
+            continue
+        for f in SIZE_FIELDS:
+            # an ASSIGNMENT or a dict-literal key, not a mention in prose
+            if _re.search(r'(^|[^#\w])%s\s*=' % _re.escape(f), txt, _re.M) or \
+               _re.search(r'[\'"]%s[\'"]\s*:' % _re.escape(f), txt):
+                line = next((i + 1 for i, L in enumerate(txt.splitlines())
+                             if f in L and not L.strip().startswith("#")), None)
+                errs.append(
+                    "ISA-0442: %s publishes `%s` (line ~%s). A position size may come from ONE "
+                    "place — position_sizing.target_pct(evidence_state) — and a second module "
+                    "that names a size is a second authority whether or not it currently "
+                    "disagrees. The last one to disagree was t1_gates' 1.5%% starter cap against "
+                    "a 3.5%% STARTER rung, and the smaller would have won silently (R4.4)."
+                    % (nm, f, line))
+
+    # the stale constant must be GONE, not re-pointed
+    sc = texts.get("scoring_config.py") or _read("scoring_config.py") or ""
+    if _re.search(r'^\s*STARTER_SIZE_CAP_PCT\s*=', sc, _re.M):
+        errs.append("ISA-0442: scoring_config.STARTER_SIZE_CAP_PCT is defined again. It was "
+                    "DELETED rather than re-pointed: STARTER is a RUNG on the ladder, not a cap, "
+                    "and the clean spec s1 says a position reaches 3.5% or it does not exist.")
+    if "SIZE_AUTHORITY_SINGLE" not in sc:
+        errs.append("ISA-0442: scoring_config.SIZE_AUTHORITY_SINGLE is absent — the declared "
+                    "rollback for this change no longer exists, so the change has no rollback "
+                    "(R4.13).")
+
+    # t1_gates must POINT at the one home rather than answer the question itself
+    tg = texts.get("t1_gates.py") or _read("t1_gates.py") or ""
+    if "size_authority" not in tg or "position_sizing.target_pct" not in tg:
+        errs.append("ISA-0442: t1_gates no longer declares `size_authority` pointing at "
+                    "position_sizing.target_pct. Removing the pointer does not remove the "
+                    "question — it removes the answer to where it is answered.")
+
+    # and the one home must still exist and still be the ladder
+    try:
+        import position_sizing as _ps
+        lad = _ps.ladder()
+        if "STARTER" not in lad:
+            errs.append("ISA-0442: position_sizing.ladder() has no STARTER rung, so the floor "
+                        "this check defends does not exist.")
+    except Exception as e:                                              # noqa: BLE001
+        errs.append("ISA-0442: position_sizing could not be read (%s: %s) — the single sizing "
+                    "authority is UNVERIFIABLE, which this reports rather than passes (R4.3)."
+                    % (type(e).__name__, e))
+    return errs
+
+
+def pair_v21_modules_executed(prerun_text=None, atlas=None):
+    """A11 / ISA-0354: every V2.1 module must be EXECUTED by the orchestrator, not merely
+    importable.
+
+    ⚑ THIS IS THE PROJECT'S SECOND FAILURE CLASS AND IT HAS SIX RECORDED OCCURRENCES.
+    `screener_local` never called `run_scheduled`, so a scoring mode never took effect for 12
+    days. `classify_security_type` had zero callers. The VCI learning loop was dead Apr-Jul.
+    Step 6.09 rescued THREE modules that were built, green, and called by nothing. Step 6.10
+    rescued `capital_destination`, which carried 22 green assertions and had been called by
+    nothing for four days. ISA-0404 found the same thing at FUNCTION granularity.
+
+    A green unit test proves a module WORKS. Only this proves it RUNS."""
+    errs = []
+    required = {
+        "isa_policy": "the policy stamp and the derived-threshold accessor (ISA-0354)",
+        "v21_golden_fixture": "the behaviour-neutrality guarantee — without it no V2 flag "
+                              "rollback is deterministic (ISA-0354)",
+        "stock_return_store": "the weekly GBP return store; it must be TOUCHED every run or it "
+                              "never accrues (R6.5 — retain first, analyse later)",
+        "correlation_engine": "the A2.3 adverse-default report (ISA-0355)",
+        "position_sizing": "the ladder and its reconciliation with the hard cap (ISA-0356)",
+        "retention": "the s3 ratchet population gate (ISA-0357)",
+        "risk_contribution": "the M1/M2/M3 monitors (ISA-0357)",
+    }
+    if prerun_text is None:
+        prerun_text = _read("monthly_isa_prerun.py")
+    if not prerun_text:
+        return ["A11/ISA-0354: monthly_isa_prerun.py is unreadable — the V2.1 execution check "
+                "could NOT run. Reported, never silently skipped (R4.9)"]
+    for mod, why in sorted(required.items()):
+        if f"import {mod} as " not in prerun_text and f"import {mod}\n" not in prerun_text:
+            errs.append(
+                f"A11/ISA-0354: `{mod}` is NOT imported by monthly_isa_prerun.py. It is {why}. "
+                f"A module that is built, green and called by nothing is this project's second "
+                f"failure class — six occurrences to date.")
+    if "_mf_begin(\"6.12\"" not in prerun_text:
+        errs.append("A11/ISA-0354: Step 6.12 does not open a manifest stage, so its execution "
+                    "would not be recorded and a skipped run would look identical to a clean "
+                    "one (R5.4 — liveness, not a checkbox).")
+    if 'summary["v21"]' not in prerun_text:
+        errs.append("A11/ISA-0354: Step 6.12 does not write `summary[\'v21\']`, so nothing "
+                    "downstream can prove the V2.1 stack produced output this run.")
+    return errs
+
+
+def pair_v21_summary_has_renderer(prerun_text=None, prefill_text=None, renderer_text=None):
+    """ISA-0439 — every key `summary.v21` carries must have a renderer or be declared out of
+    scope.
+
+    ⚑ THIS IS THE MIRROR OF `pair_v21_modules_executed`. That check proves a module RAN. This
+    one proves its output was CONSUMED. The project has six recorded occurrences of an absent
+    execution reporting success; ISA-0439 is the first recorded occurrence of the opposite — a
+    PRESENT execution reporting to nobody — and it went unnoticed because every existing
+    liveness instrument was satisfied.
+
+    ⚑ AND IT IS THE FIELD_MAP HAZARD IN A NEW PLACE. `screener_core.save_full_data` builds its
+    frame from FIELD_MAP, so a field absent from that map is computed every run and silently
+    discarded. The same shape applies here: Step 6.12 can add a key to summary.v21 at any time
+    and nothing would render it. Declaring the rendered set makes that addition fail the build
+    until someone decides where it goes."""
+    errs = []
+    if prerun_text is None:
+        prerun_text = _read("monthly_isa_prerun.py")
+    if prefill_text is None:
+        prefill_text = _read("email_prefill.py")
+    if renderer_text is None:
+        renderer_text = _read("build_monthly_isa_email.py")
+    if not (prerun_text and prefill_text and renderer_text):
+        return ["ISA-0439: one of monthly_isa_prerun.py / email_prefill.py / "
+                "build_monthly_isa_email.py is unreadable - the V2.1 render check could NOT "
+                "run. Reported, never silently skipped (R4.9)"]
+
+    # what Step 6.12 writes: every `_v21["<key>"] = ...` assignment
+    import re as _re
+    written = set(_re.findall(r'_v21\[[\'"]([a-z0-9_]+)[\'"]\]\s*=', prerun_text))
+    if not written:
+        errs.append("ISA-0439: no `_v21[...]` assignments found in monthly_isa_prerun.py. Either "
+                    "Step 6.12 has been removed or its shape changed - this check is now blind "
+                    "and must be re-pointed rather than left passing.")
+        return errs
+
+    # what email_prefill declares it renders
+    # ⚑ 26-Aug-2026, FOUND BY THIS CHECK MIS-FIRING ON A CORRECTLY DECLARED KEY. The old pattern
+    # was `\(([^)]*)\)`, which stops at the FIRST closing paren — so a trailing comment such as
+    # `# added 26-Aug-2026 (ISA-0440)` truncated the declared set and the check reported a key as
+    # UNRENDERED when it was declared two lines below. A checker whose false positive is
+    # indistinguishable from the defect it hunts is worse than no checker, so the declaration is
+    # now read with the COMMENTS STRIPPED and the tuple taken to its balanced close.
+    def _decl(name):
+        mm = _re.search(name + r'\s*=\s*\(', prefill_text)
+        if not mm:
+            return None
+        i, depth = mm.end(), 1
+        while i < len(prefill_text) and depth:
+            depth += (prefill_text[i] == "(") - (prefill_text[i] == ")")
+            i += 1
+        body = prefill_text[mm.end():i - 1]
+        return _re.sub(r'#[^\n]*', '', body)      # comments are not declarations
+
+    m_body, oos_body = _decl("V21_RENDERED_KEYS"), _decl("V21_OUT_OF_SCOPE_KEYS")
+    m = m_body is not None
+    oos = oos_body is not None
+    if not m:
+        return ["ISA-0439: email_prefill.V21_RENDERED_KEYS is absent. The rendered set must be "
+                "DECLARED so an unrendered key fails the build (R4.6.3, declared call-site "
+                "manifest)."]
+    declared = set(_re.findall(r'[\'"]([a-z0-9_]+)[\'"]', m_body))
+    out_of_scope = set(_re.findall(r'[\'"]([a-z0-9_]+)[\'"]', oos_body)) if oos else set()
+
+    missing = sorted(written - declared - out_of_scope)
+    for k in missing:
+        errs.append(
+            f"ISA-0439: Step 6.12 writes `summary.v21[{k!r}]` and NOTHING renders it. It is "
+            f"neither in email_prefill.V21_RENDERED_KEYS nor declared in "
+            f"V21_OUT_OF_SCOPE_KEYS. A number computed for a decision surface that never "
+            f"reaches the decision surface has not been computed. Render it, or declare it out "
+            f"of scope WITH A REASON - silence is not a decision (R4.6.2).")
+
+    stale = sorted(declared - written)
+    for k in stale:
+        errs.append(
+            f"ISA-0439: email_prefill declares it renders `summary.v21[{k!r}]` but Step 6.12 no "
+            f"longer writes it. The renderer is carrying a dead branch, which is how a section "
+            f"quietly empties without anyone noticing.")
+
+    # the builder must actually be reachable from the section renderer
+    if "build_v21_block" not in prefill_text:
+        errs.append("ISA-0439: email_prefill.build_v21_block is absent")
+    if "_render_v21" not in renderer_text or "_render_v21(d)" not in renderer_text:
+        errs.append("ISA-0439: build_monthly_isa_email does not CALL _render_v21 from a section "
+                    "builder, so the block would be built and never emitted - exactly the "
+                    "defect this item records.")
+    return errs
+
+
+def _summary_decls(prefill_text):
+    """AST-read the four disposition declarations out of email_prefill.py.
+
+    ⚑ AST, NOT REGEX, AND THE REASON IS ISA-0446. That defect was a regex reading a declaration
+    with `\(([^)]*)\)`, which stopped at the first closing paren — one inside a COMMENT — and
+    reported a correctly declared key as unrendered. A checker whose false positive is
+    indistinguishable from the defect it hunts teaches the reader to disbelieve it, and R2.4
+    applies to checkers and not only to the modules they inspect. `ast.literal_eval` cannot be
+    truncated by a comment, a nested paren or a line break."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(prefill_text)
+    except SyntaxError as e:
+        return None, "email_prefill.py does not parse (%s)" % e
+    found = {}
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], _ast.Name) \
+                and n.targets[0].id.startswith("SUMMARY_"):
+            try:
+                found[n.targets[0].id] = _ast.literal_eval(n.value)
+            except Exception:                                        # noqa: BLE001
+                return None, ("%s is not a literal — the disposition must be readable without "
+                              "executing email_prefill" % n.targets[0].id)
+    return found, None
+
+
+def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None):
+    """ISA-0447 — EVERY top-level `summary[...]` key the pre-run writes must have a DECLARED
+    disposition: rendered in the email, escalated through the pre-run warning list, declared out
+    of scope with a reason, or unadjudicated under a LIVE register item.
+
+    ⚑ THIS IS THE GENERALISATION OF `pair_v21_summary_has_renderer`, AND THE REASON IT WAS
+    NEEDED IS THE POINT. ISA-0439 built that check as a class-killer for "a present execution
+    reporting to nobody". Seventeen days later the entire marginal-pound router was found
+    writing `summary.capital_destination` and reaching no surface at all — a different key of
+    the same dict. The check could not have caught it, because it was scoped to `summary.v21`.
+
+        ⚑⚑ A CLASS-KILLER SCOPED TO ONE KEY IS AN INSTANCE-KILLER.
+
+    A12's plan-stability grid was deliberately routed INTO `summary.v21` at the time for exactly
+    this reason — to put a new output under an existing enforcement mechanism rather than build a
+    parallel one (R4.4). That was the right move for one output and it is not a fix for the dict.
+
+    ⚑ WHAT THIS VERIFIES, STATED SO IT IS NOT OVER-READ. It verifies that a DECISION EXISTS for
+    every key and that the decision is internally consistent: a rendered key names a builder that
+    is defined; an escalated key names a warning prefix the pre-run actually emits; an
+    out-of-scope key carries a real reason; an unadjudicated key names a register item that is
+    still open. It does NOT trace the data path from Step N to the rendered HTML and does not
+    claim to — an observer that re-derived the consumption it is checking would be ISA-0382 in a
+    new place. The declaration is the decision; this is the check that the decision exists.
+    """
+    import ast as _ast
+    errs = []
+    if prerun_text is None:
+        prerun_text = _read("monthly_isa_prerun.py")
+    if prefill_text is None:
+        prefill_text = _read("email_prefill.py")
+    if not (prerun_text and prefill_text):
+        return ["ISA-0447: monthly_isa_prerun.py or email_prefill.py is unreadable — the "
+                "summary-disposition check could NOT run. Reported, never silently skipped "
+                "(R4.9)"]
+
+    written = set(re.findall(r'\bsummary\[[\'"]([a-z0-9_]+)[\'"]\]\s*=', prerun_text))
+    if not written:
+        # ⚑ BLIND, NOT GREEN. If the orchestrator's shape changes, this check must say it can no
+        # longer see rather than report success — the failure mode it exists to prevent is
+        # exactly a silence that reads as an all-clear.
+        return ["ISA-0447: no `summary[...]` assignments found in monthly_isa_prerun.py. Either "
+                "the orchestrator has been restructured or this check's pattern no longer "
+                "matches it. The check is BLIND and must be re-pointed, not left passing."]
+
+    decls, err = _summary_decls(prefill_text)
+    if err:
+        return ["ISA-0447: " + err]
+    need = ("SUMMARY_RENDERED", "SUMMARY_ESCALATED", "SUMMARY_OUT_OF_SCOPE",
+            "SUMMARY_UNADJUDICATED", "SUMMARY_UNADJUDICATED_ITEM")
+    for nm in need:
+        if nm not in decls:
+            errs.append("ISA-0447: email_prefill.%s is absent. The disposition of every summary "
+                        "key must be DECLARED so an undeclared one fails the build (R4.6.3)."
+                        % nm)
+    if errs:
+        return errs
+
+    rendered = decls["SUMMARY_RENDERED"]
+    escalated = decls["SUMMARY_ESCALATED"]
+    oos = decls["SUMMARY_OUT_OF_SCOPE"]
+    unadj = set(decls["SUMMARY_UNADJUDICATED"])
+    unadj_item = decls["SUMMARY_UNADJUDICATED_ITEM"]
+    declared = set(rendered) | set(escalated) | set(oos) | unadj
+
+    # 1. every written key is declared
+    for k in sorted(written - declared):
+        errs.append(
+            "ISA-0447: monthly_isa_prerun writes `summary[%r]` and NOTHING declares what happens "
+            "to it. Render it, escalate it, declare it out of scope with a reason, or park it "
+            "UNADJUDICATED under a live register item — a number computed for a decision surface "
+            "that never reaches one has not been computed. Silence is not a decision (R4.6.2)."
+            % k)
+
+    # 2. no key claimed twice — two dispositions for one quantity is two homes for one rule
+    seen = {}
+    for name, d in (("SUMMARY_RENDERED", rendered), ("SUMMARY_ESCALATED", escalated),
+                    ("SUMMARY_OUT_OF_SCOPE", oos), ("SUMMARY_UNADJUDICATED", unadj)):
+        for k in d:
+            if k in seen:
+                errs.append("ISA-0447: `summary[%r]` is declared in BOTH %s and %s. One quantity, "
+                            "one disposition (R4.4)." % (k, seen[k], name))
+            seen[k] = name
+
+    # 3. stale declarations — a disposition for a key nobody writes is a dead branch, which is
+    #    how a section quietly empties without anyone noticing (ISA-0439's own lesson)
+    for k in sorted(declared - written):
+        errs.append("ISA-0447: email_prefill declares a disposition for `summary[%r]` but the "
+                    "pre-run no longer writes it." % k)
+
+    # 4. a RENDERED key must name a builder that exists
+    for k, fn in sorted(rendered.items()):
+        if not re.search(r'^def %s\s*\(' % re.escape(str(fn)), prefill_text, re.M):
+            errs.append("ISA-0447: `summary[%r]` is declared RENDERED by `%s`, and email_prefill "
+                        "defines no such function. A renderer named but absent is worse than one "
+                        "missing, because the declaration reads as evidence." % (k, fn))
+
+    # 5. an ESCALATED key must name a prefix the pre-run's warning list actually emits.
+    #    ⚑ Read the STRING LITERALS passed to warnings.append, not the file text: a check that
+    #    cannot tell a mention from a use is a check that gets deleted rather than fixed
+    #    (pair_monthly_return_architecture learned this the same way).
+    try:
+        _tree = _ast.parse(prerun_text)
+    except SyntaxError:
+        _tree = None
+        errs.append("ISA-0447: monthly_isa_prerun.py does not parse — the escalation half of "
+                    "this check could not run")
+    if _tree is not None:
+        warn_texts = []
+        for n in _ast.walk(_tree):
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute) \
+                    and n.func.attr == "append" \
+                    and isinstance(n.func.value, _ast.Name) and n.func.value.id == "warnings":
+                for sub in _ast.walk(n):
+                    if isinstance(sub, _ast.Constant) and isinstance(sub.value, str):
+                        warn_texts.append(sub.value)
+        blob = "\n".join(warn_texts)
+        for k, prefix in sorted(escalated.items()):
+            if str(prefix) not in blob:
+                errs.append(
+                    "ISA-0447: `summary[%r]` is declared ESCALATED via a warning beginning %r, "
+                    "and no `warnings.append` in monthly_isa_prerun emits that text. The claim "
+                    "that its content reaches the review is unsupported — which is precisely the "
+                    "flattering misreading ISA-0439 was raised about." % (k, prefix))
+
+    # 6. an OUT_OF_SCOPE key must carry a real reason
+    for k, why in sorted(oos.items()):
+        if not isinstance(why, str) or len(why.strip()) < 30:
+            errs.append("ISA-0447: `summary[%r]` is declared OUT_OF_SCOPE with no substantive "
+                        "reason. A key parked here without one is a key nobody decided about "
+                        "wearing the costume of a decision." % k)
+
+    # 7. an UNADJUDICATED key costs a LIVE register item. ⚑ NOT A WAIVER: when the item closes,
+    #    this goes RED until every key it covers has moved to a real bucket. That is the pressure.
+    if unadj:
+        try:
+            import isa_register as _R
+            rows = items if items is not None else _R.read_all()
+            hit = next((r for r in rows if r.get("id") == unadj_item), None)
+            if hit is None:
+                errs.append("ISA-0447: %d summary key(s) are parked UNADJUDICATED under %s and "
+                            "that item does not exist in the register. An undeclared backlog is "
+                            "not a backlog." % (len(unadj), unadj_item))
+            elif hit.get("state") in _R.CLOSED_STATES:
+                errs.append("ISA-0447: %s is %s, and %d summary key(s) are still parked under it: "
+                            "%s. Closing the item did not adjudicate the keys — move each to "
+                            "RENDERED, ESCALATED or OUT_OF_SCOPE."
+                            % (unadj_item, hit.get("state"), len(unadj),
+                               ", ".join(sorted(unadj))))
+        except Exception as e:                                       # noqa: BLE001
+            errs.append("ISA-0447: the register could not be read (%s: %s), so the UNADJUDICATED "
+                        "bucket is UNVERIFIED. Reported rather than passed (R4.3/R4.9)."
+                        % (type(e).__name__, e))
+
+    # 8. the §2 renderer must be REACHABLE, not merely built — ISA-0447 in miniature
+    _rend = _read("build_monthly_isa_email.py")
+    if _rend:
+        if "_render_capital_router" not in _rend or "_render_capital_router(d)" not in _rend:
+            errs.append("ISA-0447: build_monthly_isa_email does not CALL _render_capital_router "
+                        "from a section builder, so the router block would be built and never "
+                        "emitted — the exact defect this item records.")
+        # ⚑ AND IT MUST NOT REACH ROUND THE RUN CONTEXT. A glob over `capital_destination_*.json`
+        # also matches `capital_destination_sep_2026_scenario.json`; a scenario rendered as the
+        # live plan is a stored value that says one thing and IS another (ISA-0398's class).
+        #
+        # ⚑⚑ THE FIRST VERSION OF THIS ASSERTION FIRED ON THE COMMENT ABOVE IT. It grepped the
+        # file text for the filename and found it in email_prefill's own note explaining why the
+        # file is NOT read — a check that cannot tell a MENTION from a USE, which is ISA-0446's
+        # class exactly and R2.4's rule applied to a checker. It now looks for the name inside a
+        # FILE-OPENING CALL, so prose about the rule can never trip the rule.
+        _openers = {"open", "glob", "iglob", "load_json_optional", "load_json", "join"}
+        for _txt, _who in ((prefill_text, "email_prefill"), (_rend, "build_monthly_isa_email")):
+            try:
+                _t2 = _ast.parse(_txt)
+            except SyntaxError:
+                continue
+            for n in _ast.walk(_t2):
+                if not isinstance(n, _ast.Call):
+                    continue
+                _fn = (n.func.attr if isinstance(n.func, _ast.Attribute)
+                       else getattr(n.func, "id", ""))
+                if _fn not in _openers:
+                    continue
+                for sub in _ast.walk(n):
+                    if isinstance(sub, _ast.Constant) and isinstance(sub.value, str) \
+                            and "capital_destination_" in sub.value:
+                        errs.append(
+                            "ISA-0447: %s passes %r to `%s()` — it is opening a "
+                            "`capital_destination_*.json` file directly. The email's one source "
+                            "for the router is the run context; that name also matches the "
+                            "September SCENARIO file, which is not this run."
+                            % (_who, sub.value, _fn))
+    return errs
+
+
 def check_all():
     errs = []
     run_ctx = _read("Run_Context_ISA_Growth_Stock_Analysis.md")
@@ -1739,6 +2452,22 @@ def check_all():
     errs += pair_fund_expected_return_contracts()         # FE1-FE4 — ISA-0328 (20-Aug-2026)
     errs += pair_adoption_gate_refuses()                  # ISA-0409 (20-Aug-2026)
     errs += pair_return_basis_declared()                  # ISA-0402 / ISA-0401 (20-Aug-2026)
+    # ── V2.1-A, each behind its declared rollback flag (R4.13) ─────────────────────────
+    try:
+        import isa_policy as _pol
+        if _pol.flag("duplicate_threshold_check"):             # ISA-0432 / ISA-0433
+            errs += pair_no_literal_fallback_for_derived_thresholds()   # forms 1-3
+            errs += pair_no_derived_threshold_in_json()                 # form 4
+            errs += pair_no_duplicate_module_constant()                 # form 5
+        if _pol.flag("stock_ladder_caps"):                     # ISA-0427
+            errs += pair_stock_ladder_reconciles()
+        errs += pair_v21_modules_executed()                # A11 / ISA-0354
+        errs += pair_v21_summary_has_renderer()            # ISA-0439
+        errs += pair_summary_key_disposition()             # ISA-0447 (26-Aug-2026)
+        errs += pair_single_sizing_authority()             # ISA-0442 (26-Aug-2026)
+    except Exception as _e:                                    # noqa: BLE001
+        errs.append(f"ISA-0354: the V2.1-A checks could NOT run ({type(_e).__name__}: {_e}). "
+                    f"Reported, never silently skipped (R4.9)")
     errs += pair_orchestrator_parity()
     errs += pair_er_callsite_manifest()          # D-24 §1.3 (09-Aug-2026)
     errs += pair_score_panel_date_format()       # D-15 (09-Aug-2026)

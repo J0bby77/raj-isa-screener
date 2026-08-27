@@ -511,6 +511,68 @@ def write_run_context(
 
 
 # ---------------------------------------------------------------------------
+# ISA-0429 (CRITICAL, 22-Aug-2026). A refreshed price was written into a store beside
+# prices it must be COMMENSURABLE with, and nothing asserted commensurability. The
+# default fetch divided by 100.0 on the belief that yfinance quotes LSE tickers in
+# pence; for VUAG.L / IWMO.L it does not, so `vuag_price_now` read 1.0666 against
+# trade-date prices of 95.36-108.82 and the counterfactual returned -98.9%. That fed
+# the scaling-freeze unfreeze condition and DISABLED the D6 probation rule.
+#
+# THE CONTRACT: never assume the provider's unit. Choose the scale that reconciles
+# with the reference already in the store, and REFUSE when none does. This is correct
+# whether the provider quotes pence or pounds, and it cannot fail silently.
+PRICE_UNIT_RECONCILE_BAND = (0.5, 2.0)   # fetched/reference must land inside this
+# ⚑ ONLY scales that correspond to a REAL provider convention belong here. The first
+# draft of this contract also carried (100.0, "major_to_pence") on a "try both
+# directions" instinct - and its own regression test caught that this REPAIRED the
+# live corrupt value (1.0666 x 100 = 106.66) instead of refusing it. A scale that
+# rescues a wrong number is indistinguishable from one that fabricates a plausible one,
+# and applying a conversion on an assumption is the very defect this contract exists to
+# prevent. LSE quoting in pence is a real convention; the inverse is not.
+PRICE_UNIT_CANDIDATE_SCALES = ((1.0, "as_fetched"), (0.01, "pence_to_major"))
+
+
+class PriceUnitError(ValueError):
+    """Raised when no candidate scale reconciles a fetched price with its reference."""
+
+
+def _latest_trade_price(store, price_key):
+    """The most recent trade-date price for `price_key`, or None. R5.2: the reference
+    must come from the SAME artefact, independently sourced from the fetch."""
+    best_date, best_px = None, None
+    for t in (store or {}).get("trades") or []:
+        px = t.get(price_key)
+        if not px:
+            continue
+        d = t.get("price_date") or t.get("date") or ""
+        if best_date is None or d >= best_date:
+            best_date, best_px = d, float(px)
+    return best_px
+
+
+def _reconcile_price_unit(fetched, reference, ticker):
+    """Return (price_in_reference_units, basis). Raises PriceUnitError if no scale fits.
+
+    A missing reference is NOT an error - a fresh store has no trades - but it is
+    recorded as UNVERIFIED rather than silently treated as verified (R2: 'missing'
+    cannot masquerade as measured)."""
+    fetched = float(fetched)
+    if not reference or reference <= 0:
+        return fetched, "UNVERIFIED_no_reference"
+    lo, hi = PRICE_UNIT_RECONCILE_BAND
+    for scale, name in PRICE_UNIT_CANDIDATE_SCALES:
+        cand = fetched * scale
+        if lo * reference <= cand <= hi * reference:
+            return cand, name
+    raise PriceUnitError(
+        "%s fetched %.6g cannot be reconciled with the store's latest trade-date price "
+        "%.6g under any of %s (band %.2fx-%.2fx). Refusing rather than writing an "
+        "incommensurable price (ISA-0429)."
+        % (ticker, fetched, reference,
+           ", ".join(n for _, n in PRICE_UNIT_CANDIDATE_SCALES), lo, hi))
+
+
+# ---------------------------------------------------------------------------
 def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
                                   challenger_fn=None, sleeve_value_now=None,
                                   mu_value_now=None, _print=print):
@@ -530,12 +592,26 @@ def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
             out = {}
             for t in tickers:
                 h = yf.Ticker(t).history(period="5d")["Close"]
-                out[t] = (float(h.iloc[-1]) / 100.0, h.index[-1].date().isoformat())
+                # ISA-0429: NO unit conversion here. The provider's convention is not
+                # knowable at this point and a hard-coded /100.0 silently produced a
+                # 100x error for 5+ months. The unit is reconciled below against the
+                # trade-date prices already in the store, which are the only reference
+                # the framework has that is known to be commensurable.
+                out[t] = (float(h.iloc[-1]), h.index[-1].date().isoformat())
             return out
     try:
         px = fetch_fn(("VUAG.L", "IWMO.L"))
-        store["vuag_price_now"], store["vuag_price_now_date"] = px["VUAG.L"]
-        store["iwmo_price_now"], store["iwmo_price_now_date"] = px["IWMO.L"]
+        v_raw, v_date = px["VUAG.L"]
+        i_raw, i_date = px["IWMO.L"]
+        v_val, v_basis = _reconcile_price_unit(v_raw, _latest_trade_price(store, "vuag_price"), "VUAG.L")
+        i_val, i_basis = _reconcile_price_unit(i_raw, _latest_trade_price(store, "iwmo_price"), "IWMO.L")
+        store["vuag_price_now"], store["vuag_price_now_date"] = v_val, v_date
+        store["iwmo_price_now"], store["iwmo_price_now_date"] = i_val, i_date
+        store["vuag_price_now_unit_basis"] = v_basis
+        store["iwmo_price_now_unit_basis"] = i_basis
+    except PriceUnitError as e:
+        _print("ERROR A14 refresh: %s - store untouched (ISA-0429)" % e)
+        return None
     except Exception as e:
         _print("WARNING A14 refresh: fetch failed (%s) - store untouched" % type(e).__name__)
         return None
@@ -796,6 +872,20 @@ def main():
                          f"{_s['retain_only']}, DEAD MONEY {_s['dead_money']} "
                          f"(GBP{_s['dead_money_value_gbp']:,.0f}), UNSCORED {_s['unscored']}")
         summary["fund_action_stack"] = _s
+        # ── A7 / ISA-0440 — a DEGRADED sell order is a WARNING, never a silent revert ────────
+        _do = _fa.get("donor_ordering") or {}
+        summary["donor_ordering"] = {"state": _do.get("state"), "enabled": _do.get("enabled")}
+        if _do.get("state") != "MEASURED":
+            warnings.append(
+                "Step 6.05 SELL ORDER NOT REORDERED (%s): the fund agenda is in the PRE-A7 "
+                "FRS-led order, whose every term is FRS — and L-1/ISA-0351 measured alpha rank "
+                "persistence in this sleeve at -0.482, so that order sells low in expectation. "
+                "%s" % (_do.get("state"), _do.get("basis") or ""))
+        elif _fa.get("fund_action_stack"):
+            _h = _fa["fund_action_stack"][0]
+            _s610_note = ("Step 6.05 SELL ORDER (A7): donor #1 is %s — %s"
+                          % (_h.get("name"), _h.get("donor_why")))
+            print("  " + _s610_note)
         for f in _fa.get("anchor_rule_failures", []):
             warnings.append(
                 f"Step 6.05 ANCHOR RULE: {f['name']} realised 5y {f['realised_5y_ann']:.2f}% is "
@@ -1158,17 +1248,13 @@ def main():
                                                f"capital_destination_{month_label}.json"))
         if _cdr.get("state") == "OK":
             _sl, _fa = _cdr["sleeve_split"], _cdr["fund_allocation"]
-            summary["capital_destination"] = {
-                "state": _cdr["state"],
-                "stock_max_gbp": _sl.get("stock_max_gbp"),
-                "freeze_basis": (_sl.get("scaling_freeze") or {}).get("basis"),
-                "executability": (_sl.get("executability") or {}).get("state"),
-                "fund_allocation_state": _fa.get("state"),
-                "unallocated_gbp": _fa.get("unallocated_gbp"),
-                "c1_resolution": (_cdr["ranking"]["criteria"]["c1"] or {}).get("resolution"),
-                "idle_cost_net_gbp":
-                    (_cdr["residual"] or {}).get("annual_opportunity_cost_net_of_waiting_room_gbp"),
-            }
+            # ── ISA-0447 (26-Aug-2026): ONE HOME FOR THE SUMMARY, AND IT IS THE MODULE ───
+            # ⚑ The shape of `summary.capital_destination` is now declared by
+            # `capital_destination.summary_for_run_context()`, not assembled inline here. It was
+            # inline for six days and NOTHING RENDERED IT (ISA-0447): the email now does, and an
+            # email contract with a dict literal buried in the orchestrator is a contract with
+            # code no test can reach. The module that owns the document owns its summary (R4.4).
+            summary["capital_destination"] = _cd.summary_for_run_context(_cdr)
             _s610.append("router %s, stock cap GBP %.2f [%s], funds %s, idle GBP %.2f"
                          % (_cdr["state"], _sl.get("stock_max_gbp") or 0.0,
                             (_sl.get("scaling_freeze") or {}).get("basis"), _fa.get("state"),
@@ -1201,6 +1287,42 @@ def main():
             if not (_cdr["verification"]["parity"] or {}).get("pass"):
                 warnings.append("Step 6.10b ROUTER PARITY FAILED: inert criteria %s"
                                 % (_cdr["verification"]["parity"].get("inert_criteria")))
+            # ── 6.10d — A12 PLAN STABILITY (ISA-0440) ───────────────────────────────────
+            # ⚑ The plan is a LEXICOGRAPHIC ranking, and a lexicographic ranking over near-tied
+            # inputs can flip on noise. A12's point is that the instability must be VISIBLE
+            # rather than inferred, so the grid runs every month whether or not it finds any.
+            try:
+                _ps12 = _cd.plan_stability(base_doc=_cdr)
+                summary["plan_stability"] = {
+                    "state": _ps12.get("state"), "unstable": _ps12.get("unstable"),
+                    "reading": _ps12.get("reading"),
+                    "grid": [{k: g[k] for k in ("perturbation", "pounds_churned_gbp",
+                                                "churn_share_of_plan", "receiver_set_changed",
+                                                "order_changed")} for g in _ps12.get("grid", [])],
+                    "not_an_input": {k: v["read_by_code"] for k, v in
+                                     (_ps12.get("not_an_input") or {})
+                                     .get("quantities", {}).items()},
+                    "stock_side": _ps12.get("routed_to_stock_side"),
+                }
+                _s610.append("plan stability %s" % ("UNSTABLE: " + ", ".join(_ps12["unstable"])
+                                                    if _ps12.get("unstable") else "stable"))
+                if _ps12.get("unstable"):
+                    warnings.append(
+                        "Step 6.10d PLAN UNSTABLE under %s: the capital plan changes its "
+                        "DESTINATIONS or their order under a perturbation this small, which "
+                        "means the lexicographic ranking is resolving noise rather than "
+                        "economics (A12). %s" % (", ".join(_ps12["unstable"]),
+                                                 _ps12.get("reading") or ""))
+                _nai = [k for k, v in (_ps12.get("not_an_input") or {})
+                        .get("quantities", {}).items() if v.get("read_by_code")]
+                if _nai:
+                    warnings.append(
+                        "Step 6.10d: %s now READ by the capital router. A12 was built on the "
+                        "measured fact that they were not, and the grid reports them as "
+                        "NOT_AN_INPUT — that statement is now false and the grid must start "
+                        "perturbing them for real." % ", ".join(sorted(_nai)))
+            except Exception as _e:                                # noqa: BLE001
+                warnings.append(f"Step 6.10d (plan_stability): {type(_e).__name__}: {_e}")
         else:
             warnings.append("Step 6.10b: capital_destination %s" % _cdr.get("state"))
     except Exception as _e:
@@ -1213,7 +1335,10 @@ def main():
         _fz = _wr.freeze_state()
         summary["waiting_room"] = {"parked_gbp": _park.get("parked_gbp"),
                                    "lots_live": _park.get("lots_live"),
-                                   "recall": _fz.get("state")}
+                                   "recall": _fz.get("state"),
+                                   # ISA-0447: the REASON travels with the state. "BARRED" with
+                                   # no reason is a verdict the reader cannot check.
+                                   "recall_reason": _fz.get("reason")}
         _s610.append("waiting room GBP %.2f parked, recall %s"
                      % (_park.get("parked_gbp") or 0.0, _fz.get("state")))
         if _fz.get("state") in ("BARRED", "REFUSED") and (_park.get("parked_gbp") or 0) > 0:
@@ -1327,6 +1452,262 @@ def main():
     _mf_measure(status=("OK" if _s611 else "DEGRADED"),
                 note=("; ".join(_s611) if _s611 else "the regional M layer produced no result"))
     print("  " + ("; ".join(_s611) if _s611 else "no result"))
+
+    # ── Step 6.12 — THE V2.1 STACK (26-Aug-2026, ISA-0354/0355/0356/0357) ─────────────────────
+    # ⚑ WHY THIS STEP EXISTS AT ALL. This project's dominant failure mode is an absent execution
+    # that reports success — six recorded occurrences, the last at FUNCTION granularity
+    # (ISA-0404: `strategic_allocation.attribution()` was built, green, and called by nothing).
+    # `capital_destination` carried 22 green assertions and was called by NOTHING for four days.
+    # So amendment A11 is binding on every V2.1 module: each carries a battery assertion that it
+    # EXECUTED, not merely that it imports. This step is where that execution happens.
+    #
+    # ⚑ WHAT IS SHADOW AND WHAT IS LIVE. 6.12a and 6.12b are SHADOW ONLY and move no capital —
+    # they publish measurement so that the September run has a baseline. 6.12c and 6.12d compute
+    # sizes and lifecycle states but do NOT execute: the monthly email presents them for Raj's
+    # decision, exactly as every other action does.
+    print("\n[6.12] V2.1 stack: policy stamp, correlation, evidence, sizing, lifecycle...")
+    _mf_begin("6.12", "isa_policy + correlation_engine + evidence_state + position_sizing "
+                      "+ asset_drawdown + risk_contribution + retention")
+    _s612 = []
+    _v21 = {}
+    try:
+        import isa_policy as _pol
+        _v21["policy"] = _pol.policy_stamp()
+        _s612.append("policy %s, anchor %.2f%% (derived %s, next %s)" % (
+            _pol.POLICY_VERSION, _v21["policy"]["anchor_operative_pct"] or float("nan"),
+            _v21["policy"]["anchor_derived_at"], _v21["policy"]["anchor_next_due"]))
+        # ⚑ The anchor is DERIVED from the portfolio value (ISA-0435). If the next window has
+        # passed, say so — a stale anchor prices every gate in the framework.
+        try:
+            _nd = _v21["policy"].get("anchor_next_due")
+            if _nd and _nd < dt_date.today().isoformat():
+                warnings.append(
+                    "Step 6.12 ANCHOR OVERDUE: the required-return anchor was due to re-derive "
+                    "on %s and has not. It is a function of the portfolio value and the "
+                    "contribution schedule, so every anchor-derived gate is now priced off a "
+                    "stale portfolio (ISA-0435). Run derive_required_return.py." % _nd)
+        except Exception:
+            pass
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12 (isa_policy): {type(_e).__name__}: {_e}")
+
+    # 6.12a — the golden fixture. A rollback that is not deterministic is not a rollback.
+    try:
+        import v21_golden_fixture as _gf
+        _fx = _gf.verify()
+        _v21["golden_fixture"] = _fx
+        if _fx["status"] == "ABSENT":
+            warnings.append("Step 6.12a: no V2.1 golden fixture is frozen, so this run cannot "
+                            "prove the V2 flags are behaviour-neutral. Run "
+                            "v21_golden_fixture.py --freeze.")
+        elif not _fx["holds"]:
+            warnings.append("Step 6.12a GOLDEN FIXTURE BROKEN: " + "; ".join(_fx["diffs"][:3])
+                            + ". A declared policy constant or a DERIVATION moved. This is a "
+                              "decision, not a build — do NOT re-freeze to whatever the code "
+                              "now prints (ISA-0383).")
+        else:
+            _s612.append("golden fixture holds")
+        for _n in _fx.get("notes", []):
+            warnings.append("Step 6.12a: " + _n)
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12a (v21_golden_fixture): {type(_e).__name__}: {_e}")
+
+    # 6.12b — correlation coverage. SHADOW. Today this reports a REFUSAL, and that is the point.
+    try:
+        import correlation_engine as _ce
+        import stock_return_store as _srs
+        _cov = _srs.coverage(_srs.load())
+        _v21["correlation_coverage"] = _cov
+        if _cov["n_names"] == 0:
+            warnings.append(
+                "Step 6.12b CORRELATION UNMEASURED: the weekly GBP total-return store is EMPTY, "
+                "so no direct-stock correlation can be computed. Under A2.3 an unmeasured "
+                "correlation is ADVERSE (rho = max(rho_bar, 0.70)) and EVERY position is capped "
+                "at STARTER 3.5%. This is a measured refusal, not an estimate — and it is the "
+                "binding constraint on sizing until 52 weeks of Friday-to-Friday closes exist.")
+        else:
+            _s612.append("correlation coverage %d/%d measured"
+                         % (_cov["n_measured"], _cov["n_names"]))
+            for _t, _r in sorted(_cov["names"].items()):
+                if _r["status"] == "UNMEASURED":
+                    warnings.append(
+                        "Step 6.12b: %s has %d usable weekly returns, %d short of the %d "
+                        "minimum — capped at STARTER until then (A2.3)."
+                        % (_t, _r["usable_returns"], _r["weeks_to_minimum"], _cov["min_weeks"]))
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12b (correlation_engine): {type(_e).__name__}: {_e}")
+
+    # 6.12c — the sizing ladder, reconciled against the hard cap it must equal (ISA-0427).
+    try:
+        import position_sizing as _ps
+        _lad = _ps.ladder()
+        _caps = _ps.hard_caps()
+        _v21["ladder"] = _lad
+        _v21["hard_caps"] = _caps
+        _s612.append("ladder %s" % "/".join(str(_lad[k]) for k in
+                                            ("STARTER", "NORMAL", "HIGH", "EARNED_MAX")))
+        if abs(max(_lad.values()) - _caps["max_stock_position_pct"]) > 1e-9:
+            warnings.append(
+                "Step 6.12c LADDER vs CAP: the ladder's maximum is %.2f%% but "
+                "max_stock_position_pct is %.2f%%. portfolio_analytics.py:377 enforces the "
+                "latter, so two modules would compute different targets for one position "
+                "(ISA-0427)." % (max(_lad.values()), _caps["max_stock_position_pct"]))
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12c (position_sizing): {type(_e).__name__}: {_e}")
+
+    # 6.12d — lifecycle. The s3 ratchet's population gate is reported EVERY run, because
+    # "the rule cannot fire yet" is a fact Raj should see rather than infer from silence.
+    try:
+        import retention as _ret
+        _decisions = []
+        try:
+            _tl = summary.get("trades_log") or {}
+            _decisions = _tl.get("decisions") or []
+        except Exception:
+            _decisions = []
+        if _decisions:
+            _el = _ret.ratchet_eligible(_decisions)
+            _v21["ratchet_eligibility"] = _el
+            if not _el["eligible"]:
+                warnings.append(
+                    "Step 6.12d STEP-DOWN RATCHET CANNOT FIRE: %d forward-led decision(s) "
+                    "against %d required. %s"
+                    % (_el["n_forward_led"], _el["min_required"], _el["detail"]))
+            _s612.append("ratchet population %d forward-led" % _el["n_forward_led"])
+        else:
+            _s612.append("ratchet population unavailable (no trades log this run)")
+        _v21["min_hold_exempt"] = list(__import__("position_sizing").MIN_HOLD_EXEMPT)
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12d (retention): {type(_e).__name__}: {_e}")
+
+    # 6.12e — the s8 risk-contribution monitors. "Anything that accrues a time series starts
+    # now; anything that analyses can wait." So M1/M2/M3 verdicts are REPORTED, and an
+    # INSUFFICIENT_DATA verdict is a normal, expected reading rather than a failure.
+    try:
+        import risk_contribution as _rc
+        _m = _rc.evaluate()
+        _v21["risk_monitors"] = _m
+        _s612.append("M1 %s / M2 %s / M3 %s" % (_m["M1"]["verdict"], _m["M2"]["verdict"],
+                                                _m["M3"]["verdict"]))
+        if _m["M1"]["verdict"] == "NON_INFORMATIVE":
+            warnings.append("Step 6.12e M1 NON-INFORMATIVE: " + _m["M1"]["detail"])
+        if _m["M3"]["verdict"] == "STOP_ACTING":
+            warnings.append("Step 6.12e M3 SAYS STOP ACTING: " + _m["M3"]["detail"])
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12e (risk_contribution): {type(_e).__name__}: {_e}")
+
+    # 6.12f — §9 ACTIVE-FUND DRAWDOWN, behind the A7 benchmark precondition (ISA-0440).
+    # ⚑ THIS STEP EXISTS BECAUSE THE LABEL ABOVE ALREADY CLAIMED IT DID. `_mf_begin("6.12", ...)`
+    # has read "... + asset_drawdown + ..." since 26-Aug and the step never imported the module:
+    # an absent execution reporting success, with the run surface naming the absent module out
+    # loud. Raised as its own register item.
+    try:
+        import asset_drawdown as _ad
+        _bm = _ad.benchmark_precondition()
+        _fad = _ad.fund_active_drawdowns(benchmark_state=_bm)
+        _v21["fund_active_drawdown"] = _fad
+        _s612.append("s9 active drawdown %d/%d read, benchmark %s"
+                     % (_fad["n_read"], _fad["n_funds"], _bm["state"]))
+        if not _bm.get("clean"):
+            warnings.append(
+                "Step 6.12f §9 REFUSED — BENCHMARK REGISTRY %s: %s. The active-fund drawdown "
+                "flag is a fund return MINUS a benchmark return, and a benchmark short of its "
+                "dividends makes that difference look BETTER than it is, so a dirty registry "
+                "does not make this flag noisy, it makes it REASSURING. Every fund reads "
+                "UNMEASURED and is capped at current (A7)."
+                % (_bm["state"], "; ".join(_bm.get("errors") or []) or "unreadable"))
+        for _u in _fad.get("unreadable", []):
+            warnings.append("Step 6.12f: %s could not be measured against its comparator (%s) — "
+                            "COUNTED, not dropped (R4.9)." % (_u["sedol"], _u["error"]))
+        _meas = [f for f in _fad.get("funds", []) if f["state"] != "UNMEASURED"]
+        _deep = sorted((f for f in _fad.get("funds", []) if f["state"] == "UNMEASURED"),
+                       key=lambda f: f["current_active_drawdown_pct"])[:3]
+        if len(_meas) < _fad["n_read"]:
+            warnings.append(
+                "Step 6.12f §9 CAN ONLY FIRE ON %d OF %d FUNDS: the rest have fewer than the "
+                "declared minimum of completed own-history episodes, so their state is "
+                "UNMEASURED and they are capped at current — never assigned a state from a thin "
+                "sample (A6/R4.10). ⚑ THE DEEPEST UNMEASURED ACTIVE DRAWDOWNS ARE PUBLISHED "
+                "ANYWAY, because an unmeasurable shortfall is not an absent one: %s"
+                % (len(_meas), _fad["n_read"],
+                   "; ".join("%s %.1f%% vs %s over %dm"
+                             % (f["sedol"], f["current_active_drawdown_pct"], f["comparator"],
+                                f["months_since_peak"]) for f in _deep) or "none"))
+        for _f in _meas:
+            if _f["size_action"] in ("TRIM_CANDIDATE", "REVIEW"):
+                warnings.append("Step 6.12f §9 %s: %s vs %s — %s"
+                                % (_f["state"], _f["sedol"], _f["comparator"], _f["detail"]))
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12f (asset_drawdown): {type(_e).__name__}: {_e}")
+
+    # 6.12g — A20 SHADOW SLOT COMPETITION (ISA-0440). It trades nothing and it never will from
+    # here: the verdict enters the email as a proposal like every other action.
+    # ⚑ THE RUN IS RECORDED EVEN WHEN THE VERDICT IS UNMEASURED. Raj's condition for admitting
+    # A20 was two runs of published would-have-traded, and "we could not compute it" is one of the
+    # things those two runs are supposed to reveal. Capture first, analyse later (R6.5).
+    try:
+        import retention as _ret20
+        _sleeve_pct = None
+        try:
+            _sleeve_pct = float((summary.get("capital_destination") or {})
+                                .get("stock_sleeve_weight_pct"))
+        except Exception:                                          # noqa: BLE001
+            _sleeve_pct = None
+        # the ceiling binds only when the demand-pull rule has nothing left to offer
+        _binding = bool((summary.get("capital_destination") or {}).get("stock_max_gbp") == 0)
+        _cands = ((summary.get("v21") or {}).get("slot_candidates")) or []
+        _verdicts = []
+        for _c in _cands:
+            try:
+                _verdicts.append(_ret20.slot_competition(
+                    incumbent=_c.get("incumbent") or {}, challenger=_c.get("challenger") or {},
+                    binding_ceiling=_binding, pool_size=_c.get("pool_size"),
+                    dispersion_pp=_c.get("dispersion_pp"),
+                    estimate_se_pp=_c.get("estimate_se_pp"),
+                    friction_pp=_c.get("friction_pp")))
+            except Exception as _e:                                # noqa: BLE001
+                _verdicts.append({"verdict": "ERROR", "detail": "%s: %s" % (type(_e).__name__, _e)})
+        _log = _ret20.shadow_record(_verdicts, run_label=month_label)
+        _v21["slot_competition"] = {
+            "mode": ("LIVE" if _ret20.A20_LIVE else "SHADOW"),
+            "binding_ceiling": _binding,
+            "n_candidates": len(_cands), "verdicts": _verdicts,
+            "shadow_log": _log,
+            "constraint": _ret20.A20_ISA0167_CONSTRAINT,
+        }
+        _s612.append("A20 shadow run %d recorded (%d verdict(s))"
+                     % (_log["runs_recorded"], len(_verdicts)))
+        if not _cands:
+            warnings.append(
+                "Step 6.12g A20 SHADOW: no incumbent/challenger pair was offered to the slot "
+                "comparator this run, so it published nothing. That is not the same as 'no "
+                "challenger beat an incumbent' — the comparison did not happen. A20 needs %d "
+                "recorded shadow run(s) before it may go live and has %d; and the shadow count "
+                "is not permission on its own (ISA-0167's surviving constraint requires the "
+                "E[r]-gap trade to be measured in its own right, and it has not been)."
+                % (_ret20.A20_MIN_SHADOW_RUNS, _log["runs_recorded"]))
+        for _v in _verdicts:
+            if _v.get("verdict") == "WOULD_REPLACE":
+                warnings.append("Step 6.12g A20 SHADOW WOULD REPLACE %s with %s: %s"
+                                % (_v.get("incumbent"), _v.get("challenger"), _v.get("detail")))
+            elif _v.get("verdict") == "UNMEASURED":
+                warnings.append("Step 6.12g A20 UNMEASURED: %s" % _v.get("detail"))
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.12g (A20 slot competition): {type(_e).__name__}: {_e}")
+
+    # ⚑ A12's grid is carried INTO summary.v21 on purpose (ISA-0440). Step 6.10 computes it, and
+    # `summary.capital_destination` — the whole marginal-pound router — has NO email renderer at
+    # all, which is ISA-0439's class in a place ISA-0439 did not reach. Rather than invent a
+    # second enforcement mechanism, the new key is put under the EXISTING one: once it is in
+    # summary.v21, `consistency_check.pair_v21_summary_has_renderer()` fails the build until it
+    # is declared and rendered (R4.4 — extend the mechanism, do not parallel it).
+    if summary.get("plan_stability") is not None:
+        _v21["plan_stability"] = summary["plan_stability"]
+
+    summary["v21"] = _v21
+    _mf_measure(status=("OK" if _s612 else "DEGRADED"),
+                note=("; ".join(_s612) if _s612 else "the V2.1 stack produced no result"))
+    print("  " + ("; ".join(_s612) if _s612 else "no result"))
 
     # ── Step 6.08 — return architecture (ranked build item #1, 06-Aug-2026) ──────────
     # ⚑ Section C — the one number that answers "is this on track for £1m" — has NEVER been

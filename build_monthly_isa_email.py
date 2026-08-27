@@ -453,12 +453,68 @@ def build_s1(data):
     return inner
 
 
+def _render_capital_router(d):
+    """ISA-0447 - render the marginal-pound router inside Section 2.
+
+    ⚑ THE ORDER IS DELIBERATE. This is emitted BEFORE the ranked action table, not after it,
+    because on the August book its first line is a REFUSAL that bounds every row below it: the
+    stock cap is GBP 2,895.34 against a smallest declared position of GBP 4,890.84, so no new
+    stock position can be opened at all this month. A constraint printed underneath the
+    decisions it constrains has been published, not communicated.
+
+    ⚑ AND AN ABSENT ROUTER RENDERS AS ABSENT. An empty section reads as a router that looked and
+    found nothing to route, which is the most flattering possible misreading of a step that did
+    not run (the same reasoning as _render_v21)."""
+    v = d.get("capital_router") or {}
+    if not v:
+        return ""
+    if v.get("absent_line"):
+        return h3("Marginal-pound router") + para(se(v["absent_line"]))
+    out = h3("Marginal-pound router &mdash; where this month&#39;s capital is routed")
+    for k in ("split_line", "split_reason_line", "executability_line", "freeze_line",
+              "ranking_line"):
+        if v.get(k):
+            out += para(se(v[k]), small=(k in ("split_reason_line", "freeze_line",
+                                               "ranking_line")))
+    rows = v.get("allocation_rows") or []
+    if v.get("allocation_line"):
+        out += para(f'<strong>{se(v["allocation_line"])}</strong>')
+    if rows:
+        out += table_start(["Fund", "Allocated", "Phase", "Weight before", "Weight after",
+                            "Declared band"])
+        for i, r in enumerate(rows):
+            out += table_row([
+                f'<strong>{se(str(r.get("sedol","")))}</strong>',
+                f'{(r.get("gbp") or 0):,.2f}',
+                se(str(r.get("phase", "-"))),
+                ("&mdash;" if r.get("weight_before") is None
+                 else f'{r["weight_before"]:.2f}%'),
+                ("&mdash;" if r.get("weight_after") is None
+                 else f'{r["weight_after"]:.2f}%'),
+                se(str(r.get("band", "-"))),
+            ], last=(i == len(rows) - 1))
+        out += table_end()
+    for label, key in (("Received nothing", "blocked_rows"),
+                       ("Not eligible", "refused_rows")):
+        rr = v.get(key) or []
+        if rr:
+            out += para(f'<strong>{label}:</strong>', small=True)
+            out += "".join(para("&#8226; " + se(r), muted=True, small=True) for r in rr)
+    for k in ("band_line", "band_choice_line", "idle_line", "waiting_room_line", "parity_line"):
+        if v.get(k):
+            out += para(se(v[k]), small=(k in ("band_choice_line", "parity_line")))
+    for w in (v.get("warnings") or []):
+        out += para("<strong>" + se(w) + "</strong>")
+    return out
+
+
 def build_s2(data):
     """Section 2 — Monthly Capital Allocation"""
     d = data.get("s2_capital_allocation", {})
     inner = ""
 
     inner += kpi_row(d.get("kpis", []))
+    inner += _render_capital_router(d)          # ISA-0447
 
     items = d.get("items", [])
     if items:
@@ -742,12 +798,82 @@ def build_s6(data):
     return inner
 
 
+def _render_v21(d):
+    """ISA-0439 — render the V2.1 engine block inside Section 7.
+
+    ⚑ A refusal is rendered AS a refusal. The two most important lines this produces today
+    ("correlation UNMEASURED, every position capped at STARTER" and "the ratchet cannot fire at
+    n=1") are both statements that something could NOT be measured, and both are correct. If
+    they were omitted for being negative, the reader would infer the opposite from silence."""
+    v = d.get("v21") or {}
+    if not v:
+        return ""
+    if v.get("absent_line"):
+        return h3("V2.1 engine") + para(se(v["absent_line"]))
+    out = h3("V2.1 engine")
+    for k in ("policy_line", "ladder_line", "correlation_line", "ratchet_line",
+              "s9_precondition_line", "s9_line", "stability_line",
+              "stability_not_an_input_line", "stability_probe_line", "a20_line",
+              "fixture_line", "min_hold_line"):
+        if v.get(k):
+            out += para(se(v[k]), small=(k in ("policy_line", "min_hold_line",
+                                               "s9_precondition_line")))
+    a20 = v.get("a20_rows") or []
+    if a20:
+        out += table_start(["Incumbent", "Challenger", "Verdict", "Raw gap", "Bar", "Adjusted"])
+        for i, r in enumerate(a20):
+            fmt = (lambda x: "&mdash;" if x is None else f"{x:+.2f}pp")
+            out += table_row([se(str(r.get("incumbent") or "&mdash;")),
+                              se(str(r.get("challenger") or "&mdash;")),
+                              se(str(r.get("verdict", ""))), fmt(r.get("raw_gap")),
+                              ("&mdash;" if r.get("bar") is None else f"{r['bar']:.2f}pp"),
+                              fmt(r.get("advantage"))], last=(i == len(a20) - 1))
+        out += table_end()
+    stab = v.get("stability_rows") or []
+    if stab:
+        out += table_start(["Perturbation", "Churn (£)", "Churn %", "Destinations", "Order"])
+        for i, r in enumerate(stab):
+            out += table_row([
+                se(str(r.get("perturbation", ""))),
+                f"{r.get('churn_gbp', 0):,.0f}", f"{r.get('churn_pct', 0):.1f}%",
+                ("CHANGED" if r.get("destinations_changed") else "same"),
+                ("CHANGED" if r.get("order_changed") else "same"),
+            ], last=(i == len(stab) - 1))
+        out += table_end()
+    s9 = v.get("s9_rows") or []
+    if s9:
+        out += table_start(["Fund", "vs", "Active DD", "Months", "Episodes", "State", "Action"])
+        for i, r in enumerate(s9):
+            out += table_row([
+                se(str(r.get("sedol", ""))), se(str(r.get("comparator", ""))),
+                f"{r.get('drawdown_pct', 0):.1f}%", str(r.get("months", "")),
+                str(r.get("episodes", "")), se(str(r.get("state", ""))),
+                se(str(r.get("action", ""))),
+            ], last=(i == len(s9) - 1))
+        out += table_end()
+    for k in ("correlation_short", "ratchet_excluded"):
+        rows = v.get(k) or []
+        if rows:
+            out += "".join(para("&#8226; " + se(r), muted=True, small=True) for r in rows)
+    rows = v.get("risk_monitor_rows") or []
+    if rows:
+        out += table_start(["Monitor", "Verdict", "Reading"])
+        for i, r in enumerate(rows):
+            out += table_row([se(r.get("measure", "")), se(r.get("verdict", "")),
+                              se(r.get("detail", ""))], last=(i == len(rows) - 1))
+        out += table_end()
+    for w in (v.get("warnings") or []):
+        out += para("<strong>" + se(w) + "</strong>")
+    return out
+
+
 def build_s7(data):
     """Section 7 — Existing Stock Sleeve Review"""
     d = data.get("s7_stock_sleeve", {})
     inner = ""
 
     inner += kpi_row(d.get("kpis", []))
+    inner += _render_v21(d)          # ISA-0439
 
     holdings = d.get("holdings", [])
     if holdings:
@@ -802,6 +928,26 @@ def build_s8(data):
         inner += h3("Fund Action Stack &mdash; retention, anchor rule and agenda")
         inner += para(f"<strong>{se(fas.get('headline', ''))}</strong>"
                       + (f" &nbsp;|&nbsp; as at {se(fas.get('as_of', ''))}" if fas.get("as_of") else ""))
+        # ── A7 / ISA-0440 — SAY WHAT THE ORDER MEANS, IN THE SAME BREATH AS THE ORDER ────────
+        # ⚑ The rank column used to mean "worst FRS first" and now means "sell first". A reader
+        # who carries the old reading into the new list reads a fund at #1 as condemned when it
+        # is merely overweight. A DEGRADED state is printed as a WARNING, not omitted: an order
+        # that silently reverted to the rule A7 replaced, presented without comment, is the
+        # ISA-0439 failure in a new place.
+        _do = fas.get("donor_ordering") or {}
+        if _do.get("state") == "MEASURED":
+            inner += para("<strong>Sell order (A7):</strong> pounds above the declared band_high "
+                          "&rarr; look-through / concentration relief &rarr; cost to keep &rarr; "
+                          "<em>FRS votes last</em>. The rank below is the SELL ORDER, not a "
+                          "quality ranking: FRS was demoted to a tie-break because alpha rank "
+                          "persistence in this sleeve measured &minus;0.482 (L-1 / ISA-0351), so "
+                          "an agenda led by it sells low in expectation.",
+                          muted=True, small=True)
+        elif _do:
+            inner += para(f"<strong>&#9873; Sell order NOT reordered &mdash; "
+                          f"{se(str(_do.get('state')))}.</strong> The agenda below is in the "
+                          f"PRE-A7 FRS-led order and must be read as such. "
+                          f"{se(str(_do.get('basis') or ''))[:300]}")
         band_pill = {"HOLD/ADD": "buy", "RETAIN-ONLY": "mon", "WINDOW_SPLIT": "warn",
                      "DEAD MONEY": "sell", "UNSCORED": "grey"}
         inner += table_start(["#", "Fund", "Band", "FRS", "Realised by window",
@@ -813,7 +959,10 @@ def build_s8(data):
                       "FAIL" if r.get("anchor_rule_pass") is False else "&mdash;")
             inner += table_row([
                 str(r.get("rank", "")),
-                f"<strong>{se(str(r.get('name'))[:40])}</strong>",
+                (f"<strong>{se(str(r.get('name'))[:40])}</strong>"
+                 + (f"<br><span style=\"font-size:11px;color:#94a3b8\">"
+                    f"{se(str(r.get('donor_why'))[:72])}</span>"
+                    if r.get("donor_why") else "")),
                 pill(str(r.get("band", "")).replace("_", " "),
                      band_pill.get(r.get("band"), "grey")),
                 ("&mdash;" if r.get("frs") is None else f"{r['frs']:.1f}"),

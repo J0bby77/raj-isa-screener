@@ -620,6 +620,253 @@ def _rank_key(candidate: dict) -> tuple:
             ) + _deviation_key(candidate)
 
 
+def _load_portfolio(path=None) -> dict:
+    """-> the most recent `portfolio_data_*.json`, chosen by its OWN declared `_meta.data_date`.
+
+    ⚑ NOT by filename and NOT by mtime. The month label in the filename is the RUN month, not the
+    data month — `portfolio_data_aug_2026.json` carries data_date 31-Jul-2026 — and alphabetical
+    order on month abbreviations is simply wrong ('aug' sorts before 'jul'). A file whose date
+    cannot be read is COUNTED and named, never silently skipped (R4.9).
+    """
+    if path is not None:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    cands, unreadable = [], []
+    for p in sorted(HERE.glob("portfolio_data_*.json")):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            ds = ((d.get("_meta") or {}).get("data_date") or "").strip()
+            when = dt.datetime.strptime(ds, "%d-%b-%Y").date()
+        except Exception as e:                                            # noqa: BLE001
+            unreadable.append("%s (%s)" % (p.name, type(e).__name__))
+            continue
+        cands.append((when, p, d))
+    if not cands:
+        raise DestinationRefused(
+            "no `portfolio_data_*.json` carries a readable `_meta.data_date`. Unreadable: %s"
+            % (", ".join(unreadable) or "none found"))
+    cands.sort(key=lambda t: t[0])
+    when, p, d = cands[-1]
+    d.setdefault("_meta", {})["_selected_by"] = (
+        "_load_portfolio: newest of %d by declared data_date (%s -> %s)%s"
+        % (len(cands), p.name, when.isoformat(),
+           ("; UNREADABLE AND COUNTED: " + ", ".join(unreadable)) if unreadable else ""))
+    return d
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# A7 — THE DONOR ORDERING.  ISA-0440 / amendment schedule A7, built 26-Aug-2026.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ⚑ WHY THIS IS NOT THE BUY KEY REVERSED, AND WHY THAT IS AN ARITHMETIC POINT RATHER THAN A
+# PREFERENCE. Until now the only sell-side ordering in the framework was `waiting_room.donor_order`,
+# which read `_rank_key` and reversed it, on the R4.4 reasoning that a second ordering rule is a
+# defect on the day it is created. That reasoning was right about copies and wrong about this
+# decision. `_rank_key` puts C5 — band deviation — LAST, deliberately (ISA-0386). Reversing it
+# therefore puts "how far above its own declared band this money sits" LAST on the sell side,
+# where C1 and C2 have already decided the order. A7 puts it FIRST. Two different decisions, two
+# different rules; what R4.4 forbids is two homes for ONE rule, so this is THE one home for the
+# sell rule and `waiting_room.donor_order` and `fund_action_stack`'s ranked agenda both READ it.
+#
+# ⚑ AND WHY IT MAY NOT LEAD ON FRS. L-1 (ISA-0351, 15-Aug-2026) MEASURED rank persistence in this
+# sleeve: R2 +0.754, alpha -0.482, information ratio -0.418. A donor rule led by a retention score
+# built from those components is, in expectation, selling low. L-1 is not actionable in EITHER
+# direction (SE 0.32 on n = 11) — which is precisely why it must not be actioned IMPLICITLY by a
+# build. FRS is retained and demoted: it votes at P4, it does not decide.
+#
+#   P1  ABOVE BAND HIGH   pounds above the fund's OWN declared `band_high`. Estimation-free: a
+#                         market value against a number Raj declared. ⚑ It is 0.00 for every
+#                         in-band fund, so it orders the overweights and TIES EVERYTHING ELSE INTO
+#                         P2 — which is what keeps P2..P4 reachable. A continuous criterion at the
+#                         head of a lexicographic order otherwise IS the order (the ISA-0386
+#                         lesson, applied in the one place where a continuous head is safe).
+#   P2  RELIEF            c1 and c2 READ from `rank_inputs`, never recomputed (R4.5). +1 means this
+#                         fund's pound WIDENS a material unauthorised active bet, or ADDS to a
+#                         process/manager already at or above declared materiality — so selling it
+#                         RELIEVES the most. Estimation-free: both are ordinals over declared
+#                         thresholds, not forecasts.
+#   P3  COST TO KEEP      ORDINAL, for exactly the reason C1 is ordinal. +1 = dear to hold
+#                         (top-tercile OCF in this sleeve) and nothing extra to leave; 0 = neutral;
+#                         -1 = the EXIT itself has a real cost — a closed-end holding whose
+#                         discount would be CRYSTALLISED by selling. That is a fact about acting,
+#                         not a view about the fund, which is why it belongs above FRS and below
+#                         relief.
+#   P4  FRS VOTE          DEAD MONEY / WINDOW_SPLIT / RETAIN-ONLY / UNSCORED / HOLD-ADD band order,
+#                         then dominance, then the FRS number. Supplied by the caller — this module
+#                         does not import `fund_action_stack` — and ABSENT is a constant, so an
+#                         unsupplied FRS orders nothing rather than ordering everything to zero.
+#   P5  DETERMINISM       value desc, then sedol. Never a source of ordering, only of repeatability.
+#
+# ROLLBACK (R4.13): `A7_DONOR_ORDER_ENABLED = False` -> `donor_order` sorts by `_rank_key` in
+# REVERSE, which is exactly what `waiting_room` did before A7. One constant, no code revert.
+
+A7_DONOR_ORDER_ENABLED = True
+
+# The OCF tercile boundary is DERIVED from the sleeve each run, never a literal: a fixed "dear"
+# threshold would silently stop discriminating as the sleeve's cost base moved (ISA-0348's
+# question — what correct behaviour makes this fail? — answers "the fees all changed", which is
+# the wrong answer for a constant).
+DONOR_OCF_DEAR_TERCILE = 2.0 / 3.0
+
+_FRS_BAND_ORDER = {"DEAD MONEY": 0, "WINDOW_SPLIT": 1, "RETAIN-ONLY": 2, "UNSCORED": 3,
+                   "HOLD/ADD": 4}
+
+
+def _p1_above_band_high_gbp(sedol: str, value_gbp: float, nav_gbp: float, policy: dict) -> dict:
+    """P1 — pounds above the fund's declared `band_high`. Missing band -> Missing(reason), 0.0."""
+    band = ((policy.get("funds") or {}).get(sedol) or {})
+    hi = band.get("band_high")
+    if hi is None:
+        return {"gbp": 0.0, "state": "UNDECLARED",
+                "basis": ("this fund has no declared `band_high`, so there is no overweight to "
+                          "measure. It contributes a CONSTANT to P1 and is ordered by P2 onward "
+                          "(R4.1 — 'we could not measure this' is not 'this measured zero').")}
+    ceiling = float(hi) * float(nav_gbp)
+    return {"gbp": round(max(float(value_gbp) - ceiling, 0.0), 2), "state": "MEASURED",
+            "band_high_pct": round(float(hi) * 100, 4),
+            "ceiling_gbp": round(ceiling, 2),
+            "basis": "market value less declared band_high x NAV; 0.00 for an in-band fund"}
+
+
+def _p3_cost_to_keep(row_rank: dict, ocf_dear_pct, crystallisation_gbp) -> dict:
+    """P3 — ORDINAL. +1 dear to hold and free to leave · 0 neutral · -1 the exit itself costs."""
+    if crystallisation_gbp is not None and float(crystallisation_gbp) > 0:
+        return {"p3": -1, "state": "MEASURED", "basis":
+                ("selling crystallises a closed-end discount of GBP %.2f. A cost of ACTING is not "
+                 "a view about the fund, and it demotes this donor rather than scoring it."
+                 % float(crystallisation_gbp))}
+    c4 = (row_rank.get("c4") or {}).get("c4")
+    if c4 is None or ocf_dear_pct is None:
+        return {"p3": 0, "state": "UNMEASURED", "basis":
+                "OCF or the sleeve tercile could not be read; contributes a CONSTANT (R4.1)"}
+    if float(c4) >= float(ocf_dear_pct):
+        return {"p3": 1, "state": "MEASURED", "basis":
+                ("OCF %.2f%% is at or above this sleeve's %d%% cost tercile (%.2f%%) and the exit "
+                 "carries no crystallisation" % (float(c4), round(DONOR_OCF_DEAR_TERCILE * 100),
+                                                 float(ocf_dear_pct)))}
+    return {"p3": 0, "state": "MEASURED",
+            "basis": "OCF %.2f%% is below this sleeve's cost tercile (%.2f%%)"
+                     % (float(c4), float(ocf_dear_pct))}
+
+
+def donor_key(candidate: dict) -> tuple:
+    """THE sell-side ordering key. Lexicographic P1 -> P2 -> P3 -> P4 -> P5. Sort ASCENDING.
+
+    ⚑ Every term is NEGATED where 'more' means 'sell sooner', so one plain ascending sort orders
+    the whole key and no caller has to remember a direction per term (a reversed sort over a mixed
+    key is how a lexicographic order silently inverts its own tie-breaks).
+    """
+    r = candidate.get("rank") or {}
+    frs = candidate.get("frs_vote") or {}
+    band_rank = _FRS_BAND_ORDER.get(frs.get("band"), 9)
+    frs_val = frs.get("frs")
+    return (
+        -float((candidate.get("p1") or {}).get("gbp") or 0.0),        # P1  most overweight first
+        -int((r.get("c1") or {}).get("c1", 0)),                       # P2  widens a bet -> sell
+        -int((r.get("c2") or {}).get("c2", 0)),                       #     adds to concentration
+        -int((candidate.get("p3") or {}).get("p3", 0)),               # P3  dear to keep -> sell
+        band_rank,                                                    # P4  FRS VOTES, last
+        0 if frs.get("dominated_by") else 1,
+        (999.0 if frs_val is None else float(frs_val)),
+        -float(candidate.get("value_gbp") or 0.0),                    # P5  determinism only
+        str(candidate.get("sedol") or ""),
+    )
+
+
+def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
+                frs_by_sedol=None, nav_gbp=None) -> dict:
+    """-> the A7 donor ranking. ONE home; `waiting_room` and `fund_action_stack` both read it.
+
+    `frs_by_sedol` is OPTIONAL and is the P4 vote only: {sedol: {"frs": float|None,
+    "band": str, "dominated_by": str|None}}. Absent, P4 contributes a constant and the ordering is
+    decided entirely by the estimation-free criteria — which is the amendment's intent, not a
+    degradation.
+    """
+    portfolio = portfolio if portfolio is not None else _load_portfolio()
+    universe = universe if universe is not None else json.loads(
+        (HERE / "fund_universe.json").read_text(encoding="utf-8"))
+    tw = policy if policy is not None else json.loads(
+        (HERE / "target_weights.json").read_text(encoding="utf-8"))
+    ranking = ranking if ranking is not None else rank_inputs(universe)
+    nav = float(nav_gbp if nav_gbp is not None
+                else portfolio["summary"]["total_value_gbp"])
+    rows = ranking.get("rows") or {}
+    vals = {f["ticker"]: float(f["value_gbp"]) for f in portfolio.get("funds", [])}
+
+    ocfs = sorted(float((rows[s].get("c4") or {}).get("c4"))
+                  for s in vals if s in rows
+                  and (rows[s].get("c4") or {}).get("c4") is not None)
+    dear = (ocfs[min(int(len(ocfs) * DONOR_OCF_DEAR_TERCILE), len(ocfs) - 1)] if ocfs else None)
+
+    cands = []
+    for sd, v in sorted(vals.items()):
+        r = rows.get(sd)
+        if r is None:
+            continue
+        vote = dict((frs_by_sedol or {}).get(sd) or {})
+        c = {"sedol": sd, "value_gbp": round(v, 2),
+             "weight_pct": round(v / nav * 100, 4),
+             "rank": r,
+             "p1": _p1_above_band_high_gbp(sd, v, nav, tw),
+             "frs_vote": {"frs": vote.get("frs"), "band": vote.get("band"),
+                          "dominated_by": vote.get("dominated_by"),
+                          "state": ("SUPPLIED" if vote else "ABSENT_CONTRIBUTES_CONSTANT")},
+             "bucket_shortfall_pct": 0.0}
+        c["p3"] = _p3_cost_to_keep(r, dear, (vote.get("crystallisation_gbp")))
+        cands.append(c)
+
+    if A7_DONOR_ORDER_ENABLED:
+        cands.sort(key=donor_key)
+    else:
+        # R4.13 ROLLBACK — the pre-A7 rule reproduced EXACTLY as `waiting_room` ran it: the BUY
+        # key, sorted in reverse. Not an approximation of it: negating the leading terms and
+        # leaving `_deviation_key` ascending is a DIFFERENT order, and a rollback that does not
+        # reproduce the thing it rolls back to is not a rollback (R4.13).
+        cands.sort(key=_rank_key, reverse=True)
+    for i, c in enumerate(cands, 1):
+        c["donor_rank"] = i
+        c["why"] = _donor_why(c)
+    return {
+        "state": "MEASURED", "as_of": _today(), "item": "ISA-0440 / A7",
+        "enabled": A7_DONOR_ORDER_ENABLED,
+        "nav_gbp": round(nav, 2),
+        "ocf_dear_tercile_pct": dear,
+        "frs_supplied": bool(frs_by_sedol),
+        "order": ["P1 pounds above declared band_high",
+                  "P2 look-through / concentration relief (c1, c2 — READ from rank_inputs)",
+                  "P3 cost to keep, ORDINAL (OCF tercile; a crystallised discount DEMOTES)",
+                  "P4 FRS band, dominance, FRS — A VOTE, NOT AUTHORITY (A7)",
+                  "P5 value desc, sedol — determinism only"],
+        "basis": ("A7 supersedes V2.1 s11's FRS-led donor ranking and the pre-A7 "
+                  "`waiting_room` rule that reversed the BUY key. L-1/ISA-0351 measured alpha "
+                  "rank persistence at -0.482 in this sleeve, so a sell rule led by a retention "
+                  "score sells low in expectation. FRS is retained as the P4 vote until L-1 "
+                  "resolves (SE 0.32 on n=11 — not actionable in either direction)."),
+        "donors": cands,
+    }
+
+
+def _donor_why(c: dict) -> str:
+    """The NAMED reason this donor sits where it does — the first criterion that separated it."""
+    p1 = float((c.get("p1") or {}).get("gbp") or 0.0)
+    if p1 > 0:
+        return ("P1: GBP %.2f above its declared band_high of %.2f%%"
+                % (p1, (c["p1"].get("band_high_pct") or 0.0)))
+    r = c.get("rank") or {}
+    if int((r.get("c1") or {}).get("c1", 0)) > 0:
+        return "P2: this fund's pound WIDENS a material active bet (%.2fpp)" % (
+            (r.get("c1") or {}).get("active_pp") or 0.0)
+    if int((r.get("c2") or {}).get("c2", 0)) > 0:
+        return "P2: adds to %s, already at or above declared materiality" % (
+            ", ".join((r.get("c2") or {}).get("over_materiality") or []) or "a declared cluster")
+    p3 = int((c.get("p3") or {}).get("p3", 0))
+    if p3 != 0:
+        return "P3: %s" % (c["p3"].get("basis") or "")
+    band = (c.get("frs_vote") or {}).get("band")
+    if band and band != "HOLD/ADD":
+        return "P4 (vote only): FRS band %s" % band
+    return ("no criterion separated this fund — it is ordered by value and sedol for "
+            "repeatability (P5), which is a REFUSAL to rank, not a ranking")
+
+
 def _bucket_ceiling(tw: dict, b: str, key: str) -> float:
     """Phase A fills to the POINT TARGET; phase B to the declared BAND HIGH (ISA-0388)."""
     v = tw[b].get(key)
@@ -1304,6 +1551,298 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
+# A12 — PLAN STABILITY.  ISA-0440 / amendment schedule A12, built 26-Aug-2026.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# A12: "capital_routing.py must emit a robustness grid alongside the plan: how much does the plan
+# change if er_ca moves +/-1pp, if rho_sleeve moves +/-0.05, if NAV moves +/-5%? A lexicographic
+# ranking over near-tied inputs can be unstable, and the instability must be visible rather than
+# inferred." It follows the M* `robustness()` precedent.
+#
+# ⚑ TWO CORRECTIONS TO THE AMENDMENT, BOTH FOUND BY TRYING TO BUILD IT, BOTH STATED RATHER THAN
+# QUIETLY WORKED AROUND (R4.4: when a build makes a sentence in a spec false, updating that
+# sentence is part of the build).
+#
+#   1. THERE IS NO `capital_routing.py`. The router is THIS module. The amendment names a file
+#      that has never existed on disk, and building a `capital_routing.py` to satisfy the sentence
+#      would have created the second home R4.4 exists to prevent.
+#
+#   2. ⚑ `er_ca` AND `rho_sleeve` ARE NOT INPUTS TO THIS PLAN, AND THAT IS THE MOST USEFUL THING
+#      THE GRID REPORTS. The fund plan is produced from portfolio values, declared bands, the
+#      freeze basis and the C1..C5 ranking. Neither the confidence-adjusted expected return nor
+#      the sleeve correlation appears anywhere in its derivation — `grep` finds them in this
+#      module only in COMMENTS about other people's findings. So perturbing them here and printing
+#      "0.0% change" would be a fabricated reassurance: it would read as "the plan is robust to
+#      expected return" when the truth is "the plan never consulted expected return". The grid
+#      therefore reports NOT_AN_INPUT with the evidence, and ROUTES both perturbations to the
+#      module where they ARE inputs — `position_sizing.stock_max`, the demand-pull rule that
+#      decides the other half of the marginal pound.
+#
+# ⚑ AND ONE MEASURED RESULT WORTH READING BEFORE THE NUMBERS: rho is UNMEASURED on this book, and
+# an unmeasured correlation is ADVERSE by A2.3, which caps every position at STARTER. So moving
+# rho by +/-0.05 changes NOTHING TODAY — not because the plan is robust to correlation, but
+# because the plan is already at the floor correlation forces it to. That distinction is the
+# difference between a stable plan and a plan that has stopped listening, and only a grid that
+# names the mechanism can tell them apart.
+
+
+A12_STABILITY_ENABLED = True
+
+NAV_PERTURBATION_PCT = 5.0
+ER_CA_PERTURBATION_PP = 1.0
+RHO_PERTURBATION = 0.05
+
+
+def _plan_signature(doc: dict) -> dict:
+    """-> the comparable shape of a plan: who receives, how much, in what order, and the split."""
+    fa = doc.get("fund_allocation") or {}
+    alloc = {k: round(float(v), 2) for k, v in (fa.get("allocation") or {}).items()}
+    split = doc.get("sleeve_split") or {}
+    return {
+        "allocation": alloc,
+        "receivers": sorted(k for k, v in alloc.items() if v > 0.005),
+        "order": [c.get("sedol") for c in (fa.get("ordered") or fa.get("candidates") or [])],
+        "stock_max_gbp": round(float(split.get("stock_max_gbp") or 0.0), 2),
+        "fund_max_gbp": round(float(split.get("fund_max_gbp") or 0.0), 2),
+        "total_allocated_gbp": round(sum(alloc.values()), 2),
+    }
+
+
+def _plan_delta(base: dict, other: dict) -> dict:
+    """-> how far the plan moved. Pounds churned, receivers gained/lost, order changed."""
+    keys = sorted(set(base["allocation"]) | set(other["allocation"]))
+    churn = sum(abs(other["allocation"].get(k, 0.0) - base["allocation"].get(k, 0.0))
+                for k in keys)
+    denom = max(base["total_allocated_gbp"], 1e-9)
+    return {
+        "pounds_churned_gbp": round(churn, 2),
+        "churn_share_of_plan": round(churn / denom, 4),
+        "receivers_added": sorted(set(other["receivers"]) - set(base["receivers"])),
+        "receivers_dropped": sorted(set(base["receivers"]) - set(other["receivers"])),
+        "receiver_set_changed": other["receivers"] != base["receivers"],
+        "order_changed": other["order"] != base["order"],
+        "stock_max_delta_gbp": round(other["stock_max_gbp"] - base["stock_max_gbp"], 2),
+        "total_allocated_delta_gbp": round(other["total_allocated_gbp"]
+                                           - base["total_allocated_gbp"], 2),
+    }
+
+
+def _scaled_portfolio(portfolio: dict, factor: float) -> dict:
+    """-> the portfolio with every holding and the total scaled. A NAV move is a MARKET move: it
+    scales the holdings, it does not appear from nowhere in the summary line."""
+    p = json.loads(json.dumps(portfolio))
+    for grp in ("funds", "stocks"):
+        for row in p.get(grp) or []:
+            if row.get("value_gbp") is not None:
+                row["value_gbp"] = float(row["value_gbp"]) * factor
+    s = p["summary"]
+    for k in ("total_value_gbp", "fund_sleeve_value_gbp", "stock_sleeve_value_gbp"):
+        if s.get(k) is not None:
+            s[k] = float(s[k]) * factor
+    return p
+
+
+# The A12 instrument's own functions. They MENTION `er_ca` and `rho_sleeve` by name, so they must
+# be excluded from the scan below or the observer reports itself as the thing it is observing.
+# ⚑ MY FIRST DRAFT DID EXACTLY THAT: it returned `er_ca read_by_code = True` pointing at its own
+# line, which would have published "the plan reads er_ca" — the opposite of the truth — with an
+# AST as evidence. This is ISA-0382's rule in a new place: AN OBSERVER MAY NOT MEASURE ITSELF.
+_A12_OBSERVER_FUNCS = ("_module_reads", "_stock_side_sensitivity", "plan_stability",
+                       "_plan_signature", "_plan_delta", "_scaled_portfolio")
+
+
+def _module_reads(name: str, *, exclude=_A12_OBSERVER_FUNCS) -> dict:
+    """-> whether this module's PLAN-PRODUCING CODE ever reads `name`. AST, not grep.
+
+    ⚑ A grep answers "does this word appear", and in this file `er_ca` appears several times in
+    prose about other people's findings. The question A12 needs answered is "can this quantity
+    reach the plan", and only the parsed code can answer it (R4.6.1 — enumerate on disk, and the
+    enumeration is an ARTEFACT, not a claim).
+
+    ⚑ String constants ARE counted, deliberately: this codebase reaches quantities through
+    `row.get("c1")`, so a dict key is a read. That is also why the observer functions have to be
+    excluded by name rather than by hoping they contain no strings.
+    """
+    import ast as _ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    skip = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name in exclude:
+            for sub in _ast.walk(node):
+                skip.add(id(sub))
+    hits = []
+    for node in _ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if isinstance(node, _ast.Name) and node.id == name:
+            hits.append(getattr(node, "lineno", None))
+        elif isinstance(node, _ast.Attribute) and node.attr == name:
+            hits.append(getattr(node, "lineno", None))
+        elif isinstance(node, _ast.Constant) and isinstance(node.value, str) \
+                and node.value == name:
+            hits.append(getattr(node, "lineno", None))
+    return {"name": name, "read_by_code": bool(hits), "lines": sorted(set(hits)),
+            "observer_excluded": list(exclude),
+            "basis": ("AST over %s, EXCLUDING the A12 instrument's own functions: %d code "
+                      "reference(s). Comments and docstrings are not counted; string constants "
+                      "ARE, because a dict key is a read in this codebase."
+                      % (Path(__file__).name, len(set(hits))))}
+
+
+def _stock_side_sensitivity(nav_gbp: float, capital_on_offer_gbp: float,
+                            candidates=None) -> dict:
+    """Where er_ca and rho ACTUALLY bite: `position_sizing.stock_max` (the demand-pull rule)."""
+    try:
+        import position_sizing as _ps
+    except Exception as e:                                              # noqa: BLE001
+        return {"state": "UNAVAILABLE", "reason": "%s: %s" % (type(e).__name__, e)}
+
+    base_cands = candidates if candidates is not None else [
+        {"ticker": "_PROBE", "qualifies": True, "evidence_state": "CONFIRMED",
+         "current_value_gbp": 0.0,
+         "correlation": {"measured": False, "rho_sleeve": None,
+                         "rho_basis": "UNMEASURED_ADVERSE_DEFAULT"}}]
+
+    def _run(cs):
+        return _ps.stock_max(cs, nav_gbp=nav_gbp,
+                             capital_on_offer_gbp=capital_on_offer_gbp)
+
+    synthetic = candidates is None
+    base = _run(base_cands)
+    out = {
+        "state": ("SYNTHETIC_PROBE" if synthetic else "MEASURED"),
+        # ⚑ NAMED AS A PROBE, NOT PRINTED AS A PLAN. With no real candidate list this runs one
+        # invented CONFIRMED name to demonstrate the MECHANISM. The pound figure it produces is
+        # not a size anyone should act on, and a number that looks like a plan but is not one is
+        # precisely the class of defect this project keeps finding (R4.2 — a figure states where
+        # it came from, and this one came from a fixture).
+        "probe_stock_max_gbp": base["stock_max_gbp"],
+        "probe_binding": base["binding"],
+        "probe_note": (("no candidate list was supplied, so the grid runs ONE synthetic "
+                        "CONFIRMED candidate at zero current value. It shows what the rule DOES; "
+                        "it does not size anything.") if synthetic else None),
+        "grid": []}
+
+    for label, delta in (("rho -0.05", -RHO_PERTURBATION), ("rho +0.05", RHO_PERTURBATION)):
+        cs = json.loads(json.dumps(base_cands))
+        for c in cs:
+            corr = c.get("correlation") or {}
+            if corr.get("measured") and corr.get("rho_sleeve") is not None:
+                corr["rho_sleeve"] = float(corr["rho_sleeve"]) + delta
+        r = _run(cs)
+        measured_any = any((c.get("correlation") or {}).get("measured") for c in base_cands)
+        out["grid"].append({
+            "perturbation": label,
+            "stock_max_gbp": r["stock_max_gbp"],
+            "delta_gbp": round(r["stock_max_gbp"] - base["stock_max_gbp"], 2),
+            "note": (None if measured_any else
+                     "⚑ rho is UNMEASURED on this book. A2.3 makes an unmeasured correlation "
+                     "ADVERSE and caps every position at STARTER, so a +/-0.05 move changes "
+                     "nothing — because the plan is already at the floor correlation forces, NOT "
+                     "because it is robust to correlation. Those are different facts."),
+        })
+
+    for label, sign in (("er_ca -1pp", -1), ("er_ca +1pp", +1)):
+        cs = json.loads(json.dumps(base_cands))
+        flipped = 0
+        for c in cs:
+            m = c.get("er_ca_margin_pp")
+            if m is None:
+                continue
+            new_margin = float(m) + sign * ER_CA_PERTURBATION_PP
+            was, now = bool(c.get("qualifies")), new_margin >= 0
+            if was != now:
+                flipped += 1
+            c["qualifies"] = now
+        r = _run(cs)
+        out["grid"].append({
+            "perturbation": label,
+            "stock_max_gbp": r["stock_max_gbp"],
+            "delta_gbp": round(r["stock_max_gbp"] - base["stock_max_gbp"], 2),
+            "candidates_flipped": flipped,
+            "note": (None if any(c.get("er_ca_margin_pp") is not None for c in base_cands) else
+                     "no candidate carried `er_ca_margin_pp` (its distance from the deploy "
+                     "floor), so this run cannot say whether a 1pp move would flip anything. "
+                     "UNMEASURED, not 'no effect' (R4.1)."),
+        })
+    return out
+
+
+def plan_stability(*, portfolio=None, base_doc=None, amount_gbp=None,
+                   new_subscription_gbp=0.0, out_path=None) -> dict:
+    """-> A12's robustness grid for the marginal-pound plan. Never mutates anything on disk."""
+    if not A12_STABILITY_ENABLED:
+        return {"state": "DISABLED", "reason": "A12_STABILITY_ENABLED is False (R4.13)"}
+    import tempfile
+    portfolio = portfolio if portfolio is not None else _load_portfolio()
+    tmpdir = Path(tempfile.mkdtemp())
+
+    def _build_with(p, tag):
+        # ⚑ writes to a TEMP path: a robustness probe that overwrote the month's plan file would
+        # be an instrument that changes what it measures.
+        pf = tmpdir / ("portfolio_%s.json" % tag)
+        pf.write_text(json.dumps(p), encoding="utf-8")
+        return build(amount_gbp=amount_gbp, new_subscription_gbp=new_subscription_gbp,
+                     portfolio_path=str(pf), out_path=str(tmpdir / ("plan_%s.json" % tag)))
+
+    base = base_doc if base_doc is not None else _build_with(portfolio, "base")
+    base_sig = _plan_signature(base)
+
+    grid = []
+    for label, factor in (("NAV -5%", 1.0 - NAV_PERTURBATION_PCT / 100.0),
+                          ("NAV +5%", 1.0 + NAV_PERTURBATION_PCT / 100.0)):
+        d = _build_with(_scaled_portfolio(portfolio, factor), label.replace("%", "pct")
+                        .replace(" ", "_").replace("+", "p").replace("-", "m"))
+        grid.append({"perturbation": label, "input": "portfolio NAV and every holding",
+                     "state": d.get("state"), **_plan_delta(base_sig, _plan_signature(d))})
+
+    not_inputs = {}
+    for nm in ("er_ca", "rho_sleeve", "rho"):
+        not_inputs[nm] = _module_reads(nm)
+
+    s = portfolio["summary"]
+    nav = float(s["total_value_gbp"])
+    offer = (amount_gbp if amount_gbp is not None
+             else float(s.get("cash_deployable_gbp") or 0.0) + float(new_subscription_gbp or 0.0))
+
+    doc = {
+        "state": "MEASURED", "as_of": _today(), "item": "ISA-0440 / A12",
+        "enabled": A12_STABILITY_ENABLED,
+        "precedent": "follows the M* robustness() pattern already established in this project",
+        "base_plan": base_sig,
+        "grid": grid,
+        "unstable": [g["perturbation"] for g in grid
+                     if g["receiver_set_changed"] or g["order_changed"]],
+        "not_an_input": {
+            "state": "MEASURED_BY_AST",
+            "quantities": not_inputs,
+            "why_this_is_reported_rather_than_perturbed": (
+                "A12 asks for er_ca +/-1pp and rho_sleeve +/-0.05. Neither reaches this plan: the "
+                "fund destination is decided by portfolio values, declared bands, the freeze basis "
+                "and the C1..C5 ranking. Perturbing a quantity the plan never reads and printing "
+                "'0.0% change' would publish a fabricated reassurance — it reads as 'robust to "
+                "expected return' when the truth is 'never consulted expected return'. The AST "
+                "evidence is above and the perturbation is routed to where it BITES, below."),
+        },
+        "routed_to_stock_side": _stock_side_sensitivity(nav, offer),
+        "reading": None,
+    }
+    doc["reading"] = (
+        "The fund plan %s under a +/-5%% NAV move. %s"
+        % (("CHANGES ITS DESTINATIONS" if doc["unstable"] else
+            "keeps the same destinations and order"),
+           ("Unstable under: " + ", ".join(doc["unstable"]) + ". A lexicographic ranking over "
+            "near-tied inputs is resolving noise, and A12 exists so that is VISIBLE rather than "
+            "inferred." if doc["unstable"] else
+            "A 5% market move does not reorder the destinations, so the ranking is not sitting "
+            "on a knife edge this month. That is a statement about THIS month's inputs, not a "
+            "property of the rule.")))
+    if out_path:
+        Path(out_path).write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    return doc
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
 # selftest helpers — each one is a control that must be able to FAIL (R5.5 / R5.8)
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 def _fixture():
@@ -1417,6 +1956,94 @@ def _weight_basis_is_not_executable() -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0447 — THE DECLARED RUN-CONTEXT SUMMARY
+#
+# ⚑ WHY THIS LIVES HERE AND NOT IN THE ORCHESTRATOR. `build()` produces a document of several
+# hundred fields; the monthly run context carries a summary of it, and until 26-Aug-2026 that
+# summary was eight scalars assembled by a dict literal inside `monthly_isa_prerun` Step 6.10b
+# — and NOTHING RENDERED THEM. The whole marginal-pound router reached a decision surface only
+# if Raj opened the JSON (ISA-0447). The email now renders it, which makes this dict a contract
+# between two modules, and a contract whose only definition is a literal buried in an
+# orchestrator is one no test can reach and no reader can find. The module that owns the
+# document owns its summary.
+#
+# ⚑ WHAT IT MUST CARRY IS DECIDED BY R2.10, NOT BY BREVITY. `executability` travels whole, not
+# as its state string, because "NOT_EXECUTABLE" without the two pounds figures it fails against
+# is an adjective rather than a measurement. `band_choice_not_made` travels because the question
+# it names — whether a declared band is a preference or a limit — has NOT been decided, and a
+# summary that dropped it would let an undecided question read as a settled one.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+SUMMARY_SCHEMA_VERSION = "1.0.0"
+
+
+def summary_for_run_context(doc: dict) -> dict:
+    """The `summary.capital_destination` block of run_context_[mmm]_[yyyy].json.
+
+    Input is a full `build()` document. Returns {} for any document that is not state OK —
+    an unrouted month must render as ABSENT at the decision surface, never as an empty plan."""
+    if not doc or doc.get("state") != "OK":
+        return {}
+    _sl = doc.get("sleeve_split") or {}
+    _fa = doc.get("fund_allocation") or {}
+    _cdr = doc
+    _rk, _db = doc.get("ranking") or {}, doc.get("declared_bands") or {}
+    _res_cd, _ver = doc.get("residual") or {}, doc.get("verification") or {}
+    _frz = _sl.get("scaling_freeze") or {}
+    return {
+    "state": _cdr["state"],
+    "as_of": (_cdr.get("_meta") or {}).get("as_of"),
+    "stock_max_gbp": _sl.get("stock_max_gbp"),
+    "fund_max_gbp": _sl.get("fund_max_gbp"),
+    "amount_available_gbp": _sl.get("amount_available_gbp"),
+    "sleeve_weight_now_pct": _sl.get("stock_sleeve_weight_now_pct"),
+    "declared_band_pct": _sl.get("declared_band_pct"),
+    "in_band": _sl.get("in_band"),
+    "gbp_to_reach_band_floor": _sl.get("gbp_to_reach_band_floor"),
+    "split_state": _sl.get("state"),
+    "split_reason": _sl.get("reason"),
+    "freeze_basis": _frz.get("basis"),
+    "freeze_active": _frz.get("active"),
+    "freeze_declared_by": _frz.get("basis_declared_by"),
+    "freeze_earliest_unfreeze": _frz.get("earliest_unfreeze_mechanical"),
+    # the WHOLE executability dict: a refusal must render with the number it fails
+    # against, or "NOT_EXECUTABLE" is an adjective rather than a measurement (R2.10)
+    "executability": _sl.get("executability") or {},
+    "ranking_order": _rk.get("order"),
+    "ranking_state": _rk.get("state"),
+    "trailing_return": _rk.get("trailing_return"),
+    "c1_resolution": ((_rk.get("criteria") or {}).get("c1") or {}).get("resolution"),
+    "fund_allocation_state": _fa.get("state"),
+    "allocation_gbp": {k: v for k, v in (_fa.get("allocation") or {}).items()
+                       if (v or 0) > 0},
+    "phase_allocation": _fa.get("phase_allocation"),
+    "blocked": _fa.get("blocked"),
+    "eligibility_refused": (_cdr.get("eligibility") or {}).get("refused"),
+    "band_weights": {r["sedol"]: {"before": r.get("weight_before_pct"),
+                                  "after": r.get("weight_after_pct"),
+                                  "low": r.get("band_low_pct"),
+                                  "high": r.get("band_high_pct")}
+                     for r in (_db.get("funds") or [])},
+    "band_breaches_before": _db.get("breaches_before"),
+    "band_breaches_after": _db.get("breaches_after"),
+    "band_repaired": _db.get("repaired"),
+    "band_not_repaired": _db.get("not_repaired"),
+    "band_choice_not_made": _db.get("the_choice_not_made"),
+    "unallocated_gbp": _fa.get("unallocated_gbp"),
+    "residual_state": _res_cd.get("state"),
+    "residual_pct_of_offered": _res_cd.get("pct_of_capital_offered"),
+    "idle_cost_net_gbp":
+        _res_cd.get("annual_opportunity_cost_net_of_waiting_room_gbp"),
+    "idle_cost_basis": _res_cd.get("opportunity_cost_basis"),
+    "parity_pass": (_ver.get("parity") or {}).get("pass"),
+    "parity_inert_criteria": (_ver.get("parity") or {}).get("inert_criteria"),
+    "two_derivations_agree": _ver.get("two_derivations_agree"),
+            }
+
+
+
 def _selftest(verbose=True) -> int:
     import tempfile
     fails = []

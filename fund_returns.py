@@ -83,6 +83,15 @@ def _g(key, default):
     return getattr(_cfg, key, default)
 
 
+# ── ISA-0432: the guarded accessor for anchor-derived thresholds ──────────────────────────
+# These quantities are DERIVED from the portfolio value and the contribution schedule and move
+# whenever either does. A literal default here is a shadow copy that stops tracking on the day it
+# is written, so this delegates to isa_policy.derived(), which RAISES rather than substituting one.
+def _policy_derived(_name, _cfg_override=None):
+    import isa_policy as _pol
+    return _pol.derived(_name, cfg=_cfg_override)
+
+
 def _today() -> str:
     return datetime.date.today().isoformat()
 
@@ -190,7 +199,7 @@ def compute_fund_gate(funds: list, returns: dict, gate_pct: float = None,
                       min_coverage: float = None) -> dict:
     """Value-weighted fund-sleeve return across COVERED funds + PASS/FAIL vs gate.
     PENDING (no PASS/FAIL) until coverage >= min_coverage of fund-sleeve value."""
-    gate_pct = _g("FUND_GATE_PCT", 12.0) if gate_pct is None else gate_pct
+    gate_pct = _policy_derived("FUND_GATE_PCT") if gate_pct is None else gate_pct  # ISA-0432/0433
     min_coverage = _g("FUND_MIN_COVERAGE", 0.80) if min_coverage is None else min_coverage
     total_val = sum((f.get("value_gbp") or 0) for f in funds)
     covered_val = w_ret = 0.0

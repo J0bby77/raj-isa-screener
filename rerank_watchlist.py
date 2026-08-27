@@ -898,9 +898,11 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         e["t1_qualified"] = _detail["t1_qualified"]
         e["stage_gate"] = _detail["stage_gate"]
         e["late_cycle_flag"] = _detail["late_cycle_flag"]
-        # A5 v3 (D18/D19): evidence-based SIZING — never blocks, caps thin-evidence entries
+        # A5 v3 (D18/D19): evidence CERTIFICATION — never blocks.
+        # ⚑ ISA-0442: `size_mode` is no longer carried. It was a second authority for position
+        # size against the V2.1 ladder, and it is the ladder that decides pounds.
         e["evidence_confirmed"] = _detail["evidence_confirmed"]
-        e["size_mode"] = _detail["size_mode"]
+        e["size_authority"] = _detail["size_authority"]
         e["t1_gate_detail"] = _detail
     eligible.sort(key=lambda e: (-e.get("_composite", 0.0),
                                  -(e.get("normalised_score") or 0),

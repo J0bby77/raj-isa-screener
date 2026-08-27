@@ -369,19 +369,28 @@ ER_CALLSITE_MANIFEST = {
 ER_GATE_ACTIVE      = True    # A2 — E[r] T1-deploy gate; FLIPPED LIVE 13-Jul-26 (P2) — consumed 1-Aug pre-run
 STAGE_GATE_ACTIVE   = True    # A3 — stage gate; FLIPPED LIVE 13-Jul-26 (P2)
 T1_QUALIFICATION_MODE = True  # A4 — T1 = QUALIFICATION; FLIPPED LIVE 13-Jul-26 (P2); False = legacy rank-band rollback
-# ── A5 v3 (Raj 15-Jul-26, D18/D19 APPROVED): TENURE GATE REMOVED — sizing by conviction ×
-# evidence. Tenure/discovery-date carries no information about the company; the evidence is the
-# underlying data (both-window revisions = confirmation-over-time that already happened). Sizing
-# NEVER blocks a deploy; it caps it. Full size additionally requires Step-10 conviction >= 75.
+# ── A5 v3 (Raj 15-Jul-26, D18/D19 APPROVED): TENURE GATE REMOVED. Tenure/discovery-date carries
+# no information about the company; the evidence is the underlying data (both-window revisions =
+# confirmation-over-time that already happened).
+# ⚑ ISA-0442, 26-Aug-2026 — "sizing by conviction x evidence" AND "full size additionally requires
+# Step-10 conviction >= 75" ARE RETIRED. Raj authorised option (a): `position_sizing.target_pct()`
+# driven by `evidence_state` is the ONLY authority for how big a position is. `t1_gates` certifies
+# EVIDENCE and publishes no size. See ISA-0442 and clean spec s6 ("Do not reinstate the /100
+# conviction score") — it was never de-instated here, so it did not need reinstating.
 EVIDENCE_ER_CONF_MIN = 0.75   # D18 — er_confidence floor for the fundamentals evidence route
 EVIDENCE_SIGHTING_MIN = 2     # A5v3 — alternative route: distinct screen sightings...
 EVIDENCE_SIGHTING_GAP_DAYS = 7      # D19 — ...spaced at least this far apart...
 EVIDENCE_SIGHTING_WINDOW_DAYS = 45  # ...within this lookback (source: score_panel.csv, A8)
-STARTER_SIZE_CAP_PCT = 1.5    # D19 — cap for thin-evidence entries; scale-up trigger recorded
-                              #      at entry. PRE-REGISTERED calibration rule (A8 pattern):
-                              #      if first-sighting FULL entries underperform confirmed
-                              #      entries at 3m over >=2 quarters of ledger data, raise
-                              #      EVIDENCE_ER_CONF_MIN — never judgment-recalibrated.
+# ⚑ STARTER_SIZE_CAP_PCT IS DELETED, NOT RE-POINTED (ISA-0442, Raj option (a), 26-Aug-2026).
+# It read 1.5%, BELOW the V2.1 ladder's STARTER rung of 3.5%, and it was the smaller of two live
+# numbers for one quantity — so on the next forward-led buy it would have won silently, exactly as
+# ISA-0427 (max_stock_position_pct 0.05 against a 6.5% ladder) did. Re-pointing it at the ladder's
+# STARTER would have kept a second name for a number that already has one home. The clean spec s1
+# is unambiguous: "a position reaches 3.5% or it does not exist. No sub-scale holdings." There is
+# therefore no such thing as a starter CAP — STARTER is a RUNG, and rungs live in position_sizing.
+# ROLLBACK (R4.13): `SIZE_AUTHORITY_SINGLE = False` restores t1_gates' size fields — but reading
+# the ladder, never the 1.5. The stale number does not come back on any path.
+SIZE_AUTHORITY_SINGLE = True
 PERSISTENCE_MIN_CYCLES = 2    # A5 — RETIRED AS A GATE (v3, 15-Jul-26); cycles_seen is still
                               #      STAMPED by update_watchlist as ledger/calibration data
 LATE_CYCLE_MULT_PCTILE = 90   # A15 — extended-multiple buy-guard percentile (spec basis)
@@ -408,22 +417,42 @@ def _load_target_state():
             return _json.load(_f)
     except Exception as _e:
         import sys as _sys
-        print(f"WARNING scoring_config: target_state.json unreadable ({_e}) — using FROZEN "
-              f"12-Jul-2026 fallback anchor 13.9/18.7 (A19). Fix the anchor file.", file=_sys.stderr)
-        return {"required_return_floor_pct": 13.9, "required_return_stretch_pct": 18.7,
-                "required_return_operative_pct": 13.9, "guardrail_state": "FALLBACK"}
+        print(f"WARNING scoring_config: target_state.json unreadable ({_e}) — NO fallback "
+              f"anchor is substituted (ISA-0432 Form 3). Every anchor-derived threshold reads "
+              f"None and isa_policy.derived() will RAISE. The module stays importable so a "
+              f"screen can still RANK, but nothing may PRICE capital. Fix the anchor file.",
+              file=_sys.stderr)
+        return {"required_return_floor_pct": None, "required_return_stretch_pct": None,
+                "required_return_operative_pct": None,
+                "guardrail_state": "FALLBACK_NO_ANCHOR"}
 
 TARGET_STATE        = _load_target_state()
-REQUIRED_RETURN_MID = float(TARGET_STATE["required_return_operative_pct"])   # 13.9 at current derivation
-VCI_REQUIRED_ANNUAL_RETURN = round(REQUIRED_RETURN_MID / 100.0, 4)  # P3/A19 (18-Jul-26): E1 hurdle h
+# ⚑ ISA-0432 / ISA-0435. These are DERIVED, never declared. `derive_required_return.py` solves for
+# the return that takes the CURRENT PORTFOLIO VALUE plus the contribution schedule to the GBP 1m
+# floor by target_date — which is why 13.9 (12-Jul, NAV 144,342) and 13.8 (12-Aug, NAV 139,738) are
+# the same derivation at two portfolio values, not two competing declarations. They re-derive at the
+# 30-Sep window. Any literal copy of them is stale the moment the market moves, so on an absent
+# anchor these read None and isa_policy.derived() raises rather than substituting a plausible number.
+_rrm = TARGET_STATE.get("required_return_operative_pct")
+REQUIRED_RETURN_MID = float(_rrm) if _rrm is not None else None
+VCI_REQUIRED_ANNUAL_RETURN = (round(REQUIRED_RETURN_MID / 100.0, 4)
+                              if REQUIRED_RETURN_MID is not None else None)  # P3/A19: E1 hurdle h
                               # reads THE anchor — VCI/PathA symmetric (invariant 6; was 0.14 hardcoded)
 ER_FRICTION_BUFFER  = 2.0     # A2/D1 — pp over the A19 anchor (friction + FX + estimation)
-ER_DEPLOY_FLOOR     = REQUIRED_RETURN_MID + ER_FRICTION_BUFFER   # A2/D1 DERIVED (≈15.9 today) —
+ER_DEPLOY_FLOOR     = ((REQUIRED_RETURN_MID + ER_FRICTION_BUFFER)
+                       if REQUIRED_RETURN_MID is not None else None)   # A2/D1 DERIVED (15.8 today)
                               # consumed only when ER_GATE_ACTIVE flips True at P2; never hardcode.
-FUND_GATE_BANDS     = {"pass": round(REQUIRED_RETURN_MID + FUND_GATE_PASS_OFFSET_PP, 1),
-                       "inconclusive": round(REQUIRED_RETURN_MID + FUND_GATE_INCONCLUSIVE_OFFSET_PP, 1)}
-                              # A11/D8/A19 — DERIVED bands (13.0/11.0 at today's anchor)
-FUND_GATE_PCT       = round(REQUIRED_RETURN_MID - 1.9, 1)   # legacy 12.0 line, now anchor-derived
+FUND_GATE_BANDS     = ({"pass": round(REQUIRED_RETURN_MID + FUND_GATE_PASS_OFFSET_PP, 1),
+                        "inconclusive": round(REQUIRED_RETURN_MID + FUND_GATE_INCONCLUSIVE_OFFSET_PP, 1)}
+                       if REQUIRED_RETURN_MID is not None
+                       else {"pass": None, "inconclusive": None})
+                              # A11/D8/A19 — DERIVED bands (12.9/10.9 at today's 13.8 anchor)
+# ⚑ ISA-0433. THIS IS THE ONLY ASSIGNMENT OF FUND_GATE_PCT. A second one at the foot of the FUND
+# SLEEVE block used to set it back to a literal 12.0, silently killing this derivation for at least
+# four weeks. consistency_check.pair_no_duplicate_module_constant() now fails the build if any
+# module-level name in this file is assigned twice.
+FUND_GATE_PCT       = (round(REQUIRED_RETURN_MID - 1.9, 1)
+                       if REQUIRED_RETURN_MID is not None else None)   # DERIVED: 11.9 today
                               # (fund_returns.compute_fund_gate default; D8 bands govern the verdict)
 
 # ── Doc B (New Capabilities) P2 constants — B1/B2/B3/B4/B7 ─────────────────────────────────
@@ -464,9 +493,10 @@ DOOR_INFLECTION_OFF_HIGH_MIN_PCT = 25.0
 # B7 shadow proxies (documented): beta<1 criterion WAIVED (beta not in full_data);
 # inflection revisions second-derivative proxied by est_rev_direction == improving.
 # — B4 Category-8 tactical UCITS-ETF layer (P3 hook 18-Jul-26; Doc B §B4, D16 caps) —
-ETF_TACTICAL_MAX_POSITION_PCT = 5.0   # per position, % of TOTAL ISA (D17)
-ETF_TACTICAL_MAX_TOTAL_PCT    = 10.0  # all Category-8 positions combined
-ETF_TACTICAL_MIN_HOLD_MONTHS  = 3     # anti-churn
+# ⚑ ISA-0434: this block re-declared ETF_TACTICAL_MAX_TOTAL_PCT and ETF_TACTICAL_MIN_HOLD_MONTHS,
+# which the B4/D16 block above already owns, and introduced ETF_TACTICAL_MAX_POSITION_PCT as a
+# second name for ETF_TACTICAL_MAX_POS_PCT. Values agreed, so nothing was wrong — until one of them
+# was edited. Removed 26-Aug-2026; the B4/D16 block above is the single home.
 REGIME_B4_MENU = {                    # B7(3): regime -> permitted tactical tilts (selection=JUDGMENT;
     "RISK_ON": [],                    #   RISK_ON: none without documented cause)
     "LATE_CYCLE": ["min_vol", "quality"],
@@ -525,7 +555,8 @@ GROWTH_CONVICTION_BRACKETS = _brackets(GROWTH_TOTAL_MAX)   # 46 / 41 / 35 on /50
 # and emits fund actions for the agenda. DEFAULT off (additive; analytics unchanged until activated).
 # ===========================================================================
 FUND_RETURN_SOURCING   = True
-FUND_GATE_PCT          = 12.0
+# ⚑ ISA-0433: `FUND_GATE_PCT = 12.0` was HERE and overwrote the anchor-derived 11.9 assigned ~100
+# lines above. Removed 26-Aug-2026. The derivation is the single home; do not re-declare it.
 FUND_RETURN_STALE_DAYS = 92      # cached fund return older than this -> stale, re-source (quarterly)
 FUND_MIN_COVERAGE      = 0.80    # need >= this fraction of fund-sleeve value covered to PASS/FAIL (else pending)
 

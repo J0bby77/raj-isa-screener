@@ -37,6 +37,15 @@ def _c(name, default):
     return getattr(cfg, name, default)
 
 
+# ── ISA-0432: the guarded accessor for anchor-derived thresholds ──────────────────────────
+# These quantities are DERIVED from the portfolio value and the contribution schedule and move
+# whenever either does. A literal default here is a shadow copy that stops tracking on the day it
+# is written, so this delegates to isa_policy.derived(), which RAISES rather than substituting one.
+def _policy_derived(_name, _cfg_override=None):
+    import isa_policy as _pol
+    return _pol.derived(_name, cfg=_cfg_override)
+
+
 def _floor_platform() -> float:     return float(_c("VCI_FV_ASYMMETRY_MIN_PLATFORM", 2.0))
 def _floor_single() -> float:       return float(_c("VCI_FV_ASYMMETRY_MIN_SINGLE", 2.5))
 def _deploy_threshold() -> float:   return float(_c("VCI_DEPLOY_THRESHOLD", 75))
@@ -110,7 +119,8 @@ def derive_floor(asset_structure: Optional[str], catalyst_type: Optional[str] = 
     if p_thesis is None or L is None or p_thesis <= 0:
         return fixed, "prior_default"          # no odds -> fall back, never auto-deploy on a guess
     T = max((float(days_to_catalyst) / 365.0) if days_to_catalyst else 1.0, 0.5)
-    req = float(req_annual if req_annual is not None else _c("VCI_REQUIRED_ANNUAL_RETURN", 0.14))
+    req = float(req_annual if req_annual is not None
+               else _policy_derived("VCI_REQUIRED_ANNUAL_RETURN"))   # ISA-0432
     h = (1.0 + req) ** T - 1.0
     a_min = 1.0 + ((1.0 - p_thesis) * L + h) / p_thesis
     applied = min(max(a_min, fixed), float(_c("VCI_FLOOR_MAX", 4.0)))

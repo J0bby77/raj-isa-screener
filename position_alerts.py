@@ -55,6 +55,17 @@ DEFAULTS = {
     "ALERT_PRICE_DROP_PCT": -10.0,        # Raj 29-Jul: >10% fall on a held name -> advise review
     "ALERT_PRICE_DROP_WINDOW_D": 30,
     "ALERT_PRICE_VS_TARGET_DIVERGENCE_PP": 15.0,  # price down while target flat/up by this much
+    # ISA-0417 (23-Aug-2026) — THE UPSIDE TWIN. The 29-Jul-2026 rewrite above corrected the
+    # anti-correlation in ONE DIRECTION. It is symmetric: a RISING stock whose target rises
+    # with it ALSO holds implied upside high, so nothing can fire when a position WINS. On
+    # 22-Aug-2026 MU carried seven exit rules — four thesis breaks and three deterioration
+    # detectors — and ZERO that could fire because it was +144%, having given back 19.5% from
+    # a $1,200 peak with no rule firing at any point. A correction to a SIGNED quantity must be
+    # tested on both signs. PROVISIONAL: the rise threshold is wider than the fall threshold
+    # because upside moves are larger, not because the evidence says so — recalibrate once the
+    # detector has fired over a few runs.
+    "ALERT_PRICE_RISE_PCT": 15.0,         # >15% rise on a held name -> advise review
+    "ALERT_PRICE_RISE_WINDOW_D": 30,
 }
 
 
@@ -272,6 +283,28 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
                                   "target_pct": tc, "divergence_pp": round(tc - pmove, 2),
                                   "note": "price fell while consensus target held or rose — "
                                           "consensus is lagging, do not read the target as support"})
+        # ---- ISA-0417: the UPSIDE twin of the two rules above. Same shape, opposite sign.
+        # Neither is a sell instruction; both advise the same review. The point is that until
+        # 23-Aug-2026 the detector set could only fire on deterioration.
+        rise_lim = float(_cfg("ALERT_PRICE_RISE_PCT"))
+        rise_win = int(_cfg("ALERT_PRICE_RISE_WINDOW_D"))
+        rmove = pmove if rise_win == win_d else price_move_pct(tk, rise_win, price_csv=price_csv,
+                                                               asof=asof)
+        if rmove is not None and rmove >= rise_lim:
+            fired.append({"rule": "price_appreciation", "value_pct": rmove,
+                          "threshold_pct": rise_lim, "window_days": rise_win,
+                          "advice": "RUN_INTRAMONTH_STOCK_REVIEW",
+                          "note": "position has moved materially in its favour — re-underwrite "
+                                  "against its entry case; this is a REVIEW, never a sell"})
+            if len(tgt) >= 2:
+                tc = _pct(tgt[-1]["target_mean"], tgt[0]["target_mean"])
+                if tc is not None and (rmove - tc) >= float(_cfg("ALERT_PRICE_VS_TARGET_DIVERGENCE_PP")):
+                    fired.append({"rule": "price_target_convergence", "price_pct": rmove,
+                                  "target_pct": tc, "divergence_pp": round(rmove - tc, 2),
+                                  "note": "price rose while the consensus target held or fell — "
+                                          "the implied upside has been CONSUMED rather than "
+                                          "earned; re-underwrite before treating the position "
+                                          "as still carrying its entry case"})
         if len(eps) < 2:
             if not fired:
                 skipped.append({"ticker": tk, "reason": "insufficient_history", "points": len(eps)})
