@@ -888,6 +888,218 @@ def pair_monthly_prerun_reads(ctx_text):
     return []
 
 
+# ---------------------------------------------------------------- P0.5 (ISA-0461 / ISA-0471)
+
+# ISA-0461 / ISA-0471, P0.5 seed case ("prose is code"). The monthly-review schedule is a rule
+# with exactly one home (R4.4): Run_Context_Monthly_ISA_Review.md's "Schedule:" line, carrying
+# the cron literal. Two items came from a second home existing: F11 (ISA-0461, the two copies
+# disagreeing) and the correction Raj had to make when I read the wrong one (ISA-0471).
+#
+# Scope, stated rather than implied (R2.10 - "could not measure" and "is bad" must never look
+# the same): the Cowork project-instructions text that actually caused ISA-0461/ISA-0471 lives
+# in Cowork's project settings, not in a file this process - or anything on this machine - can
+# read. There is no "live" copy on disk, so that half of the defect is closed by DELETING the
+# literal at the source (see PROJECT_INSTRUCTIONS_SCHEDULE_FIX_27Aug2026.md, a one-line manual
+# edit Raj applies in Cowork Settings) rather than by an automated pair - a check against a
+# surface that cannot be read would itself be the false-PASS R2.10 forbids.
+#
+# What this pair CAN and DOES verify, every run: the two FILE-BASED surfaces that actually
+# govern this task's own execution - the SKILL mirrors `monthly-isa-portfolio-review` (review)
+# and `isa-monthly-prerun` (pre-run) - never state a schedule literal for the monthly ISA
+# review that disagrees with Run_Context's own cron.
+#
+# Scoped to exactly these two labels, not "every run surface" - deliberately, after a false
+# alarm on first live run (27-Aug-2026): scanning every framework_atlas surface flagged
+# Run_Context_VCI_Task's own, legitimately different schedule ("2nd Sunday each month, 9:00am")
+# as if it had to agree with THIS task's schedule. Two unrelated tasks having two different
+# schedules is not drift; "a guard pointed at the wrong surface raises false alarms" is exactly
+# the failure `pair_run_surface_basis`'s docstring already warns about, and shipping this pair
+# with that same failure mode would be a second instance of it, discovered and fixed before
+# the pair went live rather than after (R2.12 surprise register).
+#
+# Extending the registry to other tasks' own schedules, other threshold quantities, and to
+# position-size literals (F8 - a separate function, pair_prose_sizing_numbers(), not built
+# here) is the rest of P0.5 (ISA_BuildSpec_FrameworkIntegrity_and_CapitalDeployment_27Aug2026.md
+# section P0.5).
+
+_MONTHLY_REVIEW_SURFACE_LABELS = ("monthly-isa-portfolio-review", "isa-monthly-prerun")
+
+_CRON_LITERAL_RE = re.compile(r"cron\s*`([^`]+)`")
+# The ISA-0461/ISA-0471 defect shape itself: a day-of-month ordinal ("1st of each month"),
+# paired with a clock time. Run_Context's OWN schedule is never phrased this way - it reads
+# "Saturday before the first Sunday ... at 09:30", a WEEKDAY ordinal, not a day-of-month one -
+# so this specific shape appearing in either mirror is a disagreement by construction. (A
+# weekday-ordinal restatement such as "1st Sunday of each month at 09:30" is legitimate and
+# must NOT trip this - that shape is excluded on purpose, see module comment above.)
+_ORDINAL_DAY_SCHEDULE_RE = re.compile(
+    r"\b\d{1,2}(?:st|nd|rd|th)\s+of\s+each\s+month\b[^.\n]{0,60}?"
+    r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", re.I)
+# The shape both real SKILL-mirror descriptions actually use: "<ordinal weekday> each month at
+# HH:MM". Narrow on purpose (the literal phrase "each month at") so it does not pick up
+# unrelated times elsewhere in a SKILL file (a data cut-off, a step deadline, and so on).
+_EACH_MONTH_AT_RE = re.compile(r"each month at \**(\d{1,2}):(\d{2})\**", re.I)
+
+
+def _canonical_schedule(run_ctx_text):
+    """(cron, (hour, minute)) parsed from Run_Context's own Schedule line. (hour, minute) is
+    DERIVED from the cron's own minute/hour fields - never a second literal - so there is only
+    ever one number to disagree with (R4.4). Returns (None, None) if no cron literal is found;
+    returns (cron, None) if the cron is malformed and only cron-string comparison is possible."""
+    m = _CRON_LITERAL_RE.search(run_ctx_text)
+    if not m:
+        return None, None
+    cron = m.group(1).strip()
+    fields = cron.split()
+    if len(fields) != 5 or not (fields[0].isdigit() and fields[1].isdigit()):
+        return cron, None
+    return cron, (int(fields[1]), int(fields[0]))
+
+
+def pair_prose_quantity_values(run_ctx_text=None, surfaces=None):
+    """ISA-0461 / ISA-0471 (P0.5 seed). Any schedule literal for the monthly ISA review, stated
+    in the `monthly-isa-portfolio-review` or `isa-monthly-prerun` SKILL mirror, must equal
+    Run_Context_Monthly_ISA_Review.md's own cron (as a cron string, an ordinal-day-of-month
+    shape, or an "each month at HH:MM" time), or ERROR. See the module comment above this
+    function for what is, and is not, in scope."""
+    if run_ctx_text is None:
+        run_ctx_text = _read(MONTHLY_CTX)
+    canonical_cron, canonical_hm = _canonical_schedule(run_ctx_text)
+    if canonical_cron is None:
+        return ["P0.5: Run_Context_Monthly_ISA_Review.md has no `cron ...` schedule literal on "
+                "its Schedule line - canonical schedule UNMEASURED, other surfaces not checked"]
+    if surfaces is None:
+        try:
+            import framework_atlas as atlas
+            surfaces = atlas.run_surface_texts()
+        except Exception as e:                                       # noqa: BLE001
+            return [f"P0.5: framework_atlas unavailable ({e}) - other run surfaces not checked"]
+    errs = []
+    for label, text in surfaces.items():
+        if label not in _MONTHLY_REVIEW_SURFACE_LABELS:
+            continue
+        live = "\n".join(_live_lines(text))
+        for cm in _CRON_LITERAL_RE.finditer(live):
+            found = cm.group(1).strip()
+            if found != canonical_cron:
+                errs.append(
+                    f"P0.5: {label} states cron `{found}` for the monthly ISA review schedule, "
+                    f"which disagrees with Run_Context_Monthly_ISA_Review.md:108 (`{canonical_cron}`)")
+        for om in _ORDINAL_DAY_SCHEDULE_RE.finditer(live):
+            errs.append(
+                f"P0.5: {label} states a monthly-review schedule literal ('{om.group(0).strip()}') "
+                f"in the ordinal-day-of-month shape Run_Context never uses (ISA-0461/ISA-0471) - "
+                f"one home per rule (R4.4) means this surface should read Run_Context, not restate it")
+        if canonical_hm is not None:
+            for tm in _EACH_MONTH_AT_RE.finditer(live):
+                found_hm = (int(tm.group(1)), int(tm.group(2)))
+                if found_hm != canonical_hm:
+                    errs.append(
+                        f'P0.5: {label} states "each month at {tm.group(1)}:{tm.group(2)}" for '
+                        f"the monthly ISA review, which disagrees with "
+                        f"Run_Context_Monthly_ISA_Review.md:108 (`{canonical_cron}` = "
+                        f"{canonical_hm[0]:02d}:{canonical_hm[1]:02d})")
+    return errs
+
+
+
+# ── ISA-0479 / ISA-0480 / ISA-0481 / ISA-0482 (27-Aug-2026) ────────────────────────────────
+# Every scheduled task's prompt must carry a Step 0A occurrence guard whose ordinal window and
+# weekday match the schedule the canonical surface declares for it.
+#
+# WHY THIS PAIR EXISTS AND WHAT IT IS NOT. It is NOT a fix for a live scheduling defect: the run
+# history says this scheduler resolves ordinal weeks correctly (schedule_semantics_evidence.py -
+# 17 firings Jun-Aug 2026, zero wrong-ordinal, negative control passing). It exists because that
+# is an empirical finding about one app build, and because SCHEDULED_TASKS_SETUP.md previously
+# asserted the opposite guarantee with no test behind it and thereby suppressed the guards for
+# months (ISA-0482). The guard is the engine-independent defence; this pair is what stops it
+# being quietly dropped.
+#
+# The task list is derived from SCHEDULED_TASKS_SETUP.md's own tables, NEVER from listing
+# Skills_to_Edit/. That direction matters: the 27-Aug guard pass enumerated the directory and so
+# never saw isa-other-fri1, the one documented task with no mirror at all (ISA-0480). A checker
+# that reads the same surface as the thing it checks cannot find a missing row (FC-H/FC-I).
+
+_ORDINALS = {"1st": (1, 7), "2nd": (8, 14), "3rd": (15, 21), "4th": (22, 28)}
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_SCHED_RE = re.compile(r"\b(1st|2nd|3rd|4th)\s+(" + "|".join(_WEEKDAYS) + r")\b")
+_TASK_ROW_RE = re.compile(r"^\|\s*([a-z0-9][a-z0-9\-]{4,})\s*\|(.*)$", re.M)
+
+
+def declared_tasks(setup_text=None):
+    """{task_id: {'ordinal':(lo,hi)|None, 'weekday':str|None, 'destructive':bool, 'row':str}}
+    parsed from SCHEDULED_TASKS_SETUP.md's task tables. A row whose Schedule cell is not an
+    'Nth Weekday' shape (e.g. 'Mondays 08:00') yields ordinal=None and is exempt from the
+    ordinal check - with only one restricted field there is no ordinal to get wrong."""
+    if setup_text is None:
+        setup_text = _read("SCHEDULED_TASKS_SETUP.md")
+    out = {}
+    for m in _TASK_ROW_RE.finditer(setup_text):
+        task, rest = m.group(1), m.group(2)
+        if task.startswith("-") or set(task) <= set("-"):
+            continue
+        sm = _SCHED_RE.search(rest)
+        # "Saturday before the 1st Sunday" is a RELATIVE rule, not an Nth-weekday rule: the
+        # correct Saturday is in the PREVIOUS month whenever the 1st falls on a Sunday. Parsing
+        # it as "1st Sunday" would assert the wrong weekday and, worse, would bless a guard that
+        # uses the naive day-1-7 window - the exact edge case that silently skips the pre-run
+        # roughly one month in seven. Such a row demands a guard but never a window match.
+        relative = " before " in rest.lower()
+        out[task] = {
+            "ordinal": None if relative else (_ORDINALS[sm.group(1)] if sm else None),
+            "weekday": None if relative else (sm.group(2) if sm else None),
+            "relative": relative,
+            "destructive": ("deletion is permanent" in rest.lower()
+                            or "**no —" in rest.lower() or "**no -" in rest.lower()),
+            "row": rest.strip(),
+        }
+    return out
+
+
+def pair_occurrence_guard_coverage(setup_text=None, mirrors=None, exists=os.path.exists):
+    """Every task declared in SCHEDULED_TASKS_SETUP.md has a Skills_to_Edit mirror carrying a
+    Step 0A occurrence guard that names the right window and weekday; destructive tasks
+    additionally carry a deletion gate. `mirrors` maps task_id -> SKILL.md text (the self-test
+    feeds mutations; production reads disk)."""
+    tasks = declared_tasks(setup_text)
+    if not tasks:
+        return ["ISA-0482: SCHEDULED_TASKS_SETUP.md yielded no task rows - guard coverage "
+                "UNMEASURED, not clean (R2.10)"]
+    errs = []
+    for task, spec in sorted(tasks.items()):
+        if mirrors is not None:
+            text = mirrors.get(task)
+        else:
+            rel = os.path.join("Skills_to_Edit", task, "SKILL.md")
+            text = _read(rel) if exists(os.path.join(HERE, rel)) else None
+        if text is None:
+            errs.append(f"ISA-0480: `{task}` is declared in SCHEDULED_TASKS_SETUP.md but has no "
+                        f"Skills_to_Edit/{task}/SKILL.md mirror - it can carry no occurrence "
+                        f"guard, and no surface in this repo states what it actually runs")
+            continue
+        live = "\n".join(_live_lines(text))
+        needs_guard = bool(spec["ordinal"]) or spec.get("relative") or spec["destructive"]
+        if not needs_guard:
+            continue          # weekday-only cron: one restricted field, no ordinal ambiguity
+        if "OCCURRENCE GUARD" not in live.upper():
+            errs.append(f"ISA-0479: `{task}` has a mirror but no Step 0A occurrence guard - "
+                        f"correctness would rest entirely on how the scheduler resolves its cron")
+            continue
+        if spec["ordinal"]:
+            lo, hi = spec["ordinal"]
+            if not re.search(rf"\b{lo}\s*[-\u2013]\s*{hi}\b", live):
+                errs.append(f"ISA-0479: `{task}` is scheduled '{spec['weekday']}' in window "
+                            f"{lo}-{hi} but its occurrence guard never names that window - "
+                            f"a guard checking the wrong week is worse than none (FC-C)")
+            if spec["weekday"] and spec["weekday"].lower() not in live.lower():
+                errs.append(f"ISA-0479: `{task}`'s occurrence guard never names its weekday "
+                            f"({spec['weekday']})")
+        if spec["destructive"] and "DELETION GATE" not in live.upper():
+            errs.append(f"ISA-0481: `{task}` performs an IRREVERSIBLE action and carries no "
+                        f"deletion gate - the entry guard alone is a single point of failure "
+                        f"for something with no undo (R5.2)")
+    return errs
+
+
 def pair_referenced_scripts_exist(texts, exists=os.path.exists):
     """Every *.py referenced by an execution contract must be present on disk.
     THE pair that would have caught fetch_metrics_local.py: the pre-run recipe invoked it every
@@ -2452,6 +2664,7 @@ def check_all():
     errs += pair_fund_expected_return_contracts()         # FE1-FE4 — ISA-0328 (20-Aug-2026)
     errs += pair_adoption_gate_refuses()                  # ISA-0409 (20-Aug-2026)
     errs += pair_return_basis_declared()                  # ISA-0402 / ISA-0401 (20-Aug-2026)
+    errs += pair_occurrence_guard_coverage()              # ISA-0479/0480/0481/0482 (27-Aug-2026)
     # ── V2.1-A, each behind its declared rollback flag (R4.13) ─────────────────────────
     try:
         import isa_policy as _pol
@@ -2507,6 +2720,7 @@ def check_all():
         errs += pair_monthly_retired(mctx)
         errs += pair_monthly_prerun_stages(mctx, prerun)
         errs += pair_monthly_prerun_reads(mctx)
+        errs += pair_prose_quantity_values(mctx)      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
         errs += pair_monthly_capture_retention(mctx)
         errs += pair_monthly_two_regimes(mctx)
         errs += pair_monthly_lean_email(mctx, mbuild)
@@ -2542,6 +2756,49 @@ def check_all():
 
 
 def _selftest():
+    # ---- ISA-0479/0480/0481/0482: occurrence-guard coverage (27-Aug-2026) -------------------
+    _setup_ok = (
+        "| isa-nasdaq-fri4 | NASDAQ | x | `0 9 22-28 * 5` | 4th Friday |\n"
+        "| isa-weekly-eps-snapshot | y | `0 8 * * 1` | Mondays 08:00 | yes |\n"
+        "| isa-mid-month-intelligence-brief | deletes email | UNVERIFIED | 3rd Sunday | "
+        "**NO — deletion is permanent** |\n")
+    _g_fri4 = "## STEP 0A — OCCURRENCE GUARD\nday-of-month falls within 22-28 ... today is a Friday"
+    _g_mid = ("## STEP 0A — OCCURRENCE GUARD\nwithin 15-21 ... today is a Sunday\n"
+              "> **DELETION GATE (ISA-0481).** re-check before deleting")
+    _mirrors_ok = {"isa-nasdaq-fri4": _g_fri4,
+                   "isa-weekly-eps-snapshot": "## STEP 0A — OCCURRENCE GUARD\nMondays only",
+                   "isa-mid-month-intelligence-brief": _g_mid}
+    assert not pair_occurrence_guard_coverage(_setup_ok, _mirrors_ok), \
+        pair_occurrence_guard_coverage(_setup_ok, _mirrors_ok)
+    # negative controls (R5.5) — each defect class must actually FAIL
+    _m = dict(_mirrors_ok); _m["isa-nasdaq-fri4"] = None                    # missing mirror
+    assert any("no Skills_to_Edit" in e for e in pair_occurrence_guard_coverage(_setup_ok, _m))
+    _m = dict(_mirrors_ok); _m["isa-nasdaq-fri4"] = "no guard here at all"  # guard absent
+    assert any("no Step 0A occurrence guard" in e for e in pair_occurrence_guard_coverage(_setup_ok, _m))
+    _m = dict(_mirrors_ok)
+    _m["isa-nasdaq-fri4"] = _g_fri4.replace("22-28", "1-7")                 # guards the WRONG week
+    assert any("never names that window" in e for e in pair_occurrence_guard_coverage(_setup_ok, _m))
+    _m = dict(_mirrors_ok)
+    _m["isa-mid-month-intelligence-brief"] = _g_mid.split(">")[0]           # destructive, no gate
+    assert any("no deletion gate" in e for e in pair_occurrence_guard_coverage(_setup_ok, _m))
+    # a weekday-only task must NOT be required to carry a guard AT ALL (one restricted field,
+    # no ordinal ambiguity). Asserted with the guard REMOVED - the earlier fixture handed it a
+    # guard and so proved nothing, which is how this false positive shipped (R5.8).
+    _m = dict(_mirrors_ok); _m["isa-weekly-eps-snapshot"] = "plain prompt, no guard"
+    assert not [e for e in pair_occurrence_guard_coverage(_setup_ok, _m)
+                if "isa-weekly-eps-snapshot" in e]
+    # a RELATIVE schedule ("Saturday before the 1st Sunday") must parse as relative - not as
+    # "1st Sunday" - and must still demand a guard, but never a 1-7 window match.
+    _setup_rel = ("| isa-monthly-prerun | pre-run | `30 9 1-7 * 6` | "
+                  "Saturday before the 1st Sunday, 09:30 | yes |\n")
+    _spec = declared_tasks(_setup_rel)["isa-monthly-prerun"]
+    assert _spec["relative"] and _spec["ordinal"] is None and _spec["weekday"] is None, _spec
+    assert pair_occurrence_guard_coverage(_setup_rel, {"isa-monthly-prerun": "no guard"})
+    assert not pair_occurrence_guard_coverage(
+        _setup_rel, {"isa-monthly-prerun": "## STEP 0A — OCCURRENCE GUARD\nis tomorrow the first Sunday"})
+    # an empty setup surface is UNMEASURED, never clean (R2.10)
+    assert pair_occurrence_guard_coverage("", {})
+
     # seeded-good fixtures pass
     good_ctx = ("references SUMMARY_PART_B_FLOOR and SUMMARY_SOURCE_FLOOR and SUMMARY_MAX_COUNT. "
                 "Email — 7 Mandatory Sections ... exactly these 13 ...")
@@ -2906,6 +3163,45 @@ def _selftest():
     # R14.3 negative control: reported drift must surface as an error, not be swallowed.
     assert pair_register_renders_current(check=lambda _h: {"ok": False, "drift": ["X.md: differs"]})
     assert not pair_register_renders_current(check=lambda _h: {"ok": True, "drift": []})
+
+    # ISA-0461 / ISA-0471 negative controls: a schedule literal disagreeing with
+    # Run_Context:108, in one of the two real SKILL mirrors, must FAIL; agreement, a pointer,
+    # or an unrelated task's own (different) schedule must PASS.
+    good_sched_ctx = ("## Pre-Run Script Infrastructure\n\nSchedule: Saturday before the first "
+                      "Sunday of each month at **09:30** (cron `30 9 1-7 * 6`).")
+    assert not pair_prose_quantity_values(good_sched_ctx, {}), \
+        "P0.5: no other surfaces at all must pass (nothing to disagree with)"
+    assert not pair_prose_quantity_values(
+        good_sched_ctx,
+        {"monthly-isa-portfolio-review": "See Run_Context for the schedule; not restated here."}), \
+        "P0.5: a surface that points at Run_Context rather than restating must pass"
+    assert not pair_prose_quantity_values(
+        good_sched_ctx,
+        {"monthly-isa-portfolio-review": "1st Sunday of each month at 09:30 UK"}), \
+        "P0.5: the real (correct) weekday-ordinal restatement must pass, not just a bare pointer"
+    assert not pair_prose_quantity_values(
+        good_sched_ctx,
+        {"isa-monthly-prerun": "Runs on cron `30 9 1-7 * 6`, same as the monthly review."}), \
+        "P0.5: a matching cron literal must pass"
+    assert not pair_prose_quantity_values(
+        good_sched_ctx,
+        {"Run_Context_VCI_Task": "2nd Sunday each month at 09:30",
+         "vci-monthly-value-chain-intelligence": "2nd Sunday each month at 09:30"}), \
+        "P0.5: an unrelated task's own (different) schedule must not be checked at all - " \
+        "these labels are out of scope for the monthly ISA review"
+    assert pair_prose_quantity_values(
+        good_sched_ctx, {"monthly-isa-portfolio-review": "SCHEDULE: 1st of each month, 8:00am"}), \
+        "ISA-0461/ISA-0471: the actual defect shape ('1st of each month, 8:00am') must FAIL"
+    assert pair_prose_quantity_values(
+        good_sched_ctx, {"isa-monthly-prerun": "cron `0 8 1 * *`"}), \
+        "P0.5: a disagreeing cron literal must FAIL"
+    assert pair_prose_quantity_values(
+        good_sched_ctx,
+        {"isa-monthly-prerun": "Runs Saturday before first Sunday of each month at 14:30."}), \
+        "P0.5: a disagreeing 'each month at HH:MM' time (the live isa-monthly-prerun finding, " \
+        "27-Aug-2026 - see ISA item register) must FAIL"
+    assert pair_prose_quantity_values("Schedule: no cron literal here.", {"X": "irrelevant"}), \
+        "P0.5: an unmeasurable canonical schedule must be reported, never silently passed"
 
     print("consistency_check SELF-TEST OK (growth pairs + 10 monthly pairs + register pairs)")
 
