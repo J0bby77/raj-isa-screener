@@ -299,6 +299,27 @@ def classify_part_b_driver(prior_total: int, new_total: int,
 # Normalised score
 # ---------------------------------------------------------------------------
 
+def _prior_path_for(base, wl_data):
+    """The path/source_pipeline of the watchlist or VCI entry a newly-held name came from.
+
+    ⚑ READ, NEVER INFERRED (ISA-0567). A VCI entry means Path B; a main-watchlist entry means
+    Path A / growth_stock, which is what admitted it to that list in the first place. Anything
+    else returns None so the holding classifies UNKNOWN, because a guessed path decides whether
+    the position is scored on the Path A Source Score — and scoring a Path B name that way
+    recommends selling the asymmetric sleeve every month (the ABCL defect).
+    """
+    for e in (wl_data.get("vci_watchlist") or []):
+        if _base_ticker(e.get("ticker", "")) == base:
+            return {"path": "B", "source_pipeline": "vci",
+                    "basis": "carried from the VCI watchlist entry at the point the position opened"}
+    for e in (wl_data.get("watchlist") or []):
+        if _base_ticker(e.get("ticker", "")) == base:
+            return {"path": e.get("path") or "A",
+                    "source_pipeline": e.get("source_pipeline") or "growth_stock",
+                    "basis": "carried from the main watchlist entry at the point the position opened"}
+    return None
+
+
 def _base_ticker(t: str) -> str:
     """Symbol without exchange suffix, upper-cased (ONT.L -> ONT, CSU.TO -> CSU)."""
     t = str(t or "").strip().upper()
@@ -475,7 +496,22 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             cost = hs.get("cost_gbp")
             cps = round(cost / qty, 4) if (cost and qty) else None
             exch = "LSE" if (hs.get("currency") == "GBP") else "NASDAQ"
-            kept_sleeve.append({
+            # ⚑ CARRY THE PATH ACROSS THE MOVE (ISA-0567, 02-Sep-2026). A name is deleted from
+            # the watchlist and the VCI list the moment the broker file shows it held, and this
+            # auto-added sleeve entry replaced it WITHOUT `path` or `source_pipeline`. So every
+            # position opened since the tagging was last done by hand classified as UNKNOWN —
+            # measured on the September book: COCO and QBTS, one of them a Path A name this
+            # framework itself recommended in August. `classify_holding_path` correctly refuses
+            # to read UNKNOWN as Path A (a Path B name scored on the Path A Source Score is
+            # recommended for sale every month), so both were excluded from the growth action
+            # stack and could never be considered for a top-up. The July build record already
+            # named this: "sleeve path/pipeline tagging should be set by update_watchlist when a
+            # position is opened (currently manual)".
+            # ⚑ The path is READ from the entry the name is being moved FROM, never inferred.
+            # If neither list carries one, the entry stays untagged and UNKNOWN stands — that is
+            # the honest state, and it is now NAMED in the promotion log rather than silent.
+            _prior = _prior_path_for(b, wl_data)
+            _entry = {
                 "ticker": b, "name": hs.get("name", ""), "exchange": exch,
                 "purchase_date": None, "cost_per_share_usd": None,
                 "cost_total_gbp": cost, "shares": qty,
@@ -483,7 +519,18 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                 "note": (f"Auto-added from broker file {port_data_date} — "
                          "verify purchase_date / cost basis / thesis-break conditions"),
                 "_auto_added": True,
-            })
+            }
+            if _prior:
+                _entry["path"] = _prior["path"]
+                _entry["source_pipeline"] = _prior["source_pipeline"]
+                _entry["path_basis"] = _prior["basis"]
+            else:
+                promotion_log.setdefault("sleeve_added_untagged", []).append({
+                    "ticker": b,
+                    "reason": ("no path/source_pipeline on the watchlist or VCI entry this "
+                               "holding came from, so it classifies UNKNOWN and is excluded "
+                               "from the Path-A action stack until tagged by hand (ISA-0567)")})
+            kept_sleeve.append(_entry)
             promotion_log["sleeve_added"].append({"ticker": b, "shares": qty})
     if port_stocks:
         wl_data["stock_sleeve"] = kept_sleeve

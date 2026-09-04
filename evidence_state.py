@@ -60,6 +60,18 @@ import datetime
 import json
 from typing import Dict, List, Optional
 
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+
 POLICY_VERSION = "ISA_V2_1"
 
 DEGRADED_UNMEASURED = "DEGRADED_UNMEASURED"
@@ -128,6 +140,7 @@ def classify(channels: Dict[str, Optional[bool]], *, route: str = "main",
     `channels` maps channel id -> True (confirming) / False (not confirming) / None (unmeasured).
     ⚑ None is NOT False. An unmeasured channel cannot confirm and cannot reverse; conflating the
     two is the FC-F pattern that flipped DENY->ADMIT on QBTS."""
+    _fi_mark("evidence_state", "classify")
     if route not in CHANNELS:
         raise ValueError(f"unknown route {route!r}; declared routes: {sorted(CHANNELS)}")
     fams = families_for(route)

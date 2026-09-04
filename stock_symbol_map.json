@@ -1,0 +1,3161 @@
+{
+ "_what": "P1.2c VERIFIED ticker->Yahoo symbol map. An entry exists ONLY where (a) an index screen, the broker, a VCI artefact, the VCI watchlist or the declared benchmark list named the ticker, AND (b) the live listing's EXCHANGE is one its declared venue permits. \u2691 A symbol match is NOT a check: a bare `ONT` returns meta.symbol 'ONT' for Onterris, Inc. The EXCHANGE is the falsifier. \u2691 REFRESHED BY THE RUN THAT CONSUMES IT (Step 5x, ISA-0577) \u2014 this file was a hand-run artefact frozen at 2026-08-28 while the universe grew every month, and 119 of 178 names (66.9%) were unmapped, unfetched and sized on A2.3's adverse 0.70. \u2691 APPEND-ONLY: an existing entry is never re-decided (R4.8). \u2691 GENERATED \u2014 never hand-edited (R14.3).",
+ "built_on": "2026-08-28",
+ "n_map": 177,
+ "n_refused": 3,
+ "map": {
+  "AVGO": "AVGO",
+  "MU": "MU",
+  "ONT.L": "ONT.L",
+  "ABCL": "ABCL",
+  "GDWN.L": "GDWN.L",
+  "IDR.MC": "IDR.MC",
+  "ASML.AS": "ASML.AS",
+  "DAL": "DAL",
+  "ASML": "ASML",
+  "COCO": "COCO",
+  "IESC": "IESC",
+  "KLR.L": "KLR.L",
+  "MSM": "MSM",
+  "ORNBV.HE": "ORNBV.HE",
+  "CRSP": "CRSP",
+  "RGTI": "RGTI",
+  "LOOMIS.ST": "LOOMIS.ST",
+  "UAL": "UAL",
+  "TER": "TER",
+  "PGNY": "PGNY",
+  "SAAB-B.ST": "SAAB-B.ST",
+  "ATCO-A.ST": "ATCO-A.ST",
+  "INDT.ST": "INDT.ST",
+  "EPI-A.ST": "EPI-A.ST",
+  "BFT.WA": "BFT.WA",
+  "CRDO": "CRDO",
+  "RACE.MI": "RACE.MI",
+  "DPLM.L": "DPLM.L",
+  "CCC.L": "CCC.L",
+  "ASM.AS": "ASM.AS",
+  "WTS": "WTS",
+  "KLAC": "KLAC",
+  "IFCN.SW": "IFCN.SW",
+  "MNST": "MNST",
+  "APN.L": "APN.L",
+  "TYL": "TYL",
+  "CFR.SW": "CFR.SW",
+  "LR.PA": "LR.PA",
+  "AUPH": "AUPH",
+  "SPM.MI": "SPM.MI",
+  "AGYS": "AGYS",
+  "APP": "APP",
+  "STRL": "STRL",
+  "FTK.DE": "FTK.DE",
+  "HILS.L": "HILS.L",
+  "VICR": "VICR",
+  "CMCX.L": "CMCX.L",
+  "CASY": "CASY",
+  "CIEN": "CIEN",
+  "LFST": "LFST",
+  "NESR": "NESR",
+  "RXL.PA": "RXL.PA",
+  "AAON": "AAON",
+  "IFX.DE": "IFX.DE",
+  "NTRA": "NTRA",
+  "VUAG.L": "VUAG.L",
+  "IWMO.L": "IWMO.L",
+  "SWDA.L": "SWDA.L",
+  "VWRL.L": "VWRL.L",
+  "ABBN.SW": "ABBN.SW",
+  "ABNB": "ABNB",
+  "ALAB": "ALAB",
+  "ALHC": "ALHC",
+  "AMAT": "AMAT",
+  "AMD": "AMD",
+  "ANET": "ANET",
+  "APH": "APH",
+  "ARGX": "ARGX",
+  "ATI": "ATI",
+  "AXTA": "AXTA",
+  "BELFB": "BELFB",
+  "BKR": "BKR",
+  "BMY": "BMY",
+  "CAKE": "CAKE",
+  "CAT": "CAT",
+  "CHEF": "CHEF",
+  "CKN.L": "CKN.L",
+  "CORT": "CORT",
+  "CTSH": "CTSH",
+  "DGII": "DGII",
+  "DGX": "DGX",
+  "DXPE": "DXPE",
+  "EDEN.PA": "EDEN.PA",
+  "EME": "EME",
+  "ENR.DE": "ENR.DE",
+  "ENX.PA": "ENX.PA",
+  "ETN": "ETN",
+  "EXPE": "EXPE",
+  "FDX": "FDX",
+  "FIX": "FIX",
+  "FORM": "FORM",
+  "FOUR.L": "FOUR.L",
+  "FROG": "FROG",
+  "FRPT": "FRPT",
+  "FRSH": "FRSH",
+  "FTDR": "FTDR",
+  "GE": "GE",
+  "GFRD.L": "GFRD.L",
+  "GLW": "GLW",
+  "GMAB": "GMAB",
+  "GMED": "GMED",
+  "GRMN": "GRMN",
+  "GTT.PA": "GTT.PA",
+  "HALO": "HALO",
+  "HII": "HII",
+  "HRMY": "HRMY",
+  "HWM": "HWM",
+  "HXL": "HXL",
+  "IBKR": "IBKR",
+  "IDCC": "IDCC",
+  "INFQ": "INFQ",
+  "IPN.PA": "IPN.PA",
+  "ITT": "ITT",
+  "JCI": "JCI",
+  "KARO": "KARO",
+  "KRX.IR": "KRX.IR",
+  "LH": "LH",
+  "LIVN": "LIVN",
+  "LMT": "LMT",
+  "LOTB.BR": "LOTB.BR",
+  "LRCX": "LRCX",
+  "MA": "MA",
+  "MEDP": "MEDP",
+  "MGNI": "MGNI",
+  "MICC.AS": "MICC.AS",
+  "MMSI": "MMSI",
+  "MNDY": "MNDY",
+  "MOON.L": "MOON.L",
+  "MORN": "MORN",
+  "MPWR": "MPWR",
+  "MRVL": "MRVL",
+  "MSA": "MSA",
+  "MTSI": "MTSI",
+  "NTAP": "NTAP",
+  "NVDA": "NVDA",
+  "NVST": "NVST",
+  "NVT": "NVT",
+  "NXT": "NXT",
+  "ONC": "ONC",
+  "PKG": "PKG",
+  "PLTR": "PLTR",
+  "PR": "PR",
+  "REGN": "REGN",
+  "REY.MI": "REY.MI",
+  "ROKU": "ROKU",
+  "RPM": "RPM",
+  "RSW.L": "RSW.L",
+  "RUSHA": "RUSHA",
+  "RXRX": "RXRX",
+  "SAF.PA": "SAF.PA",
+  "SAND.ST": "SAND.ST",
+  "SANM": "SANM",
+  "SHOP": "SHOP",
+  "SHW": "SHW",
+  "SIE.DE": "SIE.DE",
+  "SNDK": "SNDK",
+  "SOBI.ST": "SOBI.ST",
+  "SOLS": "SOLS",
+  "SPXC": "SPXC",
+  "SRP.L": "SRP.L",
+  "STX": "STX",
+  "SUBC.OL": "SUBC.OL",
+  "TGS.OL": "TGS.OL",
+  "THC": "THC",
+  "TRU": "TRU",
+  "TTMI": "TTMI",
+  "UFPT": "UFPT",
+  "URI": "URI",
+  "VALMT.HE": "VALMT.HE",
+  "VRT": "VRT",
+  "VSEC": "VSEC",
+  "WAB": "WAB",
+  "WDC": "WDC",
+  "WMG": "WMG",
+  "XPO": "XPO",
+  "XYZ": "XYZ",
+  "ZAB.WA": "ZAB.WA"
+ },
+ "verified": [
+  {
+   "ticker": "AAON",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "AAON Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ABBN.SW",
+   "currency": "CHF",
+   "exchange": "EBS",
+   "expected_exchanges": [
+    "EBS",
+    "VTX"
+   ],
+   "source": "constituents_history",
+   "company": "ABB LTD",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ABCL",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "AbCellera Biologics Inc. Common Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ABNB",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Airbnb Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "AGYS",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Agilysys Inc. Common Stock (DE)",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ALAB",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Astera Labs Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ALHC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Alignment Healthcare Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "AMAT",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Applied Materials Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "AMD",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Advanced Micro Devices Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ANET",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "ARISTA NETWORKS INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "APH",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "AMPHENOL CORP CL A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "APN.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "APPLIED NUTRITION PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "APP",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Applovin Corporation Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ARGX",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "argenx SE American Depositary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ASM.AS",
+   "currency": "EUR",
+   "exchange": "AMS",
+   "expected_exchanges": [
+    "AMS"
+   ],
+   "source": "constituents_history",
+   "company": "ASM INTERNATIONAL NV",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ASML",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "ASML Holding N.V. New York Registry Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ASML.AS",
+   "currency": "EUR",
+   "exchange": "AMS",
+   "expected_exchanges": [
+    "AMS"
+   ],
+   "source": "constituents_history",
+   "company": "ASML HOLDING NV",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ATCO-A.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "ATLAS COPCO CLASS A",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ATI",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "ATI Inc",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "AUPH",
+   "currency": "USD",
+   "exchange": "NGM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Aurinia Pharmaceuticals Inc Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "AVGO",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "portfolio_data(broker truth)",
+   "company": "Broadcom Inc",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "AXTA",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Axalta Coating Systems Ltd.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "BELFB",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Bel Fuse Inc. Class B Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "BFT.WA",
+   "currency": "PLN",
+   "exchange": "WSE",
+   "expected_exchanges": [
+    "WSE"
+   ],
+   "source": "constituents_history",
+   "company": "BENEFIT SYSTEMS SA",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "BKR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Baker Hughes Company Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "BMY",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "BRISTOL MYERS SQUIBB CO",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CAKE",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Cheesecake Factory Incorporated (The) Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CASY",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Casey's General Stores Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CAT",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "CATERPILLAR INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CCC.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "COMPUTACENTER PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CFR.SW",
+   "currency": "CHF",
+   "exchange": "EBS",
+   "expected_exchanges": [
+    "EBS",
+    "VTX"
+   ],
+   "source": "constituents_history",
+   "company": "COMPAGNIE FINANCIERE RICHEMONT SA",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CHEF",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "The Chefs' Warehouse Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CIEN",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "CIENA CORP",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CKN.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "CLARKSON PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CMCX.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "CMC MARKETS PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "COCO",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "The Vita Coco Company Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CORT",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Corcept Therapeutics Incorporated Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "CRDO",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Credo Technology Group Holding Ltd Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CRSP",
+   "currency": "USD",
+   "exchange": "NGM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "CRISPR Therapeutics AG Common Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CTSH",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Cognizant Technology Solutions Corporation Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "DAL",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "DELTA AIR LINES INC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "DGII",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Digi International Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "DGX",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "QUEST DIAGNOSTICS INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "DPLM.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "DIPLOMA PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "DXPE",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "DXP Enterprises Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "EDEN.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "EDENRED",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "EME",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "EMCOR GROUP INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ENR.DE",
+   "currency": "EUR",
+   "exchange": "GER",
+   "expected_exchanges": [
+    "FRA",
+    "GER",
+    "XETRA"
+   ],
+   "source": "constituents_history",
+   "company": "SIEMENS ENERGY N AG",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ENX.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "EURONEXT NV",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "EPI-A.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "EPIROC CLASS A",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ETN",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "EATON CORP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "EXPE",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Expedia Group Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FDX",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "FEDEX CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FIX",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "COMFORT SYSTEMS USA INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FORM",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "FormFactor Inc. FormFactor Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FOUR.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "4IMPRINT GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FROG",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "JFrog Ltd. Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FRPT",
+   "currency": "USD",
+   "exchange": "NGM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Freshpet Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FRSH",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Freshworks Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FTDR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Frontdoor Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FTK.DE",
+   "currency": "EUR",
+   "exchange": "GER",
+   "expected_exchanges": [
+    "FRA",
+    "GER",
+    "XETRA"
+   ],
+   "source": "constituents_history",
+   "company": "FLATEXDEGIRO N",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "GDWN.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "GOODWIN PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "GE",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "GENERAL ELECTRIC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GFRD.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "GALLIFORD TRY PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GLW",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "CORNING INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GMAB",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Genmab A/S ADS",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GMED",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Globus Medical Inc Class A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GRMN",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "GARMIN LTD",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GTT.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "GAZTRANSPORT & TECHNIGAZ SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "HALO",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Halozyme Therapeutics Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "HII",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "HUNTINGTON INGALLS INDUSTRIE",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "HILS.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "HILL AND SMITH PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "HRMY",
+   "currency": "USD",
+   "exchange": "NGM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Harmony Biosciences Holdings Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "HWM",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "HOWMET AEROSPACE INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "HXL",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Hexcel Corporation",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IBKR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Interactive Brokers Group Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IDCC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "InterDigital Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IDR.MC",
+   "currency": "EUR",
+   "exchange": "MCE",
+   "expected_exchanges": [
+    "MCE"
+   ],
+   "source": "constituents_history",
+   "company": "INDRA SISTEMAS SA",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "IESC",
+   "currency": "USD",
+   "exchange": "NGM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "IES Holdings Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "IFCN.SW",
+   "currency": "CHF",
+   "exchange": "EBS",
+   "expected_exchanges": [
+    "EBS",
+    "VTX"
+   ],
+   "source": "constituents_history",
+   "company": "INFICON HOLDING AG",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "IFX.DE",
+   "currency": "EUR",
+   "exchange": "GER",
+   "expected_exchanges": [
+    "FRA",
+    "GER",
+    "XETRA"
+   ],
+   "source": "constituents_history",
+   "company": "INFINEON TECHNOLOGIES AG",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "INDT.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "INDUTRADE",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "INFQ",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "NYQ",
+    "NYS"
+   ],
+   "source": "artefact:vci_prescore_aug_2026.json",
+   "company": "Infleqtion, Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IPN.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "IPSEN SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ITT",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "ITT Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IWMO.L",
+   "currency": "USD",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "declared benchmark (SYMBOL_MAP)",
+   "company": "comparator, not a candidate",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "JCI",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "JOHNSON CONTROLS INTERNATION",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "KARO",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Karooooo Ltd. Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "KLAC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "KLA Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "KLR.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "KELLER GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "KRX.IR",
+   "currency": "EUR",
+   "exchange": "ISE",
+   "expected_exchanges": [
+    "ISE"
+   ],
+   "source": "constituents_history",
+   "company": "KINGSPAN GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LFST",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "LifeStance Health Group Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "LH",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "LABCORP HOLDINGS INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LIVN",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "LivaNova PLC Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LMT",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "LOCKHEED MARTIN CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LOOMIS.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "LOOMIS CLASS B",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "LOTB.BR",
+   "currency": "EUR",
+   "exchange": "BRU",
+   "expected_exchanges": [
+    "BRU"
+   ],
+   "source": "constituents_history",
+   "company": "LOTUS BAKERIES NV",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LR.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "LEGRAND SA",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "LRCX",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Lam Research Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MA",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "MASTERCARD INC   A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MEDP",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Medpace Holdings Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MGNI",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Magnite Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MICC.AS",
+   "currency": "EUR",
+   "exchange": "AMS",
+   "expected_exchanges": [
+    "AMS"
+   ],
+   "source": "constituents_history",
+   "company": "MAGNUM ICE CREAM NV",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MMSI",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Merit Medical Systems Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MNDY",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "monday.com Ltd. Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MNST",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Monster Beverage Corporation",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "MOON.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "MOONPIG GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MORN",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Morningstar Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MPWR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Monolithic Power Systems Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MRVL",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Marvell Technology Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MSA",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "MSA Safety Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MSM",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "MSC Industrial Direct Co. Inc. Class A",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "MTSI",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "MACOM Technology Solutions Holdings Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "MU",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "portfolio_data(broker truth)",
+   "company": "Micron Technology Inc",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "NESR",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "National Energy Services Reunited Corp Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "NTAP",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "NetApp Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "NTRA",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Natera Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "NVDA",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "NVIDIA Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "NVST",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Envista Holdings Corp.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "NVT",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "nVent Electric plc",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "NXT",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Nextpower Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ONC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "BeOne Medicines Ltd. American Depositary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ONT.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "portfolio_data(broker truth)",
+   "company": "Oxford Nanopore Technologies PLC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ORNBV.HE",
+   "currency": "EUR",
+   "exchange": "HEL",
+   "expected_exchanges": [
+    "HEL"
+   ],
+   "source": "constituents_history",
+   "company": "ORION CLASS B",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "PGNY",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Progyny Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "PKG",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "PACKAGING CORP OF AMERICA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "PLTR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Palantir Technologies Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "PR",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Permian Resources Corporation Class A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RACE.MI",
+   "currency": "EUR",
+   "exchange": "MIL",
+   "expected_exchanges": [
+    "MIL"
+   ],
+   "source": "constituents_history",
+   "company": "FERRARI NV",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "REGN",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Regeneron Pharmaceuticals Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "REY.MI",
+   "currency": "EUR",
+   "exchange": "MIL",
+   "expected_exchanges": [
+    "MIL"
+   ],
+   "source": "constituents_history",
+   "company": "REPLY",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RGTI",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Rigetti Computing Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ROKU",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Roku Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RPM",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "RPM International Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RSW.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "RENISHAW PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RUSHA",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Rush Enterprises Inc. Common Stock Cl A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "RXL.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "REXEL SA",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "RXRX",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "NCM",
+    "NGM",
+    "NMS"
+   ],
+   "source": "artefact:vci_prescore_aug_2026.json",
+   "company": "Recursion Pharmaceuticals, Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SAAB-B.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "SAAB CLASS B",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "SAF.PA",
+   "currency": "EUR",
+   "exchange": "PAR",
+   "expected_exchanges": [
+    "PAR"
+   ],
+   "source": "constituents_history",
+   "company": "SAFRAN SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SAND.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "SANDVIK",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SANM",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Sanmina Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SHOP",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Shopify Inc. Class A Subordinate Voting Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SHW",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "SHERWIN WILLIAMS CO/THE",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SIE.DE",
+   "currency": "EUR",
+   "exchange": "GER",
+   "expected_exchanges": [
+    "FRA",
+    "GER",
+    "XETRA"
+   ],
+   "source": "constituents_history",
+   "company": "SIEMENS N AG",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SNDK",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Sandisk Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SOBI.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "SWEDISH ORPHAN BIOVITRUM",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SOLS",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Solstice Advanced Materials Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SPM.MI",
+   "currency": "EUR",
+   "exchange": "MIL",
+   "expected_exchanges": [
+    "MIL"
+   ],
+   "source": "constituents_history",
+   "company": "SAIPEM",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "SPXC",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "SPX Technologies Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SRP.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "SERCO GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "STRL",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Sterling Infrastructure Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "STX",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "SEAGATE TECHNOLOGY HOLDINGS",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SUBC.OL",
+   "currency": "NOK",
+   "exchange": "OSL",
+   "expected_exchanges": [
+    "OSL"
+   ],
+   "source": "constituents_history",
+   "company": "SUBSEA  SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SWDA.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "declared benchmark (SYMBOL_MAP)",
+   "company": "comparator, not a candidate",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "TER",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Teradyne Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "TGS.OL",
+   "currency": "NOK",
+   "exchange": "OSL",
+   "expected_exchanges": [
+    "OSL"
+   ],
+   "source": "constituents_history",
+   "company": "TGS",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "THC",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Tenet Healthcare Corporation",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "TRU",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "TransUnion",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "TTMI",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "TTM Technologies Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "TYL",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "TYLER TECHNOLOGIES INC",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "UAL",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "United Airlines Holdings Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "UFPT",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "UFP Technologies Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "URI",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "UNITED RENTALS INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "VALMT.HE",
+   "currency": "EUR",
+   "exchange": "HEL",
+   "expected_exchanges": [
+    "HEL"
+   ],
+   "source": "constituents_history",
+   "company": "VALMET CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "VICR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Vicor Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "VRT",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "VERTIV HOLDINGS CO A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "VSEC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "VSE Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "VUAG.L",
+   "currency": "GBP",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "declared benchmark (SYMBOL_MAP)",
+   "company": "comparator, not a candidate",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "VWRL.L",
+   "currency": "GBP",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "declared benchmark (SYMBOL_MAP)",
+   "company": "comparator, not a candidate",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "WAB",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "WABTEC CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "WDC",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Western Digital Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "WMG",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Warner Music Group Corp. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "WTS",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Watts Water Technologies Inc. Class A",
+   "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "XPO",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "XPO Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "XYZ",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "BLOCK INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ZAB.WA",
+   "currency": "PLN",
+   "exchange": "WSE",
+   "expected_exchanges": [
+    "WSE"
+   ],
+   "source": "constituents_history",
+   "company": "ZABKA GROUP SOCIETE ANONYME SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-03"
+  }
+ ],
+ "refused": [
+  {
+   "ticker": "FRO",
+   "group": "STOXX600",
+   "source": "constituents_history",
+   "company": "FRONTLINE PLC",
+   "declared_venue": null,
+   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"FRO\": \"FRO.L\" \u2014 deliberately, never guessed",
+   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
+  },
+  {
+   "ticker": "IONQ",
+   "group": "VCI",
+   "source": "artefact:vci_prescore_aug_2026.json",
+   "company": "IonQ, Inc.",
+   "declared_venue": null,
+   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"IONQ\": \"IONQ.L\" \u2014 deliberately, never guessed",
+   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
+  },
+  {
+   "ticker": "SATL",
+   "group": "VCI",
+   "source": "artefact:vci_prescore_aug_2026.json",
+   "company": "Satellogic Inc.",
+   "declared_venue": null,
+   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"SATL\": \"SATL.L\" \u2014 deliberately, never guessed",
+   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
+  }
+ ],
+ "refreshed_on": "2026-09-03"
+}

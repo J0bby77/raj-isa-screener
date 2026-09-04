@@ -23,6 +23,18 @@ import source_score as _ss     # Jul-26 Part 1: THE single Source Score
 import expected_return as _er  # Fix Pack A2: E[r] object at rerank (same module as the screen)
 import t1_gates as _t1         # Fix Pack A2/A3/A4/A5/A15: THE T1 qualification gate set
 import fv_composite as _fvc    # Fix Pack A6: THE shared FV composite (screen = deploy)
+
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 try:
     import deployment_flags as _dflags  # shared deployment-gate pre-flags (action-stack caps)
 except Exception:
@@ -350,6 +362,7 @@ def _apply_diversification(stack, cfg, ctx):
     room is investable. SOFT tilt: over-represented-sector BUYs carry a DIVERSIFY_OVERRIDE_DELTA sort
     penalty, so an under-represented alternative wins unless the over-rep name beats it by >= the delta.
     No-op when ctx has no sector map (standalone rerank) — the pre-run supplies the look-through."""
+    _fi_mark("rerank_watchlist", "_apply_diversification")
     if not ctx:
         return
     cap       = getattr(cfg, "SLEEVE_SECTOR_CAP_ISA", 0.12)
@@ -492,6 +505,20 @@ def build_action_stack(universe, cfg, month_label, ctx=None):
     seen = {r["ticker"] for r in top}
     for r in stack:                       # force-include ALL mandatory (tier M) actions
         if r["tier"] == TIER_M and r["ticker"] not in seen:
+            top.append(r); seen.add(r["ticker"])
+    # ⚑ AND FORCE-INCLUDE EVERY HELD NAME CARRYING A CAPITAL VERDICT (ISA-0566, 02-Sep-2026).
+    # `APS_TOP_N` is a DISPLAY cap. Applying it to a held position deletes a DECISION: on the
+    # September book MU scored 67.8, cleared the 65 fresh-capital bar and was tagged
+    # held_axis=add_worthy — the framework's own judgement that it deserves more capital — and
+    # then fell out of the artefact because ten candidates scored 71-80 above it. Nothing
+    # downstream could see it, so the top-up was never considered. A held name the stack has
+    # adjudicated is a capital destination or a disposal; either way it is a decision, and a
+    # decision cut by a row limit is a decision that silently did not happen.
+    # retain_only is included too: "own it, but no new money" is the answer to the same
+    # question and the reader needs to see it was asked.
+    for r in stack:
+        if r.get("held_axis") and r["ticker"] not in seen:
+            r["force_included"] = "held verdict — exempt from APS_TOP_N (ISA-0566)"
             top.append(r); seen.add(r["ticker"])
     top.sort(key=_stack_key)
     for i, r in enumerate(top, 1):
@@ -856,10 +883,23 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     # FAILS if it is absent — it may not recompute, and it may not fall back to "no re-rate",
     # because that silently reinstates the defect D-24 exists to remove.
     _anchor_tbl = _er.load_anchor_table()          # raises AnchorTableMissing when absent
-    log.info("D-24 anchor table %s@%s — %d sector medians, excluded %s",
-             _anchor_tbl.get("group"), _anchor_tbl.get("as_of"),
-             len(_anchor_tbl.get("median_by_sector") or {}),
-             sorted((_anchor_tbl.get("excluded") or {}).keys()))
+    # ⚑ FIXED 02-Sep-2026 (rehearsal, ISA-0553). This was `log.info(...)`, but `log` is the
+    # promotion-log DICT bound 230 lines above — this module has no logger and never imported
+    # `logging`. Every invocation of Step 7.5 therefore died here with AttributeError AFTER
+    # the source scores had been computed and BEFORE they were written, so `rerank_watchlist`
+    # exited rc=1, the FINAL top-N re-rank never happened, and Step 8 ranked on the screening
+    # score with `source_score` present on 0 of 93 names — the ranking basis the whole of
+    # Step 8 rests on, silently absent. The orchestrator logged it as a WARNING and carried on.
+    # The trace is also recorded in the promotion log, so the fact is captured, not just printed.
+    _anchor_note = ("D-24 anchor table %s@%s — %d sector medians, excluded %s"
+                    % (_anchor_tbl.get("group"), _anchor_tbl.get("as_of"),
+                       len(_anchor_tbl.get("median_by_sector") or {}),
+                       sorted((_anchor_tbl.get("excluded") or {}).keys())))
+    log["d24_anchor_table"] = {
+        "group": _anchor_tbl.get("group"), "as_of": _anchor_tbl.get("as_of"),
+        "n_sector_medians": len(_anchor_tbl.get("median_by_sector") or {}),
+        "excluded": sorted((_anchor_tbl.get("excluded") or {}).keys())}
+    print("  [rerank] " + _anchor_note)
     for e in eligible:
         td = tk.get(e["ticker"]) or {}
         try:

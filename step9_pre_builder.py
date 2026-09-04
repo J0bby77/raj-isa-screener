@@ -1145,6 +1145,25 @@ def main():
             return "source_score"
         return "normalised_score_fallback"
 
+
+    def _t1_gate_failed(entry: dict):
+        """WHICH gate the T1 conjunction failed on, from the gate's own stored detail.
+
+        ⚑ Read, never re-derived. `t1_gates.evaluate()` owns this verdict; an observer that
+        re-computed it would be a second home for the rule (R4.4) and could disagree with the
+        gate that actually decided. Returns None when the name PASSED or when no detail was
+        stored — and `None` here never means "passed", because `t1_qualified` carries that."""
+        det = entry.get("t1_gate_detail") or {}
+        failed = [g for g in ("ns_floor", "stage", "er", "clean_flags")
+                  if isinstance(det.get(g), dict) and det[g].get("pass") is False]
+        if not failed:
+            return None
+        parts = []
+        for g in failed:
+            st = det[g].get("state") or det[g].get("value")
+            parts.append("%s%s" % (g, "" if st is None else "=%s" % st))
+        return "t1_gate_failed:" + ",".join(parts)
+
     _deployment_pool = []
     # Jul-2026 (Raj): the deployment priority stack lists DEPLOYABLE names only. Exclude any
     # name below the quality floor (normalised_score < 60 -> "Remove / Reject"); it is not a
@@ -1205,6 +1224,26 @@ def main():
             "strategic_conviction_score": entry.get("strategic_conviction_score"),
             "entry_window_score":         entry.get("entry_window_score"),
             "decision_bucket":            entry.get("decision_bucket"),
+            # ── ISA-0487 (29-Aug-2026) — THE VERDICT MUST TRAVEL WITH THE ROW ──────────
+            # `t1_qualified` is computed for EVERY entry above (52 of 52 on the Aug book) and
+            # was DROPPED HERE, because this projection is a hand-listed field set and nobody
+            # added it. `stock_candidates._qualifies` reads exactly this field, so P3 refused
+            # all 32 rows of `deployable_stack` and the capital pipeline could not be wired.
+            #
+            # ⚑ The same class the capture layer already recorded — "a field absent from the
+            # FIELD_MAP is computed and silently discarded" — recurring in a second projection.
+            # A hand-listed projection is a contract that no test reaches and no reader can
+            # tell is incomplete: the producer looks correct, the consumer looks correct, and
+            # the field dies between them.
+            #
+            # ⚑ `entry.get(...)` — NOT `bool(entry.get(...))`. An ABSENT verdict must stay
+            # None so P3 REFUSES; coercing it to False would route the pound to funds on a
+            # verdict nobody reached, and a default False is indistinguishable in the output
+            # from a measured rejection (R2.10). That coercion is the defect, not the fix.
+            "t1_qualified":               entry.get("t1_qualified"),
+            "t1_gate_failed":             _t1_gate_failed(entry),
+            "stage_gate":                 entry.get("stage_gate"),
+            "evidence_confirmed":         entry.get("evidence_confirmed"),
             "pct_vs_entry":               entry.get("pct_vs_entry"),
         })
 

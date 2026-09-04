@@ -1,0 +1,179 @@
+{
+ "_what": "P0.4 negative-claim register. A claim of absence, impossibility or unavailability that gates capital must carry a TEST and a DATE, and it EXPIRES.",
+ "_why": "⚑ A NEGATIVE CLAIM NEEDS MORE EVIDENCE THAN A POSITIVE ONE, NOT LESS, because it is load-bearing precisely where it STOPS INVESTIGATION. A positive claim gets checked because somebody uses it; a negative claim gets checked by nobody, because it means 'don't bother'.",
+ "_phrase_list_home": "framework_integrity.NEGATIVE_PHRASES. The phrase list is itself in this register and additions are register work, not a quiet edit.",
+ "_default_expiry_runs": 3,
+ "claims": [
+  {
+   "claim": "Yahoo is network-blocked from both the container and the device shell",
+   "asserted_in": "stock_return_store.py (module docstring)",
+   "asserted_on": "2026-08-23",
+   "test_id": "stock_price_fetch._network_probe",
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 3,
+   "state": "FALSIFIED",
+   "gates": [
+    "correlation_engine.assess",
+    "position_sizing.apply_correlation",
+    "risk_contribution.contributions"
+   ],
+   "evidence": "HTTP 200 from the cloud container 28-Aug-2026 for AVGO (371.54 USD), ONT.L (179.4 GBp) and GBPUSD=X (1.3585). Contradicted by the framework's own ISA-0411 FIVE DAYS BEFORE it was written: a 400-ticker MIDCAP400 Yahoo screen from local bash on 21-Aug-2026.",
+   "cost": "the entire correlation gate, and therefore the top three ladder rungs",
+   "register_item": "ISA-0455"
+  },
+  {
+   "claim": "the device has no network",
+   "asserted_in": "ISA_Analysis_RegionalM_and_FundStructuralEr_20Aug2026.md",
+   "asserted_on": "2026-08-20",
+   "test_id": "stock_price_fetch._network_probe",
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 3,
+   "state": "FALSIFIED",
+   "gates": [
+    "regional_m.fetch"
+   ],
+   "evidence": "same probe; ISA-0411 records a live 400-ticker fetch from the device shell.",
+   "register_item": "ISA-0455"
+  },
+  {
+   "claim": "no 104-week price series exists on disk for the direct-stock sleeve",
+   "asserted_in": "stock_return_store.py (module docstring)",
+   "asserted_on": "2026-08-23",
+   "test_id": "stock_return_store.coverage",
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 1,
+   "state": "ASSERTED_TRUE",
+   "gates": [
+    "correlation_engine.assess"
+   ],
+   "evidence": "TRUE as at 28-Aug-2026 and falsified BY THIS BUILD at P1. Expiry set to 1 run so it is re-tested the first time the fetch runs, rather than surviving three.",
+   "register_item": "ISA-0455"
+  },
+  {
+   "claim": "E3 guidance has no free structured source",
+   "asserted_in": "ISA_BuildSpec_FrameworkIntegrity_27Aug2026.md D21b",
+   "asserted_on": "2026-08-27",
+   "test_id": "stock_price_fetch._e3_source_probe",
+   "last_tested": "2026-08-27",
+   "runs_since_tested": 0,
+   "expires_after_runs": 6,
+   "state": "ASSERTED_TRUE",
+   "gates": [
+    "evidence_state.classify.E3"
+   ],
+   "evidence": "Raj, 27-Aug-2026 (D21b). E3 is declared PERMANENTLY UNMEASURED and the remaining four channels become MANDATORY for STRONG — an unmeasurable channel is NOT quietly dropped from the count. Under D22 it is None, not a coverage failure. ⚑ 'Permanent' still carries a 6-run expiry: a permanent claim with no expiry is exactly the shape of the Yahoo claim.",
+   "register_item": "ISA-0469"
+  },
+  {
+   "claim": "the step-down ratchet cannot fire",
+   "asserted_in": "retention.py",
+   "asserted_on": "2026-08-26",
+   "test_id": "retention.ratchet_status",
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 1,
+   "state": "ASSERTED_TRUE",
+   "gates": [
+    "retention.step_down_ratchet"
+   ],
+   "evidence": "TRUE, and re-tested every run by P5. freeze_history holds ONE measured month against a required twelve, so the earliest possible fire is ~Aug-2027. The run must print WHICH condition binds — a rule that says 'cannot fire' without saying 'why this month' is ISA-0348's pattern in reporting form.",
+   "register_item": "ISA-0457",
+   "site": {
+    "module": "retention",
+    "owner": null,
+    "phrase": "cannot fire"
+   }
+  },
+  {
+   "claim": "a position reaches 3.5% or it does not exist",
+   "asserted_in": "position_sizing.py (module docstring, clean spec §1)",
+   "asserted_on": "2026-08-26",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "position_sizing",
+    "owner": "<module>",
+    "phrase": "does not exist"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "⚑ This is a POLICY statement about position size, not an assertion that a capability is unavailable. Adjudicated rather than stop-listed. ⚑ AND IT IS AMENDED BY D15: floor-then-priority fill makes 3.5% an END STATE, not an entry rule, so P7/P4 must rewrite this sentence — which is precisely why it is tracked here instead of filtered out.",
+   "register_item": "ISA-0470"
+  },
+  {
+   "claim": "the criterion is UNAVAILABLE for every fund and says so",
+   "asserted_in": "capital_destination.py (rank_inputs / _rank_key docstrings)",
+   "asserted_on": "2026-08-19",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "capital_destination",
+    "owner": null,
+    "phrase": "unavailable"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "Describes the module's own REFUSAL semantics — an UNAVAILABLE criterion contributes a constant and therefore orders nothing. It asserts that the code SAYS SO, which is the opposite of a claim that stops investigation.",
+   "register_item": "ISA-0470"
+  },
+  {
+   "claim": "E2 quarter-beat has no reachable free source",
+   "asserted_in": "stock_price_fetch.e2_quarter_beat / _e2_source_probe",
+   "asserted_on": "2026-08-28",
+   "test_id": "stock_price_fetch._e2_source_probe",
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 3,
+   "state": "ASSERTED_TRUE",
+   "gates": [
+    "evidence_state.classify.E2",
+    "position_sizing.target_pct(STRONG)"
+   ],
+   "evidence": "⚑ THIS CORRECTS THE BUILD SPEC. §P1.11 states E2 is sourced from Yahoo `earningsHistory` at 'one extra endpoint per ticker'. Tested 28-Aug-2026: v10 quoteSummary returns HTTP 401 Unauthorized (it now requires a cookie/crumb pair). Nothing in the tree carries epsActual/epsEstimate either — watchlist_scored holds FORWARD fields (fwd_eps_growth, eps_trend_mom_pct, rev_est_fwd_pct), which are E1 revision material, not an E2 quarter BEAT. ⚑ CONSEQUENCE, STATED NOT ABSORBED: with E2 and E3 both unsourced, D21b's STRONG (= all four of E1/E2/E4/E5) is UNREACHABLE, so the ladder ceiling stays at CONFIRMED -> NORMAL 4.5%. The 1.29x figure is unaffected because it IS NORMAL vs STARTER; HIGH and EARNED_MAX remain out of reach for a NAMED, DATED, EXPIRING reason instead of an unexamined one. ⚑ EXPIRY IS 3 RUNS, NOT E3's 6, because this is an ACCESS problem and access changes; the non-existence of a free guidance feed does not.",
+   "register_item": "ISA-0484"
+  },
+  {
+   "claim": "the VCI prescore artefact records no exchange or currency for its names",
+   "asserted_in": "stock_price_fetch._provenance / build_symbol_map",
+   "asserted_on": "2026-08-28",
+   "test_id": null,
+   "last_tested": "2026-08-28",
+   "runs_since_tested": 0,
+   "expires_after_runs": 3,
+   "state": "ASSERTED_TRUE",
+   "gates": [
+    "stock_price_fetch.build_symbol_map"
+   ],
+   "evidence": "vci_prescore_aug_2026.json records ticker/theme/name/mktcap and no venue, so a VCI name has NO venue provenance and cannot be verified against the ONT/Onterris class. QBTS, INFQ and RXRX are therefore REFUSED by the auto-verifier. QBTS is covered by the hand-declared SYMBOL_MAP (a human typed it deliberately, which is the correct escape hatch); INFQ and RXRX are not, and are named in every fetch report until the VCI pipeline records a venue.",
+   "register_item": "ISA-0485"
+  },
+  {
+   "claim": "90-day analyst revision breadth has no source in this framework, so evidence channel E1 is unsourceable",
+   "asserted_in": "stock_price_fetch.e1_analyst_revision (docstring)",
+   "asserted_on": "2026-08-29",
+   "test_id": "stock_price_fetch._e1_source_probe",
+   "last_tested": "2026-08-29",
+   "runs_since_tested": 0,
+   "expires_after_runs": 6,
+   "state": "HOLDS",
+   "gates": [
+    "evidence_state.classify",
+    "position_sizing.target_pct",
+    "position_sizing.stock_max"
+   ],
+   "evidence": "E1's declared definition is `90d revision breadth > 0 AND FY1 estimate up over 90d`. The only breadth fields on the screen row are `est_rev_eps_up_30d` / `est_rev_eps_down_30d` (30 days, yfinance). Measured 29-Aug-2026 over the 32-name deployable stack: 0 of 32 rows carry any 90-day revision field. A 30-day breadth is a DIFFERENT quantity, not a shorter view of the same one; substituting it would be ISA-0405's class and would CONFIRM rather than merely fail to confirm.",
+   "cost": "one of the two fundamental-family channels. With E2 (HTTP 401) and E3 (no free source) also unsourced, only E4 (price) and E5 (route) remain: 2 channels in 2 families, so CONFIRMED is reachable and STRONG/EARNED_MAX are structurally unreachable. The ladder ceiling is NORMAL 4.5%.",
+   "register_item": "ISA-0489",
+   "expiry_behaviour": "on expiry E1 reads UNMEASURED and the run must say so; it NEVER reads False. 6 runs, matching E3, because this is a DATA-MODEL gap rather than an access problem — access changes faster than a schema does."
+  }
+ ],
+ "_rule_site": "`site` resolves a docstring occurrence to its register entry by MODULE + OWNER + PHRASE, for claims whose wording in the code differs from the register's canonical text. It is a resolution rule, never an exemption: the entry still carries a state, a test and a date.",
+ "_rule_not_a_claim": "state NOT_A_CAPABILITY_CLAIM adjudicates prose that trips the phrase list without asserting that anything is unavailable. It is DECLARED here, in the register, rather than hidden in a stop-list inside the checker — because a stop-list is a decision nobody can review, and a future edit that turns the prose into a real claim must be noticed rather than absorbed."
+}

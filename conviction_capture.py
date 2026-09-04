@@ -47,6 +47,30 @@ SCHEMA_VERSION = 1
 
 TIERS = {"T1", "T2", "T3", "T1-A", "T2-A", "T3-A"}
 ROUTES = {"main", "vci"}
+
+
+def _single_authority() -> bool:
+    """Is D21's single sizing authority live? Defaults TRUE when the flag is undeclared —
+    the post-D21 world is the intended one, and a rollback must be a DELIBERATE act."""
+    try:
+        import isa_policy as _p
+        if "single_sizing_authority" in _p.V2_FLAGS:
+            return bool(_p.V2_FLAGS["single_sizing_authority"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return True
+
+
+def _thesis_states():
+    """The declared states, READ from their one home (R4.4) — never restated here."""
+    try:
+        import thesis_state as _ts
+        return tuple(_ts.STATES)
+    except Exception:                                                   # noqa: BLE001
+        # ⚑ A REFUSAL, NOT A FALLBACK LIST. If the module is unimportable the validator must
+        # not invent the vocabulary it is validating against — a second copy of the state list
+        # here is exactly the two-homes defect P7 exists to close.
+        return ()
 CLASSIFICATIONS = {"High", "Medium", "Watch", "No Action"}
 THESIS_DIRECTIONS = {"Strengthening", "Unchanged", "Weakening", "Degrading"}
 JUDGEMENT_DIMS = ("d8_macro_resilience", "d9_portfolio_fit", "d10_execution_practicality")
@@ -302,6 +326,14 @@ def prefill(month_label, here=None, step9_pre=None, action_stack=None, regime=No
             },
             "conviction_total": None,
             "classification": None,
+            # ── P7.3 (D21, 28-Aug-2026) — WHERE JUDGEMENT NOW LIVES ────────────────────
+            # LEFT NULL ON PURPOSE, exactly like d8/d9/d10 above: these are the session
+            # judgements this file exists to capture, and validate() fails while either is
+            # empty. ⚑ `INTACT` as a DEFAULT would make "nobody looked" and "the thesis is as
+            # underwritten" render identically — which is R2.10's exact prohibition, and is
+            # how the /100 came to stand at 2 of 53 populated while still gating the email.
+            "thesis_state": None,
+            "thesis_state_rationale": "",
             "action": (stack_by_ticker.get(tk) or {}).get("action"),
             "thesis_direction": None,
             "vci_hurdle": {k: (False if k == "nvidia_class_exception" else None)
@@ -470,9 +502,58 @@ def validate(doc, strict_judgement=True):
             if n.get("classification") not in CLASSIFICATIONS:
                 errs.append(f"{tag}: classification {n.get('classification')!r} not in "
                             f"{sorted(CLASSIFICATIONS)}")
-            if n.get("conviction_total") is None:
-                errs.append(f"{tag}: conviction_total is null")
-            elif n.get("conviction_basis") is None:
+            # ══════════════════════════════════════════════════════════════════════════════
+            # P7.3 — THE §7.6.2 GATE NOW READS `thesis_state` + `evidence_state` (D21)
+            # ══════════════════════════════════════════════════════════════════════════════
+            # ⚑ WHY THE OLD GATE HAD TO GO: it required `conviction_total`, and
+            # `step9_conviction_aug_2026.json` carries that field NULL for EVERY name, with the
+            # /100 standing at 2 of 53 populated. A gate on a field nobody fills is not a gate
+            # — it is a control that reports success while doing nothing, which is this
+            # project's dominant failure class wearing the costume of a check.
+            #
+            # ⚑⚑ AND R11 IS WHY BOTH BRANCHES EXIST RATHER THAN ONE. Retiring the /100 removes
+            # a control; if `thesis_state` were optional the net effect of P7 would be to
+            # remove a control and add none (C8). So the NEW gate must be refusing BEFORE the
+            # old one is gone, and the rollback path must still refuse on something. There is
+            # never a window with neither.
+            if _single_authority():
+                _ts = n.get("thesis_state")
+                if _ts is None:
+                    errs.append(f"{tag}: thesis_state is null — D21 moved judgement out of the "
+                                f"/100 and INTO thesis_state, which may BLOCK, DOWNSIZE or HOLD "
+                                f"and never upsize. Declare one of "
+                                f"{sorted(_thesis_states())}.")
+                elif _ts not in _thesis_states():
+                    errs.append(f"{tag}: thesis_state {_ts!r} is not declared. Declared: "
+                                f"{sorted(_thesis_states())}.")
+                _tr = str(n.get("thesis_state_rationale") or "").strip()
+                if not _tr:
+                    errs.append(f"{tag}: thesis_state has no rationale. A state without a "
+                                f"reason cannot be challenged next month, which is the only "
+                                f"thing that makes a judgement reviewable rather than a "
+                                f"preference.")
+                elif len(_tr) < 15:
+                    errs.append(f"{tag}: thesis_state_rationale is {len(_tr)} chars — too "
+                                f"short to be the one-sentence rationale §7.6.2 requires of "
+                                f"every judgement field.")
+                if n.get("evidence_state") is None:
+                    errs.append(f"{tag}: evidence_state is null — the §7.6.2 gate reads "
+                                f"thesis_state AND evidence_state, both non-null with "
+                                f"rationales. Evidence sets the rung; thesis_state may only "
+                                f"cap it.")
+            else:
+                # ROLLBACK PATH (V2_FLAGS["single_sizing_authority"] = False): the pre-D21
+                # gate, unchanged, so the flag restores the old behaviour exactly.
+                if n.get("conviction_total") is None:
+                    errs.append(f"{tag}: conviction_total is null")
+                elif n.get("conviction_basis") is None:
+                    errs.append(f"{tag}: conviction_total present but conviction_basis is null "
+                                f"— a T1 /100 total and a T2 /50 total are not the same number "
+                                f"and must say which they are")
+            # ⚑ conviction_total remains COMPUTED AND DISPLAYED either way (P7.1 / A10). What
+            # changed is that no GATE reads it — enforced by AST in
+            # consistency_check.pair_no_gate_reads_conviction_score.
+            if n.get("conviction_total") is not None and n.get("conviction_basis") is None:
                 errs.append(f"{tag}: conviction_total present but conviction_basis is null — "
                             f"a T1 /100 total and a T2 /50 total are not the same number and "
                             f"must say which they are")

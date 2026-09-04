@@ -189,13 +189,56 @@ def find_latest_xlsx(folder: str) -> str:
 # ---------------------------------------------------------------------------
 # Classification helpers
 # ---------------------------------------------------------------------------
+def _iso_or(d):
+    """'31-Aug-2026' | '2026-08-31' -> ISO. Returns the input unchanged if unparseable, so a
+    comparison against it fails CLOSED (the statement is treated as not-newer) rather than open."""
+    import datetime as _dt
+    t = str(d or "").strip()
+    for f in ("%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y"):
+        try:
+            return _dt.datetime.strptime(t[:11], f).date().isoformat()
+        except ValueError:
+            continue
+    return t
+
+
 def classify_holding(investment_name: str, ticker) -> str:
     # Doc B B2 (P2): MMF/ultra-short UCITS tickers are CASH EQUIVALENTS — counted as cash in
     # deployable-cash, the B1 reserve and drift denominators; excluded from equity buckets.
+    # ⚑ MATCH ON THE LISTING BASE, NOT THE EXACT STRING (ISA-0564, 02-Sep-2026). The declared
+    # list carries `CSH2.L`; the AJ Bell export names the holding
+    # `Amundi Smart Overnight Ret GBP H ETF Acc (LSE:CSH2)`, which parses to `CSH2`. Exact
+    # comparison therefore never matched, the money-market ETF was filed as a STOCK, and the
+    # rule three lines above — "counted as cash in deployable-cash, the B1 reserve and drift
+    # denominators; excluded from equity buckets" — never fired ONCE. Measured on the September
+    # book: GBP 1,249.40 invisible as deployable capital, the stock sleeve reported 11.12% when
+    # the equity sleeve is 10.27%, and the B2 MMF sweep could not see its own instrument.
+    # ⚑ This is the THIRD instance of ISA-0549's class in this framework: one holding, two
+    # spellings, the alias resolved on the way IN and not on the way OUT. The normalisation is
+    # applied to BOTH sides here so the declared list can be written either way and neither
+    # spelling can go unmatched again.
     try:
         import scoring_config as _sc_b2
-        if str(ticker or "").upper() in {str(t).upper() for t in
-                                          getattr(_sc_b2, "CASH_EQUIVALENT_TICKERS", []) or []}:
+
+        def _ceq_key(t):
+            """Uppercased ticker with a single trailing exchange suffix removed. `.L` and `CSH2`
+            are the same instrument; `BRK.B` is a share CLASS, so only a suffix that looks like
+            an exchange code (1-3 letters after the final dot, on a base of 2+ chars) is cut."""
+            t = str(t or "").strip().upper()
+            if "." in t:
+                base, _, suf = t.rpartition(".")
+                if len(base) >= 2 and 1 <= len(suf) <= 3 and suf.isalpha():
+                    return base
+            return t
+
+        _declared = getattr(_sc_b2, "CASH_EQUIVALENT_TICKERS", []) or []
+        _keys = {_ceq_key(t) for t in _declared} | {str(t or "").strip().upper() for t in _declared}
+        _t = str(ticker or "").strip().upper()
+        if _t and (_t in _keys or _ceq_key(_t) in _keys):
+            return "cash_equivalent"
+        # the list also carries a NAME entry for the OEIC alternative, matched on the name
+        if any(str(d or "").strip().upper() in (investment_name or "").upper()
+               for d in _declared if " " in str(d or "")):
             return "cash_equivalent"
     except Exception:
         pass
@@ -605,7 +648,118 @@ def parse_portfolio(xlsx_path: str) -> dict:
     # after clearing, the S/O is already reflected in the stated balance.
     so_adj, so_applied, so_elapsed = _standing_order_adjustment(data_dt)
     effective_cash  = round(cash_value + so_adj, 2)
-    deployable_cash = round(effective_cash - CASH_BUFFER_MIN, 2)
+    # ⚑ THE GBP 150 BUFFER IS RETIRED HERE (ISA-0565, 02-Sep-2026). D23 (ISA-0544, Raj,
+    # 02-Sep-2026) declares the GBP 250 ISA cash reserve "the SINGLE control on residual
+    # deployment". This line was a SECOND control on the same quantity, applied earlier and by
+    # a different module, so the framework was actually retaining GBP 400 while reporting a
+    # GBP 250 reserve. That is the FC-D class (R4.4) that `consistency_check.
+    # pair_cash_reserve_is_single_topup_control` exists to prevent — and it missed this one,
+    # because it enforces the retirement of the constant NAMED in D23 (`min_topup_gbp`) rather
+    # than the RULE D23 states. The pair has been widened accordingly.
+    # ⚑ Deployable is now the effective cash in full. The reserve is applied ONCE, downstream,
+    # by position_sizing.allocate() reading target_weights.stock_sleeve.cash_reserve_gbp.
+    deployable_cash = effective_cash
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # DEPLOYABLE CASH COMES FROM THE CASH STATEMENT (Raj, 02-Sep-2026 — ISA-0574)
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # ⚑ TWO BASES, ON PURPOSE, AND THEY ARE NOT IN CONFLICT. Raj's convention: the portfolio and
+    # X-Ray are the PREVIOUS MONTH-END, because they are the EXPOSURE basis — co-dating them is
+    # what keeps XR1, the 6.05 two-derivation fund reconciliation and the look-through comparing
+    # the same book, and what makes month-on-month comparison mean anything. Cash is the CAPITAL
+    # basis and must be current, because it is the only input that decides how much money is
+    # actually on the table. A fund reports NAV at month-end and knows its cash for dealing;
+    # this is the same split, declared.
+    # ⚑ THIS IS NOT A NEW RULE — IT IS AN UNIMPLEMENTED ONE. Run_Context's Step 1b-2 row already
+    # names the cash statement "THE GOLDEN SOURCE FOR THE ISA ALLOWANCE, platform fees, FX
+    # charges, dividends, interest AND THE DAILY CASH BALANCE". The allowance was wired to it;
+    # the balance never was. Two homes for one quantity, with the non-authoritative one winning
+    # (R4.4). Measured 02-Sep-2026: the 31-Aug snapshot says GBP 1,065.39, the statement says
+    # GBP 12,315.39, and the router was sizing on the first.
+    # ⚑ EXPOSURE FIGURES ARE UNTOUCHED. `cash_value`, `total_value_gbp`, every weight, the sleeve
+    # percentages and the band positions all stay on the month-end book. Only `deployable` moves.
+    # ⚑ THE MMF IS ADDED BACK because the statement's balance is broker CASH and the money-market
+    # ETF is a HOLDING there — it is cash to this framework (ISA-0564) but not to AJ Bell.
+    # ⚑ AND IT DEGRADES BY NAMING, NEVER BY GUESSING: no statement, an unreadable one, or one
+    # OLDER than the broker file, and deployable falls back to the month-end figure with the
+    # basis stated on the artefact. "We could not read it" and "there is no more cash" must
+    # never produce the same number (R2.10).
+    class _MMFHandled(Exception):
+        """Sentinel: the MMF branch already set the basis; skip the default assignment."""
+    deployable_basis = "month_end_broker_file"
+    deployable_as_of = str(data_date)
+    deployable_note = ("cash statement not consulted")
+    try:
+        import extract_cash_statement as _ecs_dep
+        # the ISA folder is the parent of the Investment Analysis dir the xlsx was found in;
+        # parse_portfolio only receives the workbook path, so derive it from that (one home:
+        # the same folder every other reader of the cash statement uses).
+        _isa_dir = os.path.dirname(os.path.abspath(xlsx_path))
+        _cs_dep = _ecs_dep.parse(folder=_isa_dir)
+        _close = _cs_dep.get("closing_balance_gbp")
+        _rows_dep = [r for r in (_cs_dep.get("rows") or []) if r.get("date")]
+        _cs_last = max((str(r["date"])[:10] for r in _rows_dep), default=None)
+        if not _cs_dep.get("source_files"):
+            deployable_note = ("no Cash Statement export on file — deployable falls back to the "
+                               "month-end broker cash line. This is a COVERAGE GAP, not a "
+                               "statement that no further cash exists.")
+        elif _close is None or _cs_last is None:
+            deployable_note = ("the cash statement carries no closing balance or no dated rows — "
+                               "deployable falls back to the month-end broker cash line.")
+        elif _cs_last < _iso_or(data_date):
+            deployable_note = ("the cash statement's last row (%s) PREDATES the broker file (%s), "
+                               "so the statement is the stale side here — deployable stays on the "
+                               "month-end broker cash line." % (_cs_last, _iso_or(data_date)))
+        else:
+            # ⚑ THE MMF IS ADDED BACK, AND THAT IS ONLY SAFE WHILE THE TWO PARTS ARE CONSISTENT
+            # (Raj, 02-Sep-2026). The statement's balance is broker CASH and does NOT read the
+            # money-market holding — correct, because to AJ Bell the MMF is a position. So
+            # deployable = current cash (statement) + the MMF (snapshot). Those come from
+            # DIFFERENT DATES, which is fine for an instrument that moves ~GBP 0.06/day — but
+            # NOT if the MMF itself was traded in between: a sale after the snapshot date raises
+            # the statement's cash AND leaves the holding still showing in the month-end file,
+            # so the sum would count the same money twice. A purchase loses it twice over.
+            # The one condition that breaks the arithmetic is therefore checked, not assumed.
+            _mmf_names = []
+            try:
+                import scoring_config as _sc_mmf
+                _mmf_names = [str(t).upper() for t in
+                              (getattr(_sc_mmf, "CASH_EQUIVALENT_TICKERS", []) or [])]
+            except Exception:                                           # noqa: BLE001
+                pass
+            _mmf_trades = [r for r in _rows_dep
+                           if str(r.get("date"))[:10] > _iso_or(data_date)
+                           and any(n.split(".")[0] in str(r.get("description") or "").upper()
+                                   or n in str(r.get("description") or "").upper()
+                                   or "OVERNIGHT" in str(r.get("description") or "").upper()
+                                   for n in _mmf_names)]
+            if _mmf_trades:
+                deployable_cash = round(float(_close), 2)
+                deployable_basis = "cash_statement_closing_balance_mmf_excluded"
+                deployable_as_of = _cs_last
+                deployable_note = (
+                    "Closing GBP %.2f as at %s. ⚑ The money-market holding is NOT added: %d "
+                    "MMF trade(s) settled after the %s snapshot, so the month-end holding figure "
+                    "and the statement's cash are no longer consistent and summing them would "
+                    "double-count. The MMF is EXCLUDED rather than estimated — deployable is "
+                    "understated by at most the stale holding, which is the safe direction. "
+                    "Rows: %s" % (float(_close), _cs_last, len(_mmf_trades), data_date,
+                                  "; ".join(str(r.get("description"))[:40] for r in _mmf_trades[:3])))
+                raise _MMFHandled
+            deployable_cash = round(float(_close) + float(mmf_value or 0.0), 2)
+            deployable_basis = "cash_statement_closing_balance_plus_mmf"
+            deployable_as_of = _cs_last
+            deployable_note = ("Run_Context Step 1b-2 declares the cash statement the golden "
+                               "source for the daily cash balance. Closing GBP %.2f as at %s, "
+                               "plus GBP %.2f held in the money-market ETF (cash to this "
+                               "framework, a holding to the broker). Exposure figures remain on "
+                               "the %s month-end book."
+                               % (float(_close), _cs_last, float(mmf_value or 0.0), data_date))
+    except _MMFHandled:
+        pass
+    except Exception as _dep_e:                                         # noqa: BLE001
+        deployable_note = ("the cash statement could not be read (%s: %s) — deployable falls back "
+                           "to the month-end broker cash line, UNMEASURED rather than confirmed."
+                           % (type(_dep_e).__name__, _dep_e))
 
     # Weights
     for h in stocks + funds:
@@ -671,6 +825,8 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "mmf_holdings":           mmf_holdings,
             "cash_effective_gbp":     effective_cash,
             "cash_deployable_gbp":    deployable_cash,
+            "cash_deployable_basis":  deployable_basis,
+            "cash_deployable_as_of":  deployable_as_of,
             "standing_order_applied": so_applied,
             "standing_order_adj":     so_adj,
             "cash_pct":               cash_pct,
@@ -695,10 +851,16 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "value_gbp":      round(cash_value, 2),
             "effective_gbp":  effective_cash,
             "deployable_gbp": deployable_cash,
+            # ⚑ R4.2 — the figure states WHEN it was true and WHERE it came from, because the
+            # exposure basis and the capital basis are deliberately different dates (ISA-0574).
+            "deployable_basis": deployable_basis,
+            "deployable_as_of": deployable_as_of,
+            "deployable_note": deployable_note,
         },
         "notes": (
             f"Cash per file: £{cash_value:,.2f}. {so_note} "
-            f"Deployable after £{CASH_BUFFER_MIN:.0f} buffer: £{deployable_cash:,.2f}."
+            f"Deployable is effective cash in full: £{deployable_cash:,.2f} — the GBP 250 "
+            f"D23 reserve is the single control and is applied downstream, once (ISA-0565)."
         ),
     }
 

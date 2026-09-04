@@ -44,9 +44,29 @@ import os
 import statistics
 from typing import Dict, List, Optional
 
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEDGER = os.path.join(os.environ.get("ISA_OUT", HERE), "risk_contribution_ledger.json")
 
+# ⚑ THE **REVIEW** FRACTION — and it is DELIBERATELY DISTINCT from
+# `position_sizing.MIN_ENTRY_FRACTION_OF_STARTER` (0.80), which is the **ENTRY** floor.
+#     0.75 REVIEW : "below this a HELD position is not carrying its risk share"
+#     0.80 ENTRY  : "below this, do not OPEN a position at all"
+# Two rules, two populations, two questions. ⚑ A future session WILL read them as a duplicate
+# and unify them, silently moving the entry floor — which is why
+# `consistency_check.pair_entry_and_review_fractions_distinct()` asserts both exist, are
+# unequal, and each carries prose naming its own rule (P4.4).
 FLAG_FRACTION_OF_STARTER = 0.75
 FLAG_CONSECUTIVE_RUNS = 2
 M1_MIN_RUNS = 6
@@ -55,12 +75,35 @@ M3_MIN_PAIRS = 5
 
 
 def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
-                  starter_pct: float) -> dict:
+                  starter_pct: float, matrix: Optional[Dict[str, float]] = None) -> dict:
     """rc_i and risk_weight_i for every name with BOTH a weight and a measured sigma.
 
     ⚑ A name with no measured sigma is EXCLUDED AND NAMED, never given a default. Defaulting a
     missing sigma would decide its risk share by the default, and the whole point of this
-    instrument is that risk share is measured."""
+    instrument is that risk share is measured.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════
+    P2 (28-Aug-2026) — `matrix` IS THE CORRELATION MATRIX, AND THE OLD FORMULA IS ITS rho==1
+    SPECIAL CASE
+    ═══════════════════════════════════════════════════════════════════════════════════════
+        sigma_p       = sqrt( SUM_i SUM_j w_i w_j sigma_i sigma_j rho_ij )
+        MCTR_i        = ( SUM_j w_j sigma_i sigma_j rho_ij ) / sigma_p
+        rc_i          = w_i * MCTR_i / sigma_p
+        risk_weight_i = (sigma_p / N) / MCTR_i
+
+    ⚑⚑ WITH EVERY rho = 1: sigma_p = SUM(w*sigma), MCTR_i = sigma_i, and
+    risk_weight_i = (SUM(w*sigma)/N)/sigma_i — **which is the existing formula, identically.**
+    That reduction is not an ARGUMENT that the change is safe; **it IS the test**, and it is
+    asserted (P2-A1) against an all-ones matrix to 1e-9.
+
+    ⚑ WHY IT MATTERS, measured on this book: the correlation-blind `w*sigma` proxy is not
+    merely imprecise, THE ERROR RUNS TOWARD THE RISK. It **overstates the diversifiers and
+    understates the correlated core** — ONT.L overstated 4.4x, MU understated 8.9pp — so a
+    replacement rule driven by it preferentially challenges the names that are REDUCING sleeve
+    risk. `matrix=None` reproduces present behaviour exactly, stamped `w_sigma_proxy`.
+
+    `matrix` is {"A|B": rho} as `stock_price_fetch.matrix()` emits it, in either key order."""
+    _fi_mark("risk_contribution", "contributions")
     usable = {k: float(sigmas[k]) for k in weights
               if sigmas.get(k) is not None and float(sigmas.get(k) or 0) > 0
               and float(weights.get(k) or 0) > 0}
@@ -73,25 +116,103 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
                 "threshold_pct": round(FLAG_FRACTION_OF_STARTER * starter_pct, 4),
                 "detail": "no name has both a weight and a measured sigma"}
     n = len(usable)
-    denom = sum(float(weights[k]) * usable[k] for k in usable)
-    mean_risk = denom / n
+    names = sorted(usable)
     thr = FLAG_FRACTION_OF_STARTER * float(starter_pct)
+
+    rho, missing_pairs = _rho_lookup(names, matrix)
+    basis = "covariance_mctr" if matrix is not None else "w_sigma_proxy"
+
+    # sigma_p and MCTR. With rho == 1 everywhere this reduces EXACTLY to sum(w*sigma).
+    var = 0.0
+    for a in names:
+        for b in names:
+            var += (float(weights[a]) * float(weights[b]) * usable[a] * usable[b]
+                    * rho(a, b))
+    sigma_p = var ** 0.5
+    if sigma_p <= 0:
+        return {"measured": False, "rows": {}, "excluded": excluded, "rc_basis": basis,
+                "threshold_pct": round(thr, 4),
+                "detail": ("sigma_p is not positive — the decomposition REFUSES rather than "
+                           "dividing by it (P2-A4)")}
+    mctr = {a: sum(float(weights[b]) * usable[a] * usable[b] * rho(a, b)
+                   for b in names) / sigma_p for a in names}
+    mean_risk = sigma_p / n
+
+    # ⚑ P2.3 PARTIAL COVERAGE, NOT REFUSAL (C3 — a correction to the 26-Aug design).
+    # "Any missing pair ⇒ refuse the whole decomposition" is a CLIFF: add a 7th name and the
+    # instrument goes dark for 52 weeks, exactly when the book changes, and M1/M2/M3 stop
+    # accruing. The correct split is to refuse the CAPITAL CONSEQUENCE (the FLAG) for a name
+    # whose pairs are unmeasured, while still PUBLISHING the decomposition with coverage as
+    # the FIRST figure and every exclusion named with its weight — the concentration_clusters
+    # precedent, which reports 77.5% rather than refusing.
+    unmeasured_for = {a for (a, b) in missing_pairs} | {b for (a, b) in missing_pairs}
     rows = {}
-    for k, s in usable.items():
-        w = float(weights[k])
+    for k in names:
+        s, w, m = usable[k], float(weights[k]), mctr[k]
+        flag_suppressed = k in unmeasured_for and matrix is not None
         rows[k] = {
             "weight_pct": round(w, 4), "sigma": round(s, 6),
-            "rc_share": round(w * s / denom, 6) if denom else None,
+            "mctr": round(m, 6),
+            "rc_share": round(w * m / sigma_p, 6),
             "fair_share": round(1.0 / n, 6),
-            "risk_weight_pct": round(mean_risk / s, 4),
-            "below_tolerance": (mean_risk / s) < thr,
+            "risk_weight_pct": round(mean_risk / m, 4) if m > 0 else None,
+            "below_tolerance": (bool((mean_risk / m) < thr) if (m > 0 and not flag_suppressed)
+                                else False),
+            "flag_suppressed_unmeasured_pair": flag_suppressed,
         }
-    return {"measured": True, "rows": rows, "excluded": excluded,
+    n_pairs = n * (n - 1) // 2
+    coverage = round(1.0 - len(missing_pairs) / n_pairs, 4) if n_pairs else 1.0
+    return {"measured": True,
+            # ⚑ COVERAGE IS THE FIRST FIGURE, NOT A FOOTNOTE. A diversification statistic
+            # quoted over 78% of a book and read as covering it is how a concentration goes
+            # unnoticed.
+            "pair_coverage": coverage,
+            "n_pairs_measured": n_pairs - len(missing_pairs), "n_pairs_total": n_pairs,
+            "unmeasured_pairs": ["%s|%s" % p for p in sorted(missing_pairs)],
+            "flags_suppressed_for": sorted(unmeasured_for) if matrix is not None else [],
+            "rc_basis": basis, "sigma_p": round(sigma_p, 6),
+            "n_eff": round(1.0 / sum(r["rc_share"] ** 2 for r in rows.values()), 4)
+                     if rows else None,
+            "rows": rows, "excluded": excluded,
             "n_names": n, "threshold_pct": round(thr, 4),
-            "sum_w_sigma": round(denom, 6),
-            "detail": (f"risk_weight = (SUM(w*sigma)/{n}) / sigma_i; FLAG below "
+            "sum_w_sigma": round(sum(float(weights[k]) * usable[k] for k in names), 6),
+            "detail": (f"rc_basis={basis}; risk_weight = (sigma_p/{n}) / MCTR_i; FLAG below "
                        f"{FLAG_FRACTION_OF_STARTER} x STARTER {starter_pct}% = {thr:.3f}% "
-                       f"for {FLAG_CONSECUTIVE_RUNS} consecutive runs")}
+                       f"for {FLAG_CONSECUTIVE_RUNS} consecutive runs. "
+                       + ("With matrix=None every rho is 1 and this is the incumbent "
+                          "w*sigma formula, identically (P2-A1)."
+                          if matrix is None else
+                          f"Pair coverage {coverage:.1%}; a name with any unmeasured pair "
+                          f"is PUBLISHED and its FLAG is SUPPRESSED (P2.3/C3)."))}
+
+
+def _rho_lookup(names, matrix):
+    """-> (rho(a,b), missing_pairs). `matrix=None` ⇒ every rho is 1.0, which is the incumbent.
+
+    ⚑ A missing pair defaults to 1.0 — the MOST ADVERSE value, not the most convenient. It
+    maximises sigma_p and therefore never flatters diversification (A2.3's direction), and the
+    pair is recorded so the FLAG is suppressed rather than issued on a guess."""
+    if matrix is None:
+        return (lambda a, b: 1.0), set()
+    lut = {}
+    for k, v in (matrix or {}).items():
+        if v is None:
+            continue
+        if "|" in k:
+            a, b = k.split("|", 1)
+            lut[(a, b)] = float(v)
+            lut[(b, a)] = float(v)
+    missing = set()
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if (a, b) not in lut:
+                missing.add((a, b))
+
+    def rho(a, b):
+        if a == b:
+            return 1.0
+        return lut.get((a, b), 1.0)
+    return rho, missing
 
 
 def _load() -> dict:
@@ -111,12 +232,41 @@ def _save(doc) -> str:
     return LEDGER
 
 
+def _rollback_run(doc: dict, rd: str) -> bool:
+    """Remove every trace of run_date `rd` and REDERIVE the flag state from what is left.
+
+    ⚑ Rolling back the runs[] row alone would leave the `consecutive` counters advanced, so the
+    second write of a month would still count twice. The counters are therefore recomputed from
+    `history` rather than decremented — a decrement assumes the row being removed was the last
+    one, and on a re-run of an older month it is not (R5.2: derive, do not adjust)."""
+    seen = any(r.get("run") == rd for r in (doc.get("runs") or []))
+    if not seen:
+        return False
+    doc["runs"] = [r for r in doc["runs"] if r.get("run") != rd]
+    for k, st in (doc.get("flags") or {}).items():
+        st["history"] = [h for h in st.get("history", []) if h.get("run") != rd]
+        c = 0
+        for h in st["history"]:
+            c = c + 1 if h.get("below") else 0
+        st["consecutive"] = c
+        st["flagged"] = c >= FLAG_CONSECUTIVE_RUNS
+        st["newly_flagged"] = False
+    doc["m3_pairs"] = [p for p in (doc.get("m3_pairs") or []) if p.get("run_date") != rd]
+    return True
+
+
 def record_run(contrib: dict, *, run_date: Optional[str] = None, doc=None,
                persist: bool = True) -> dict:
     """M1 capture. Writes EVERY run, including runs where nothing flags — a zero is the
     observation that makes M1's 'never fires' failure mode detectable."""
     doc = doc if doc is not None else _load()
     rd = run_date or datetime.date.today().isoformat()
+    # ⚑⚑ ISA-0549 (02-Sep-2026). record_run APPENDED unconditionally, so re-running a pre-run
+    # for the same run_date added a SECOND observation of one month AND advanced every name's
+    # `consecutive` counter a second time — inflating M1's series and bringing a position to
+    # FLAG_CONSECUTIVE_RUNS on one month's evidence. A monthly ledger must be idempotent in its
+    # own period: a re-run REPLACES that date, it does not accrue against it (R4.11).
+    _rollback_run(doc, rd)
     rows = contrib.get("rows") or {}
     below = sorted(k for k, v in rows.items() if v["below_tolerance"])
     flagged = []
@@ -132,6 +282,14 @@ def record_run(contrib: dict, *, run_date: Optional[str] = None, doc=None,
             flagged.append(k)
         st["newly_flagged"] = st["flagged"] and not was
     doc["runs"].append({
+        # ⚑ P2.4 LEDGER CONTINUITY. Every entry carries its rc_basis, and M1/M2/M3 SEGMENT by
+        # basis and REFUSE to pool across a basis change: "3 runs on covariance_mctr, 2 on
+        # w_sigma_proxy; the minimum of 6 applies PER BASIS and these are not one series."
+        # Pooling them would answer a question about one instrument using observations from
+        # two. Prior proxy entries are RETAINED and MARKED, never rewritten (R2.13).
+        "rc_basis": contrib.get("rc_basis", "w_sigma_proxy"),
+        "pair_coverage": contrib.get("pair_coverage"),
+        "sigma_p": contrib.get("sigma_p"), "n_eff": contrib.get("n_eff"),
         "run": rd, "n_names": len(rows), "n_below_tolerance": len(below),
         "n_flagged": len(flagged), "below": below, "flagged": sorted(flagged),
         "fraction_flagged": round(len(flagged) / len(rows), 4) if rows else None,
@@ -162,11 +320,32 @@ def record_m3_pair(doc, *, run_date, incumbent, challenger, swapped: bool,
     return doc["m3_pairs"][-1]
 
 
-def evaluate(doc=None) -> dict:
-    """M1/M2/M3 verdicts. REFUSES to render one before its declared minimum sample (R3.5)."""
+def evaluate(doc=None, *, rc_basis: Optional[str] = None) -> dict:
+    """M1/M2/M3 verdicts. REFUSES to render one before its declared minimum sample (R3.5).
+
+    ⚑ P2.4 — SEGMENTED BY `rc_basis`, AND IT REFUSES TO POOL ACROSS ONE. `w_sigma_proxy` and
+    `covariance_mctr` are two different instruments measuring the same thing differently; six
+    runs made of three of each is not six observations of either. The minimum applies PER
+    BASIS, and the refusal SAYS SO with the counts rather than quietly reporting the pooled
+    verdict. Prior proxy entries are RETAINED and MARKED, never rewritten (R2.13)."""
     doc = doc if doc is not None else _load()
-    runs = doc.get("runs") or []
-    out = {}
+    all_runs = doc.get("runs") or []
+    by_basis = {}
+    for r in all_runs:
+        by_basis.setdefault(r.get("rc_basis", "w_sigma_proxy"), []).append(r)
+    if rc_basis is None:
+        # the CURRENT basis is the one the most recent run used
+        rc_basis = (all_runs[-1].get("rc_basis", "w_sigma_proxy") if all_runs
+                    else "w_sigma_proxy")
+    runs = by_basis.get(rc_basis, [])
+    out = {"rc_basis": rc_basis,
+           "runs_by_basis": {k: len(v) for k, v in sorted(by_basis.items())},
+           "basis_note": ("M1/M2/M3 are evaluated on the %r series ONLY. %s — the minimum of "
+                          "%d applies PER BASIS and these are not one series."
+                          % (rc_basis,
+                             "; ".join("%d run(s) on %s" % (len(v), k)
+                                       for k, v in sorted(by_basis.items())) or "no runs",
+                             M1_MIN_RUNS))}
 
     # ── M1 bindingness ────────────────────────────────────────────────────────────────
     if len(runs) < M1_MIN_RUNS:

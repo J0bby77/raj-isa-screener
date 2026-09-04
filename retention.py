@@ -53,11 +53,37 @@ import datetime
 import math
 from typing import Dict, List, Optional
 
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+
 RATCHET_FLOOR_PCT = 10.0
 RATCHET_STEP_PCT = 5.0
 PROBATION_TRAIL_PP = 5.0
 PROBATION_MIN_POSITIONS = 3
 PROBATION_MONTHS = 12
+# ── P5 (ISA-0457 / D18-D19), built 29-Aug-2026 ────────────────────────────────────────────
+PROBATION_MIN_TRAILING_MONTHS = 9        # leg (b): 9 of 12; binomial p ~ 0.073 under the null
+EARLY_WARNING_MONTHS = 6                 # leg-free 6m reading; NON-GATING by construction
+# ⚑ D18. The population is EVERY open direct-stock position, VCI INCLUDED — the ceiling is a
+# capital question and VCI is the same capital. This REPLACES `route == "forward_led"`, which
+# no live producer ever emitted: the published "n=1, only COCO" came from a FIXTURE, and live
+# the filter returned 0 while the run printed "population unavailable" (F4 / ISA-0457).
+ELIGIBLE_BASIS = "all_open_direct_stock_positions"
+# ⚑ AND THE THRESHOLD IS KNOWN TO BE WEAK, WHICH IS WHY LEG (a) IS NOT ALONE. Measured sleeve
+# tracking error vs VUAG is 38.6%/yr, so -5pp is t = 0.1295 — NON_DISCRIMINATING, firing ~44%
+# of the time on ZERO true alpha at 6, 12 AND 24 months. Widening the window does not fix a
+# threshold expressed in the units of the quantity rather than of its noise (R3.11). The
+# conjunction of three weak legs is what makes the rule mean anything, and D19 is Raj's.
+PROBATION_LEGS = ("trail_pp", "months_trailing", "ex_largest")
 
 HOLD_REMARK = "HOLD_AND_REMARK"
 TRIM_TO_RISK_TARGET = "TRIM_TO_RISK_TARGET"
@@ -192,51 +218,259 @@ def step_down(current_sleeve_weight_pct: float) -> dict:
                       f"would breach its 12.5% single-fund cap within two increments.")}
 
 
-def ratchet_eligible(decisions: List[dict], *, today=None) -> dict:
-    """Is the s3 population large enough for the rule to fire at all?
+def ratchet_eligible(positions: List[dict], *, today=None) -> dict:
+    """P5.1 / D18. Is the s3 population large enough for the rule to fire at all?
 
-    ⚑ Only FORWARD-LED framework decisions count."""
-    fl = [d for d in decisions if d.get("route") == "forward_led"]
-    excluded = [{"ticker": d.get("ticker"), "route": d.get("route"),
-                 "reason": d.get("exclusion_reason") or f"route={d.get('route')}, not forward_led"}
-                for d in decisions if d.get("route") != "forward_led"]
-    ok = len(fl) >= PROBATION_MIN_POSITIONS
-    return {"eligible": ok, "n_forward_led": len(fl),
-            "forward_led": [d.get("ticker") for d in fl],
+    ⚑⚑ THE POPULATION IS EVERY OPEN DIRECT-STOCK POSITION, VCI INCLUDED, AND THE PREVIOUS
+    RULE COULD NEVER HAVE BEEN TRUE. This filtered `route == "forward_led"`. Nothing in the
+    live tree emits that value: `decision_ledger`'s vocabulary is {main, vci}, and all twelve
+    trades in `sleeve_counterfactual` carry `route: null`. The string occurs ONLY in this
+    module's own selftest and two fixtures — so the published finding *"n=1, only COCO, correct
+    not a loophole"* was A FIXTURE RESULT, and on live data the filter returned 0 while the run
+    printed "population unavailable".
+
+    ⚑ That is not an absent execution — it is a PRESENT execution that can never be true, and
+    the tell was that the value appeared only in tests (F4 / ISA-0457, a new FC sub-class).
+
+    ⚑ D18's reasoning: the ceiling is a CAPITAL question, and VCI capital is the same capital.
+    A route-based population also made the rule's answer depend on a label nobody assigned.
+    Route attribution still happens — see `route_attribution()` — but it is NON-GATING."""
+    _fi_mark("retention", "ratchet_eligible")
+    open_pos, excluded = [], []
+    for d in (positions or []):
+        tk = d.get("ticker")
+        # ⚑ `is False` / explicit zero only. A position with NO declared `open` flag and no
+        # declared quantity is UNKNOWN, and an unknown must not be silently counted IN (it
+        # would inflate the population toward eligibility) nor silently OUT (it would suppress
+        # the rule). It is excluded WITH ITS REASON NAMED, and the count of such names is
+        # published so a reader can see the population is incomplete.
+        if d.get("open") is False or d.get("closed") is True:
+            excluded.append({"ticker": tk, "reason": "position is closed"})
+            continue
+        q = d.get("quantity", d.get("units"))
+        if q is not None and float(q) <= 0:
+            excluded.append({"ticker": tk, "reason": "quantity <= 0"})
+            continue
+        if d.get("asset_class") in ("fund", "etf_fund", "cash"):
+            excluded.append({"ticker": tk,
+                             "reason": f"asset_class={d.get('asset_class')} is not direct stock"})
+            continue
+        open_pos.append(d)
+    ok = len(open_pos) >= PROBATION_MIN_POSITIONS
+    return {"eligible": ok,
+            "basis": ELIGIBLE_BASIS,
+            "n_positions": len(open_pos),
+            "positions": [d.get("ticker") for d in open_pos],
+            # ⚑ retained under its old name so no consumer silently reads 0 after this change
+            "n_forward_led": None,
             "min_required": PROBATION_MIN_POSITIONS, "excluded": excluded,
-            "detail": (f"{len(fl)} forward-led decision(s) against {PROBATION_MIN_POSITIONS} "
-                       f"required. THE RULE CANNOT FIRE and that is CORRECT, not a loophole: "
-                       f"measuring the framework on a book it did not assemble is measuring the "
-                       f"wrong thing, in either direction."
+            "detail": (f"{len(open_pos)} open direct-stock position(s) against "
+                       f"{PROBATION_MIN_POSITIONS} required ({ELIGIBLE_BASIS}, D18). THE RULE "
+                       f"CANNOT FIRE on population."
                        if not ok else
-                       f"{len(fl)} forward-led decisions — the population is real and the rule "
-                       f"may be evaluated")}
+                       f"{len(open_pos)} open direct-stock positions ({ELIGIBLE_BASIS}, D18) — "
+                       f"the population is sufficient and the three legs may be evaluated")}
 
 
-def evaluate_ratchet(*, decisions, sleeve_vs_vuag_pp, months_measured,
-                     current_sleeve_weight_pct) -> dict:
-    """The full s3 gate. Every refusal names WHICH condition failed."""
-    el = ratchet_eligible(decisions)
-    reasons = []
+def route_attribution(decisions: List[dict]) -> dict:
+    """P5.2. Buckets decisions by route. **NON-GATING — it decides nothing.**
+
+    ⚑ IT MAKES NO COUNTERFACTUAL CLAIM. Whether MU and AVGO "would have qualified" under the
+    forward-led framework is a HYPOTHESIS, and R2.2 bars a hypothesis from a decision. This
+    reports what each position's route WAS, with `pre_framework` as its own bucket rather than
+    folded into an "other" that reads like a judgement.
+
+    ⚑ It exists because D18 removed route from the GATE, and removing a distinction from a gate
+    is not a reason to stop recording it — it is a reason to record it somewhere it cannot
+    decide anything."""
+    _fi_mark("retention", "route_attribution")
+    buckets = {"forward_led": [], "vci": [], "pre_framework": [], "override": [],
+               "unattributed": []}
+    for d in (decisions or []):
+        r = d.get("route")
+        key = r if r in buckets else ("unattributed" if r in (None, "") else "override")
+        buckets[key].append(d.get("ticker"))
+    return {"buckets": {k: sorted(v) for k, v in buckets.items()},
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "gating": False,
+            "makes_counterfactual_claim": False,
+            "detail": ("route attribution is a RECORD, not a gate (P5.2). It states which "
+                       "route each position arrived by and makes NO claim about whether a "
+                       "pre-framework position would have qualified — that is a hypothesis, "
+                       "and R2.2 keeps hypotheses out of decisions.")}
+
+
+
+# ── P5.4 — READING THE LEGS OUT OF `freeze_history`, WITHOUT INVENTING ANY ────────────────
+FREEZE_MONTH_FIELDS = (
+    "vs_vuag_pp", "vs_vuag_exlargest_pp", "vs_iwmo_pp", "vs_iwmo_exlargest_pp",
+    "largest_position_ticker", "largest_position_weight_pct",
+    "sign_all_in", "sign_exlargest", "measured", "basis",
+)
+
+
+def ratchet_inputs_from_freeze_history(history: List[dict]) -> dict:
+    """-> the three legs' inputs, or None for each one the history cannot supply.
+
+    ⚑⚑ NOTHING IS RETRO-FILLED (P5-A10). `freeze_history` today carries only
+    `beats_vuag_exmu` / `beats_iwmo_exmu` / `measured`; the per-month POUNDS-AND-PP fields
+    P5.4 declares are written going forward, not backfilled. 2026-07 in particular is
+    `measured: false` and stays that way — ISA-0429 established that it cannot be recomputed
+    from the corrupted price, and a fabricated boolean is worse than a gap.
+
+    ⚑ So this reader returns `None` for every leg the history does not actually carry, and the
+    caller renders ACTIVE_UNMEASURED. It does NOT derive `vs_vuag_pp` from `beats_vuag_exmu`:
+    a boolean cannot supply a magnitude, and inventing one would be exactly the class where a
+    stored value says one thing and IS another.
+
+    ⚑ `months_trailing` counts only MEASURED months. An unmeasured month is not a
+    non-trailing month — counting it as one would let a data gap argue that the sleeve is
+    working, which is the direction ISA-0429 showed is the dangerous one."""
+    _fi_mark("retention", "ratchet_inputs_from_freeze_history")
+    hist = [h for h in (history or []) if isinstance(h, dict)]
+    measured = [h for h in hist if h.get("measured") is True]
+    recent = sorted(measured, key=lambda h: str(h.get("month") or ""))[-PROBATION_MONTHS:]
+
+    def _last(field):
+        for h in reversed(recent):
+            if h.get(field) is not None:
+                return h[field]
+        return None
+
+    trailing = None
+    if recent and all(h.get("vs_vuag_pp") is not None for h in recent):
+        trailing = sum(1 for h in recent if h["vs_vuag_pp"] <= -PROBATION_TRAIL_PP)
+
+    missing = sorted({f for f in ("vs_vuag_pp", "vs_vuag_exlargest_pp",
+                                  "largest_position_ticker")
+                      if _last(f) is None})
+    return {
+        "months_measured": len(measured),
+        "months_in_window": len(recent),
+        "months_trailing": trailing,
+        "sleeve_vs_vuag_pp": _last("vs_vuag_pp"),
+        "sleeve_vs_vuag_exlargest_pp": _last("vs_vuag_exlargest_pp"),
+        "largest_position_ticker": _last("largest_position_ticker"),
+        "early_warning_pp": (None if len(measured) < EARLY_WARNING_MONTHS else
+                             _last("vs_vuag_pp")),
+        "fields_missing": missing,
+        "declared_fields": list(FREEZE_MONTH_FIELDS),
+        "detail": ("%d measured month(s) of the %d the rule needs. Missing per-month field(s): "
+                   "%s. These are written GOING FORWARD (P5.4) and are NOT backfilled — 2026-07 "
+                   "stays measured:false because it cannot be recomputed and a fabricated "
+                   "boolean is worse than a gap (ISA-0429 / P5-A10)."
+                   % (len(measured), PROBATION_MONTHS, ", ".join(missing) or "none")),
+    }
+
+def evaluate_ratchet(*, decisions=None, sleeve_vs_vuag_pp=None, months_measured=None,
+                     current_sleeve_weight_pct=None, positions=None,
+                     months_trailing=None, sleeve_vs_vuag_exlargest_pp=None,
+                     largest_position_ticker=None, early_warning_pp=None) -> dict:
+    """P5.3 / D19. The full s3 gate: a THREE-LEG CONJUNCTION, every refusal naming its leg.
+
+    ⚑⚑ WHY THREE LEGS AND NOT A WIDER WINDOW. Leg (a) alone is `-5pp`, which is **0.1295 SD**
+    against a measured sleeve tracking error of 38.6%/yr — it fires about 44% of the time on
+    ZERO true alpha, and it does so at 6, 12 AND 24 months. The window is the wrong lever: a
+    threshold expressed in the units of the quantity rather than of its noise is a coin flip
+    that LOOKS discriminating (R3.11). Three weak, differently-wrong legs in conjunction is
+    what buys discrimination here, and the conjunction is Raj's declared design (D19).
+
+    ⚑ LEG (c) IS NOT OPTIONAL. On ISA-0429's restated numbers the all-in and ex-MU legs
+    disagreed by 25pp (+3.2pp vs -22.5pp). A single-leg rule reads whichever leg it was handed,
+    and the two answer different questions: whether the SLEEVE is working, and whether it is
+    working other than through its one largest bet.
+
+    ⚑ ANY LEG UNMEASURED => `ACTIVE_UNMEASURED`, NEVER "does not fire" (ISA-0429's rule). The
+    two spellings are asserted distinct, because "we looked and it did not fire" and "we could
+    not look" are opposite facts that a single `fires: False` would merge (R2.10)."""
+    _fi_mark("retention", "evaluate_ratchet")
+    pop = positions if positions is not None else decisions
+    el = ratchet_eligible(pop or [])
+
+    legs, unmeasured, binding = {}, [], []
+
+    # ── population is a PRECONDITION, not a leg: it says the rule is not applicable yet ──
     if not el["eligible"]:
-        reasons.append(f"population {el['n_forward_led']} < {PROBATION_MIN_POSITIONS}")
-    if months_measured is None or months_measured < PROBATION_MONTHS:
-        reasons.append(f"only {months_measured} of {PROBATION_MONTHS} months measured")
+        binding.append("population %s of %s (%s)"
+                       % (el["n_positions"], PROBATION_MIN_POSITIONS, el["basis"]))
+
+    # ── leg (a): does the sleeve trail VUAG by at least the declared threshold? ──────────
     if sleeve_vs_vuag_pp is None:
-        reasons.append("sleeve-vs-VUAG is UNMEASURED — an unmeasured month reads "
-                       "ACTIVE-UNMEASURED, never as underperformance (ISA-0429)")
-    elif sleeve_vs_vuag_pp > -PROBATION_TRAIL_PP:
-        reasons.append(f"trails by {-sleeve_vs_vuag_pp:.2f}pp, inside the "
-                       f"{PROBATION_TRAIL_PP}pp threshold")
-    if reasons:
-        return {"fires": False, "reasons": reasons, "eligibility": el,
+        legs["trail_pp"] = None
+        unmeasured.append("trail_pp (sleeve vs VUAG is UNMEASURED)")
+    else:
+        legs["trail_pp"] = bool(sleeve_vs_vuag_pp <= -PROBATION_TRAIL_PP)
+        if not legs["trail_pp"]:
+            binding.append("trails by %.2fpp, inside the %.1fpp threshold"
+                           % (-sleeve_vs_vuag_pp, PROBATION_TRAIL_PP))
+
+    # ── leg (b): has it trailed in at least 9 of the last 12 measured months? ────────────
+    if months_measured is None or months_measured < PROBATION_MONTHS:
+        legs["months_trailing"] = None
+        unmeasured.append("months_trailing (%s of %s months measured)"
+                          % (months_measured, PROBATION_MONTHS))
+        binding.append("only %s of %s months measured" % (months_measured, PROBATION_MONTHS))
+    elif months_trailing is None:
+        legs["months_trailing"] = None
+        unmeasured.append("months_trailing (the per-month trailing count is UNMEASURED)")
+    else:
+        legs["months_trailing"] = bool(months_trailing >= PROBATION_MIN_TRAILING_MONTHS)
+        if not legs["months_trailing"]:
+            binding.append("trailed in %s of %s months, below the %s required"
+                           % (months_trailing, PROBATION_MONTHS,
+                              PROBATION_MIN_TRAILING_MONTHS))
+
+    # ── leg (c): does it still trail with the LARGEST position removed? ─────────────────
+    # ⚑ `largest_position_ticker` is read PER MONTH and is NEVER hard-coded to MU: a
+    # hard-coded ex-MU leg becomes an ex-nothing leg the month MU is trimmed.
+    if sleeve_vs_vuag_exlargest_pp is None:
+        legs["ex_largest"] = None
+        unmeasured.append("ex_largest (the ex-largest-position leg is UNMEASURED)")
+    else:
+        legs["ex_largest"] = bool(sleeve_vs_vuag_exlargest_pp <= -PROBATION_TRAIL_PP)
+        if not legs["ex_largest"]:
+            binding.append("ex-%s the sleeve trails by %.2fpp, inside the %.1fpp threshold"
+                           % (largest_position_ticker or "largest",
+                              -sleeve_vs_vuag_exlargest_pp, PROBATION_TRAIL_PP))
+
+    # ── the 6-month reading is published and GATES NOTHING (P5-A8) ──────────────────────
+    early = {"months": EARLY_WARNING_MONTHS, "vs_vuag_pp": early_warning_pp,
+             "state": ("UNMEASURED" if early_warning_pp is None else
+                       ("TRAILING" if early_warning_pp <= -PROBATION_TRAIL_PP else "OK")),
+             "gates": False,
+             "note": ("EARLY WARNING ONLY. It is reported so a deterioration is visible before "
+                      "the 12-month legs can speak, and it changes `fires` in no circumstance.")}
+
+    base = {"eligibility": el, "legs": legs, "legs_required": list(PROBATION_LEGS),
+            "early_warning": early, "basis": ELIGIBLE_BASIS,
+            "route_attribution": route_attribution(pop or []),
+            "thresholds": {"trail_pp": PROBATION_TRAIL_PP,
+                           "min_trailing_months": PROBATION_MIN_TRAILING_MONTHS,
+                           "months": PROBATION_MONTHS,
+                           "min_positions": PROBATION_MIN_POSITIONS}}
+
+    # ⚑ P5.5 — SAY WHICH CONDITION BINDS, not merely that nothing fired. A rule that reports
+    # "cannot fire" without saying why THIS month is ISA-0348's pattern in reporting form.
+    if unmeasured:
+        return {**base, "state": "ACTIVE_UNMEASURED", "fires": False,
+                "unmeasured": unmeasured, "binding": binding,
                 "new_ceiling_pct": None,
-                "detail": "step-down does NOT fire: " + "; ".join(reasons)}
+                "detail": ("step-down is ACTIVE-UNMEASURED (NOT 'does not fire'): "
+                           + "; ".join(unmeasured)
+                           + ". An unmeasured leg is a gap in what we know, not evidence that "
+                             "the sleeve is working (ISA-0429).")}
+    if not el["eligible"] or not all(legs[k] for k in PROBATION_LEGS):
+        return {**base, "state": "DOES_NOT_FIRE", "fires": False,
+                "unmeasured": [], "binding": binding, "new_ceiling_pct": None,
+                "detail": "step-down does NOT fire: " + "; ".join(binding)}
+
     sd = step_down(current_sleeve_weight_pct)
-    return {"fires": True, "reasons": [], "eligibility": el, **sd,
-            "detail": (f"trails VUAG by {-sleeve_vs_vuag_pp:.2f}pp over {months_measured} "
-                       f"months across {el['n_forward_led']} forward-led positions -> ceiling "
-                       f"steps {sd['current_pct']:.2f}% -> {sd['new_ceiling_pct']:.0f}%")}
+    return {**base, "state": "FIRES", "fires": True, "unmeasured": [], "binding": [], **sd,
+            "detail": ("all three legs hold: trails VUAG by %.2fpp, in %s of %s months, and by "
+                       "%.2fpp ex-%s -> ceiling steps %.2f%% -> %.0f%%"
+                       % (-sleeve_vs_vuag_pp, months_trailing, PROBATION_MONTHS,
+                          -sleeve_vs_vuag_exlargest_pp, largest_position_ticker or "largest",
+                          sd["current_pct"], sd["new_ceiling_pct"]))}
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -601,31 +835,135 @@ def _selftest():
     assert step_down(10.4)["at_floor"] is True
     assert step_down(8.0)["new_ceiling_pct"] == 10.0, "never below the floor"
 
-    # the LIVE population: only COCO is forward-led -> cannot fire
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # P5 — THE STEP-DOWN RATCHET (D18/D19), built 29-Aug-2026. P5-A1 .. P5-A11.
+    # ⚑ Every assertion below is paired with a control that FORCES the opposite verdict —
+    # ISA-0348's question asked of each one: what correct behaviour makes this fail?
+    # ══════════════════════════════════════════════════════════════════════════════════
     live = [{"ticker": "AVGO", "route": "pre_framework"}, {"ticker": "MU", "route": "pre_framework"},
-            {"ticker": "ONT.L", "route": "pre_framework"}, {"ticker": "ABCL", "route": "a13_override"},
-            {"ticker": "QBTS", "route": "vci_path_b"}, {"ticker": "COCO", "route": "forward_led"}]
+            {"ticker": "ONT.L", "route": "pre_framework"}, {"ticker": "ABCL", "route": "override"},
+            {"ticker": "QBTS", "route": "vci"}, {"ticker": "COCO", "route": "forward_led"}]
+
+    # P5-A1 — population is OPEN DIRECT-STOCK POSITIONS; the live book is n = 6
     el = ratchet_eligible(live)
-    assert el["eligible"] is False and el["n_forward_led"] == 1, el
-    assert "CORRECT, not a loophole" in el["detail"]
-    assert len(el["excluded"]) == 5
+    assert el["eligible"] is True and el["n_positions"] == 6, el
+    assert el["basis"] == ELIGIBLE_BASIS == "all_open_direct_stock_positions", el
+    #   control: a 2-position book is NOT eligible
+    assert ratchet_eligible(live[:2])["eligible"] is False
 
-    ev = evaluate_ratchet(decisions=live, sleeve_vs_vuag_pp=-22.5, months_measured=12,
-                          current_sleeve_weight_pct=10.40)
-    assert ev["fires"] is False, "n=1 must block even at -22.5pp"
-    assert any("population" in r for r in ev["reasons"]), ev["reasons"]
+    # P5-A2 — VCI IS INCLUDED: removing QBTS reduces n by exactly one
+    no_qbts = [d for d in live if d["ticker"] != "QBTS"]
+    assert ratchet_eligible(no_qbts)["n_positions"] == el["n_positions"] - 1
+    #   control: the OLD route filter would have given n = 1 on this same book, which is why
+    #   the published "n=1, only COCO" was a fixture result and never a live one
+    assert len([d for d in live if d.get("route") == "forward_led"]) == 1
 
-    # an UNMEASURED month must not read as underperformance (ISA-0429)
-    many = live + [{"ticker": f"F{i}", "route": "forward_led"} for i in range(3)]
-    un = evaluate_ratchet(decisions=many, sleeve_vs_vuag_pp=None, months_measured=12,
-                          current_sleeve_weight_pct=16.65)
-    assert un["fires"] is False and any("UNMEASURED" in r for r in un["reasons"]), un
+    # P5-A3 — NO LIVE PRODUCER EMITS `forward_led` AS A ROUTE VALUE. If one ever does, this
+    # FAILS and the vocabulary is re-adjudicated rather than quietly re-adopted.
+    #
+    # ⚑⚑ THIS ASSERTION'S FIRST VERSION WAS WRONG IN THE WAY THE STANDARD WARNS ABOUT, AND IT
+    # FIRED ON ITS FIRST RUN. It scanned for the STRING "forward_led" anywhere outside a
+    # selftest, and hit `email_prefill:2148` — `ratch.get("forward_led")`, a dict KEY being
+    # READ by a consumer. A check that cannot tell a producer from a consumer reports the
+    # framework unsafe for a reason that is not true, and gets deleted rather than fixed.
+    #
+    # ⚑ THE FIX IS TO REUSE THE ONE HOME FOR THIS QUESTION rather than write a second: P0.2's
+    # `framework_integrity._producers_of` already distinguishes an EMITTED value (dict literal,
+    # subscript assign, keyword argument, conditional) from a mention, and already excludes
+    # selftests by span rather than by a flat `ast.walk` + `continue` (ISA-0474). A private
+    # re-implementation here would be exactly the two-homes defect this build exists to kill.
+    #
+    # ⚑ AND IT REPORTS BLIND RATHER THAN GREEN: if the instrument is unavailable the assertion
+    # says so instead of passing, because "nothing produces it" and "I could not look" are the
+    # same output and opposite facts (R2.10 / R4.9).
+    import os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        import framework_integrity as _fi
+        _prod = _fi._producers_of("route", "forward_led")
+        _blind = False
+    except Exception as _e:                                             # noqa: BLE001
+        _prod, _blind = [], True
+    assert not _blind, ("P5-A3 is BLIND: framework_integrity._producers_of is unavailable "
+                        "(%s). This assertion did NOT run and must not read as a pass." % _e) \
+        if _blind else True
+    assert not _prod, ("P5-A3: a live producer now emits route='forward_led' (%s). D18's "
+                       "population is route-blind BY DESIGN; re-adjudicate the vocabulary "
+                       "before relying on it again." % _prod[:5])
+    #   control: the detector is NOT vacuous — it finds a route value that IS emitted live
+    _live_vocab = _fi._producers_of("route", "main") or _fi._producers_of("route", "vci")
+    assert _live_vocab, ("P5-A3 control: `_producers_of` found NO producer for ANY live route "
+                         "value either, so its silence on `forward_led` proves nothing — the "
+                         "detector is blind, not clean.")
 
-    fires = evaluate_ratchet(decisions=many, sleeve_vs_vuag_pp=-22.5, months_measured=12,
-                             current_sleeve_weight_pct=16.65)
-    assert fires["fires"] is True and fires["new_ceiling_pct"] == 15.0, fires
+    # P5-A4 — EACH LEG ALONE DOES NOT FIRE. Three fixtures, one per leg.
+    base_kw = dict(positions=live, months_measured=12, current_sleeve_weight_pct=16.65,
+                   largest_position_ticker="MU")
+    only_a = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=-22.5, months_trailing=3,
+                              sleeve_vs_vuag_exlargest_pp=-1.0)
+    only_b = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=-1.0, months_trailing=11,
+                              sleeve_vs_vuag_exlargest_pp=-1.0)
+    only_c = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=-1.0, months_trailing=3,
+                              sleeve_vs_vuag_exlargest_pp=-22.5)
+    for _r, _n in ((only_a, "a"), (only_b, "b"), (only_c, "c")):
+        assert _r["fires"] is False and _r["state"] == "DOES_NOT_FIRE", (_n, _r["state"])
+        assert _r["binding"], "a refusal must NAME which leg bound it (P5-A9)"
+
+    # P5-A5 — ALL THREE => FIRES, and the step is ONE 5% multiple, floored at 10%
+    fires = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=-22.5, months_trailing=11,
+                             sleeve_vs_vuag_exlargest_pp=-22.5)
+    assert fires["fires"] is True and fires["state"] == "FIRES", fires
+    assert fires["new_ceiling_pct"] == 15.0, "17%% -> 15%%, NOT 17%% -> 10%%"
     assert fires["routing"] == "capital_destination"
-    print("retention selftest OK (30 assertions)")
+
+    # P5-A6 — ANY UNMEASURED LEG => ACTIVE_UNMEASURED, and the two spellings are DISTINCT
+    un = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=None, months_trailing=11,
+                          sleeve_vs_vuag_exlargest_pp=-22.5)
+    assert un["state"] == "ACTIVE_UNMEASURED" and un["fires"] is False, un
+    assert un["state"] != only_a["state"], ("ACTIVE_UNMEASURED and DOES_NOT_FIRE must not be "
+                                            "one output with two meanings (R2.10)")
+    assert any("UNMEASURED" in u for u in un["unmeasured"]), un
+
+    # P5-A7 — leg (c) follows `largest_position_ticker`, which is read PER MONTH
+    swapped = evaluate_ratchet(**{**base_kw, "largest_position_ticker": "AVGO"},
+                               sleeve_vs_vuag_pp=-22.5, months_trailing=11,
+                               sleeve_vs_vuag_exlargest_pp=-1.0)
+    assert "ex-AVGO" in " ".join(swapped["binding"]), swapped["binding"]
+
+    # P5-A8 — the 6-month reading is EARLY WARNING and gates NOTHING
+    ew = evaluate_ratchet(**base_kw, sleeve_vs_vuag_pp=-1.0, months_trailing=3,
+                          sleeve_vs_vuag_exlargest_pp=-1.0, early_warning_pp=-50.0)
+    assert ew["early_warning"]["state"] == "TRAILING" and ew["early_warning"]["gates"] is False
+    assert ew["fires"] is only_b["fires"], "-50pp at 6m must not change `fires`"
+
+    # P5-A9 — the refusal names WHICH condition binds; a months-only failure reports MONTHS
+    months_only = evaluate_ratchet(positions=live, months_measured=1, months_trailing=None,
+                                   sleeve_vs_vuag_pp=-22.5, sleeve_vs_vuag_exlargest_pp=-22.5,
+                                   current_sleeve_weight_pct=16.65)
+    assert any("months measured" in b for b in months_only["binding"]), months_only["binding"]
+    assert not any("population" in b for b in months_only["binding"]), months_only["binding"]
+
+    # P5-A10 — historical entries are NOT retro-fabricated
+    try:
+        import json as _json
+        _cf = _json.load(open(_os.path.join(_here, "sleeve_counterfactual.json"),
+                              encoding="utf-8"))
+        _jul = [e for e in (_cf.get("freeze_history") or []) if e.get("month") == "2026-07"]
+        if _jul:
+            assert _jul[0].get("measured") is False, ("2026-07 must stay measured:false — it "
+                                                      "cannot be recomputed and a fabricated "
+                                                      "boolean is worse than a gap (ISA-0429)")
+    except FileNotFoundError:
+        pass
+
+    # P5-A11 — route_attribution makes NO counterfactual claim, and does not gate
+    ra = route_attribution(live)
+    assert ra["gating"] is False and ra["makes_counterfactual_claim"] is False
+    assert ra["counts"]["pre_framework"] == 3 and ra["counts"]["forward_led"] == 1, ra["counts"]
+    assert ra["counts"]["vci"] == 1 and ra["counts"]["override"] == 1, ra["counts"]
+    assert "pre_framework" in ra["buckets"], "pre_framework is its OWN bucket, not an 'other'"
+
+    print("retention selftest OK (30 + P5 A1-A11 assertions)")
 
 
 if __name__ == "__main__":

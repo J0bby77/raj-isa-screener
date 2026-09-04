@@ -3816,6 +3816,39 @@ def save_full_data(rows, outputs_dir, run_date, group):
     _cap = {"run_date": run_date, "group": group, "path": path, "ok": False, "reason": None}
     try:
         import capture_screen_artefacts as _csa
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # ISA-0547 (02-Sep-2026) — REFRESH THE REGIME BEFORE CAPTURING IT, IN THE FUNCTION
+        # THAT PRODUCES THE ARTEFACT (R4.11).
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # The capture used to run BEFORE drawdown_monitor had run that day, so the regime it
+        # stamped was whatever was last written and `stamp_basis` came out `live_stale_source`
+        # — inadmissible as point-in-time evidence, permanently, because the documented remedy
+        # (re-run the capture later) would stamp an August row live in September (ISA-0517,
+        # R6.4: relabel, never rewrite). The remedy lived in a printed WARN and a prose step,
+        # i.e. in someone remembering, which R14.1 calls a defect. Two rows accumulated that
+        # way between 15-Aug and 03-Sep.
+        # ⚑ BEST-EFFORT AND HONEST. If the refresh cannot run, the row is still stamped
+        # truthfully and the reason is RECORDED on the capture status — a stale regime must
+        # never be silently upgraded, which is the negative control on this fix.
+        _cap["regime_refresh"] = None
+        try:
+            import drawdown_monitor as _ddm_pre
+            # ⚑ NOT check_only. `check_only=True` computes the regime and does NOT persist it,
+            # so `drawdown_state.last_check` would stay stale and capture_screen_artefacts
+            # would STILL stamp `live_stale_source` — the fix would look applied and change
+            # nothing, which is the failure class this whole workstream exists to kill. The
+            # real run is what Run_Context 16d always instructed; it is now wired instead of
+            # printed.
+            _ddm_rc = _ddm_pre.run()
+            _cap["regime_refresh"] = ("drawdown_monitor.run() ran and PERSISTED state before the "
+                                      "capture (rc=%s)" % _ddm_rc)
+            if _ddm_rc != 0:
+                _cap["regime_refresh"] += " — NON-ZERO: the regime may still be stale"
+        except Exception as _e_ddm:                                    # noqa: BLE001
+            _cap["regime_refresh"] = ("REFUSED: %s: %s — the regime row will be stamped "
+                                      "honestly at whatever basis it truly has, never "
+                                      "upgraded (ISA-0547)"
+                                      % (type(_e_ddm).__name__, _e_ddm))
         _r = _csa.capture_one(path, _inv, run_date=None, group=None)
         _fd = _r.get("full_data", {})
         _cap["ok"] = bool(_fd.get("ok"))
@@ -3832,9 +3865,14 @@ def save_full_data(rows, outputs_dir, run_date, group):
                  f"{_cap.get('columns')} cols | constituents {_cap['constituents']} | "
                  f"regime {_cap['regime_stamp_basis']}")
         if _cap.get("regime_pit") is False:
-            log.warning("§Q capture: regime NOT point-in-time yet — re-run "
-                        "`capture_screen_artefacts.py --src outputs --dest .` after "
-                        "drawdown_monitor.py (Run_Context 16d) to upgrade it.")
+            # ⚑ ISA-0547: this is now a REPORTED OUTCOME, not an instruction to a human. The
+            # ordering is handled above; if the row is still not point-in-time the reason is
+            # carried on `screen_capture_status.json` where consistency_check can see it, and
+            # it is NOT upgraded after the fact.
+            log.warning("§Q capture: regime NOT point-in-time (basis=%s). Refresh attempt: %s. "
+                        "This row is left HONESTLY stamped — re-running the capture later "
+                        "would stamp today's regime onto this run_date (ISA-0517)."
+                        % (_cap.get("regime_stamp_basis"), _cap.get("regime_refresh")))
     except Exception as _e:
         _cap["reason"] = f"{type(_e).__name__}: {_e}"
         try:

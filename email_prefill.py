@@ -1154,12 +1154,36 @@ def _s2_standing_lines(analytics=None) -> list:
     else:
         lines.append("Drawdown ladder: state not yet seeded — first monitor run populates (B1)")
     # A21: paused S/O RAISES the bar (+5 conviction, one size notch down); NEVER gates timing.
-    lines.append("Paused-S/O policy (A21): conviction floor +5, starter size one notch down — "
-                 "existing cash deploys whenever a name clears the RAISED bar; deployment "
-                 "timing is NEVER conditioned on S/O resumption.")
+    # ⚑ A21 IS DELETED (D21, 28-Aug-2026). It was written in the vocabulary of two RETIRED
+    # things — the /100 conviction floor and the pre-ladder starter band — so retiring it is a
+    # consequence, not a choice. Its economic job is discharged by demand-pull plus
+    # floor-then-priority fill: scarcity is competition for a capped pool, not a raised bar.
+    # ⚑ THE LINE IS REPLACED, NOT SILENTLY DROPPED. A standing line that simply disappears
+    # reads as a rule that was forgotten; this one says it was retired and names the residual.
+    lines.append("Paused-S/O policy: RETIRED 28-Aug-2026 (D21) — a paused S/O no longer "
+                 "raises the conviction bar and no longer moves the entry size. It never "
+                 "gated deployment timing and still does not. Sizing is position_sizing."
+                 "ladder() keyed on evidence_state, capped (never raised) by thesis_state. "
+                 "Residual recorded as ISA-0466: A21's +5 was the only live tightening on a "
+                 "gate that excluded 0 of 13 names in August, and that is answered by a "
+                 "MEASURED recalibration of the E[r]/T1 hurdle, never by a new +5.")
     return lines
 
 
+# ⚑ RESTORED 02-Sep-2026 (rehearsal, ISA-0551). The D21 edit of 28-Aug-2026 replaced the A21
+# paragraph in `_s2_standing_lines` and, in doing so, deleted THREE lines that were not part
+# of the paragraph: this function's own `return lines`, and the `def` headers of
+# `skeleton_s3` and `skeleton_s4` immediately below it. Two failures, one edit:
+#   (a) SILENT — `_s2_standing_lines` returned the s4 liquidation-tracker DICT in place of
+#       the §2 standing LINES, and §2 rendered whatever a dict degrades to. Nothing raised.
+#   (b) HARD — `skeleton_s3`/`skeleton_s4` became NameErrors, so `email_prefill` CRASHED on
+#       every degraded path (`has_scored == False`, or `build_s3_from_scored` finding no
+#       qualifying case) and wrote no `email_data_[mmm_yyyy].json` at all.
+# The class is R3/R5.8: a text edit inside a function body can silently change what the
+# function RETURNS and what the module DEFINES. Grep cannot see it; the AST can. The
+# mechanism that stops it recurring is `consistency_check.check_undefined_global_calls()`
+# (A18-U), which parses every module in this folder and fails the pre-run on any call to a
+# name the module never binds — the pair that would have caught this on the day.
 def skeleton_s3() -> list:
     return [
         {
@@ -1176,7 +1200,8 @@ def skeleton_s3() -> list:
                 }
             ],
             "paragraphs": [
-                "[Claude fills: full investment case — valuation, growth driver, moat, management, portfolio fit, execution, risks.]"
+                "[Claude fills: full investment case — valuation, growth driver, moat, "
+                "management, portfolio fit, execution, risks.]"
             ],
             "separator_after": False,
         }
@@ -1586,9 +1611,19 @@ def build_vci_sleeve_from_step9(step9: dict) -> dict:
 V21_RENDERED_KEYS = (
     "policy", "golden_fixture", "correlation_coverage", "ladder", "hard_caps",
     "ratchet_eligibility", "risk_monitors", "min_hold_exempt",
+    "risk_contribution",             # ISA-0456, wired 02-Sep-2026 - see below
+
     "fund_active_drawdown",          # §9 / A7, added 26-Aug-2026 (ISA-0440)
     "plan_stability",                # A12 grid, added 26-Aug-2026 (ISA-0440)
     "slot_competition",              # A20 shadow, added 26-Aug-2026 (ISA-0440)
+    # ── P5, added 29-Aug-2026 (ISA-0457 / D18-D19) ──────────────────────────────────────
+    # ⚑ All three are RENDERED, not escalated and not parked. `SUMMARY_ESCALATED` is
+    # admissible only where a key's decision content IS the exception; the ratchet's status
+    # carries positive content every month — WHICH condition binds, and how far off the rule
+    # is from being able to speak at all. Parking them would be the laundering §7.4 forbids.
+    "ratchet",                       # the three-leg D19 verdict and which leg binds
+    "ratchet_inputs",                # what freeze_history could and could not supply
+    "route_attribution",             # NON-GATING record; D18 removed route from the gate
 )
 # ⚑ `slot_candidates` is an INPUT to Step 6.12g, not an output of it. Declared out of scope with
 # its reason rather than left to fail the renderer check — silence is not a decision (R4.6.2).
@@ -1670,6 +1705,85 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
                 % (_gbp(ex.get("stock_max_gbp")),
                    _gbp(ex.get("smallest_declared_position_gbp")),
                    ex.get("smallest_declared_position_basis", "?")))
+
+    # ── 2b. ISA-0490 — WHICH POSITIONS THE CAP ACTUALLY OPENS ───────────────────────────────
+    # ⚑ Until 29-Aug-2026 §2 printed a stock CAP and stopped. A ceiling is not an instruction:
+    # Raj still had to decide which names it bought and at what size, which is the decision the
+    # framework exists to do. `stock_candidates` -> `deployment_sequencer` ->
+    # `position_sizing.allocate` now answer that, and this is where the answer reaches him.
+    pipe = cd.get("pipeline") or {}
+    if pipe.get("state"):
+        out["pipeline_line"] = (
+            "Candidate pipeline %s (%s): %s assessed, %s qualified, %s rejected, %s refused. "
+            "Source: %s. Ranking basis: source_score, then correlation-sequenced."
+            % (pipe.get("state"), pipe.get("binding", "?"),
+               pipe.get("n_candidates", "?"), pipe.get("n_qualifying", "?"),
+               pipe.get("n_rejected", "?"), pipe.get("n_refused", "?"),
+               pipe.get("step9_pre_source", "?")))
+        # ⚑ A REFUSAL IS NOT A REJECTION. A name nobody could adjudicate must never read as a
+        # name the gate turned down (R2.10) — so it gets its own sentence, not a footnote.
+        if (pipe.get("n_refused") or 0) > 0:
+            out["pipeline_refusal_line"] = (
+                "%s candidate(s) could NOT be adjudicated and are EXCLUDED from the demand "
+                "list — they were not rejected. The list below is therefore incomplete and "
+                "the cap is a floor on demand, not a measure of it."
+                % pipe.get("n_refused"))
+            warns.append(out["pipeline_refusal_line"])
+
+    al = cd.get("allocation") or {}
+    if al.get("state") == "OK":
+        arows = []
+        for r in (al.get("rows") or []):
+            if (r.get("allocated_gbp") or 0) <= 0:
+                continue
+            arows.append({"ticker": r.get("ticker"), "gbp": r.get("allocated_gbp"),
+                          "state": r.get("state"), "rung": r.get("rung"),
+                          "target_pct": r.get("target_pct"),
+                          "obligation_gbp": r.get("obligation_gbp")})
+        out["stock_allocation_rows"] = arows
+        out["stock_allocation_line"] = (
+            "Stock deployment: %s opens %d position(s) — %s. Residual %s to funds/MMF. "
+            "Entry floor %s (MIN_ENTRY = 0.80 x STARTER, D16); STARTER %s."
+            % (_gbp(al.get("allocated_gbp")), al.get("n_opened", 0),
+               ", ".join("%s %s (%s)" % (r["ticker"], _gbp(r["gbp"]), r["state"])
+                         for r in arows) or "none",
+               _gbp(al.get("residual_gbp")), _gbp(al.get("min_entry_gbp")),
+               _gbp(al.get("starter_gbp"))))
+        # ⚑ A FILL OBLIGATION IS A CLAIM ON NEXT MONTH'S CAPITAL AND MUST BE SAID OUT LOUD.
+        obs = [r for r in (al.get("rows") or []) if r.get("obligation_gbp")]
+        if obs:
+            out["fill_obligation_line"] = (
+                "FILL OBLIGATION created: %s. Under D17 a sub-target entry carries a FIRST "
+                "CLAIM on the next tranche, ahead of any new position — and it is VOIDED if "
+                "the name degrades before then."
+                % "; ".join("%s %s to reach its %s target"
+                            % (r["ticker"], _gbp(r["obligation_gbp"]), r.get("rung", "?"))
+                            for r in obs))
+            warns.append(out["fill_obligation_line"])
+    elif al.get("state") == "REFUSED":
+        out["stock_allocation_line"] = (
+            "STOCK DEPLOYMENT UNRESOLVED: the sleeve cap stands but WHICH positions it opens "
+            "could not be computed — %s. Do not infer the positions from the cap."
+            % al.get("reason", "no reason given"))
+        warns.append(out["stock_allocation_line"])
+
+    # ── 2c. where the sleeve ENDS UP, which is the number the decision turns on ──────────────
+    pd_ = cd.get("post_deployment") or {}
+    if pd_.get("stock_sleeve_weight_pct") is not None:
+        b = pd_.get("declared_band_pct") or []
+        out["post_deployment_line"] = (
+            "After deployment the stock sleeve is %s%% of NAV (%s of %s), %s%+.2fpp, against a "
+            "declared %s band."
+            % (pd_["stock_sleeve_weight_pct"], _gbp(pd_.get("stock_sleeve_gbp")),
+               _gbp(pd_.get("nav_gbp")), "", (pd_.get("movement_pp") or 0.0),
+               ("%s-%s%%" % (b[0], b[1])) if len(b) == 2 else "?"))
+        if pd_.get("above_band_high"):
+            out["post_deployment_warning"] = (
+                "This takes the stock sleeve ABOVE its declared band high. Under D20 the band "
+                "is a REPORTING measure and demand-pull is deliberately NOT capped by it, so "
+                "this is the declared rule working rather than a breach — but it is a "
+                "PHASE-TRANSITION decision and it is yours, not the framework's.")
+            warns.append(out["post_deployment_warning"])
 
     # ── 3. the freeze, and WHOSE decision its basis is ──────────────────────────────────────
     if cd.get("freeze_basis"):
@@ -1850,6 +1964,22 @@ SUMMARY_RENDERED = {
     "vci_binary_risk_budget":     "build_vci_sleeve_from_step9",
     "vci_deploy_eligible":        "build_vci_sleeve_from_step9",
     "override_log":               "skeleton_s11",                 # s11 override P&L line
+    # ── P0/P1, 28-Aug-2026. §7.4 requires adjudication IN THE SAME CHANGE. ──────────────
+    # ⚑ RENDERED, not escalated and not unadjudicated. These four carry POSITIVE analytical
+    # content — the reader needs the coverage number when nothing is wrong — and
+    # SUMMARY_ESCALATED is admissible only where the decision content IS the exception.
+    "fetch_report":               "build_integrity_block",        # s7 — measurement/coverage
+    "correlation_coverage":       "build_integrity_block",        # s7 — measurement/coverage
+    # ── ISA-0577 / ISA-0581, 03-Sep-2026. RENDERED, not escalated. ─────────────────────
+    # ⚑ These two carry POSITIVE analytical content and the reader needs them when nothing is
+    # wrong — how many names the fetch universe actually covers, and how many symbols the
+    # refresh admitted. Escalating them would say "it warns when it breaks", and the defect
+    # they exist to make visible produced NO output at all for 119 names: 66.9% of the
+    # universe unfetched behind a coverage line reading 59 of 59 measured.
+    "symbol_map_refresh":         "build_integrity_block",        # s7 — measurement/coverage
+    "fetch_universe":             "build_integrity_block",        # s7 — measurement/coverage
+    "execution_ledger":           "build_integrity_block",        # s11 — framework health
+    "integrity_report":           "build_integrity_block",        # s11 — framework health
 }
 
 # key -> the warning-stage prefix that carries its decision content into the pre-run warning
@@ -1858,6 +1988,11 @@ SUMMARY_RENDERED = {
 # content does not belong here — "it warns when it breaks" is not "its output reaches a
 # surface", and treating the two as the same is the misreading ISA-0439 was raised about.
 SUMMARY_ESCALATED = {
+    # ⚑ ISA-0546 (02-Sep-2026). The A18 counts ESCALATE rather than render: their decision
+    # content IS the exception. The individual mismatches already reach Raj through errors[]
+    # and warnings[]; this key exists so the SPLIT between the two is visible, because a run
+    # reporting "0 errors" while quietly carrying warnings is the thing being fixed.
+    "a18_consistency":            "Step 9d",
     "fund_exposure_vectors":      "Step 6.10a",   # age/provenance of a capture, not a finding
     "calibration_files":          "Calibration",  # stale/unstamped file list
     "calibration_fingerprint":    "Calibration",  # live-config hash match
@@ -1868,6 +2003,11 @@ SUMMARY_ESCALATED = {
     "off_framework_trades":       "Step 1.5",     # trades with no framework decision behind them
     "anchor_rederived":           "A19",          # the anchor moved this run
     "anchor_operative_moved":     "A19",
+    # ⚑ ADMISSIBLE HERE, and the distinction is deliberate. The preflight's decision content
+    # IS the exception list: when every declaration check is clean it has nothing to tell the
+    # reader that the §11 integrity queue does not already say. The pre-run emits each failure
+    # with the "PREFLIGHT " prefix into the warning list the review reads before writing.
+    "framework_integrity_preflight": "PREFLIGHT",   # Step 0 — declaration checks
 }
 
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here
@@ -1903,6 +2043,156 @@ SUMMARY_UNADJUDICATED = (
         "universe_price_coverage", "xray_1yr_return_pct", "xray_1yr_benchmark_pct",
         "vci_calibration_state",
 )
+
+
+def build_integrity_block(fetch_report=None, correlation_coverage=None,
+                          integrity_report=None, execution_ledger=None,
+                          symbol_map_refresh=None, fetch_universe=None) -> dict:
+    """P0/P1 -> the §7 (measurement) and §11 (framework health) sub-blocks.
+
+    ⚑ WHY THESE FOUR KEYS ARE RENDERED AND NOT ESCALATED. `SUMMARY_ESCALATED` is admissible
+    only where a key's decision content IS the exception — "it warns when it breaks". Coverage,
+    the correlation basis mix and the ranked finding queue all carry POSITIVE analytical
+    content: the reader needs the number when nothing is wrong. Parking them as escalated, or
+    as unadjudicated, would be exactly the laundering §7.4 forbids — writing *escalated* where
+    the truth is *nobody has built a surface* turns a backlog into a reassuring category.
+
+    ⚑ §7 SAYS THE BASIS OUT LOUD. On a first fetch EVERY observation is `backfilled_not_pit`,
+    so the matrix is admissible for RISK and is NOT point-in-time evidence. That sentence
+    travels with the matrix until the PIT share is material (P1.5).
+
+    ⚑ AND THE STARTER-CAP WARNING DOES NOT SIMPLY DISAPPEAR (spec §8). Once correlation is
+    measured, Step 6.12b's "capped at STARTER because correlation is UNMEASURED" stops firing.
+    It is REPLACED by a positive coverage statement naming names and week counts, so the
+    transition from unmeasured to measured is an OBSERVED EVENT rather than something inferred
+    from a position size that changed."""
+    out, s7, s11 = {}, [], []
+
+    cov = correlation_coverage or {}
+    fr = fetch_report or {}
+
+    # ── §7 — THE UNIVERSE AND THE MAP THAT GATES IT (ISA-0577) ──────────────────────────
+    # ⚑ THE COVERAGE LINE BELOW IS ONLY READABLE AGAINST A DENOMINATOR. Until 03-Sep-2026 it
+    # was denominated by the STORE, so it read 59 of 59 measured while 119 universe names had
+    # no series at all — and that report is what made the absence look like a working
+    # mechanism. This line states what the universe IS and where it came from.
+    fu = fetch_universe or {}
+    if fu:
+        oc = fu.get("origin_counts") or {}
+        s7.append("Fetch universe: %d name(s) — %s. Every name promoted by the monthly growth "
+                  "screeners and by VCI is in it, not only the watchlist and the held sleeve."
+                  % (fu.get("n", 0),
+                     ", ".join("%s %d" % (k, v) for k, v in sorted(oc.items())) or "no origins"))
+    smr = symbol_map_refresh or {}
+    if smr:
+        st = smr.get("state")
+        if st == "DISABLED":
+            s7.append("Symbol map: refresh DISABLED by rollback flag "
+                      "V2_FLAGS['symbol_map_refresh']; the map is whatever is on disk.")
+        elif st == "UNAVAILABLE":
+            s7.append("Symbol map: refresh UNAVAILABLE — %s. \u2691 The map was NOT refreshed, so "
+                      "any name promoted since its last refresh reads UNMEASURED because it was "
+                      "never fetched, not because no data exists." % smr.get("reason"))
+        else:
+            ref = smr.get("refused") or []
+            s7.append("Symbol map (Step 5x): %s — %s admitted this run, %s already present and "
+                      "not re-decided (append-only), %s of %s universe names mapped. %d REFUSED "
+                      "and NAMED%s. \u2691 An entry requires provenance AND a live exchange its "
+                      "declared venue permits: a bare `ONT` answers from NYQ for Onterris, Inc."
+                      % (st, smr.get("n_admitted"), smr.get("n_kept"), smr.get("n_mapped_after"),
+                         smr.get("n_universe"), len(ref),
+                         (" (" + ", ".join(str(r.get("ticker")) for r in ref) + ")")
+                         if ref else ""))
+    if fr:
+        st = fr.get("state")
+        if st in ("FETCH_UNAVAILABLE", "UNAVAILABLE"):
+            s7.append("Return-store fetch: %s — %s. ⚑ The store is UNCHANGED and correlation "
+                      "reads UNMEASURED BECAUSE THE FETCH FAILED, not because no data exists."
+                      % (st, fr.get("reason")))
+        elif st == "DISABLED":
+            s7.append("Return-store fetch: DISABLED by rollback flag "
+                      "V2_FLAGS['stock_return_fetch']; the store is untouched.")
+        else:
+            failed = fr.get("failed") or []
+            s7.append("Return-store fetch: %s — %d name(s) fetched, %d failed%s, %d "
+                      "observation(s) skipped for a missing FX rate (never converted at a "
+                      "neighbouring rate)."
+                      % (st, len(fr.get("fetched") or []), len(failed),
+                         (" (" + ", ".join(f.get("ticker", "?") for f in failed) + ")")
+                         if failed else "",
+                         fr.get("skipped_observations", 0)))
+    if cov:
+        names = cov.get("names") or {}
+        meas = sorted(k for k, v in names.items()
+                      if v.get("status") in ("MEASURED", "MEASURED_SHORT"))
+        # ⚑ THE POSITIVE COVERAGE STATEMENT that replaces the STARTER-cap warning.
+        s7.append("Correlation coverage: %d of %d names MEASURED — %s. %d STALE and EXCLUDED%s."
+                  % (cov.get("n_measured", 0), cov.get("n_names", 0),
+                     ", ".join("%s %dw" % (k, names[k].get("usable_returns", 0))
+                               for k in meas) or "none",
+                     cov.get("n_stale", 0),
+                     (" (" + ", ".join(cov.get("stale_excluded") or []) + ")")
+                     if cov.get("stale_excluded") else ""))
+        # ⚑ ISA-0578 — WHY a name is unmeasured, not merely that it is. "No symbol was ever
+        # declared, so nothing was tried" and "fetched correctly, 44 of 52 weeks" both read
+        # UNMEASURED and both take A2.3's adverse 0.70. They are different facts with different
+        # fixes, and rendering them identically is the R2.10 conflation that let 119 names sit
+        # unfetched behind a report saying 59 of 59 measured.
+        _by = cov.get("unmeasured_by_reason") or {}
+        if _by:
+            _lbl = {"NOT_FETCHED_NO_SYMBOL": "NEVER FETCHED (no verified Yahoo symbol declared)",
+                    "NOT_FETCHED_NO_SERIES": "NEVER WRITTEN (the fetch FAILED)",
+                    "INSUFFICIENT_HISTORY": "fetched, younger than the 52-week minimum"}
+            s7.append("Unmeasured, by cause: "
+                      + "; ".join("%d %s — %s" % (len(v), _lbl.get(k, k), ", ".join(v))
+                                  for k, v in sorted(_by.items()))
+                      + ". \u2691 All three take A2.3's adverse rho of 0.70 and they are NOT "
+                        "the same fact: the first needs a declared symbol, the second a working "
+                        "fetch, the third only time.")
+        pit = cov.get("pit_share")
+        s7.append("Observation basis: %s point-in-time, %s backfilled (PIT share %s). ⚑ %s"
+                  % (cov.get("n_point_in_time"), cov.get("n_backfilled"),
+                     ("%.1f%%" % (pit * 100)) if pit is not None else "UNMEASURED",
+                     cov.get("basis_note", "")))
+        out["coverage_line"] = s7[-2] if len(s7) >= 2 else s7[-1]
+
+    led = execution_ledger or {}
+    if led:
+        rows = led.get("rows") or []
+        rnl = [r["quantity"] for r in rows if r.get("verdict") == "REACHABLE_NOT_LIVE"]
+        ne = [r["quantity"] for r in rows if r.get("verdict") == "NOT_EXECUTED"]
+        s11.append("Execution ledger: %s — %d capital-path function(s) declared, %d live, "
+                   "%d REACHABLE_NOT_LIVE%s, %d never executed%s."
+                   % (led.get("state"), led.get("n_declared", 0),
+                      sum(1 for r in rows if r.get("verdict") == "live_run"),
+                      len(rnl), (" (" + ", ".join(rnl) + ")") if rnl else "",
+                      len(ne), (" (" + ", ".join(ne) + ")") if ne else ""))
+        s11.append("⚑ REACHABLE IS NOT LIVE. A function called only by a test, a selftest or a "
+                   "synthetic probe is reachable and has never run on the capital path — which "
+                   "is why `framework_atlas` flagged none of the twelve 27-Aug findings while "
+                   "reporting 150 zero-caller functions (ISA-0468).")
+
+    rep = integrity_report or {}
+    if rep:
+        q = rep.get("queue") or []
+        s11.append("Integrity queue: %s — %d finding(s), top %d shown, ranked by £ exposure."
+                   % (rep.get("state"), rep.get("n_total", 0), len(q)))
+        for i, f in enumerate(q, 1):
+            s11.append("  %2d. £%s  %-22s %s" % (i, format(f.get("gbp_exposure", 0.0), ",.2f"),
+                                                 f.get("source", "?"),
+                                                 str(f.get("subject", ""))[:70]))
+        # ⚑ NO SILENT CAPS (R4.9): the suppressed count carries its OWN £ exposure, so the
+        # reader can tell "7 suppressed, £0" (noise) from "31 suppressed, £4,120" (a queue).
+        sup = rep.get("suppressed") or {}
+        if sup:
+            s11.append("  " + sup.get("line", ""))
+        atlas = rep.get("atlas") or {}
+        if atlas.get("state") == "STALE":
+            s11.append("  ⚑ framework_atlas is STALE: declares as_of %s, %s days old. %s"
+                       % (atlas.get("as_of"), atlas.get("age_days"), atlas.get("r15_4", "")))
+    out["s7_lines"] = s7
+    out["s11_lines"] = s11
+    return out
 
 
 def build_v21_block(v21: dict) -> dict:
@@ -1964,19 +2254,77 @@ def build_v21_block(v21: dict) -> dict:
 
     ratch = v21.get("ratchet_eligibility") or {}
     if ratch:
+        # ── ISA-0457 / D18 (29-Aug-2026): the population is EVERY OPEN DIRECT-STOCK
+        # position, VCI included — no longer `route == "forward_led"`, which no live producer
+        # ever emitted. This renderer read `n_forward_led` and `forward_led`; leaving it would
+        # have printed a count from a filter that is gone. It is the CONSUMER half of the same
+        # defect, and it surfaced because `ratchet_eligible` kept the old key present-and-None
+        # instead of deleting it, so nothing could silently read 0.
+        _n = ratch.get("n_positions")
+        _names = ratch.get("positions") or []
         if not ratch.get("eligible"):
             out["ratchet_line"] = (
-                "Step-down ratchet: CANNOT FIRE - %d forward-led decision(s) against %d required "
-                "(%s). This is correct, not a loophole: measuring the framework on a book it did "
-                "not assemble is measuring the wrong thing, in either direction."
-                % (ratch.get("n_forward_led", 0), ratch.get("min_required", 3),
-                   ", ".join(ratch.get("forward_led") or []) or "none"))
+                "Step-down ratchet: CANNOT FIRE - %s open direct-stock position(s) against %s "
+                "required (%s). Population basis: %s (D18)."
+                % (_n if _n is not None else "?", ratch.get("min_required", 3),
+                   ", ".join(_names) or "none", ratch.get("basis", "?")))
         else:
-            out["ratchet_line"] = ("Step-down ratchet: population is real (%d forward-led "
-                                   "decisions) and the rule may be evaluated."
-                                   % ratch.get("n_forward_led", 0))
+            out["ratchet_line"] = (
+                "Step-down ratchet: population is sufficient (%s open direct-stock positions, "
+                "basis %s). The three D19 legs may be evaluated."
+                % (_n if _n is not None else "?", ratch.get("basis", "?")))
         out["ratchet_excluded"] = ["%s - %s" % (e.get("ticker"), e.get("reason"))
                                    for e in (ratch.get("excluded") or [])]
+
+    # ── P5 (ISA-0457): the THREE-LEG verdict, and WHICH condition binds this month ──────────
+    # ⚑ "The rule cannot fire" is true every month between now and ~Aug-2027 and informative in
+    # none of them. What Raj needs is the CLOCK: which leg is short, and by how much. A refusal
+    # that does not say why THIS month is ISA-0348's pattern in reporting form.
+    rr = v21.get("ratchet") or {}
+    if rr.get("state"):
+        legs = rr.get("legs") or {}
+        _leg_txt = ", ".join(
+            "%s=%s" % (k, {True: "TRAILING", False: "ok", None: "UNMEASURED"}[legs.get(k)])
+            for k in (rr.get("legs_required") or sorted(legs)))
+        out["ratchet_state_line"] = (
+            "Step-down ratchet: %s. Legs (all three required, D19): %s."
+            % (rr["state"], _leg_txt or "none evaluated"))
+        # ⚑ ACTIVE_UNMEASURED and DOES_NOT_FIRE are DIFFERENT SENTENCES. One says we looked and
+        # the rule did not fire; the other says we could not look, and only the first is
+        # evidence about the sleeve (ISA-0429).
+        if rr["state"] == "ACTIVE_UNMEASURED":
+            out["ratchet_binding_line"] = (
+                "ACTIVE-UNMEASURED, which is NOT 'the sleeve is performing': %s. An unmeasured "
+                "leg is a gap in what we know."
+                % "; ".join(rr.get("unmeasured") or ["no reason given"]))
+        elif rr.get("binding"):
+            out["ratchet_binding_line"] = ("Binding condition(s) this month: %s."
+                                           % "; ".join(rr["binding"]))
+        ew = rr.get("early_warning") or {}
+        if ew.get("state"):
+            out["ratchet_early_warning_line"] = (
+                "6-month early warning: %s (%s). NON-GATING — it changes `fires` in no "
+                "circumstance and is shown so a deterioration is visible before the 12-month "
+                "legs can speak."
+                % (ew["state"], ("%.2fpp vs VUAG" % ew["vs_vuag_pp"])
+                   if ew.get("vs_vuag_pp") is not None else "unmeasured"))
+
+    ri = v21.get("ratchet_inputs") or {}
+    if ri:
+        out["ratchet_inputs_line"] = (
+            "Ratchet clock: %s of %s months measured. Per-month field(s) still missing: %s. "
+            "These are written GOING FORWARD and are NOT backfilled — 2026-07 stays "
+            "measured:false because it cannot be recomputed, and a fabricated boolean is worse "
+            "than a gap (ISA-0429)."
+            % (ri.get("months_measured", "?"), 12,
+               ", ".join(ri.get("fields_missing") or []) or "none"))
+
+    ra = v21.get("route_attribution") or {}
+    if ra.get("counts"):
+        out["route_attribution_line"] = (
+            "Route attribution (RECORD ONLY — D18 removed route from the gate, and this makes "
+            "NO claim about whether a pre-framework position would have qualified): %s."
+            % ", ".join("%s %d" % (k, n) for k, n in sorted(ra["counts"].items()) if n))
 
     mon = v21.get("risk_monitors") or {}
     if mon:
@@ -1990,6 +2338,41 @@ def build_v21_block(v21: dict) -> dict:
             if m.get("verdict") in ("NON_INFORMATIVE", "STOP_ACTING"):
                 warns.append("%s %s: %s" % (k, m.get("verdict"), m.get("detail")))
         out["risk_monitor_rows"] = rows
+
+    # ── THE MEASURED RISK DECOMPOSITION (ISA-0456, wired 02-Sep-2026) ──────────────────────
+    # ⚑ COVERAGE IS THE FIRST FIGURE, NOT A FOOTNOTE — the concentration_clusters precedent. A
+    # risk share quoted over part of the sleeve and read as covering it is how a concentration
+    # goes unnoticed, so the excluded names are printed with the reason they were excluded.
+    # ⚑ `rc_basis` IS PRINTED EVERY MONTH. `w_sigma_proxy` and `covariance_mctr` are two
+    # different instruments, and the proxy OVERSTATES diversifiers and UNDERSTATES the
+    # correlated core — measured on the Aug-2026 book, ONT.L 9.0% -> 2.6% and MU 42.5% -> 50.1%.
+    # A reader who cannot see which instrument produced the number cannot judge it.
+    rcd = v21.get("risk_contribution") or {}
+    if rcd.get("state") == "REFUSED":
+        warns.append("Risk decomposition NOT PRODUCED this month (%s) — M1/M2/M3 below exclude "
+                     "this run entirely (ISA-0456)." % rcd.get("reason"))
+    elif rcd.get("rows"):
+        rcr = []
+        for tk, r in sorted((rcd.get("rows") or {}).items(),
+                            key=lambda kv: -(kv[1].get("rc_share") or 0)):
+            rcr.append({"ticker": tk,
+                        "risk_share_pct": round((r.get("rc_share") or 0) * 100, 1),
+                        "risk_weight_pct": r.get("risk_weight_pct"),
+                        "below_tolerance": r.get("below_tolerance")})
+        out["risk_contribution_rows"] = rcr
+        out["risk_contribution_basis_line"] = (
+            "Risk decomposition basis %s; pair coverage %s; %d of %d direct-stock position(s) "
+            "measured%s."
+            % (rcd.get("rc_basis"), rcd.get("pair_coverage"), len(rcd.get("rows") or {}),
+               len(rcd.get("rows") or {}) + len(rcd.get("unmatched_positions") or []),
+               ("; EXCLUDED and named: " + "; ".join(
+                   "%s (%s)" % (u.get("ticker"), u.get("why"))
+                   for u in (rcd.get("unmatched_positions") or [])))
+               if rcd.get("unmatched_positions") else ""))
+        if rcd.get("rc_basis") != "covariance_mctr":
+            warns.append("Risk decomposition fell back to rc_basis=%r — the correlation-blind "
+                         "proxy biases the D10 replacement nomination toward the names that "
+                         "REDUCE sleeve risk (ISA-0456)." % rcd.get("rc_basis"))
 
     # ── §9 ACTIVE-FUND DRAWDOWN, behind the A7 benchmark precondition (ISA-0440) ────────────
     # ⚑ THE UNMEASURED READINGS ARE PRINTED, and that is a deliberate choice rather than clutter.

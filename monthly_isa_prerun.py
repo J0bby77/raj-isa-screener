@@ -630,6 +630,20 @@ def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
 # Main pipeline
 # ---------------------------------------------------------------------------
 def main():
+    # ⚑⚑ ISA-0589, 03-Sep-2026. THESE SIX ARE BOUND FIRST, BEFORE ANY GUARD CAN APPEND TO THEM.
+    # They used to be initialised 111 lines below, AFTER the ISA-0572 memory-base guard and the
+    # trades-log guard already called `warnings.append(...)`. Python binds `warnings` as a local
+    # for the whole of main(), so those calls raised UnboundLocalError and the pre-run died
+    # before Step 0 with a traceback — on exactly the condition ISA-0572 was built to report
+    # gracefully. R4.12: `log[...] = x` written before `log` exists. The guard was never
+    # exercised because the case it guards was false in the session that wrote it (FC-K).
+    errors: list = []
+    warnings: list = []
+    summary: dict = {}
+    flags: list = []
+    degraded = False   # True -> status downgraded to PARTIAL (step ran but data incomplete)
+    watchlist_promotion_log: dict = {}
+
     parser = argparse.ArgumentParser(
         description="Monthly ISA Pre-Run Orchestrator -- runs day before the main review."
     )
@@ -693,7 +707,29 @@ def main():
     watchlist_config_path   = os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
 
     # Find memory files (optional -- best effort)
+    # ⚑ AN ABSENT MEMORY DIR IS NAMED, NOT DISCOVERED LATER (ISA-0572, 02-Sep-2026).
+    # `_resolve_memory_base()` returns candidates[0] when NOTHING on its list exists, so
+    # MEMORY_BASE can point at a directory that is not there and every `find_memory_file` then
+    # returns None — silently. That is the exact shape of the defect ISA already fixed once
+    # (project_isa_memory_base_fix: "a Windows path in a Linux sandbox read as 'no memory',
+    # silently"), and it is environment-dependent rather than code-dependent: `.auto-memory`
+    # was NOT mounted in the 02-Sep Cowork session, so the same tree degrades or does not
+    # depending on which session runs it. Step 5 loses the VCI watchlist and analytics loses
+    # every purchase date, and both look like ordinary empty results.
+    if not os.path.isdir(MEMORY_BASE):
+        warnings.append(
+            "MEMORY BASE ABSENT: %r does not exist, so every memory read returns None — the "
+            "VCI watchlist (Step 5) and the trades log (purchase dates for analytics) are "
+            "UNAVAILABLE, not empty. Set ISA_MEMORY_DIR to the memory directory and re-run, or "
+            "treat this run's memory-derived fields as UNMEASURED." % MEMORY_BASE)
+        print("  ⚑ MEMORY BASE ABSENT: %s — memory-derived inputs are UNAVAILABLE, not empty"
+              % MEMORY_BASE)
     trades_log_path  = find_memory_file("project_isa_trades_log.md")
+    if not trades_log_path:
+        warnings.append(
+            "project_isa_trades_log.md NOT FOUND under MEMORY_BASE (%s). analytics runs with no "
+            "purchase dates: holding periods, the 182-day min-hold and entry-basis figures "
+            "degrade to UNMEASURED. Absent is not empty (R2.10)." % MEMORY_BASE)
     prior_port_path  = args.prior_portfolio
 
     if not prior_port_path:
@@ -717,12 +753,9 @@ def main():
         candidates = sorted(candidates, key=_mkey)
         prior_port_path = candidates[-1] if candidates else None
 
-    errors   = []
-    warnings = []
-    summary  = {}
-    flags    = []
-    degraded = False   # True -> status downgraded to PARTIAL (step ran but data incomplete)
-    watchlist_promotion_log = {}
+    # ⚑ ISA-0589 — the accumulators are bound at the TOP of main(), not here. A second
+    # initialisation at this point would silently DISCARD everything the guards above appended
+    # (the absent memory base, the missing trades log) — one home per rule (R4.4).
 
     # CAPTURE LAYER ITEM 2 — open the run manifest before any step runs.
     global MANIFEST
@@ -733,6 +766,39 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 1: Extract portfolio
     # ---------------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 0 — FRAMEWORK-INTEGRITY PREFLIGHT (P0.1 / P0.2 / P0.4)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ IT MUST PRECEDE EVERYTHING, and the reason is not tidiness. A declaration failure
+    # should stop a run BEFORE it computes anything on a broken contract. Computing first and
+    # checking afterwards produces a plausible artefact with a red line underneath it — and
+    # the artefact is what gets read.
+    # ⚑ IT IS REPORT-ONLY ON PURPOSE. Phase 0 is new and it fails the build for real reasons
+    # today (two FALSIFIED network claims, one dead vocabulary, one quantity with two
+    # computers). Blocking Raj's pre-run on its first sight of a problem is how a control gets
+    # switched off — the R5.7 lesson the KR5 block in run_tests.py already records. It NAMES
+    # them, every run, so the number is visible and shrinking rather than assumed.
+    print("\n[0] Framework-integrity preflight (declaration checks BEFORE any work)...")
+    _mf_begin("0", "framework_integrity.preflight")
+    try:
+        import framework_integrity as _fi
+        _pf = _fi.preflight(SCRIPT_DIR)
+        summary["framework_integrity_preflight"] = _pf
+        _mf_measure(status=("OK" if _pf["state"] == "OK" else "DEGRADED"),
+                    note="; ".join(_pf["errors"]) or "all declaration checks clean")
+        print("  preflight %s — %s" % (_pf["state"],
+              "; ".join(_pf["errors"])[:300] or "quantity/threshold/negative-claim registers clean"))
+        for _e in _pf["errors"]:
+            warnings.append("PREFLIGHT " + _e)
+    except Exception as _e:                                    # noqa: BLE001
+        # ⚑ AN UNAVAILABLE MONITOR IS REPORTED, NEVER SILENTLY SKIPPED (R4.9). "The check did
+        # not run" and "the check passed" are different facts (R2.10).
+        summary["framework_integrity_preflight"] = {
+            "state": "UNAVAILABLE", "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="preflight unavailable: %s" % _e)
+        warnings.append("PREFLIGHT UNAVAILABLE — %s: %s" % (type(_e).__name__, _e))
+        print("  preflight UNAVAILABLE — %s" % _e)
+
     print(f"\n[1/9] Extracting portfolio from xlsx...")
     _mf_begin("1", "extract_portfolio")
     ok, stdout, stderr = run_script(
@@ -789,6 +855,180 @@ def main():
     txn_data = {}
     _mf_probe_json(portfolio_path, "stocks", "value_gbp", "stocks extracted")
     _mf_probe_json(portfolio_path, "funds", "value_gbp", "funds extracted", add=True)
+
+    print("\n[1b] Importing transaction history...")
+    _mf_begin("1b", "extract_transactions")
+    rc, stdout, stderr = run_script_rc(
+        "extract_transactions",
+        ["--isa-folder", isa_folder, "--ledger", txn_ledger_path,
+         "--out", transactions_path],
+        dry_run=args.dry_run,
+    )
+    if rc == 3:
+        # Policy, not degradation: "missing transaction export = WARN, never ERROR"
+        # (project_isa_transaction_ledger). Declaring it SKIPPED keeps the manifest honest
+        # without manufacturing an alarm Raj cannot act on.
+        _mf_measure(status="SKIPPED", note="no Transaction History export saved this month "
+                                           "-- policy fallback to holdings-delta inference")
+        txn_status = "ABSENT"
+        warnings.append(
+            "Step 1b: no 'Transaction History MM-YYYY.xlsx' found in the ISA "
+            "folder -- execution reconciliation falls back to holdings-delta "
+            "inference, and dealing costs/fill prices are unavailable this month."
+        )
+        print("  No transaction export found -- reconciliation degrades to holdings-delta.")
+    elif rc != 0:
+        txn_status = "ERROR"
+        warnings.append(f"Step 1b (extract_transactions): {stderr or stdout or 'unknown error'}")
+        print(f"  FAILED (non-fatal): {stderr or stdout}")
+    else:
+        print(stdout.strip())
+        if os.path.exists(transactions_path):
+            try:
+                with open(transactions_path, encoding="utf-8") as _tf:
+                    txn_data = json.load(_tf)
+                txn_status = txn_data.get("_meta", {}).get("status", "OK")
+                _ms = txn_data.get("month_summary", {})
+                _br = txn_data.get("broker_reconciliation", {})
+                summary["transactions"] = {
+                    "status":              txn_status,
+                    "source_file":         txn_data.get("_meta", {}).get("source_file"),
+                    "n_trades":            _ms.get("n_trades"),
+                    "buys":                _ms.get("buys"),
+                    "sells":               _ms.get("sells"),
+                    "dealing_costs_gbp":   _ms.get("total_dealing_costs_gbp"),
+                    "net_cash_impact_gbp": _ms.get("net_cash_impact_gbp"),
+                    "distributions_gbp":   _ms.get("distributions_gbp"),
+                    "broker_reconciliation": _br.get("status"),
+                    "ledger_entries":      txn_data.get("ledger_meta", {}).get("total_entries"),
+                    "cost_calibration":    txn_data.get("cost_calibration", {}),
+                }
+                for w in txn_data.get("warnings", []):
+                    warnings.append(f"Step 1b: {w}")
+                if _br.get("status") == "INCOMPLETE_WINDOW":
+                    warnings.append(
+                        "Step 1b: transaction ledger does not yet span the "
+                        "holding period of %d of %d positions -- seed it with a "
+                        "full history export (extract_transactions.py --seed) "
+                        "to enable the completeness check."
+                        % (_br.get("n_missing_from_ledger", 0),
+                           _br.get("n_compared", 0)))
+                elif _br.get("status") == "MISMATCH":
+                    # The ledger disagrees with the broker portfolio file. Either a
+                    # monthly export was never saved, or a row mis-parsed. Surface
+                    # it loudly -- a silently incomplete ledger is worse than none.
+                    flags.append({
+                        "type": "TRANSACTION_LEDGER_INCOMPLETE",
+                        "message": ("Ledger-implied holdings do not match the broker "
+                                    "portfolio file: "
+                                    + "; ".join(
+                                        f"{d['ticker']} broker {d['broker_quantity']} "
+                                        f"vs ledger {d['ledger_quantity']}"
+                                        for d in _br.get("differences", [])[:6])),
+                    })
+            except Exception as exc:
+                txn_status = "ERROR"
+                warnings.append(f"Step 1b: could not read {os.path.basename(transactions_path)}: {exc}")
+
+    # ---------------------------------------------------------------------------
+    # Step 1.5: Reconcile prior recommendations vs broker truth (recommendations != executions).
+    # The system never assumes a prior recommendation was executed; it confirms from THIS month's
+    # actual holdings (broker file). Additive — no-op until a decision ledger exists.
+    # ---------------------------------------------------------------------------
+    if not errors and os.path.exists(portfolio_path):
+        ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
+        if os.path.exists(ledger_path):
+            print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
+            _mf_begin("1.5", "ledger_reconciliation")
+            try:
+                sys.path.insert(0, SCRIPT_DIR)
+                import decision_ledger as _dl_mod
+                with open(portfolio_path, encoding="utf-8") as _pf:
+                    _pd = json.load(_pf)
+                _held = {s.get("ticker"): s.get("quantity") for s in _pd.get("stocks", []) if s.get("ticker")}
+                _prior_h = None
+                if prior_port_path and os.path.exists(prior_port_path):
+                    try:
+                        with open(prior_port_path, encoding="utf-8") as _ppf:
+                            _ppd = json.load(_ppf)
+                        _prior_h = {s.get("ticker"): s.get("quantity") for s in _ppd.get("stocks", []) if s.get("ticker")}
+                    except Exception:
+                        _prior_h = None
+                # Transaction-truth reconciliation (26-Jul-26). Confirms from the
+                # actual dealing record where available -- date, fill price and
+                # dealing cost included -- and degrades to the original
+                # holdings-delta inference when no export exists.
+                _txns = _dl_mod.load_transactions(transactions_path)
+                _res = _dl_mod.reconcile_executions_from_transactions(
+                    ledger_path, _txns, _held, prior_holdings=_prior_h,
+                    date=run_date.isoformat())
+                _rc = _res["counts"]
+                summary["ledger_reconcile"] = _rc
+                summary["ledger_reconcile_source"] = _res["source"]
+                summary["ledger_reconcile_confirmed"] = _res["confirmed"]
+                if _res["off_framework"]:
+                    # Trades with no matching recommendation: acted outside the
+                    # framework. Holdings-diffing cannot see these reliably.
+                    summary["off_framework_trades"] = _res["off_framework"]
+                    flags.append({
+                        "type": "OFF_FRAMEWORK_TRADE",
+                        "message": "; ".join(
+                            f"{o['type']} {o['ticker']} {o['quantity']} @ {o['price']} "
+                            f"on {o['date']} (GBP {o['amount_gbp']}) -- no ledger recommendation"
+                            for o in _res["off_framework"][:6]),
+                    })
+                print(f"  Reconciled prior recommendations vs broker truth: {_rc}")
+                # ── Fix Pack A13 (P2): OVERRIDE LOG — broker-truth changes NOT matching a ledger
+                # recommendation. Two classes: (a) a recommendation marked not_executed (Raj
+                # declined the framework), (b) a holdings change with NO ledger entry (Raj acted
+                # outside the framework). Each gets 3/6/12-mo counterfactual slots that this
+                # step prices on later runs from live prices (zero new fetch — pre-run prices
+                # everything). Appended to run_context summary.override_log; email §11 renders
+                # the one-line cumulative summary; trades-log section mirrors it (P7d: a closed
+                # position with a blank reason renders "reason UNBACKFILLED", never
+                # "reconciled and closed").
+                try:
+                    _led = _dl_mod.load_ledger(ledger_path)
+                    _ov = []
+                    _stamp = run_date.isoformat()
+                    _recs = {str(e.get("ticker", "")).upper(): e for e in _led.get("entries", [])}
+                    for _e3 in _led.get("entries", []):
+                        if _e3.get("execution_status") == "not_executed" and \
+                           str(_e3.get("executed_confirmed_date") or _stamp)[:7] == _stamp[:7]:
+                            _ov.append({"date": _stamp, "ticker": _e3.get("ticker"),
+                                        "action": f"declined_{_e3.get('decision')}",
+                                        "framework_state": _e3.get("scores_at_decision"),
+                                        "gates": _e3.get("gates_at_decision"),
+                                        "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                        "pnl_vs_framework_gbp": None})
+                    if _prior_h is not None:
+                        for _t4, _q4 in _held.items():
+                            if _t4 not in _prior_h and _t4 not in _recs:
+                                _ov.append({"date": _stamp, "ticker": _t4,
+                                            "action": "bought_outside_framework",
+                                            "framework_state": None, "gates": None,
+                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                            "pnl_vs_framework_gbp": None})
+                        for _t4 in _prior_h:
+                            if _t4 not in _held and not any(
+                                    e.get("decision") == "sell" and
+                                    str(e.get("ticker", "")).upper() == _t4
+                                    for e in _led.get("entries", [])):
+                                _ov.append({"date": _stamp, "ticker": _t4,
+                                            "action": "sold_outside_framework",
+                                            "framework_state": None, "gates": None,
+                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
+                                            "pnl_vs_framework_gbp": None})
+                    if _ov:
+                        summary["override_log"] = _ov
+                        print(f"  A13: {len(_ov)} override(s) logged: "
+                              f"{[o['ticker'] + ':' + o['action'] for o in _ov]}")
+                except Exception as _oex:
+                    warnings.append(f"A13 override log skipped: {_oex}")
+            except Exception as _ex:
+                warnings.append(f"Step 1.5 (ledger reconcile) skipped: {_ex}")
+                print(f"  WARNING: {_ex}")
+
     # ── Step 1b-2 — cash statement (05-Aug-2026, register H13) ───────────────────────
     # The ISA allowance was wrong by GBP5,000 for four months because contributions were being
     # read from the Transaction History, which is a DEALING record and contains no cash
@@ -844,6 +1084,671 @@ def main():
         _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
         warnings.append(f"Step 1b-2 (extract_cash_statement): {type(_e).__name__}: {_e}")
         print(f"  FAILED (non-fatal): {_e}")
+    # ---------------------------------------------------------------------------
+    # Step 2: Extract X-Ray
+    # ---------------------------------------------------------------------------
+    _mf_probe_json(txn_ledger_path, "entries", "date", "transaction ledger entries")
+    print(f"\n[2/9] Extracting X-Ray from PDF...")
+    _mf_begin("2", "extract_xray")
+    ok, stdout, stderr = run_script(
+        "extract_xray",
+        ["--isa-folder", isa_folder, "--out", xray_path],
+        dry_run=args.dry_run,
+    )
+    if not ok:
+        msg = stderr or stdout or "Unknown error in extract_xray"
+        # X-Ray is important but not fatal -- warn and continue
+        warnings.append(f"Step 2 (extract_xray): {msg}")
+        print(f"  WARNING: {msg}")
+        # Create minimal xray JSON so downstream steps don't crash
+        if not os.path.exists(xray_path):
+            with open(xray_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "_meta": {"month_label": month_label, "report_date": "unknown"},
+                    "_warning": "X-Ray extraction failed -- Claude must retrieve manually at Step 6",
+                    "asset_allocation": {}, "country_exposure": [], "world_regions": {},
+                    "sector_weights": {}, "trailing_returns": {}, "fund_holdings": [],
+                }, f, indent=2)
+    else:
+        print(stdout.strip())
+        valid, vmsg = validate_json_output(xray_path, ["_meta", "sector_weights"])
+        if not valid:
+            warnings.append(f"Step 2 validation: {vmsg}")
+            print(f"  Validation WARNING: {vmsg}")
+        else:
+            print(f"  Validation: {vmsg}")
+            if not errors:  # only if portfolio step succeeded
+                with open(xray_path, encoding="utf-8") as f:
+                    xray_data = json.load(f)
+                tr = xray_data.get("trailing_returns", {})
+                if "1yr" in tr:
+                    r = tr["1yr"]
+                    summary["xray_1yr_return_pct"] = r.get("portfolio_pct")
+                    summary["xray_1yr_benchmark_pct"] = r.get("benchmark_pct")
+
+    # ---------------------------------------------------------------------------
+    # Step 3: Analytics
+    # ---------------------------------------------------------------------------
+    _mf_probe_json(xray_path, "country_exposure", "equity_pct", "X-Ray country rows")
+    print(f"\n[3/9] Running portfolio analytics...")
+    _mf_begin("3", "portfolio_analytics")
+    if errors:
+        print("  SKIPPED -- portfolio extraction failed (required input).")
+        warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
+    else:
+        analytics_args = [
+            "--portfolio", portfolio_path,
+            "--out",       analytics_path,
+        ]
+        # H10 (06-Aug-2026): the overlap check now reads the PUBLISHED X-Ray look-through table
+        # instead of asking for a hand calculation. Passed here rather than defaulted inside
+        # portfolio_analytics so that an absent X-Ray shows up as a stated absence in the run
+        # output rather than as a quietly missing section.
+        if xray_path and os.path.exists(xray_path):
+            analytics_args += ["--xray", xray_path]
+        else:
+            warnings.append(
+                "Step 3 (analytics): X-Ray JSON not available, so the H10 look-through overlap "
+                "check is ABSENT this run. It is NOT falling back to the retired hand-calc, "
+                "which reported AVGO 4.04% against a published 4.31%.")
+        if prior_port_path:
+            analytics_args += ["--prior-portfolio", prior_port_path]
+        if trades_log_path:
+            analytics_args += ["--trades-log", trades_log_path]
+        else:
+            # 01-Aug-26: previously a SILENT omission. Without the trades log,
+            # parse_trades_log_positions() returns [] and the stock-sleeve return is
+            # computed with no purchase dates, and the Step 8 thesis-break conditions are
+            # absent -- with nothing printed. Degraded data must be visible.
+            warnings.append(
+                "Step 3 (analytics): project_isa_trades_log.md not found at MEMORY_BASE "
+                f"({MEMORY_BASE}) -- stock-sleeve return computed WITHOUT purchase dates and "
+                "Step 8 thesis-break conditions are unavailable. Treat sleeve return as indicative.")
+            print(f"  WARNING: trades log not found -- sleeve return degraded. MEMORY_BASE={MEMORY_BASE}")
+            degraded = True
+
+        ok, stdout, stderr = run_script(
+            "analytics", analytics_args, dry_run=args.dry_run
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in portfolio_analytics"
+            errors.append(f"Step 3 (analytics): {msg}")
+            print(f"  FAILED: {msg}")
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(
+                analytics_path,
+                ["_meta", "fund_drift_table", "phase_status", "capital_summary"]
+            )
+            if not valid:
+                errors.append(f"Step 3 validation: {vmsg}")
+                print(f"  Validation FAILED: {vmsg}")
+            else:
+                print(f"  Validation: {vmsg}")
+                with open(analytics_path, encoding="utf-8") as f:
+                    ana_data = json.load(f)
+                phase = ana_data.get("phase_status", {})
+                summary["phase_status"] = phase.get("status")
+                summary["rebalancing_candidates"] = len(ana_data.get("rebalancing_candidates", []))
+                flags.extend(ana_data.get("flags", []))
+
+    # ---------------------------------------------------------------------------
+    # Step 4: Update watchlist (promotion/removal/score-delta)
+    # ---------------------------------------------------------------------------
+    _mf_probe_json(analytics_path, "fund_drift_table.rows", "ticker", "drift rows")
+    print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
+    _mf_begin("4", "update_watchlist")
+    if errors:
+        print("  SKIPPED -- prior step(s) failed.")
+        warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
+    elif not os.path.exists(watchlist_config_path):
+        warnings.append("Step 4 (update_watchlist): watchlist_tickers.json not found -- skipping.")
+        print("  WARNING: watchlist_tickers.json not found -- skipped.")
+    else:
+        ok, stdout, stderr = run_script(
+            "update_watchlist_py",
+            [
+                "--portfolio-data", portfolio_path,
+                "--watchlist-json", watchlist_config_path,
+                "--inv-dir",        SCRIPT_DIR,
+                "--out-json",       watchlist_config_path,
+            ],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in update_watchlist"
+            warnings.append(f"Step 4 (update_watchlist): {msg}")
+            print(f"  WARNING: {msg}")
+        else:
+            print(stdout.strip())
+            try:
+                import json as _json
+                for line in stdout.splitlines():
+                    if line.strip().startswith("{") and "additions" in line:
+                        watchlist_promotion_log = _json.loads(line)
+                        break
+            except Exception:
+                pass
+            if watchlist_promotion_log:
+                n_add = len(watchlist_promotion_log.get("additions", []))
+                n_rem = len(watchlist_promotion_log.get("removals", []))
+                n_upd = len(watchlist_promotion_log.get("score_updates", []))
+                print(f"  Watchlist updated: +{n_add} added | -{n_rem} removed | {n_upd} score updates")
+            # Guardrail: a SUMMARY tab that parses to zero rows is a silent parser failure.
+            n_files = len(watchlist_promotion_log.get("xlsx_files_read", []))
+            n_rows  = watchlist_promotion_log.get("rows_parsed", 0)
+            # ── WP-G (29-Jul-2026): CALIBRATION PREFLIGHT ────────────────────────────────────
+            # The pre-run consumes SUMMARY tabs produced by screens that ran under whatever
+            # calibration was live AT THAT TIME. On 29-Jul-2026 the forward-axis bucket weights
+            # changed (price .70 -> thirds) while the next screen was not until 07-Aug, so the
+            # 01-Aug pre-run would have ranked candidates under a config that no longer existed
+            # and nothing could detect it. This checks every ingested workbook's calibration
+            # stamp against live config, and the pool size against its own trailing median.
+            # WARN-ONLY by design: it annotates and degrades, it never halts the review.
+            try:
+                import calibration_guard as _cg
+                _live = _cg.config_fingerprint()
+                summary["calibration_fingerprint"] = _live["hash"]
+                # WP-M7 (29-Jul-2026): pass the REAL stamps. This was hardcoded to None, so the
+                # guard could only ever return UNSTAMPED and the whole fingerprint mechanism was
+                # inert at the one place it mattered. update_watchlist now carries the per-file
+                # calibration stamp off the SUMMARY rows.
+                _stamp_map = watchlist_promotion_log.get("calibration_stamps") or {}
+                _stale_files, _unstamped_files = [], []
+                for _fn, _sts in _stamp_map.items():
+                    for _st in (_sts or [None]):
+                        _v = _cg.compare_fingerprint({"hash": _st, "params": {}} if _st else None,
+                                                     live=_live)["verdict"]
+                        if _v == "STALE":
+                            _stale_files.append(f"{_fn} ({_st})")
+                        elif _v == "UNSTAMPED":
+                            _unstamped_files.append(_fn)
+                summary["calibration_files"] = {"stale": _stale_files,
+                                                "unstamped": _unstamped_files,
+                                                "checked": len(_stamp_map)}
+                if _stale_files:
+                    warnings.append(
+                        "Step 4 CALIBRATION STALE: %d ingested workbook(s) were scored under a "
+                        "SUPERSEDED calibration (live %s): %s. Their SUMMARY ranking is not "
+                        "current -- restamp via restamp_screener_outputs.py + restamp_write.py "
+                        "before trusting the candidate pool."
+                        % (len(_stale_files), _live["hash"], ", ".join(_stale_files[:6])))
+                    print("  CALIBRATION STALE in %d file(s): %s"
+                          % (len(_stale_files), ", ".join(_stale_files[:4])))
+                if _unstamped_files:
+                    print("  Calibration: %d file(s) predate the fingerprint (unverifiable): %s"
+                          % (len(_unstamped_files), ", ".join(_unstamped_files[:4])))
+                _one = sorted({_st for _sts in _stamp_map.values() for _st in (_sts or []) if _st})
+                _pf = _cg.preflight("PRERUN_POOL", n_rows,
+                                    stamped_fingerprint=({"hash": _one[0], "params": {}}
+                                                         if len(_one) == 1 else None),
+                                    store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT))
+                summary["calibration_preflight"] = _pf
+                if _pf.get("attention_required"):
+                    warnings.append("Step 4 CALIBRATION: " + _pf["headline"][:400])
+                    print("  CALIBRATION ATTENTION: " + _pf["headline"][:200])
+                else:
+                    print(f"  Calibration preflight OK (live {_live['hash']}, pool {n_rows}).")
+                _cg.record_pool("PRERUN_POOL", run_date.isoformat(), n_rows,
+                                store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT),
+                                fingerprint_hash=_live["hash"])
+            except Exception as _cgerr:
+                warnings.append(f"Step 4 calibration preflight unavailable (non-fatal): {_cgerr}")
+                print(f"  WARNING: calibration preflight unavailable: {_cgerr}")
+            if n_files == 0:
+                warnings.append("Step 4 guardrail: no Growth Stock Analysis xlsx found in working dir or month archive -- no candidates ingested.")
+                degraded = True
+            elif n_rows == 0:
+                warnings.append(f"Step 4 guardrail: {n_files} analysis file(s) read but 0 candidate rows parsed -- check SUMMARY tab headers.")
+                degraded = True
+            for _k in ("sleeve_phantom_removed", "sleeve_added", "held_removed_from_watchlist", "held_removed_from_vci"):
+                _v = watchlist_promotion_log.get(_k, [])
+                if _v:
+                    print(f"  Reconcile [{_k}]: {[x.get('ticker') for x in _v]}")
+
+    # ---------------------------------------------------------------------------
+    # Step 5: Sync VCI watchlist from memory file + refresh Part A scores
+    # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "watchlist entries")
+    print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
+    _mf_begin("5", "sync_vci_watchlist")
+    vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
+    _vci_existing = 0
+    try:
+        with open(watchlist_config_path, encoding="utf-8") as _f:
+            _vci_existing = len((json.load(_f) or {}).get("vci_watchlist") or [])
+    except Exception:
+        _vci_existing = 0
+    if args.skip_vci_sync:
+        print(f"  SKIPPED (--skip-vci-sync) -- reusing {_vci_existing} existing vci_watchlist entr(y/ies).")
+        if _vci_existing == 0:
+            warnings.append("Step 5 SKIPPED via --skip-vci-sync but watchlist_tickers.json holds "
+                            "NO vci_watchlist entries -- run one pass without the flag.")
+            degraded = True
+    elif not vci_md_path:
+        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found at resolved MEMORY_BASE -- VCI watchlist not synced. (Held names are still removed at Step 4.)")
+        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped. MEMORY_BASE={MEMORY_BASE}")
+        degraded = True
+    elif not os.path.exists(watchlist_config_path):
+        warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
+        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
+    else:
+        ok, stdout, stderr = run_script(
+            "sync_vci_watchlist",
+            [
+                "--watchlist-md",   vci_md_path,
+                "--watchlist-json", watchlist_config_path,
+                "--inv-dir",        SCRIPT_DIR,
+                "--portfolio-data", portfolio_path,
+            ],
+            dry_run=args.dry_run,
+        )
+        if not ok:
+            msg = stderr or stdout or "Unknown error in sync_vci_watchlist"
+            warnings.append(f"Step 5 (sync_vci_watchlist): {msg}")
+            print(f"  WARNING: {msg}")
+        else:
+            print(stdout.strip())
+
+    # ---------------------------------------------------------------------------
+    # Step 6: Fetch watchlist + stock sleeve metrics (yfinance pull)
+    # ---------------------------------------------------------------------------
+    _mf_probe_json(watchlist_config_path, "vci_watchlist", "ticker", "VCI entries")
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 5y — POPULATE THE WEEKLY GBP TOTAL-RETURN STORE (P1 / ISA-0455)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ PLACED AFTER STEP 5 AND BEFORE STEP 6.10, and both halves are load-bearing.
+    # AFTER Step 5, because the fetch universe is the union of the store, the broker sleeve,
+    # the watchlist, the vci_watchlist and the candidate_pool — and Steps 4 and 5 are what
+    # write the last three. BEFORE Step 6.10, because the capital router consumes correlation
+    # through the candidate pipeline: a fetch AFTERWARDS would size September's capital on
+    # August's matrix.
+    #
+    # ⚑ UNTIL 28-Aug-2026 THIS STEP DID NOT EXIST, because a live docstring said Yahoo was
+    # network-blocked from both the container and the device shell. It was FALSE, and the
+    # framework's own ISA-0411 had recorded a 400-ticker Yahoo screen five days before that
+    # sentence was written. The store had never been written to; every name read UNMEASURED;
+    # A2.3's adverse default of 0.70 capped every position at STARTER against a measured mean
+    # pairwise correlation of 0.19. Nothing was broken. Nobody fetched.
+    #
+    # ⚑ stdlib `urllib` only — no yfinance, no pip, no tmpfs, no stub on PYTHONPATH. Step 6
+    # below still needs yfinance for its own metrics; this step deliberately does not.
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 5x — REFRESH THE TICKER -> YAHOO SYMBOL MAP (P1.2c / ISA-0577)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ IMMEDIATELY BEFORE 5y, AND THAT POSITION IS THE WHOLE FIX. 5y fetches only names the
+    # map resolves; the map is what 5y's universe is intersected with. A refresh AFTER the
+    # fetch would admit September's names in time for October.
+    #
+    # ⚑ UNTIL 03-Sep-2026 THIS STEP DID NOT EXIST AND `build_symbol_map()` HAD ZERO CALLERS ON
+    # DISK. `stock_symbol_map.json` was a hand-run artefact stamped 2026-08-28 while
+    # `build_universe` grew with every screener and VCI promotion. Measured on 03-Sep: 119 of
+    # 178 universe names (66.9%) unmapped -> dropped by build_universe(strict=False) -> never
+    # fetched -> UNMEASURED -> A2.3's adverse rho of 0.70 -> capped at STARTER. HRMY and NVDA,
+    # the two names September's ranker put at the top, were both in the 119, and 116 of the 119
+    # already carried index-screen provenance that would admit them. Nothing was broken.
+    # NOBODY BUILT THE MAP. That is FC-E, this project's second failure class.
+    #
+    # ⚑ IT ADMITS, IT NEVER GUESSES. An entry requires provenance AND a live exchange that the
+    # declared venue permits — a bare `ONT` answers from NYQ for "Onterris, Inc." and published
+    # GBP 18,471.20 against a broker truth of GBP 997.92. Names it cannot verify are REFUSED,
+    # NAMED in the warning list, and written to `symbol_map_refusals.json`, which
+    # consistency_check reads: a name may be refused, it may never be refused SILENTLY.
+    print("\n[5x] Symbol map refresh (stock_price_fetch.refresh_symbol_map)...")
+    _mf_begin("5x", "symbol_map_refresh")
+    try:
+        import stock_price_fetch as _spf5x
+        _mr = _spf5x.refresh_symbol_map()
+        summary["symbol_map_refresh"] = _mr
+        if _mr.get("state") == "DISABLED":
+            _mf_measure(status="OK",
+                        note="rollback: V2_FLAGS['symbol_map_refresh'] is False")
+            print("  DISABLED — the map is whatever is on disk (rollback flag)")
+        else:
+            for _r in (_mr.get("refused") or []):
+                warnings.append(
+                    "Step 5x SYMBOL REFUSED %s (%s) — %s FIX: %s"
+                    % (_r.get("ticker"), _r.get("source") or "no source",
+                       (_r.get("reason") or "")[:220], _r.get("fix") or
+                       "declare the intended listing in stock_price_fetch.SYMBOL_MAP"))
+            _n_after = _mr.get("n_unmapped_after")
+            _mf_measure(rows_in=_mr.get("n_unmapped_before"),
+                        rows_out=_mr.get("n_admitted"),
+                        status=("OK" if not _n_after else "DEGRADED"),
+                        note=("%s: %s admitted, %s kept unchanged (append-only, R4.8), %s "
+                              "REFUSED and NAMED; %s of %s universe names now mapped"
+                              % (_mr.get("state"), _mr.get("n_admitted"), _mr.get("n_kept"),
+                                 _mr.get("n_refused"), _mr.get("n_mapped_after"),
+                                 _mr.get("n_universe"))))
+            print("  %s — %s admitted, %s refused, %s/%s universe names mapped"
+                  % (_mr.get("state"), _mr.get("n_admitted"), _mr.get("n_refused"),
+                     _mr.get("n_mapped_after"), _mr.get("n_universe")))
+    except Exception as _e:                                    # noqa: BLE001
+        # ⚑ NAMED, NEVER SWALLOWED. A failed refresh leaves the map exactly as it was and 5y
+        # behaves as it did before this stage existed — but the run must say so, because
+        # "the map did not grow" and "there was nothing to add" are different facts (R2.10).
+        summary["symbol_map_refresh"] = {"state": "UNAVAILABLE",
+                                         "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="symbol map refresh unavailable: %s" % _e)
+        warnings.append("STEP 5x UNAVAILABLE — %s: %s. The symbol map was NOT refreshed; any "
+                        "name promoted since its last refresh will read UNMEASURED because it "
+                        "was never fetched, not because no data exists."
+                        % (type(_e).__name__, _e))
+        print("  UNAVAILABLE — %s" % _e)
+
+    print("\n[5y] Weekly GBP total-return store (stock_price_fetch, batched, stdlib only)...")
+    _mf_begin("5y", "stock_price_fetch")
+    try:
+        import stock_price_fetch as _spf
+        import stock_return_store as _srs
+        # ⚑ ISA-0580. THE COVERAGE DENOMINATOR IS THE UNIVERSE, NEVER THE STORE. `coverage()`
+        # defaults its ticker list to the names already IN the store, so a name that was never
+        # fetched is INVISIBLE: on 02-Sep-2026 this reported "59 names, 59 measured, 0
+        # unmeasured" while 119 universe names had no series at all, and that report is what
+        # made the absence of HRMY and NVDA look like a working mechanism. A metric whose
+        # denominator is its own numerator's source can only ever report 100%.
+        _uni5y = _spf.build_universe(strict=False)
+        _uni_tickers = list(_uni5y["tickers"]) + list(_uni5y.get("unmapped") or [])
+        _fr, _guard = None, 0
+        # ⚑ ISA-0578. THE GUARD IS DERIVED FROM THE UNIVERSE, never a magic 12. At BATCH_SIZE 20
+        # a fixed 12 capped the fetch at 240 names and the loop exited with `remaining` > 0 and
+        # NO warning — a silent partial waiting for the universe to grow into it (FC-I).
+        _max_batches = max(4, -(-len(_uni_tickers) // max(1, _spf.BATCH_SIZE)) + 3)
+        while _guard < _max_batches:             # the caller loops to ALL_DONE (P1.7)
+            _guard += 1
+            _fr = _spf.run()
+            if _fr.get("state") in ("ALL_DONE", "DISABLED", "FETCH_UNAVAILABLE"):
+                break
+        # ⚑ ISA-0578 — the declared refusals travel WITH the coverage report, so a name that
+        # was NEVER FETCHED and a name that is simply younger than 52 weeks stop rendering
+        # identically. Both read UNMEASURED and both take A2.3's adverse 0.70; they are
+        # different facts with different fixes (R2.10).
+        _cov = _srs.coverage(_srs.load(), _uni_tickers, _spf.load_declared_refusals())
+        summary["fetch_report"] = _fr
+        summary["correlation_coverage"] = _cov
+        summary["fetch_universe"] = {"n": len(_uni_tickers), "basis": _uni5y.get("basis"),
+                                     "origin_counts": {}}
+        for _t, _o in (_uni5y.get("origin") or {}).items():
+            summary["fetch_universe"]["origin_counts"][_o] = \
+                summary["fetch_universe"]["origin_counts"].get(_o, 0) + 1
+        if _fr.get("state") == "FETCH_UNAVAILABLE":
+            # ⚑ STEP 6.12b MUST NAME THE FETCH FAILURE AS THE CAUSE, never the absence of
+            # data. "We could not fetch" and "there is nothing to fetch" are different facts,
+            # and the second is what the framework believed for months (R2.10).
+            warnings.append("FETCH_UNAVAILABLE — %s. The store is UNCHANGED; correlation reads "
+                            "UNMEASURED because the FETCH FAILED, not because no data exists."
+                            % _fr.get("reason"))
+            _mf_measure(status="DEGRADED", note="fetch unavailable: %s" % _fr.get("reason"))
+        elif _fr.get("state") == "DISABLED":
+            _mf_measure(status="OK", note="rollback: V2_FLAGS['stock_return_fetch'] is False")
+        else:
+            for _f in _fr.get("failed", []):
+                warnings.append("FETCH FAILED %s — %s (history untouched; a fetch failure must "
+                                "never look like a delisting)"
+                                % (_f.get("ticker"), _f.get("reason")))
+            # ⚑ ISA-0578. THE REFUSALS REACH THE WARNING LIST. `run()` returns
+            # `unmapped_refused` precisely so the caller can name them, and this loop ignored
+            # it: 119 names were dropped on 02-Sep-2026 with zero warnings emitted. A producer
+            # that names its refusals is only half the contract — R4.9 requires the READER to
+            # count what it cannot match.
+            for _u in (_fr.get("unmapped_refused") or []):
+                warnings.append(
+                    "FETCH SKIPPED %s — no verified Yahoo symbol, so it is NOT FETCHED and its "
+                    "correlation reads UNMEASURED because nothing was tried, not because no "
+                    "data exists (R2.10). Step 5x names the reason and the one-line fix." % _u)
+            # ⚑ AND THE LOOP MUST SAY IT DID NOT FINISH. Exiting on the batch guard with names
+            # still queued is a silent partial (FC-I).
+            if _fr.get("state") != "ALL_DONE":
+                warnings.append(
+                    "STEP 5y DID NOT COMPLETE — state %s after %d batch(es) with %s name(s) "
+                    "still queued of %s. The store holds a PARTIAL refresh this run; the "
+                    "resume file carries the remainder."
+                    % (_fr.get("state"), _guard, _fr.get("remaining"), _fr.get("n_universe")))
+            _mf_measure(rows_out=_cov["n_names"],
+                        status=("OK" if _cov["n_measured"] else "DEGRADED"),
+                        note=("%d/%d names measured; pit_share %s; %d stale excluded"
+                              % (_cov["n_measured"], _cov["n_names"], _cov["pit_share"],
+                                 _cov["n_stale"])))
+        print("  %s — %s/%s names MEASURED, %s stale, pit_share %s"
+              % (_fr.get("state"), _cov.get("n_measured"), _cov.get("n_names"),
+                 _cov.get("n_stale"), _cov.get("pit_share")))
+    except Exception as _e:                                    # noqa: BLE001
+        summary["fetch_report"] = {"state": "UNAVAILABLE",
+                                   "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="stock_price_fetch unavailable: %s" % _e)
+        warnings.append("STEP 5y UNAVAILABLE — %s: %s" % (type(_e).__name__, _e))
+        print("  UNAVAILABLE — %s" % _e)
+
+    print(f"\n[6/9] Fetching watchlist & sleeve metrics (yfinance)...")
+    _mf_begin("6", "fetch_watchlist_metrics")
+    if not os.path.exists(watchlist_config_path):
+        warnings.append("Step 6: watchlist_tickers.json not found -- skipping metrics pull. "
+                        "Create it in Investment Analysis folder.")
+        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
+        # Create empty placeholder so downstream steps don't crash
+        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                       "_warning": "watchlist_tickers.json missing -- metrics not pulled"}, f)
+    elif errors:
+        print("  SKIPPED -- prior step(s) failed.")
+        warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
+        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"_meta": {"month_label": month_label}, "tickers": {}}, f)
+    elif _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path):
+        # IDEMPOTENCE (31-Jul-2026). The pre-run prose runs this orchestrator TWICE — once to
+        # build the base data, once after the metrics fetch to rebuild Steps 7-9 on live scores.
+        # Re-fetching on the second pass costs ~20s of the 45s bash budget and can only make the
+        # data staler-or-equal, so a populated metrics file that already covers the CURRENT
+        # ticker set short-circuits Step 6. `--skip-fetch` forces the same path unconditionally.
+        _reason = _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path)
+        print(f"  SKIPPED -- {_reason} (existing metrics preserved).")
+        if not os.path.exists(watchlist_metrics_path):
+            # --skip-fetch on a cold folder (the fast first pass of the two-phase pre-run):
+            # downstream steps require the file to exist, so seed the documented placeholder.
+            with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+                json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                           "_warning": "--skip-fetch: metrics not pulled on this pass"}, f)
+            print("  Placeholder metrics file written (fetch deferred to the standalone STEP 2).")
+        try:
+            with open(watchlist_metrics_path, encoding="utf-8") as f:
+                _wm = json.load(f)
+            summary["watchlist_tickers_scored"] = len(_wm.get("tickers", {}))
+            summary["in_window_names"] = _wm.get("_meta", {}).get("in_window_tickers", [])
+            print("  Scored " + str(summary["watchlist_tickers_scored"])
+                  + " tickers (from existing file) | In-window: "
+                  + str(summary["in_window_names"]))
+        except Exception as _e:
+            warnings.append(f"Step 6 skip: could not summarise existing metrics ({_e}).")
+    else:
+        ok, stdout, stderr = run_script(
+            "fetch_watchlist",
+            [
+                "--watchlist",    watchlist_config_path,
+                "--out",          watchlist_metrics_path,
+                "--month-label",  month_label,
+            ],
+            dry_run=args.dry_run,
+        )
+        # Watchlist pull is non-fatal (yfinance may fail for some tickers)
+        if not ok:
+            msg = stderr or stdout or "Unknown error in fetch_watchlist_metrics"
+            # ARCHITECTURE (corrected 31-Jul-2026): the metrics fetch is LOCAL-PRIMARY. It runs
+            # in this sandbox via yfinance on tmpfs; Composio is fallback-only and there is NO
+            # out-of-band transfer step. The previous note here claimed the opposite and told the
+            # operator to "run the Composio metrics pull + transfer", contradicting the pre-run
+            # prompt. It also made a REAL failure look benign: fetch_watchlist_metrics raised
+            # NameError on FETCH_WORKERS at every invocation (undefined name, fixed 31-Jul), and
+            # this branch reported it as "local yfinance unavailable (expected)". A fetch failure
+            # is now always surfaced as a WARNING naming the actual error.
+            # Reusing stale metrics is still permitted (better than nothing) but never silent.
+            metrics_n, missing = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
+            if metrics_n > 0:
+                print(f"  WARNING: local metrics fetch FAILED ({msg.splitlines()[0][:160]}) "
+                      f"-- falling back to the existing metrics file ({metrics_n} tickers).")
+                warnings.append(f"Step 6 (fetch_watchlist) FAILED: {msg.splitlines()[0][:200]} "
+                                f"-- reusing pre-existing metrics ({metrics_n} tickers). Scores may "
+                                f"be stale; investigate before relying on Step 9 output.")
+                degraded = True
+                if missing:
+                    warnings.append(f"Step 6: reused metrics do not cover {len(missing)} current "
+                                    f"name(s), which will be unscored: {missing[:20]}"
+                                    + (" ..." if len(missing) > 20 else ""))
+            else:
+                warnings.append(f"Step 6 (fetch_watchlist): {msg} AND no usable metrics file present "
+                                "-- downstream scoring will be empty. Re-run the local fetch "
+                                "(see the pre-run task STEP 2 recipe); use the Composio fallback "
+                                "only if the local sandbox cannot reach Yahoo at all.")
+                print(f"  WARNING: {msg} (no metrics available)")
+                degraded = True
+                if not os.path.exists(watchlist_metrics_path):
+                    with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
+                        json.dump({"_meta": {"month_label": month_label}, "tickers": {},
+                                   "_warning": "local fetch failed, no prior metrics: " + msg}, f)
+        else:
+            print(stdout.strip())
+            valid, vmsg = validate_json_output(watchlist_metrics_path, ["_meta", "tickers"])
+            if not valid:
+                warnings.append("Step 6 validation: " + vmsg)
+                print("  Validation WARNING: " + vmsg)
+            else:
+                with open(watchlist_metrics_path, encoding="utf-8") as f:
+                    wm_data = json.load(f)
+                n_scored = len(wm_data.get("tickers", {}))
+                in_window = wm_data.get("_meta", {}).get("in_window_tickers", [])
+                summary["watchlist_tickers_scored"] = n_scored
+                summary["in_window_names"] = in_window
+                print("  Scored " + str(n_scored) + " tickers | In-window: " + str(in_window))
+
+    # ---------------------------------------------------------------------------
+    # Step 6.5: VCI forward-led re-price (§11.3 / §14.2)
+    #   The VCI run scored/ranked on the 2nd-Sunday price; price drifts by the Saturday
+    #   pre-run, so a stale fv_asymmetry is a WRONG deployment gate. Recompute fv_asymmetry
+    #   and VCI_Source_Score for every vci_watchlist name at the CURRENT (Saturday) live price
+    #   via vci_deploy_eval, re-rank by VCI_Source_Score, and write the fields back into
+    #   watchlist_tickers.json so Step 8 (step9_pre_builder) consumes fresh, not stale, values.
+    #   ACS is NOT re-scored here (stickier); only the price-driven terms refresh.
+    # ---------------------------------------------------------------------------
+    # Step 6 coverage — tickers priced / tickers the current watchlist needs. This is the
+    # number STOXX600 publishes a ranking on without saying so; here it is declared.
+    try:
+        _n6, _miss6 = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
+        _need6 = _n6 + len(_miss6)
+        _mf_measure(rows_in=_need6 or None, rows_out=_n6,
+                    coverage=(_n6 / _need6) if _need6 else None,
+                    note=(f"missing: {_miss6[:12]}" if _miss6 else None))
+    except Exception as _e6:
+        _mf_measure(note=f"coverage probe failed: {_e6}")
+
+    print(f"\n[6.5] VCI forward-led re-price (fv_asymmetry / VCI_Source_Score at live price)...")
+    _mf_begin("6.5", "vci_reprice")
+    if not os.path.exists(watchlist_config_path):
+        print("  SKIPPED -- watchlist_tickers.json not found.")
+    else:
+        try:
+            if SCRIPT_DIR not in sys.path:
+                sys.path.insert(0, SCRIPT_DIR)
+            import vci_deploy_eval as _vde
+            try:
+                import scoring_config as _sc
+            except Exception:
+                _sc = None
+
+            with open(watchlist_config_path, encoding="utf-8") as f:
+                _wt = json.load(f)
+            _vci = _wt.get("vci_watchlist", []) or []
+
+            # live-price lookup from the Step-6 metrics pull (current_price), with fallbacks
+            _px = {}
+            if os.path.exists(watchlist_metrics_path):
+                try:
+                    with open(watchlist_metrics_path, encoding="utf-8") as f:
+                        _wm = json.load(f)
+                    for _t, _row in (_wm.get("tickers", {}) or {}).items():
+                        _v = (_row or {}).get("current_price")
+                        if _v is None:
+                            _pr = (_row or {}).get("_prices") or {}
+                            _v = _pr.get("current") or _pr.get("last") or _pr.get("close")
+                        if _v is not None:
+                            _px[str(_t).upper()] = float(_v)
+                except Exception as _e:
+                    print(f"  NOTE: could not read live prices from metrics ({_e}); using stored fallbacks.")
+
+            def _base_t(t):
+                t = str(t or "").upper()
+                return t.split(".")[0] if "." in t else t
+
+            def _price_lookup(t):
+                tu = str(t or "").upper()
+                if tu in _px:
+                    return _px[tu]
+                bt = _base_t(tu)
+                for k, v in _px.items():
+                    if _base_t(k) == bt:
+                        return v
+                # last-resort fallback: the entry's own stored price / entry level
+                for e in _vci:
+                    if str(e.get("ticker", "")).upper() == tu:
+                        return e.get("price") or e.get("entry_level")
+                return None
+
+            if _vci:
+                # normalise the acs field vci_deploy_eval expects (entries store acs_score)
+                for e in _vci:
+                    if e.get("acs") is None:
+                        e["acs"] = e.get("acs_score")
+                # v2: portfolio value for E5 liquidity sizing (best-effort; None -> no cap)
+                _pv = None
+                try:
+                    if os.path.exists(portfolio_path):
+                        with open(portfolio_path, encoding="utf-8") as _pf:
+                            _pd = json.load(_pf)
+                        _pv = _pd.get("total_value") or _pd.get("portfolio_value") \
+                              or (_pd.get("summary", {}) or {}).get("total_value")
+                except Exception:
+                    _pv = None
+                _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv)
+                # v2 E4: sleeve binary risk-budget headroom over the deploy-eligible set
+                try:
+                    import vci_risk_budget as _vrb
+                    _open = [e for e in _ranked if e.get("deploy_eligible")]
+                    summary["vci_binary_risk_committed"] = _vrb.committed_risk(_open)
+                    summary["vci_binary_risk_budget"] = getattr(_sc, "VCI_SLEEVE_BINARY_RISK_BUDGET", None) if _sc else None
+                except Exception:
+                    pass
+                # write recomputed deployability fields back, preserve one canonical order
+                for i, e in enumerate(_ranked, 1):
+                    e["vci_rank"] = i
+                _wt["vci_watchlist"] = _ranked
+                if not args.dry_run:
+                    with open(watchlist_config_path, "w", encoding="utf-8") as f:
+                        json.dump(_wt, f, indent=2, default=str)
+                _elig = [e for e in _ranked if e.get("deploy_eligible")]
+                print(f"  Re-priced {len(_ranked)} VCI name(s); {len(_elig)} deploy-eligible. "
+                      f"Top by VCI_Source_Score: "
+                      + ", ".join(f"{e.get('ticker')}({e.get('vci_source_score')})" for e in _ranked[:3]))
+                summary["vci_repriced"] = len(_ranked)
+                summary["vci_deploy_eligible"] = [e.get("ticker") for e in _elig]
+            else:
+                print("  No VCI watchlist names to re-price.")
+
+            # surface calibration state (read-only) if the learning module has produced one
+            _cal_path = getattr(_sc, "VCI_CALIBRATION_STATE_PATH", None) if _sc else None
+            if _cal_path and os.path.exists(_cal_path):
+                try:
+                    with open(_cal_path, encoding="utf-8") as f:
+                        _cal = json.load(f)
+                    summary["vci_calibration_state"] = {
+                        "calibration_gate_passed": _cal.get("calibration_gate_passed", False),
+                        "resolved_outcomes": _cal.get("resolved_outcomes"),
+                        "weights": _cal.get("weights"),
+                    }
+                    print(f"  VCI calibration state: gate_passed="
+                          f"{_cal.get('calibration_gate_passed', False)} (read-only, advisory).")
+                except Exception:
+                    pass
+        except Exception as e:
+            warnings.append(f"Step 6.5 (VCI re-price): {e} -- VCI names carry forward stale deployability fields.")
+            print(f"  WARNING: VCI re-price failed ({e}); carrying forward stored fields.")
 
     # ── Step 6.05 — Fund Action Stack (register C4 + C5, 05-Aug-2026) ────────────────
     # The fund sleeve is 85.1% of the ISA and had no ownership floor and no opportunity-cost
@@ -1191,268 +2096,6 @@ def main():
                 note=("; ".join(_s609) if _s609 else "no source-side measure produced a result"))
     print("  " + ("; ".join(_s609) if _s609 else "no result"))
 
-    # ── Step 6.10 — THE MARGINAL-POUND ROUTER (20-Aug-2026) ───────────────────────────────────
-    # ⚑ WHY THIS STEP EXISTS. `capital_destination` was built 16-Aug-2026, closed five register
-    # items, carried 22 green assertions — and was called by NOTHING. Same shape as the three
-    # modules Step 6.09 rescued the day before, and the framework's second failure class: an
-    # absent execution that reported success. ISA-0386 / ISA-0387 / ISA-0388 / ISA-0390 all land
-    # inside this module, so wiring it is part of shipping them; a router nobody runs allocates
-    # nothing and would have gone stale exactly as quietly.
-    #   6.10a  the per-fund exposure vectors the router's C1 reads (ISA-0392) — a REPORT of the
-    #          artefact's age and provenance. It is NOT refreshed here: the capture needs network
-    #          and this run has none, and a step that pretends to refresh is worse than one that
-    #          declares it cannot.
-    #   6.10b  the destination itself: sleeve split, ranking, allocation, idle capital priced.
-    #   6.10c  the waiting-room / recall position (ISA-0390).
-    print("\n[6.10] Marginal-pound router: sleeve split, estimation-free ranking, recall leg...")
-    _mf_begin("6.10", "capital_destination + fund_exposure_vectors + waiting_room")
-    _s610 = []
-    try:
-        import fund_exposure_vectors as _fev
-        _fv = json.load(open(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json"))) \
-            if os.path.exists(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json")) else None
-        if _fv is None:
-            warnings.append(
-                "Step 6.10a: fund_exposure_vectors.json is ABSENT, so the router's C1 runs at "
-                "DECLARED-MANDATE resolution (one-hot on the fund's own benchmark) instead of "
-                "look-through. That is a degradation, not a failure — but ISA-0333 / ISA-0160 / "
-                "ISA-0328 stay BLOCKED until the capture is re-run (ISA-0392). The capture needs "
-                "network and this run has none.")
-        else:
-            _sp = _fv.get("as_of_spread_days") or {}
-            summary["fund_exposure_vectors"] = {
-                "n_funds": len(_fv.get("vectors") or {}), "stale": _fv.get("stale"),
-                "age_days": _sp, "corroboration": _fv.get("corroboration"),
-                "share_class_substitutions": _fv.get("share_class_substitutions")}
-            _s610.append("exposure vectors %d funds, %d-%d days old"
-                         % (len(_fv.get("vectors") or {}), _sp.get("min", -1), _sp.get("max", -1)))
-            if _fv.get("stale"):
-                warnings.append(
-                    "Step 6.10a EXPOSURE VECTORS STALE for %s (older than %d days). The router "
-                    "still ranks on them; a stale vector is a fact about the capture, not a "
-                    "reason to fall back silently (ISA-0392)."
-                    % (", ".join(_fv["stale"]), _fev.STALE_AFTER_DAYS))
-            if _fv.get("share_class_substitutions"):
-                warnings.append(
-                    "Step 6.10a EXPOSURE VECTORS use a DIFFERENT SHARE CLASS for %s — same "
-                    "portfolio, different fee or distribution line. Named so it is a known "
-                    "substitution rather than an assumed identity (R6.1)."
-                    % ", ".join(_fv["share_class_substitutions"]))
-    except Exception as _e:
-        warnings.append(f"Step 6.10a (fund_exposure_vectors): {type(_e).__name__}: {_e}")
-        print(f"  fund_exposure_vectors FAILED (non-fatal): {_e}")
-
-    try:
-        import capital_destination as _cd
-        _cdr = _cd.build(out_path=os.path.join(SCRIPT_DIR,
-                                               f"capital_destination_{month_label}.json"))
-        if _cdr.get("state") == "OK":
-            _sl, _fa = _cdr["sleeve_split"], _cdr["fund_allocation"]
-            # ── ISA-0447 (26-Aug-2026): ONE HOME FOR THE SUMMARY, AND IT IS THE MODULE ───
-            # ⚑ The shape of `summary.capital_destination` is now declared by
-            # `capital_destination.summary_for_run_context()`, not assembled inline here. It was
-            # inline for six days and NOTHING RENDERED IT (ISA-0447): the email now does, and an
-            # email contract with a dict literal buried in the orchestrator is a contract with
-            # code no test can reach. The module that owns the document owns its summary (R4.4).
-            summary["capital_destination"] = _cd.summary_for_run_context(_cdr)
-            _s610.append("router %s, stock cap GBP %.2f [%s], funds %s, idle GBP %.2f"
-                         % (_cdr["state"], _sl.get("stock_max_gbp") or 0.0,
-                            (_sl.get("scaling_freeze") or {}).get("basis"), _fa.get("state"),
-                            _fa.get("unallocated_gbp") or 0.0))
-            if (_sl.get("executability") or {}).get("state") == "NOT_EXECUTABLE":
-                warnings.append(
-                    "Step 6.10b STOCK CAP IS NOT EXECUTABLE: GBP %.2f is below the smallest "
-                    "position size the framework declares (GBP %.2f, %s). A cap that cannot open "
-                    "a position is GBP 0 of executable capital reported as a non-zero number "
-                    "(ISA-0387)."
-                    % (_sl["executability"]["stock_max_gbp"],
-                       _sl["executability"]["smallest_declared_position_gbp"] or 0.0,
-                       _sl["executability"]["smallest_declared_position_basis"]))
-            if (_cdr["residual"] or {}).get("unallocated_gbp", 0) > 0:
-                warnings.append(
-                    "Step 6.10b IDLE CAPITAL GBP %.2f (%.1f%% of what was offered), priced at GBP "
-                    "%s/yr net of the waiting-room yield. Idle capital is a DECISION with a stated "
-                    "price, never a default."
-                    % (_cdr["residual"]["unallocated_gbp"],
-                       _cdr["residual"].get("pct_of_capital_offered") or 0.0,
-                       _cdr["residual"].get("annual_opportunity_cost_net_of_waiting_room_gbp")))
-            _db = _cdr.get("declared_bands") or {}
-            if _db.get("not_repaired"):
-                warnings.append(
-                    "Step 6.10b DECLARED PER-FUND BAND BREACH not repaired: %s. Band restoration "
-                    "is C5, the tie-break (Raj, 19-Aug-2026 / ISA-0386), so a breach is repaired "
-                    "only if the fund also wins on C1-C4. Whether a declared band is a preference "
-                    "or a limit has NOT been decided — stated, not resolved by implementation."
-                    % ", ".join(_db["not_repaired"]))
-            if not (_cdr["verification"]["parity"] or {}).get("pass"):
-                warnings.append("Step 6.10b ROUTER PARITY FAILED: inert criteria %s"
-                                % (_cdr["verification"]["parity"].get("inert_criteria")))
-            # ── 6.10d — A12 PLAN STABILITY (ISA-0440) ───────────────────────────────────
-            # ⚑ The plan is a LEXICOGRAPHIC ranking, and a lexicographic ranking over near-tied
-            # inputs can flip on noise. A12's point is that the instability must be VISIBLE
-            # rather than inferred, so the grid runs every month whether or not it finds any.
-            try:
-                _ps12 = _cd.plan_stability(base_doc=_cdr)
-                summary["plan_stability"] = {
-                    "state": _ps12.get("state"), "unstable": _ps12.get("unstable"),
-                    "reading": _ps12.get("reading"),
-                    "grid": [{k: g[k] for k in ("perturbation", "pounds_churned_gbp",
-                                                "churn_share_of_plan", "receiver_set_changed",
-                                                "order_changed")} for g in _ps12.get("grid", [])],
-                    "not_an_input": {k: v["read_by_code"] for k, v in
-                                     (_ps12.get("not_an_input") or {})
-                                     .get("quantities", {}).items()},
-                    "stock_side": _ps12.get("routed_to_stock_side"),
-                }
-                _s610.append("plan stability %s" % ("UNSTABLE: " + ", ".join(_ps12["unstable"])
-                                                    if _ps12.get("unstable") else "stable"))
-                if _ps12.get("unstable"):
-                    warnings.append(
-                        "Step 6.10d PLAN UNSTABLE under %s: the capital plan changes its "
-                        "DESTINATIONS or their order under a perturbation this small, which "
-                        "means the lexicographic ranking is resolving noise rather than "
-                        "economics (A12). %s" % (", ".join(_ps12["unstable"]),
-                                                 _ps12.get("reading") or ""))
-                _nai = [k for k, v in (_ps12.get("not_an_input") or {})
-                        .get("quantities", {}).items() if v.get("read_by_code")]
-                if _nai:
-                    warnings.append(
-                        "Step 6.10d: %s now READ by the capital router. A12 was built on the "
-                        "measured fact that they were not, and the grid reports them as "
-                        "NOT_AN_INPUT — that statement is now false and the grid must start "
-                        "perturbing them for real." % ", ".join(sorted(_nai)))
-            except Exception as _e:                                # noqa: BLE001
-                warnings.append(f"Step 6.10d (plan_stability): {type(_e).__name__}: {_e}")
-        else:
-            warnings.append("Step 6.10b: capital_destination %s" % _cdr.get("state"))
-    except Exception as _e:
-        warnings.append(f"Step 6.10b (capital_destination): {type(_e).__name__}: {_e}")
-        print(f"  capital_destination FAILED (non-fatal): {_e}")
-
-    try:
-        import waiting_room as _wr
-        _park = _wr.outstanding()
-        _fz = _wr.freeze_state()
-        summary["waiting_room"] = {"parked_gbp": _park.get("parked_gbp"),
-                                   "lots_live": _park.get("lots_live"),
-                                   "recall": _fz.get("state"),
-                                   # ISA-0447: the REASON travels with the state. "BARRED" with
-                                   # no reason is a verdict the reader cannot check.
-                                   "recall_reason": _fz.get("reason")}
-        _s610.append("waiting room GBP %.2f parked, recall %s"
-                     % (_park.get("parked_gbp") or 0.0, _fz.get("state")))
-        if _fz.get("state") in ("BARRED", "REFUSED") and (_park.get("parked_gbp") or 0) > 0:
-            warnings.append(
-                "Step 6.10c PARKED CAPITAL IS LOCKED IN: GBP %.2f sits in funds as a TIMING "
-                "decision and the recall leg is %s — %s Parking under an active freeze is not a "
-                "reversible decision (ISA-0390 x ISA-0387)."
-                % (_park["parked_gbp"], _fz["state"], _fz.get("reason", "")))
-    except Exception as _e:
-        warnings.append(f"Step 6.10c (waiting_room): {type(_e).__name__}: {_e}")
-        print(f"  waiting_room FAILED (non-fatal): {_e}")
-
-    _mf_measure(status=("OK" if _s610 else "DEGRADED"),
-                note=("; ".join(_s610) if _s610 else "the marginal-pound router produced no result"))
-    print("  " + ("; ".join(_s610) if _s610 else "no result"))
-
-    # ── Step 6.11 — THE REGIONAL M LAYER AND THE FUND STRUCTURAL E[r] (20-Aug-2026) ───────────
-    # ⚑ 6.11a regional_m (ISA-0160)  ·  6.11b fund_expected_return (ISA-0328).
-    # Placed BETWEEN 6.10 (which produces the per-fund exposure vectors) and 6.08 (which consumes
-    # the result), because that is the dependency order. Wired in the SAME change that built them:
-    # `capital_destination` closed five items, carried 22 green assertions and was called by
-    # nothing for four days, and `strategic_allocation.attribution` was built and unreached for
-    # four days more. A module the monthly run never invokes is not part of the framework however
-    # many assertions it passes.
-    # ⚑ BOTH SHIP BEHAVIOUR-NEUTRAL. With the net buyback yield undeclared every M_k is UNMEASURED
-    # and every fund E[r] refuses; `fund_expected_return.OPERATIVE` is False and
-    # `return_architecture.ER_BASIS_OPERATIVE` is untouched. Nothing here moves a verdict today.
-    print("\n[6.11] Regional M layer and fund structural E[r]...")
-    _mf_begin("6.11", "regional_m + fund_expected_return")
-    _s611 = []
-    try:
-        import regional_m as _rm
-        _rmr = _rm.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
-        st = _rmr.get("state")
-        if st == "NO_CAPTURE":
-            warnings.append(
-                "Step 6.11a: regional_m_inputs.json is ABSENT — every M_k is UNMEASURED and every "
-                "consumer refuses. This is the honest state, not a failure, but the layer is doing "
-                "nothing until the capture is restored (assisted Cowork step; the device has no "
-                "network).")
-        elif st == "DISABLED":
-            warnings.append("Step 6.11a: regional_m is DISABLED by its rollback constant.")
-        else:
-            _wi = _rmr.get("world_identity") or {}
-            _s611.append("regional_m %s, world identity %s" % (st, _wi.get("verdict")))
-            _blocked = ((_rmr.get("m") or {}).get("blocked_cells") or [])
-            if _blocked:
-                warnings.append(
-                    "Step 6.11a REGIONAL M PARTIAL: %d of 7 cells UNMEASURED (%s). %s"
-                    % (len(_blocked), ", ".join(_blocked), _rmr.get("partial_reason", "")[:240]))
-            for _c in ((_rmr.get("age") or {}).get("stale_cells") or []):
-                warnings.append(
-                    "Step 6.11a REGIONAL M CAPTURE STALE for cell %s (older than %d days). The "
-                    "refresh is an ASSISTED Cowork step, never a pre-run step." % (_c, _rm.STALE_AFTER_DAYS))
-            for _c in ((_rmr.get("corroboration") or {}).get("breaches") or []):
-                warnings.append(
-                    "Step 6.11a CORROBORATION BREACH on cell %s — more than %.1fpp from the "
-                    "declared external capital-market assumption. Published, never blended (R6.2)."
-                    % (_c, _rm.CORROBORATION_TOL_PP))
-            _pl = _rmr.get("plausibility") or {}
-            if _pl.get("state") == "MEASURED" and not _pl.get("within_band"):
-                warnings.append(
-                    "Step 6.11a PLAUSIBILITY: implied real PER-SHARE growth %.2f%% against a "
-                    "measured historical reference of %.2f%%. Above the reference means the "
-                    "construction is GENEROUS; far above it is the signature of the ISA-0405 "
-                    "aggregate-vs-per-share double-count."
-                    % (_pl["implied_real_per_share_growth_pct"],
-                       _pl["historical_reference"]["value"]))
-            summary["regional_m"] = {
-                "state": st, "world_identity": _wi.get("verdict"),
-                "blocked_cells": _blocked,
-                "specification": (_rmr.get("m") or {}).get("operative_specification")}
-    except Exception as _e:                                        # noqa: BLE001
-        warnings.append(f"Step 6.11a (regional_m): {type(_e).__name__}: {_e}")
-
-    try:
-        import fund_expected_return as _fer
-        _ferr = _fer.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
-        if _ferr.get("state") == "DISABLED":
-            warnings.append("Step 6.11b: fund_expected_return is DISABLED by its rollback constant.")
-        else:
-            _sl = _ferr.get("sleeve") or {}
-            _un = _ferr.get("unmeasured") or []
-            _s611.append("fund E[r] %s (%d/%d measured)"
-                         % (_ferr.get("state"), len(_ferr.get("funds") or {}) - len(_un),
-                            len(_ferr.get("funds") or {})))
-            if _un:
-                warnings.append(
-                    "Step 6.11b FUND E[r] PARTIAL: %d of %d funds UNMEASURED. Every one NAMES what "
-                    "it is blocked on and none is given a sleeve average (R2.10)." % (len(_un), len(_ferr.get("funds") or {})))
-            if _sl.get("state") == "MEASURED":
-                warnings.append(
-                    "Step 6.11b FUND SLEEVE FORWARD E[r] %.2f%% over %.1f%% covered weight. ⚑ This "
-                    "is PUBLISHED, not OPERATIVE: return_architecture.ER_BASIS_OPERATIVE is "
-                    "unchanged and no verdict moves on it (D-13's null-behaviour-delta pattern)."
-                    % (_sl["structural_er_pct"], 100 * _sl["covered_weight"]))
-            _od = _ferr.get("ordering_diagnostic") or {}
-            if _od.get("state") == "MEASURED" and _od.get("dilution_pp") is not None:
-                warnings.append(
-                    "Step 6.11b ORDERING DIAGNOSTIC (NON-BINDING): the marginal pound's "
-                    "money-weighted forward E[r] is %.2f%% against a sleeve of %.2f%% (%+.2fpp). "
-                    "Not evidence the ordering is wrong — it is what C1 does when it closes the US "
-                    "underweight. One month is an anecdote; a persistent sign belongs to ISA-0333."
-                    % (_od["money_weighted_er_pct"], _od["sleeve_er_pct"], _od["dilution_pp"]))
-            summary["fund_expected_return"] = {
-                "state": _ferr.get("state"), "operative": _ferr["_meta"]["operative"],
-                "sleeve_pct": _sl.get("structural_er_pct"), "n_unmeasured": len(_un)}
-    except Exception as _e:                                        # noqa: BLE001
-        warnings.append(f"Step 6.11b (fund_expected_return): {type(_e).__name__}: {_e}")
-
-    _mf_measure(status=("OK" if _s611 else "DEGRADED"),
-                note=("; ".join(_s611) if _s611 else "the regional M layer produced no result"))
-    print("  " + ("; ".join(_s611) if _s611 else "no result"))
-
     # ── Step 6.12 — THE V2.1 STACK (26-Aug-2026, ISA-0354/0355/0356/0357) ─────────────────────
     # ⚑ WHY THIS STEP EXISTS AT ALL. This project's dominant failure mode is an absent execution
     # that reports success — six recorded occurrences, the last at FUNCTION granularity
@@ -1516,7 +2159,23 @@ def main():
     try:
         import correlation_engine as _ce
         import stock_return_store as _srs
-        _cov = _srs.coverage(_srs.load())
+        # ⚑ ISA-0580 — the UNIVERSE is the denominator here too, and it is read from what Step
+        # 5y actually fetched against rather than recomputed, so the two surfaces cannot drift.
+        _cov_tickers = None
+        try:
+            import stock_price_fetch as _spf612
+            _u612 = _spf612.build_universe(strict=False)
+            _cov_tickers = list(_u612["tickers"]) + list(_u612.get("unmapped") or [])
+        except Exception as _e612:                                 # noqa: BLE001
+            warnings.append("Step 6.12b: could not rebuild the fetch universe (%s: %s) — "
+                            "coverage falls back to the STORE as its denominator, which can "
+                            "only report 100%%. Named, not silent (ISA-0580)."
+                            % (type(_e612).__name__, _e612))
+        try:
+            _ref612 = _spf612.load_declared_refusals()
+        except Exception:                                          # noqa: BLE001
+            _ref612 = None
+        _cov = _srs.coverage(_srs.load(), _cov_tickers, _ref612)
         _v21["correlation_coverage"] = _cov
         if _cov["n_names"] == 0:
             warnings.append(
@@ -1555,27 +2214,94 @@ def main():
     except Exception as _e:                                        # noqa: BLE001
         warnings.append(f"Step 6.12c (position_sizing): {type(_e).__name__}: {_e}")
 
-    # 6.12d — lifecycle. The s3 ratchet's population gate is reported EVERY run, because
-    # "the rule cannot fire yet" is a fact Raj should see rather than infer from silence.
+    # 6.12d — lifecycle. P5 (ISA-0457 / D18-D19), rebuilt 29-Aug-2026.
+    #
+    # ⚑⚑ WHAT CHANGED AND WHY IT MATTERS. This block used to read the population from
+    # `summary.trades_log.decisions` and filter `route == "forward_led"`. Nothing in the live
+    # tree emits that route value, and when the trades log was absent the run printed
+    # "ratchet population unavailable" — so on every real run the rule reported an ABSENCE
+    # where the honest answer was a MEASUREMENT. Under D18 the population is every open
+    # direct-stock position (VCI included), which comes from `portfolio_data` and is ALWAYS
+    # available, so the rule is now evaluated every month rather than skipped.
+    #
+    # ⚑ AND IT PRINTS **WHICH CONDITION BINDS**. "Cannot fire" without "because leg (b) has 1
+    # of 12 months" is ISA-0348's pattern in reporting form — a statement that is true every
+    # month and informative in none of them.
     try:
         import retention as _ret
-        _decisions = []
+        _pos = []
         try:
-            _tl = summary.get("trades_log") or {}
-            _decisions = _tl.get("decisions") or []
-        except Exception:
-            _decisions = []
-        if _decisions:
-            _el = _ret.ratchet_eligible(_decisions)
+            _pd_doc = _portfolio_doc if "_portfolio_doc" in dir() else None
+        except Exception:                                          # noqa: BLE001
+            _pd_doc = None
+        if not _pd_doc:
+            try:
+                import capital_destination as _cd_pop
+                _pd_doc = _cd_pop._load_portfolio()
+            except Exception:                                      # noqa: BLE001
+                _pd_doc = None
+        _pos = list((_pd_doc or {}).get("stocks") or [])
+
+        _legs_in = {"months_measured": None}
+        try:
+            _cf = json.load(open(os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"),
+                                 encoding="utf-8"))
+            _legs_in = _ret.ratchet_inputs_from_freeze_history(_cf.get("freeze_history"))
+        except Exception as _e2:                                   # noqa: BLE001
+            warnings.append("Step 6.12d: `sleeve_counterfactual.json` unreadable (%s) — the "
+                            "three ratchet legs are UNMEASURED, which is NOT the same as "
+                            "'the sleeve is performing' (ISA-0429)." % type(_e2).__name__)
+
+        if _pos:
+            _sw = None
+            try:
+                _sm = (_pd_doc or {}).get("summary") or {}
+                _sw = (float(_sm["stock_sleeve_value_gbp"])
+                       / float(_sm["total_value_gbp"]) * 100.0)
+            except Exception:                                      # noqa: BLE001
+                _sw = None
+            _rr = _ret.evaluate_ratchet(
+                positions=_pos, current_sleeve_weight_pct=_sw,
+                months_measured=_legs_in.get("months_measured"),
+                months_trailing=_legs_in.get("months_trailing"),
+                sleeve_vs_vuag_pp=_legs_in.get("sleeve_vs_vuag_pp"),
+                sleeve_vs_vuag_exlargest_pp=_legs_in.get("sleeve_vs_vuag_exlargest_pp"),
+                largest_position_ticker=_legs_in.get("largest_position_ticker"),
+                early_warning_pp=_legs_in.get("early_warning_pp"))
+            _el = _rr["eligibility"]
             _v21["ratchet_eligibility"] = _el
-            if not _el["eligible"]:
+            _v21["ratchet"] = _rr
+            _v21["ratchet_inputs"] = _legs_in
+            _v21["route_attribution"] = _rr["route_attribution"]
+            # ⚑ ACTIVE_UNMEASURED and DOES_NOT_FIRE get DIFFERENT sentences. One says we
+            # looked and the rule did not fire; the other says we could not look.
+            if _rr["state"] == "ACTIVE_UNMEASURED":
                 warnings.append(
-                    "Step 6.12d STEP-DOWN RATCHET CANNOT FIRE: %d forward-led decision(s) "
-                    "against %d required. %s"
-                    % (_el["n_forward_led"], _el["min_required"], _el["detail"]))
-            _s612.append("ratchet population %d forward-led" % _el["n_forward_led"])
+                    "Step 6.12d STEP-DOWN RATCHET IS ACTIVE-UNMEASURED (not 'does not fire'): "
+                    "population %s of %s (%s) is satisfied, but %s. An unmeasured leg is a gap "
+                    "in what we know, not evidence the sleeve is working (ISA-0429). Earliest "
+                    "the 12-month leg can be satisfied is ~Aug-2027."
+                    % (_el["n_positions"], _el["min_required"], _el["basis"],
+                       "; ".join(_rr["unmeasured"])))
+            elif not _rr["fires"]:
+                warnings.append(
+                    "Step 6.12d STEP-DOWN RATCHET DOES NOT FIRE — the binding condition(s) "
+                    "this month: %s." % "; ".join(_rr["binding"]))
+            else:
+                warnings.append(
+                    "Step 6.12d STEP-DOWN RATCHET FIRES: %s" % _rr["detail"])
+            _s612.append("ratchet %s (population %s, %s)"
+                         % (_rr["state"], _el["n_positions"], _el["basis"]))
         else:
-            _s612.append("ratchet population unavailable (no trades log this run)")
+            # ⚑ A REFUSAL, NAMED. Not "population unavailable" as a shrug.
+            _v21["ratchet"] = {"state": "REFUSED", "fires": False,
+                               "reason": ("no open direct-stock positions could be read from "
+                                          "portfolio_data, so the D18 population is UNKNOWN "
+                                          "rather than zero")}
+            warnings.append("Step 6.12d: the ratchet population could NOT be read from "
+                            "portfolio_data. That is UNKNOWN, not zero — the rule is neither "
+                            "eligible nor ineligible this run.")
+            _s612.append("ratchet population REFUSED (portfolio_data unreadable)")
         _v21["min_hold_exempt"] = list(__import__("position_sizing").MIN_HOLD_EXEMPT)
     except Exception as _e:                                        # noqa: BLE001
         warnings.append(f"Step 6.12d (retention): {type(_e).__name__}: {_e}")
@@ -1585,6 +2311,87 @@ def main():
     # INSUFFICIENT_DATA verdict is a normal, expected reading rather than a failure.
     try:
         import risk_contribution as _rc
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # ISA-0456 / ISA-0551 — THE PRODUCER, WIRED. `contributions()` and `record_run()` were
+        # called by NOTHING outside their own _selftest, `risk_contribution_ledger.json` did
+        # not exist, and `evaluate()` therefore read an empty ledger and returned
+        # INSUFFICIENT_DATA every month. That reads as "we are accruing data, be patient" while
+        # nothing was accruing — FC-A, and the same absent-execution shape as ISA-0507.
+        # ⚑ THE MATRIX IS PASSED. `contributions(matrix=...)` shipped 28-Aug and no caller ever
+        # supplied one, so every reading would have stamped `w_sigma_proxy` — the
+        # correlation-blind formula — while a measured matrix sat on disk. The error runs
+        # TOWARD the risk: it overstates the diversifiers (ONT.L 4.4x) and understates the
+        # correlated core (MU by 8.9pp), so a replacement rule driven by it preferentially
+        # challenges the names that are REDUCING sleeve risk.
+        # ⚑ rho AND sigma come from ONE call to `stock_price_fetch.matrix()` over ONE window
+        # (P2.5) — a sigma from another window assembles a covariance matrix out of two.
+        _rc_note = None
+        try:
+            import stock_price_fetch as _spf_rc, position_sizing as _ps_rc
+            _sleeve_names = _spf_rc._portfolio_sleeve(_pd_doc)      # broker truth, one home
+            _mx = _spf_rc.matrix(tickers=_sleeve_names)
+            _sig = _mx.get("sigma_ann") or {}
+            _nav_rc = float(((_pd_doc or {}).get("summary") or {})["total_value_gbp"])
+            # weights as % of NAV, keyed to the STORE's names. A stock the store cannot name is
+            # EXCLUDED AND COUNTED, never defaulted (R4.9).
+            _wts_rc, _unmatched = {}, []
+            for _st_row in ((_pd_doc or {}).get("stocks") or []):
+                _tk = _st_row.get("ticker")
+                _val = _st_row.get("value_gbp")
+                if not _tk or _val in (None, ""):
+                    _unmatched.append({"ticker": _tk, "why": "no ticker or no value_gbp"})
+                    continue
+                _key = next((n for n in _mx.get("names", [])
+                             if n == _tk or n.split(".")[0] == str(_tk).split(".")[0]), None)
+                if _key is None:
+                    _unmatched.append({"ticker": _tk, "why": "no weekly-return series in the store"})
+                    continue
+                _wts_rc[_key] = float(_val) / _nav_rc * 100.0
+            _starter = float(_ps_rc.ladder()["STARTER"])
+            _contrib = _rc.contributions(_wts_rc, _sig, starter_pct=_starter,
+                                         matrix=_mx.get("rho"))
+            _rc.record_run(_contrib, run_date=(run_date.isoformat()
+                                              if isinstance(run_date, dt_date) else None))
+            _v21["risk_contribution"] = {
+                "rc_basis": _contrib.get("rc_basis"),
+                "sigma_p": _contrib.get("sigma_p"),
+                "n_eff": _contrib.get("n_eff"),
+                "pair_coverage": _contrib.get("pair_coverage"),
+                "rows": _contrib.get("rows"),
+                "excluded": _contrib.get("excluded"),
+                "unmatched_positions": _unmatched,
+                "matrix_as_of": _mx.get("weeks_used_max"),
+                "matrix_coverage": _mx.get("coverage"),
+                "basis_note": ("rho and sigma from ONE stock_price_fetch.matrix() call over one "
+                               "window (P2.5). ISA-0456: matrix=None would be the "
+                               "correlation-blind w_sigma_proxy."),
+            }
+            _s612.append("risk_contribution %s over %d name(s)"
+                         % (_contrib.get("rc_basis"), len(_contrib.get("rows") or {})))
+            if _unmatched:
+                warnings.append(
+                    "Step 6.12e: %d direct-stock position(s) have NO weekly-return series and "
+                    "are EXCLUDED from the risk decomposition, not defaulted: %s. The published "
+                    "risk shares therefore cover %d of %d positions (R4.9)."
+                    % (len(_unmatched), "; ".join("%s (%s)" % (u["ticker"], u["why"])
+                                                  for u in _unmatched),
+                       len(_wts_rc), len(_wts_rc) + len(_unmatched)))
+            if _contrib.get("rc_basis") != "covariance_mctr":
+                warnings.append(
+                    "Step 6.12e: the risk decomposition fell back to rc_basis=%r. ISA-0456: the "
+                    "correlation-blind proxy OVERSTATES diversifiers and UNDERSTATES the "
+                    "correlated core, so the D10 replacement nomination it feeds is biased "
+                    "toward challenging the names that reduce sleeve risk."
+                    % _contrib.get("rc_basis"))
+        except Exception as _e2:                                   # noqa: BLE001
+            # ⚑ A REFUSAL, NAMED — never a silent fall-through to evaluate() on a stale ledger.
+            _rc_note = "%s: %s" % (type(_e2).__name__, _e2)
+            _v21["risk_contribution"] = {"state": "REFUSED", "reason": _rc_note}
+            warnings.append(
+                "Step 6.12e THIS MONTH'S RISK DECOMPOSITION WAS NOT PRODUCED (%s). M1/M2/M3 "
+                "below are evaluated on the ledger AS IT STOOD, so their sample does NOT "
+                "include September — an INSUFFICIENT_DATA verdict here means 'not measured "
+                "this month', not 'measured and thin' (ISA-0456)." % _rc_note)
         _m = _rc.evaluate()
         _v21["risk_monitors"] = _m
         _s612.append("M1 %s / M2 %s / M3 %s" % (_m["M1"]["verdict"], _m["M2"]["verdict"],
@@ -1708,759 +2515,6 @@ def main():
     _mf_measure(status=("OK" if _s612 else "DEGRADED"),
                 note=("; ".join(_s612) if _s612 else "the V2.1 stack produced no result"))
     print("  " + ("; ".join(_s612) if _s612 else "no result"))
-
-    # ── Step 6.08 — return architecture (ranked build item #1, 06-Aug-2026) ──────────
-    # ⚑ Section C — the one number that answers "is this on track for £1m" — has NEVER been
-    # computed. It shipped as `total_return: null, status: "pending_section_a"` and rendered as
-    # "[Claude fills]". Section A was computed, but from `est_return`: prose typed by hand a
-    # month earlier, which scores Scottish Mortgage 14.0% on a realised 5y of 0.22% (register
-    # C4). This step replaces both with arithmetic, against ONE declared expected-return input
-    # per holding, gated on thresholds DERIVED from the A19 anchor.
-    print("\n[6.08] Return architecture (Section A/B/C + shortfall + levers)...")
-    _mf_begin("6.08", "return_architecture")
-    try:
-        import return_architecture as _ra
-        _ra_path = os.path.join(SCRIPT_DIR, f"return_architecture_{month_label}.json")
-        _fas_json = None
-        try:
-            with open(os.path.join(SCRIPT_DIR, f"fund_action_stack_{month_label}.json"),
-                      encoding="utf-8") as _f:
-                _fas_json = json.load(_f)
-        except Exception:                                      # noqa: BLE001
-            _fas_json = None
-        _met_json = None
-        try:
-            with open(os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json"),
-                      encoding="utf-8") as _f:
-                _met_json = json.load(_f)
-        except Exception:                                      # noqa: BLE001
-            _met_json = None
-        _rar = _ra.build(run_date if isinstance(run_date, dt_date) else None,
-                         _port, _fas_json, None, _met_json, _ra_path)
-        _sa, _sb, _sc = _rar["section_a"], _rar["section_b"], _rar["section_c"]
-        summary["return_architecture"] = {
-            "basis": _rar["operative_basis"], "anchor_pct": _rar["anchor"]["operative_pct"],
-            "section_a_pct": _sa["value_pct"], "section_a_verdict": _sa.get("verdict"),
-            "section_b_pct": _sb["value_pct"], "section_b_verdict": _sb.get("verdict"),
-            "section_c_pct": _sc["value_pct"], "section_c_verdict": _sc.get("verdict"),
-            "shortfall_pp": _sc.get("shortfall_pp"), "coverage": _sc.get("coverage")}
-        _bad = [i for i in _rar["invariants"] if not i["holds"]]
-        _mf_measure(status="OK" if not _bad else "DEGRADED",
-                    note=(f"Section C {_sc['value_pct']}% vs anchor "
-                          f"{_rar['anchor']['operative_pct']}% -> {_sc.get('verdict')} "
-                          f"(shortfall {_sc.get('shortfall_pp')}pp); "
-                          f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])} "
-                          f"invariants hold"))
-        for _i in _bad:
-            errors.append(f"Step 6.08 INVARIANT {_i['invariant']} FAILED: {_i['detail']}")
-        if _sc.get("verdict") in ("Flag", "Watch"):
-            _top = (_rar["shortfall_attribution"]["rows"] or [])[:3]
-            warnings.append(
-                f"Step 6.08 SECTION C {str(_sc.get('verdict')).upper()}: total ISA expected "
-                f"return {_sc['value_pct']}% against a required {_rar['anchor']['operative_pct']}% "
-                f"— short by {_sc.get('shortfall_pp')}pp on the '{_rar['operative_basis']}' basis. "
-                f"Largest drags: " + "; ".join(
-                    f"{r['asset_id']} {r['contribution_to_shortfall_pp']:+.2f}pp" for r in _top))
-        for _l in _rar["levers"]:
-            if not _l["feasible"] and _l["lever"] == "deploy_idle_cash":
-                warnings.append(f"Step 6.08 CASH: {_l['blocked_reason']}")
-        if _rar["thresholds"]["divergences"]:
-            for _d in _rar["thresholds"]["divergences"]:
-                warnings.append(
-                    f"Step 6.08 THRESHOLD DRIFT: {_d['threshold']} derived {_d['derived_pct']}% "
-                    f"vs the frozen constant {_d['legacy_pct']}% ({_d['delta_pp']:+}pp) — the "
-                    f"derived value is operative; target_weights.json is now stale prose")
-        _bmd = _rar.get("bucket_minimum_divergence") or {}
-        for _r in (_bmd.get("rows") or []):
-            if _r.get("agree") is False:
-                warnings.append(
-                    f"Step 6.08 BUCKET MINIMUM {_r['bucket']}: policy file says "
-                    f"{_r['policy_pct']}%, fund_action_stack uses {_r['in_force_pct']}%. "
-                    f"{_bmd.get('diagnosis')} Left in force pending Raj (one constant).")
-        for _d in (_rar.get("defects_observed") or []):
-            warnings.append(f"Step 6.08 {_d['code']}: {_d['detail']}")
-        print(f"  A {_sa['value_pct']}% {_sa.get('verdict')} | B {_sb['value_pct']}% "
-              f"{_sb.get('verdict')} | C {_sc['value_pct']}% {_sc.get('verdict')} "
-              f"(short {_sc.get('shortfall_pp')}pp) | invariants "
-              f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])}")
-    except Exception as _e:
-        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
-        errors.append(f"Step 6.08 (return_architecture): {type(_e).__name__}: {_e}")
-        print(f"  FAILED: {_e}")
-
-    print("\n[1b] Importing transaction history...")
-    _mf_begin("1b", "extract_transactions")
-    rc, stdout, stderr = run_script_rc(
-        "extract_transactions",
-        ["--isa-folder", isa_folder, "--ledger", txn_ledger_path,
-         "--out", transactions_path],
-        dry_run=args.dry_run,
-    )
-    if rc == 3:
-        # Policy, not degradation: "missing transaction export = WARN, never ERROR"
-        # (project_isa_transaction_ledger). Declaring it SKIPPED keeps the manifest honest
-        # without manufacturing an alarm Raj cannot act on.
-        _mf_measure(status="SKIPPED", note="no Transaction History export saved this month "
-                                           "-- policy fallback to holdings-delta inference")
-        txn_status = "ABSENT"
-        warnings.append(
-            "Step 1b: no 'Transaction History MM-YYYY.xlsx' found in the ISA "
-            "folder -- execution reconciliation falls back to holdings-delta "
-            "inference, and dealing costs/fill prices are unavailable this month."
-        )
-        print("  No transaction export found -- reconciliation degrades to holdings-delta.")
-    elif rc != 0:
-        txn_status = "ERROR"
-        warnings.append(f"Step 1b (extract_transactions): {stderr or stdout or 'unknown error'}")
-        print(f"  FAILED (non-fatal): {stderr or stdout}")
-    else:
-        print(stdout.strip())
-        if os.path.exists(transactions_path):
-            try:
-                with open(transactions_path, encoding="utf-8") as _tf:
-                    txn_data = json.load(_tf)
-                txn_status = txn_data.get("_meta", {}).get("status", "OK")
-                _ms = txn_data.get("month_summary", {})
-                _br = txn_data.get("broker_reconciliation", {})
-                summary["transactions"] = {
-                    "status":              txn_status,
-                    "source_file":         txn_data.get("_meta", {}).get("source_file"),
-                    "n_trades":            _ms.get("n_trades"),
-                    "buys":                _ms.get("buys"),
-                    "sells":               _ms.get("sells"),
-                    "dealing_costs_gbp":   _ms.get("total_dealing_costs_gbp"),
-                    "net_cash_impact_gbp": _ms.get("net_cash_impact_gbp"),
-                    "distributions_gbp":   _ms.get("distributions_gbp"),
-                    "broker_reconciliation": _br.get("status"),
-                    "ledger_entries":      txn_data.get("ledger_meta", {}).get("total_entries"),
-                    "cost_calibration":    txn_data.get("cost_calibration", {}),
-                }
-                for w in txn_data.get("warnings", []):
-                    warnings.append(f"Step 1b: {w}")
-                if _br.get("status") == "INCOMPLETE_WINDOW":
-                    warnings.append(
-                        "Step 1b: transaction ledger does not yet span the "
-                        "holding period of %d of %d positions -- seed it with a "
-                        "full history export (extract_transactions.py --seed) "
-                        "to enable the completeness check."
-                        % (_br.get("n_missing_from_ledger", 0),
-                           _br.get("n_compared", 0)))
-                elif _br.get("status") == "MISMATCH":
-                    # The ledger disagrees with the broker portfolio file. Either a
-                    # monthly export was never saved, or a row mis-parsed. Surface
-                    # it loudly -- a silently incomplete ledger is worse than none.
-                    flags.append({
-                        "type": "TRANSACTION_LEDGER_INCOMPLETE",
-                        "message": ("Ledger-implied holdings do not match the broker "
-                                    "portfolio file: "
-                                    + "; ".join(
-                                        f"{d['ticker']} broker {d['broker_quantity']} "
-                                        f"vs ledger {d['ledger_quantity']}"
-                                        for d in _br.get("differences", [])[:6])),
-                    })
-            except Exception as exc:
-                txn_status = "ERROR"
-                warnings.append(f"Step 1b: could not read {os.path.basename(transactions_path)}: {exc}")
-
-    # ---------------------------------------------------------------------------
-    # Step 1.5: Reconcile prior recommendations vs broker truth (recommendations != executions).
-    # The system never assumes a prior recommendation was executed; it confirms from THIS month's
-    # actual holdings (broker file). Additive — no-op until a decision ledger exists.
-    # ---------------------------------------------------------------------------
-    if not errors and os.path.exists(portfolio_path):
-        ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
-        if os.path.exists(ledger_path):
-            print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
-            _mf_begin("1.5", "ledger_reconciliation")
-            try:
-                sys.path.insert(0, SCRIPT_DIR)
-                import decision_ledger as _dl_mod
-                with open(portfolio_path, encoding="utf-8") as _pf:
-                    _pd = json.load(_pf)
-                _held = {s.get("ticker"): s.get("quantity") for s in _pd.get("stocks", []) if s.get("ticker")}
-                _prior_h = None
-                if prior_port_path and os.path.exists(prior_port_path):
-                    try:
-                        with open(prior_port_path, encoding="utf-8") as _ppf:
-                            _ppd = json.load(_ppf)
-                        _prior_h = {s.get("ticker"): s.get("quantity") for s in _ppd.get("stocks", []) if s.get("ticker")}
-                    except Exception:
-                        _prior_h = None
-                # Transaction-truth reconciliation (26-Jul-26). Confirms from the
-                # actual dealing record where available -- date, fill price and
-                # dealing cost included -- and degrades to the original
-                # holdings-delta inference when no export exists.
-                _txns = _dl_mod.load_transactions(transactions_path)
-                _res = _dl_mod.reconcile_executions_from_transactions(
-                    ledger_path, _txns, _held, prior_holdings=_prior_h,
-                    date=run_date.isoformat())
-                _rc = _res["counts"]
-                summary["ledger_reconcile"] = _rc
-                summary["ledger_reconcile_source"] = _res["source"]
-                summary["ledger_reconcile_confirmed"] = _res["confirmed"]
-                if _res["off_framework"]:
-                    # Trades with no matching recommendation: acted outside the
-                    # framework. Holdings-diffing cannot see these reliably.
-                    summary["off_framework_trades"] = _res["off_framework"]
-                    flags.append({
-                        "type": "OFF_FRAMEWORK_TRADE",
-                        "message": "; ".join(
-                            f"{o['type']} {o['ticker']} {o['quantity']} @ {o['price']} "
-                            f"on {o['date']} (GBP {o['amount_gbp']}) -- no ledger recommendation"
-                            for o in _res["off_framework"][:6]),
-                    })
-                print(f"  Reconciled prior recommendations vs broker truth: {_rc}")
-                # ── Fix Pack A13 (P2): OVERRIDE LOG — broker-truth changes NOT matching a ledger
-                # recommendation. Two classes: (a) a recommendation marked not_executed (Raj
-                # declined the framework), (b) a holdings change with NO ledger entry (Raj acted
-                # outside the framework). Each gets 3/6/12-mo counterfactual slots that this
-                # step prices on later runs from live prices (zero new fetch — pre-run prices
-                # everything). Appended to run_context summary.override_log; email §11 renders
-                # the one-line cumulative summary; trades-log section mirrors it (P7d: a closed
-                # position with a blank reason renders "reason UNBACKFILLED", never
-                # "reconciled and closed").
-                try:
-                    _led = _dl_mod.load_ledger(ledger_path)
-                    _ov = []
-                    _stamp = run_date.isoformat()
-                    _recs = {str(e.get("ticker", "")).upper(): e for e in _led.get("entries", [])}
-                    for _e3 in _led.get("entries", []):
-                        if _e3.get("execution_status") == "not_executed" and \
-                           str(_e3.get("executed_confirmed_date") or _stamp)[:7] == _stamp[:7]:
-                            _ov.append({"date": _stamp, "ticker": _e3.get("ticker"),
-                                        "action": f"declined_{_e3.get('decision')}",
-                                        "framework_state": _e3.get("scores_at_decision"),
-                                        "gates": _e3.get("gates_at_decision"),
-                                        "counterfactual": {"3m": None, "6m": None, "12m": None},
-                                        "pnl_vs_framework_gbp": None})
-                    if _prior_h is not None:
-                        for _t4, _q4 in _held.items():
-                            if _t4 not in _prior_h and _t4 not in _recs:
-                                _ov.append({"date": _stamp, "ticker": _t4,
-                                            "action": "bought_outside_framework",
-                                            "framework_state": None, "gates": None,
-                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
-                                            "pnl_vs_framework_gbp": None})
-                        for _t4 in _prior_h:
-                            if _t4 not in _held and not any(
-                                    e.get("decision") == "sell" and
-                                    str(e.get("ticker", "")).upper() == _t4
-                                    for e in _led.get("entries", [])):
-                                _ov.append({"date": _stamp, "ticker": _t4,
-                                            "action": "sold_outside_framework",
-                                            "framework_state": None, "gates": None,
-                                            "counterfactual": {"3m": None, "6m": None, "12m": None},
-                                            "pnl_vs_framework_gbp": None})
-                    if _ov:
-                        summary["override_log"] = _ov
-                        print(f"  A13: {len(_ov)} override(s) logged: "
-                              f"{[o['ticker'] + ':' + o['action'] for o in _ov]}")
-                except Exception as _oex:
-                    warnings.append(f"A13 override log skipped: {_oex}")
-            except Exception as _ex:
-                warnings.append(f"Step 1.5 (ledger reconcile) skipped: {_ex}")
-                print(f"  WARNING: {_ex}")
-
-    # ---------------------------------------------------------------------------
-    # Step 2: Extract X-Ray
-    # ---------------------------------------------------------------------------
-    _mf_probe_json(txn_ledger_path, "entries", "date", "transaction ledger entries")
-    print(f"\n[2/9] Extracting X-Ray from PDF...")
-    _mf_begin("2", "extract_xray")
-    ok, stdout, stderr = run_script(
-        "extract_xray",
-        ["--isa-folder", isa_folder, "--out", xray_path],
-        dry_run=args.dry_run,
-    )
-    if not ok:
-        msg = stderr or stdout or "Unknown error in extract_xray"
-        # X-Ray is important but not fatal -- warn and continue
-        warnings.append(f"Step 2 (extract_xray): {msg}")
-        print(f"  WARNING: {msg}")
-        # Create minimal xray JSON so downstream steps don't crash
-        if not os.path.exists(xray_path):
-            with open(xray_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "_meta": {"month_label": month_label, "report_date": "unknown"},
-                    "_warning": "X-Ray extraction failed -- Claude must retrieve manually at Step 6",
-                    "asset_allocation": {}, "country_exposure": [], "world_regions": {},
-                    "sector_weights": {}, "trailing_returns": {}, "fund_holdings": [],
-                }, f, indent=2)
-    else:
-        print(stdout.strip())
-        valid, vmsg = validate_json_output(xray_path, ["_meta", "sector_weights"])
-        if not valid:
-            warnings.append(f"Step 2 validation: {vmsg}")
-            print(f"  Validation WARNING: {vmsg}")
-        else:
-            print(f"  Validation: {vmsg}")
-            if not errors:  # only if portfolio step succeeded
-                with open(xray_path, encoding="utf-8") as f:
-                    xray_data = json.load(f)
-                tr = xray_data.get("trailing_returns", {})
-                if "1yr" in tr:
-                    r = tr["1yr"]
-                    summary["xray_1yr_return_pct"] = r.get("portfolio_pct")
-                    summary["xray_1yr_benchmark_pct"] = r.get("benchmark_pct")
-
-    # ---------------------------------------------------------------------------
-    # Step 3: Analytics
-    # ---------------------------------------------------------------------------
-    _mf_probe_json(xray_path, "country_exposure", "equity_pct", "X-Ray country rows")
-    print(f"\n[3/9] Running portfolio analytics...")
-    _mf_begin("3", "portfolio_analytics")
-    if errors:
-        print("  SKIPPED -- portfolio extraction failed (required input).")
-        warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
-    else:
-        analytics_args = [
-            "--portfolio", portfolio_path,
-            "--out",       analytics_path,
-        ]
-        # H10 (06-Aug-2026): the overlap check now reads the PUBLISHED X-Ray look-through table
-        # instead of asking for a hand calculation. Passed here rather than defaulted inside
-        # portfolio_analytics so that an absent X-Ray shows up as a stated absence in the run
-        # output rather than as a quietly missing section.
-        if xray_path and os.path.exists(xray_path):
-            analytics_args += ["--xray", xray_path]
-        else:
-            warnings.append(
-                "Step 3 (analytics): X-Ray JSON not available, so the H10 look-through overlap "
-                "check is ABSENT this run. It is NOT falling back to the retired hand-calc, "
-                "which reported AVGO 4.04% against a published 4.31%.")
-        if prior_port_path:
-            analytics_args += ["--prior-portfolio", prior_port_path]
-        if trades_log_path:
-            analytics_args += ["--trades-log", trades_log_path]
-        else:
-            # 01-Aug-26: previously a SILENT omission. Without the trades log,
-            # parse_trades_log_positions() returns [] and the stock-sleeve return is
-            # computed with no purchase dates, and the Step 8 thesis-break conditions are
-            # absent -- with nothing printed. Degraded data must be visible.
-            warnings.append(
-                "Step 3 (analytics): project_isa_trades_log.md not found at MEMORY_BASE "
-                f"({MEMORY_BASE}) -- stock-sleeve return computed WITHOUT purchase dates and "
-                "Step 8 thesis-break conditions are unavailable. Treat sleeve return as indicative.")
-            print(f"  WARNING: trades log not found -- sleeve return degraded. MEMORY_BASE={MEMORY_BASE}")
-            degraded = True
-
-        ok, stdout, stderr = run_script(
-            "analytics", analytics_args, dry_run=args.dry_run
-        )
-        if not ok:
-            msg = stderr or stdout or "Unknown error in portfolio_analytics"
-            errors.append(f"Step 3 (analytics): {msg}")
-            print(f"  FAILED: {msg}")
-        else:
-            print(stdout.strip())
-            valid, vmsg = validate_json_output(
-                analytics_path,
-                ["_meta", "fund_drift_table", "phase_status", "capital_summary"]
-            )
-            if not valid:
-                errors.append(f"Step 3 validation: {vmsg}")
-                print(f"  Validation FAILED: {vmsg}")
-            else:
-                print(f"  Validation: {vmsg}")
-                with open(analytics_path, encoding="utf-8") as f:
-                    ana_data = json.load(f)
-                phase = ana_data.get("phase_status", {})
-                summary["phase_status"] = phase.get("status")
-                summary["rebalancing_candidates"] = len(ana_data.get("rebalancing_candidates", []))
-                flags.extend(ana_data.get("flags", []))
-
-    # ---------------------------------------------------------------------------
-    # Step 4: Update watchlist (promotion/removal/score-delta)
-    # ---------------------------------------------------------------------------
-    _mf_probe_json(analytics_path, "fund_drift_table.rows", "ticker", "drift rows")
-    print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
-    _mf_begin("4", "update_watchlist")
-    if errors:
-        print("  SKIPPED -- prior step(s) failed.")
-        warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
-    elif not os.path.exists(watchlist_config_path):
-        warnings.append("Step 4 (update_watchlist): watchlist_tickers.json not found -- skipping.")
-        print("  WARNING: watchlist_tickers.json not found -- skipped.")
-    else:
-        ok, stdout, stderr = run_script(
-            "update_watchlist_py",
-            [
-                "--portfolio-data", portfolio_path,
-                "--watchlist-json", watchlist_config_path,
-                "--inv-dir",        SCRIPT_DIR,
-                "--out-json",       watchlist_config_path,
-            ],
-            dry_run=args.dry_run,
-        )
-        if not ok:
-            msg = stderr or stdout or "Unknown error in update_watchlist"
-            warnings.append(f"Step 4 (update_watchlist): {msg}")
-            print(f"  WARNING: {msg}")
-        else:
-            print(stdout.strip())
-            try:
-                import json as _json
-                for line in stdout.splitlines():
-                    if line.strip().startswith("{") and "additions" in line:
-                        watchlist_promotion_log = _json.loads(line)
-                        break
-            except Exception:
-                pass
-            if watchlist_promotion_log:
-                n_add = len(watchlist_promotion_log.get("additions", []))
-                n_rem = len(watchlist_promotion_log.get("removals", []))
-                n_upd = len(watchlist_promotion_log.get("score_updates", []))
-                print(f"  Watchlist updated: +{n_add} added | -{n_rem} removed | {n_upd} score updates")
-            # Guardrail: a SUMMARY tab that parses to zero rows is a silent parser failure.
-            n_files = len(watchlist_promotion_log.get("xlsx_files_read", []))
-            n_rows  = watchlist_promotion_log.get("rows_parsed", 0)
-            # ── WP-G (29-Jul-2026): CALIBRATION PREFLIGHT ────────────────────────────────────
-            # The pre-run consumes SUMMARY tabs produced by screens that ran under whatever
-            # calibration was live AT THAT TIME. On 29-Jul-2026 the forward-axis bucket weights
-            # changed (price .70 -> thirds) while the next screen was not until 07-Aug, so the
-            # 01-Aug pre-run would have ranked candidates under a config that no longer existed
-            # and nothing could detect it. This checks every ingested workbook's calibration
-            # stamp against live config, and the pool size against its own trailing median.
-            # WARN-ONLY by design: it annotates and degrades, it never halts the review.
-            try:
-                import calibration_guard as _cg
-                _live = _cg.config_fingerprint()
-                summary["calibration_fingerprint"] = _live["hash"]
-                # WP-M7 (29-Jul-2026): pass the REAL stamps. This was hardcoded to None, so the
-                # guard could only ever return UNSTAMPED and the whole fingerprint mechanism was
-                # inert at the one place it mattered. update_watchlist now carries the per-file
-                # calibration stamp off the SUMMARY rows.
-                _stamp_map = watchlist_promotion_log.get("calibration_stamps") or {}
-                _stale_files, _unstamped_files = [], []
-                for _fn, _sts in _stamp_map.items():
-                    for _st in (_sts or [None]):
-                        _v = _cg.compare_fingerprint({"hash": _st, "params": {}} if _st else None,
-                                                     live=_live)["verdict"]
-                        if _v == "STALE":
-                            _stale_files.append(f"{_fn} ({_st})")
-                        elif _v == "UNSTAMPED":
-                            _unstamped_files.append(_fn)
-                summary["calibration_files"] = {"stale": _stale_files,
-                                                "unstamped": _unstamped_files,
-                                                "checked": len(_stamp_map)}
-                if _stale_files:
-                    warnings.append(
-                        "Step 4 CALIBRATION STALE: %d ingested workbook(s) were scored under a "
-                        "SUPERSEDED calibration (live %s): %s. Their SUMMARY ranking is not "
-                        "current -- restamp via restamp_screener_outputs.py + restamp_write.py "
-                        "before trusting the candidate pool."
-                        % (len(_stale_files), _live["hash"], ", ".join(_stale_files[:6])))
-                    print("  CALIBRATION STALE in %d file(s): %s"
-                          % (len(_stale_files), ", ".join(_stale_files[:4])))
-                if _unstamped_files:
-                    print("  Calibration: %d file(s) predate the fingerprint (unverifiable): %s"
-                          % (len(_unstamped_files), ", ".join(_unstamped_files[:4])))
-                _one = sorted({_st for _sts in _stamp_map.values() for _st in (_sts or []) if _st})
-                _pf = _cg.preflight("PRERUN_POOL", n_rows,
-                                    stamped_fingerprint=({"hash": _one[0], "params": {}}
-                                                         if len(_one) == 1 else None),
-                                    store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT))
-                summary["calibration_preflight"] = _pf
-                if _pf.get("attention_required"):
-                    warnings.append("Step 4 CALIBRATION: " + _pf["headline"][:400])
-                    print("  CALIBRATION ATTENTION: " + _pf["headline"][:200])
-                else:
-                    print(f"  Calibration preflight OK (live {_live['hash']}, pool {n_rows}).")
-                _cg.record_pool("PRERUN_POOL", run_date.isoformat(), n_rows,
-                                store=os.path.join(SCRIPT_DIR, _cg.POOL_STORE_DEFAULT),
-                                fingerprint_hash=_live["hash"])
-            except Exception as _cgerr:
-                warnings.append(f"Step 4 calibration preflight unavailable (non-fatal): {_cgerr}")
-                print(f"  WARNING: calibration preflight unavailable: {_cgerr}")
-            if n_files == 0:
-                warnings.append("Step 4 guardrail: no Growth Stock Analysis xlsx found in working dir or month archive -- no candidates ingested.")
-                degraded = True
-            elif n_rows == 0:
-                warnings.append(f"Step 4 guardrail: {n_files} analysis file(s) read but 0 candidate rows parsed -- check SUMMARY tab headers.")
-                degraded = True
-            for _k in ("sleeve_phantom_removed", "sleeve_added", "held_removed_from_watchlist", "held_removed_from_vci"):
-                _v = watchlist_promotion_log.get(_k, [])
-                if _v:
-                    print(f"  Reconcile [{_k}]: {[x.get('ticker') for x in _v]}")
-
-    # ---------------------------------------------------------------------------
-    # Step 5: Sync VCI watchlist from memory file + refresh Part A scores
-    # ---------------------------------------------------------------------------
-    _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "watchlist entries")
-    print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
-    _mf_begin("5", "sync_vci_watchlist")
-    vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
-    _vci_existing = 0
-    try:
-        with open(watchlist_config_path, encoding="utf-8") as _f:
-            _vci_existing = len((json.load(_f) or {}).get("vci_watchlist") or [])
-    except Exception:
-        _vci_existing = 0
-    if args.skip_vci_sync:
-        print(f"  SKIPPED (--skip-vci-sync) -- reusing {_vci_existing} existing vci_watchlist entr(y/ies).")
-        if _vci_existing == 0:
-            warnings.append("Step 5 SKIPPED via --skip-vci-sync but watchlist_tickers.json holds "
-                            "NO vci_watchlist entries -- run one pass without the flag.")
-            degraded = True
-    elif not vci_md_path:
-        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found at resolved MEMORY_BASE -- VCI watchlist not synced. (Held names are still removed at Step 4.)")
-        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped. MEMORY_BASE={MEMORY_BASE}")
-        degraded = True
-    elif not os.path.exists(watchlist_config_path):
-        warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
-        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
-    else:
-        ok, stdout, stderr = run_script(
-            "sync_vci_watchlist",
-            [
-                "--watchlist-md",   vci_md_path,
-                "--watchlist-json", watchlist_config_path,
-                "--inv-dir",        SCRIPT_DIR,
-                "--portfolio-data", portfolio_path,
-            ],
-            dry_run=args.dry_run,
-        )
-        if not ok:
-            msg = stderr or stdout or "Unknown error in sync_vci_watchlist"
-            warnings.append(f"Step 5 (sync_vci_watchlist): {msg}")
-            print(f"  WARNING: {msg}")
-        else:
-            print(stdout.strip())
-
-    # ---------------------------------------------------------------------------
-    # Step 6: Fetch watchlist + stock sleeve metrics (yfinance pull)
-    # ---------------------------------------------------------------------------
-    _mf_probe_json(watchlist_config_path, "vci_watchlist", "ticker", "VCI entries")
-    print(f"\n[6/9] Fetching watchlist & sleeve metrics (yfinance)...")
-    _mf_begin("6", "fetch_watchlist_metrics")
-    if not os.path.exists(watchlist_config_path):
-        warnings.append("Step 6: watchlist_tickers.json not found -- skipping metrics pull. "
-                        "Create it in Investment Analysis folder.")
-        print(f"  WARNING: watchlist_tickers.json not found -- skipped.")
-        # Create empty placeholder so downstream steps don't crash
-        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
-            json.dump({"_meta": {"month_label": month_label}, "tickers": {},
-                       "_warning": "watchlist_tickers.json missing -- metrics not pulled"}, f)
-    elif errors:
-        print("  SKIPPED -- prior step(s) failed.")
-        warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
-        with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
-            json.dump({"_meta": {"month_label": month_label}, "tickers": {}}, f)
-    elif _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path):
-        # IDEMPOTENCE (31-Jul-2026). The pre-run prose runs this orchestrator TWICE — once to
-        # build the base data, once after the metrics fetch to rebuild Steps 7-9 on live scores.
-        # Re-fetching on the second pass costs ~20s of the 45s bash budget and can only make the
-        # data staler-or-equal, so a populated metrics file that already covers the CURRENT
-        # ticker set short-circuits Step 6. `--skip-fetch` forces the same path unconditionally.
-        _reason = _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path)
-        print(f"  SKIPPED -- {_reason} (existing metrics preserved).")
-        if not os.path.exists(watchlist_metrics_path):
-            # --skip-fetch on a cold folder (the fast first pass of the two-phase pre-run):
-            # downstream steps require the file to exist, so seed the documented placeholder.
-            with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
-                json.dump({"_meta": {"month_label": month_label}, "tickers": {},
-                           "_warning": "--skip-fetch: metrics not pulled on this pass"}, f)
-            print("  Placeholder metrics file written (fetch deferred to the standalone STEP 2).")
-        try:
-            with open(watchlist_metrics_path, encoding="utf-8") as f:
-                _wm = json.load(f)
-            summary["watchlist_tickers_scored"] = len(_wm.get("tickers", {}))
-            summary["in_window_names"] = _wm.get("_meta", {}).get("in_window_tickers", [])
-            print("  Scored " + str(summary["watchlist_tickers_scored"])
-                  + " tickers (from existing file) | In-window: "
-                  + str(summary["in_window_names"]))
-        except Exception as _e:
-            warnings.append(f"Step 6 skip: could not summarise existing metrics ({_e}).")
-    else:
-        ok, stdout, stderr = run_script(
-            "fetch_watchlist",
-            [
-                "--watchlist",    watchlist_config_path,
-                "--out",          watchlist_metrics_path,
-                "--month-label",  month_label,
-            ],
-            dry_run=args.dry_run,
-        )
-        # Watchlist pull is non-fatal (yfinance may fail for some tickers)
-        if not ok:
-            msg = stderr or stdout or "Unknown error in fetch_watchlist_metrics"
-            # ARCHITECTURE (corrected 31-Jul-2026): the metrics fetch is LOCAL-PRIMARY. It runs
-            # in this sandbox via yfinance on tmpfs; Composio is fallback-only and there is NO
-            # out-of-band transfer step. The previous note here claimed the opposite and told the
-            # operator to "run the Composio metrics pull + transfer", contradicting the pre-run
-            # prompt. It also made a REAL failure look benign: fetch_watchlist_metrics raised
-            # NameError on FETCH_WORKERS at every invocation (undefined name, fixed 31-Jul), and
-            # this branch reported it as "local yfinance unavailable (expected)". A fetch failure
-            # is now always surfaced as a WARNING naming the actual error.
-            # Reusing stale metrics is still permitted (better than nothing) but never silent.
-            metrics_n, missing = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
-            if metrics_n > 0:
-                print(f"  WARNING: local metrics fetch FAILED ({msg.splitlines()[0][:160]}) "
-                      f"-- falling back to the existing metrics file ({metrics_n} tickers).")
-                warnings.append(f"Step 6 (fetch_watchlist) FAILED: {msg.splitlines()[0][:200]} "
-                                f"-- reusing pre-existing metrics ({metrics_n} tickers). Scores may "
-                                f"be stale; investigate before relying on Step 9 output.")
-                degraded = True
-                if missing:
-                    warnings.append(f"Step 6: reused metrics do not cover {len(missing)} current "
-                                    f"name(s), which will be unscored: {missing[:20]}"
-                                    + (" ..." if len(missing) > 20 else ""))
-            else:
-                warnings.append(f"Step 6 (fetch_watchlist): {msg} AND no usable metrics file present "
-                                "-- downstream scoring will be empty. Re-run the local fetch "
-                                "(see the pre-run task STEP 2 recipe); use the Composio fallback "
-                                "only if the local sandbox cannot reach Yahoo at all.")
-                print(f"  WARNING: {msg} (no metrics available)")
-                degraded = True
-                if not os.path.exists(watchlist_metrics_path):
-                    with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
-                        json.dump({"_meta": {"month_label": month_label}, "tickers": {},
-                                   "_warning": "local fetch failed, no prior metrics: " + msg}, f)
-        else:
-            print(stdout.strip())
-            valid, vmsg = validate_json_output(watchlist_metrics_path, ["_meta", "tickers"])
-            if not valid:
-                warnings.append("Step 6 validation: " + vmsg)
-                print("  Validation WARNING: " + vmsg)
-            else:
-                with open(watchlist_metrics_path, encoding="utf-8") as f:
-                    wm_data = json.load(f)
-                n_scored = len(wm_data.get("tickers", {}))
-                in_window = wm_data.get("_meta", {}).get("in_window_tickers", [])
-                summary["watchlist_tickers_scored"] = n_scored
-                summary["in_window_names"] = in_window
-                print("  Scored " + str(n_scored) + " tickers | In-window: " + str(in_window))
-
-    # ---------------------------------------------------------------------------
-    # Step 6.5: VCI forward-led re-price (§11.3 / §14.2)
-    #   The VCI run scored/ranked on the 2nd-Sunday price; price drifts by the Saturday
-    #   pre-run, so a stale fv_asymmetry is a WRONG deployment gate. Recompute fv_asymmetry
-    #   and VCI_Source_Score for every vci_watchlist name at the CURRENT (Saturday) live price
-    #   via vci_deploy_eval, re-rank by VCI_Source_Score, and write the fields back into
-    #   watchlist_tickers.json so Step 8 (step9_pre_builder) consumes fresh, not stale, values.
-    #   ACS is NOT re-scored here (stickier); only the price-driven terms refresh.
-    # ---------------------------------------------------------------------------
-    # Step 6 coverage — tickers priced / tickers the current watchlist needs. This is the
-    # number STOXX600 publishes a ranking on without saying so; here it is declared.
-    try:
-        _n6, _miss6 = metrics_coverage(watchlist_metrics_path, watchlist_config_path)
-        _need6 = _n6 + len(_miss6)
-        _mf_measure(rows_in=_need6 or None, rows_out=_n6,
-                    coverage=(_n6 / _need6) if _need6 else None,
-                    note=(f"missing: {_miss6[:12]}" if _miss6 else None))
-    except Exception as _e6:
-        _mf_measure(note=f"coverage probe failed: {_e6}")
-
-    print(f"\n[6.5] VCI forward-led re-price (fv_asymmetry / VCI_Source_Score at live price)...")
-    _mf_begin("6.5", "vci_reprice")
-    if not os.path.exists(watchlist_config_path):
-        print("  SKIPPED -- watchlist_tickers.json not found.")
-    else:
-        try:
-            if SCRIPT_DIR not in sys.path:
-                sys.path.insert(0, SCRIPT_DIR)
-            import vci_deploy_eval as _vde
-            try:
-                import scoring_config as _sc
-            except Exception:
-                _sc = None
-
-            with open(watchlist_config_path, encoding="utf-8") as f:
-                _wt = json.load(f)
-            _vci = _wt.get("vci_watchlist", []) or []
-
-            # live-price lookup from the Step-6 metrics pull (current_price), with fallbacks
-            _px = {}
-            if os.path.exists(watchlist_metrics_path):
-                try:
-                    with open(watchlist_metrics_path, encoding="utf-8") as f:
-                        _wm = json.load(f)
-                    for _t, _row in (_wm.get("tickers", {}) or {}).items():
-                        _v = (_row or {}).get("current_price")
-                        if _v is None:
-                            _pr = (_row or {}).get("_prices") or {}
-                            _v = _pr.get("current") or _pr.get("last") or _pr.get("close")
-                        if _v is not None:
-                            _px[str(_t).upper()] = float(_v)
-                except Exception as _e:
-                    print(f"  NOTE: could not read live prices from metrics ({_e}); using stored fallbacks.")
-
-            def _base_t(t):
-                t = str(t or "").upper()
-                return t.split(".")[0] if "." in t else t
-
-            def _price_lookup(t):
-                tu = str(t or "").upper()
-                if tu in _px:
-                    return _px[tu]
-                bt = _base_t(tu)
-                for k, v in _px.items():
-                    if _base_t(k) == bt:
-                        return v
-                # last-resort fallback: the entry's own stored price / entry level
-                for e in _vci:
-                    if str(e.get("ticker", "")).upper() == tu:
-                        return e.get("price") or e.get("entry_level")
-                return None
-
-            if _vci:
-                # normalise the acs field vci_deploy_eval expects (entries store acs_score)
-                for e in _vci:
-                    if e.get("acs") is None:
-                        e["acs"] = e.get("acs_score")
-                # v2: portfolio value for E5 liquidity sizing (best-effort; None -> no cap)
-                _pv = None
-                try:
-                    if os.path.exists(portfolio_path):
-                        with open(portfolio_path, encoding="utf-8") as _pf:
-                            _pd = json.load(_pf)
-                        _pv = _pd.get("total_value") or _pd.get("portfolio_value") \
-                              or (_pd.get("summary", {}) or {}).get("total_value")
-                except Exception:
-                    _pv = None
-                _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv)
-                # v2 E4: sleeve binary risk-budget headroom over the deploy-eligible set
-                try:
-                    import vci_risk_budget as _vrb
-                    _open = [e for e in _ranked if e.get("deploy_eligible")]
-                    summary["vci_binary_risk_committed"] = _vrb.committed_risk(_open)
-                    summary["vci_binary_risk_budget"] = getattr(_sc, "VCI_SLEEVE_BINARY_RISK_BUDGET", None) if _sc else None
-                except Exception:
-                    pass
-                # write recomputed deployability fields back, preserve one canonical order
-                for i, e in enumerate(_ranked, 1):
-                    e["vci_rank"] = i
-                _wt["vci_watchlist"] = _ranked
-                if not args.dry_run:
-                    with open(watchlist_config_path, "w", encoding="utf-8") as f:
-                        json.dump(_wt, f, indent=2, default=str)
-                _elig = [e for e in _ranked if e.get("deploy_eligible")]
-                print(f"  Re-priced {len(_ranked)} VCI name(s); {len(_elig)} deploy-eligible. "
-                      f"Top by VCI_Source_Score: "
-                      + ", ".join(f"{e.get('ticker')}({e.get('vci_source_score')})" for e in _ranked[:3]))
-                summary["vci_repriced"] = len(_ranked)
-                summary["vci_deploy_eligible"] = [e.get("ticker") for e in _elig]
-            else:
-                print("  No VCI watchlist names to re-price.")
-
-            # surface calibration state (read-only) if the learning module has produced one
-            _cal_path = getattr(_sc, "VCI_CALIBRATION_STATE_PATH", None) if _sc else None
-            if _cal_path and os.path.exists(_cal_path):
-                try:
-                    with open(_cal_path, encoding="utf-8") as f:
-                        _cal = json.load(f)
-                    summary["vci_calibration_state"] = {
-                        "calibration_gate_passed": _cal.get("calibration_gate_passed", False),
-                        "resolved_outcomes": _cal.get("resolved_outcomes"),
-                        "weights": _cal.get("weights"),
-                    }
-                    print(f"  VCI calibration state: gate_passed="
-                          f"{_cal.get('calibration_gate_passed', False)} (read-only, advisory).")
-                except Exception:
-                    pass
-        except Exception as e:
-            warnings.append(f"Step 6.5 (VCI re-price): {e} -- VCI names carry forward stale deployability fields.")
-            print(f"  WARNING: VCI re-price failed ({e}); carrying forward stored fields.")
 
     # ---------------------------------------------------------------------------
     # Step 7: Score Part A/B
@@ -2763,6 +2817,347 @@ def main():
             })
     except Exception as _r4e:
         warnings.append(f"R4 revisions crosstab skipped: {_r4e}")
+    # ── Step 6.10 — THE MARGINAL-POUND ROUTER (20-Aug-2026) ───────────────────────────────────
+    # ⚑ WHY THIS STEP EXISTS. `capital_destination` was built 16-Aug-2026, closed five register
+    # items, carried 22 green assertions — and was called by NOTHING. Same shape as the three
+    # modules Step 6.09 rescued the day before, and the framework's second failure class: an
+    # absent execution that reported success. ISA-0386 / ISA-0387 / ISA-0388 / ISA-0390 all land
+    # inside this module, so wiring it is part of shipping them; a router nobody runs allocates
+    # nothing and would have gone stale exactly as quietly.
+    #   6.10a  the per-fund exposure vectors the router's C1 reads (ISA-0392) — a REPORT of the
+    #          artefact's age and provenance. It is NOT refreshed here: the capture needs network
+    #          and this run has none, and a step that pretends to refresh is worse than one that
+    #          declares it cannot.
+    #   6.10b  the destination itself: sleeve split, ranking, allocation, idle capital priced.
+    #   6.10c  the waiting-room / recall position (ISA-0390).
+    print("\n[6.10] Marginal-pound router: sleeve split, estimation-free ranking, recall leg...")
+    _mf_begin("6.10", "capital_destination + fund_exposure_vectors + waiting_room")
+    _s610 = []
+    try:
+        import fund_exposure_vectors as _fev
+        _fv = json.load(open(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json"))) \
+            if os.path.exists(os.path.join(SCRIPT_DIR, "fund_exposure_vectors.json")) else None
+        if _fv is None:
+            warnings.append(
+                "Step 6.10a: fund_exposure_vectors.json is ABSENT, so the router's C1 runs at "
+                "DECLARED-MANDATE resolution (one-hot on the fund's own benchmark) instead of "
+                "look-through. That is a degradation, not a failure — but ISA-0333 / ISA-0160 / "
+                "ISA-0328 stay BLOCKED until the capture is re-run (ISA-0392). The capture needs "
+                "network and this run has none.")
+        else:
+            _sp = _fv.get("as_of_spread_days") or {}
+            summary["fund_exposure_vectors"] = {
+                "n_funds": len(_fv.get("vectors") or {}), "stale": _fv.get("stale"),
+                "age_days": _sp, "corroboration": _fv.get("corroboration"),
+                "share_class_substitutions": _fv.get("share_class_substitutions")}
+            _s610.append("exposure vectors %d funds, %d-%d days old"
+                         % (len(_fv.get("vectors") or {}), _sp.get("min", -1), _sp.get("max", -1)))
+            if _fv.get("stale"):
+                warnings.append(
+                    "Step 6.10a EXPOSURE VECTORS STALE for %s (older than %d days). The router "
+                    "still ranks on them; a stale vector is a fact about the capture, not a "
+                    "reason to fall back silently (ISA-0392)."
+                    % (", ".join(_fv["stale"]), _fev.STALE_AFTER_DAYS))
+            if _fv.get("share_class_substitutions"):
+                warnings.append(
+                    "Step 6.10a EXPOSURE VECTORS use a DIFFERENT SHARE CLASS for %s — same "
+                    "portfolio, different fee or distribution line. Named so it is a known "
+                    "substitution rather than an assumed identity (R6.1)."
+                    % ", ".join(_fv["share_class_substitutions"]))
+    except Exception as _e:
+        warnings.append(f"Step 6.10a (fund_exposure_vectors): {type(_e).__name__}: {_e}")
+        print(f"  fund_exposure_vectors FAILED (non-fatal): {_e}")
+
+    try:
+        import capital_destination as _cd
+        _cdr = _cd.build(out_path=os.path.join(SCRIPT_DIR,
+                                               f"capital_destination_{month_label}.json"))
+        if _cdr.get("state") == "OK":
+            _sl, _fa = _cdr["sleeve_split"], _cdr["fund_allocation"]
+            # ── ISA-0447 (26-Aug-2026): ONE HOME FOR THE SUMMARY, AND IT IS THE MODULE ───
+            # ⚑ The shape of `summary.capital_destination` is now declared by
+            # `capital_destination.summary_for_run_context()`, not assembled inline here. It was
+            # inline for six days and NOTHING RENDERED IT (ISA-0447): the email now does, and an
+            # email contract with a dict literal buried in the orchestrator is a contract with
+            # code no test can reach. The module that owns the document owns its summary (R4.4).
+            summary["capital_destination"] = _cd.summary_for_run_context(_cdr)
+            _s610.append("router %s, stock cap GBP %.2f [%s], funds %s, idle GBP %.2f"
+                         % (_cdr["state"], _sl.get("stock_max_gbp") or 0.0,
+                            (_sl.get("scaling_freeze") or {}).get("basis"), _fa.get("state"),
+                            _fa.get("unallocated_gbp") or 0.0))
+            if (_sl.get("executability") or {}).get("state") == "NOT_EXECUTABLE":
+                warnings.append(
+                    "Step 6.10b STOCK CAP IS NOT EXECUTABLE: GBP %.2f is below the smallest "
+                    "position size the framework declares (GBP %.2f, %s). A cap that cannot open "
+                    "a position is GBP 0 of executable capital reported as a non-zero number "
+                    "(ISA-0387)."
+                    % (_sl["executability"]["stock_max_gbp"],
+                       _sl["executability"]["smallest_declared_position_gbp"] or 0.0,
+                       _sl["executability"]["smallest_declared_position_basis"]))
+            if (_cdr["residual"] or {}).get("unallocated_gbp", 0) > 0:
+                warnings.append(
+                    "Step 6.10b IDLE CAPITAL GBP %.2f (%.1f%% of what was offered), priced at GBP "
+                    "%s/yr net of the waiting-room yield. Idle capital is a DECISION with a stated "
+                    "price, never a default."
+                    % (_cdr["residual"]["unallocated_gbp"],
+                       _cdr["residual"].get("pct_of_capital_offered") or 0.0,
+                       _cdr["residual"].get("annual_opportunity_cost_net_of_waiting_room_gbp")))
+            _db = _cdr.get("declared_bands") or {}
+            if _db.get("not_repaired"):
+                warnings.append(
+                    "Step 6.10b DECLARED PER-FUND BAND BREACH not repaired: %s. Band restoration "
+                    "is C5, the tie-break (Raj, 19-Aug-2026 / ISA-0386), so a breach is repaired "
+                    "only if the fund also wins on C1-C4. Whether a declared band is a preference "
+                    "or a limit has NOT been decided — stated, not resolved by implementation."
+                    % ", ".join(_db["not_repaired"]))
+            if not (_cdr["verification"]["parity"] or {}).get("pass"):
+                warnings.append("Step 6.10b ROUTER PARITY FAILED: inert criteria %s"
+                                % (_cdr["verification"]["parity"].get("inert_criteria")))
+            # ── 6.10d — A12 PLAN STABILITY (ISA-0440) ───────────────────────────────────
+            # ⚑ The plan is a LEXICOGRAPHIC ranking, and a lexicographic ranking over near-tied
+            # inputs can flip on noise. A12's point is that the instability must be VISIBLE
+            # rather than inferred, so the grid runs every month whether or not it finds any.
+            try:
+                _ps12 = _cd.plan_stability(base_doc=_cdr)
+                summary["plan_stability"] = {
+                    "state": _ps12.get("state"), "unstable": _ps12.get("unstable"),
+                    "reading": _ps12.get("reading"),
+                    "grid": [{k: g[k] for k in ("perturbation", "pounds_churned_gbp",
+                                                "churn_share_of_plan", "receiver_set_changed",
+                                                "order_changed")} for g in _ps12.get("grid", [])],
+                    "not_an_input": {k: v["read_by_code"] for k, v in
+                                     (_ps12.get("not_an_input") or {})
+                                     .get("quantities", {}).items()},
+                    "stock_side": _ps12.get("routed_to_stock_side"),
+                }
+                _s610.append("plan stability %s" % ("UNSTABLE: " + ", ".join(_ps12["unstable"])
+                                                    if _ps12.get("unstable") else "stable"))
+                if _ps12.get("unstable"):
+                    warnings.append(
+                        "Step 6.10d PLAN UNSTABLE under %s: the capital plan changes its "
+                        "DESTINATIONS or their order under a perturbation this small, which "
+                        "means the lexicographic ranking is resolving noise rather than "
+                        "economics (A12). %s" % (", ".join(_ps12["unstable"]),
+                                                 _ps12.get("reading") or ""))
+                _nai = [k for k, v in (_ps12.get("not_an_input") or {})
+                        .get("quantities", {}).items() if v.get("read_by_code")]
+                if _nai:
+                    warnings.append(
+                        "Step 6.10d: %s now READ by the capital router. A12 was built on the "
+                        "measured fact that they were not, and the grid reports them as "
+                        "NOT_AN_INPUT — that statement is now false and the grid must start "
+                        "perturbing them for real." % ", ".join(sorted(_nai)))
+            except Exception as _e:                                # noqa: BLE001
+                warnings.append(f"Step 6.10d (plan_stability): {type(_e).__name__}: {_e}")
+        else:
+            warnings.append("Step 6.10b: capital_destination %s" % _cdr.get("state"))
+    except Exception as _e:
+        warnings.append(f"Step 6.10b (capital_destination): {type(_e).__name__}: {_e}")
+        print(f"  capital_destination FAILED (non-fatal): {_e}")
+
+    try:
+        import waiting_room as _wr
+        _park = _wr.outstanding()
+        _fz = _wr.freeze_state()
+        summary["waiting_room"] = {"parked_gbp": _park.get("parked_gbp"),
+                                   "lots_live": _park.get("lots_live"),
+                                   "recall": _fz.get("state"),
+                                   # ISA-0447: the REASON travels with the state. "BARRED" with
+                                   # no reason is a verdict the reader cannot check.
+                                   "recall_reason": _fz.get("reason")}
+        _s610.append("waiting room GBP %.2f parked, recall %s"
+                     % (_park.get("parked_gbp") or 0.0, _fz.get("state")))
+        if _fz.get("state") in ("BARRED", "REFUSED") and (_park.get("parked_gbp") or 0) > 0:
+            warnings.append(
+                "Step 6.10c PARKED CAPITAL IS LOCKED IN: GBP %.2f sits in funds as a TIMING "
+                "decision and the recall leg is %s — %s Parking under an active freeze is not a "
+                "reversible decision (ISA-0390 x ISA-0387)."
+                % (_park["parked_gbp"], _fz["state"], _fz.get("reason", "")))
+    except Exception as _e:
+        warnings.append(f"Step 6.10c (waiting_room): {type(_e).__name__}: {_e}")
+        print(f"  waiting_room FAILED (non-fatal): {_e}")
+
+    _mf_measure(status=("OK" if _s610 else "DEGRADED"),
+                note=("; ".join(_s610) if _s610 else "the marginal-pound router produced no result"))
+    print("  " + ("; ".join(_s610) if _s610 else "no result"))
+
+    # ── Step 6.11 — THE REGIONAL M LAYER AND THE FUND STRUCTURAL E[r] (20-Aug-2026) ───────────
+    # ⚑ 6.11a regional_m (ISA-0160)  ·  6.11b fund_expected_return (ISA-0328).
+    # Placed BETWEEN 6.10 (which produces the per-fund exposure vectors) and 6.08 (which consumes
+    # the result), because that is the dependency order. Wired in the SAME change that built them:
+    # `capital_destination` closed five items, carried 22 green assertions and was called by
+    # nothing for four days, and `strategic_allocation.attribution` was built and unreached for
+    # four days more. A module the monthly run never invokes is not part of the framework however
+    # many assertions it passes.
+    # ⚑ BOTH SHIP BEHAVIOUR-NEUTRAL. With the net buyback yield undeclared every M_k is UNMEASURED
+    # and every fund E[r] refuses; `fund_expected_return.OPERATIVE` is False and
+    # `return_architecture.ER_BASIS_OPERATIVE` is untouched. Nothing here moves a verdict today.
+    print("\n[6.11] Regional M layer and fund structural E[r]...")
+    _mf_begin("6.11", "regional_m + fund_expected_return")
+    _s611 = []
+    try:
+        import regional_m as _rm
+        _rmr = _rm.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
+        st = _rmr.get("state")
+        if st == "NO_CAPTURE":
+            warnings.append(
+                "Step 6.11a: regional_m_inputs.json is ABSENT — every M_k is UNMEASURED and every "
+                "consumer refuses. This is the honest state, not a failure, but the layer is doing "
+                "nothing until the capture is restored (assisted Cowork step; the device has no "
+                "network).")
+        elif st == "DISABLED":
+            warnings.append("Step 6.11a: regional_m is DISABLED by its rollback constant.")
+        else:
+            _wi = _rmr.get("world_identity") or {}
+            _s611.append("regional_m %s, world identity %s" % (st, _wi.get("verdict")))
+            _blocked = ((_rmr.get("m") or {}).get("blocked_cells") or [])
+            if _blocked:
+                warnings.append(
+                    "Step 6.11a REGIONAL M PARTIAL: %d of 7 cells UNMEASURED (%s). %s"
+                    % (len(_blocked), ", ".join(_blocked), _rmr.get("partial_reason", "")[:240]))
+            for _c in ((_rmr.get("age") or {}).get("stale_cells") or []):
+                warnings.append(
+                    "Step 6.11a REGIONAL M CAPTURE STALE for cell %s (older than %d days). The "
+                    "refresh is an ASSISTED Cowork step, never a pre-run step." % (_c, _rm.STALE_AFTER_DAYS))
+            for _c in ((_rmr.get("corroboration") or {}).get("breaches") or []):
+                warnings.append(
+                    "Step 6.11a CORROBORATION BREACH on cell %s — more than %.1fpp from the "
+                    "declared external capital-market assumption. Published, never blended (R6.2)."
+                    % (_c, _rm.CORROBORATION_TOL_PP))
+            _pl = _rmr.get("plausibility") or {}
+            if _pl.get("state") == "MEASURED" and not _pl.get("within_band"):
+                warnings.append(
+                    "Step 6.11a PLAUSIBILITY: implied real PER-SHARE growth %.2f%% against a "
+                    "measured historical reference of %.2f%%. Above the reference means the "
+                    "construction is GENEROUS; far above it is the signature of the ISA-0405 "
+                    "aggregate-vs-per-share double-count."
+                    % (_pl["implied_real_per_share_growth_pct"],
+                       _pl["historical_reference"]["value"]))
+            summary["regional_m"] = {
+                "state": st, "world_identity": _wi.get("verdict"),
+                "blocked_cells": _blocked,
+                "specification": (_rmr.get("m") or {}).get("operative_specification")}
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.11a (regional_m): {type(_e).__name__}: {_e}")
+
+    try:
+        import fund_expected_return as _fer
+        _ferr = _fer.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
+        if _ferr.get("state") == "DISABLED":
+            warnings.append("Step 6.11b: fund_expected_return is DISABLED by its rollback constant.")
+        else:
+            _sl = _ferr.get("sleeve") or {}
+            _un = _ferr.get("unmeasured") or []
+            _s611.append("fund E[r] %s (%d/%d measured)"
+                         % (_ferr.get("state"), len(_ferr.get("funds") or {}) - len(_un),
+                            len(_ferr.get("funds") or {})))
+            if _un:
+                warnings.append(
+                    "Step 6.11b FUND E[r] PARTIAL: %d of %d funds UNMEASURED. Every one NAMES what "
+                    "it is blocked on and none is given a sleeve average (R2.10)." % (len(_un), len(_ferr.get("funds") or {})))
+            if _sl.get("state") == "MEASURED":
+                warnings.append(
+                    "Step 6.11b FUND SLEEVE FORWARD E[r] %.2f%% over %.1f%% covered weight. ⚑ This "
+                    "is PUBLISHED, not OPERATIVE: return_architecture.ER_BASIS_OPERATIVE is "
+                    "unchanged and no verdict moves on it (D-13's null-behaviour-delta pattern)."
+                    % (_sl["structural_er_pct"], 100 * _sl["covered_weight"]))
+            _od = _ferr.get("ordering_diagnostic") or {}
+            if _od.get("state") == "MEASURED" and _od.get("dilution_pp") is not None:
+                warnings.append(
+                    "Step 6.11b ORDERING DIAGNOSTIC (NON-BINDING): the marginal pound's "
+                    "money-weighted forward E[r] is %.2f%% against a sleeve of %.2f%% (%+.2fpp). "
+                    "Not evidence the ordering is wrong — it is what C1 does when it closes the US "
+                    "underweight. One month is an anecdote; a persistent sign belongs to ISA-0333."
+                    % (_od["money_weighted_er_pct"], _od["sleeve_er_pct"], _od["dilution_pp"]))
+            summary["fund_expected_return"] = {
+                "state": _ferr.get("state"), "operative": _ferr["_meta"]["operative"],
+                "sleeve_pct": _sl.get("structural_er_pct"), "n_unmeasured": len(_un)}
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.11b (fund_expected_return): {type(_e).__name__}: {_e}")
+
+    _mf_measure(status=("OK" if _s611 else "DEGRADED"),
+                note=("; ".join(_s611) if _s611 else "the regional M layer produced no result"))
+    print("  " + ("; ".join(_s611) if _s611 else "no result"))
+
+    # ── Step 6.08 — return architecture (ranked build item #1, 06-Aug-2026) ──────────
+    # ⚑ Section C — the one number that answers "is this on track for £1m" — has NEVER been
+    # computed. It shipped as `total_return: null, status: "pending_section_a"` and rendered as
+    # "[Claude fills]". Section A was computed, but from `est_return`: prose typed by hand a
+    # month earlier, which scores Scottish Mortgage 14.0% on a realised 5y of 0.22% (register
+    # C4). This step replaces both with arithmetic, against ONE declared expected-return input
+    # per holding, gated on thresholds DERIVED from the A19 anchor.
+    print("\n[6.08] Return architecture (Section A/B/C + shortfall + levers)...")
+    _mf_begin("6.08", "return_architecture")
+    try:
+        import return_architecture as _ra
+        _ra_path = os.path.join(SCRIPT_DIR, f"return_architecture_{month_label}.json")
+        _fas_json = None
+        try:
+            with open(os.path.join(SCRIPT_DIR, f"fund_action_stack_{month_label}.json"),
+                      encoding="utf-8") as _f:
+                _fas_json = json.load(_f)
+        except Exception:                                      # noqa: BLE001
+            _fas_json = None
+        _met_json = None
+        try:
+            with open(os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json"),
+                      encoding="utf-8") as _f:
+                _met_json = json.load(_f)
+        except Exception:                                      # noqa: BLE001
+            _met_json = None
+        _rar = _ra.build(run_date if isinstance(run_date, dt_date) else None,
+                         _port, _fas_json, None, _met_json, _ra_path)
+        _sa, _sb, _sc = _rar["section_a"], _rar["section_b"], _rar["section_c"]
+        summary["return_architecture"] = {
+            "basis": _rar["operative_basis"], "anchor_pct": _rar["anchor"]["operative_pct"],
+            "section_a_pct": _sa["value_pct"], "section_a_verdict": _sa.get("verdict"),
+            "section_b_pct": _sb["value_pct"], "section_b_verdict": _sb.get("verdict"),
+            "section_c_pct": _sc["value_pct"], "section_c_verdict": _sc.get("verdict"),
+            "shortfall_pp": _sc.get("shortfall_pp"), "coverage": _sc.get("coverage")}
+        _bad = [i for i in _rar["invariants"] if not i["holds"]]
+        _mf_measure(status="OK" if not _bad else "DEGRADED",
+                    note=(f"Section C {_sc['value_pct']}% vs anchor "
+                          f"{_rar['anchor']['operative_pct']}% -> {_sc.get('verdict')} "
+                          f"(shortfall {_sc.get('shortfall_pp')}pp); "
+                          f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])} "
+                          f"invariants hold"))
+        for _i in _bad:
+            errors.append(f"Step 6.08 INVARIANT {_i['invariant']} FAILED: {_i['detail']}")
+        if _sc.get("verdict") in ("Flag", "Watch"):
+            _top = (_rar["shortfall_attribution"]["rows"] or [])[:3]
+            warnings.append(
+                f"Step 6.08 SECTION C {str(_sc.get('verdict')).upper()}: total ISA expected "
+                f"return {_sc['value_pct']}% against a required {_rar['anchor']['operative_pct']}% "
+                f"— short by {_sc.get('shortfall_pp')}pp on the '{_rar['operative_basis']}' basis. "
+                f"Largest drags: " + "; ".join(
+                    f"{r['asset_id']} {r['contribution_to_shortfall_pp']:+.2f}pp" for r in _top))
+        for _l in _rar["levers"]:
+            if not _l["feasible"] and _l["lever"] == "deploy_idle_cash":
+                warnings.append(f"Step 6.08 CASH: {_l['blocked_reason']}")
+        if _rar["thresholds"]["divergences"]:
+            for _d in _rar["thresholds"]["divergences"]:
+                warnings.append(
+                    f"Step 6.08 THRESHOLD DRIFT: {_d['threshold']} derived {_d['derived_pct']}% "
+                    f"vs the frozen constant {_d['legacy_pct']}% ({_d['delta_pp']:+}pp) — the "
+                    f"derived value is operative; target_weights.json is now stale prose")
+        _bmd = _rar.get("bucket_minimum_divergence") or {}
+        for _r in (_bmd.get("rows") or []):
+            if _r.get("agree") is False:
+                warnings.append(
+                    f"Step 6.08 BUCKET MINIMUM {_r['bucket']}: policy file says "
+                    f"{_r['policy_pct']}%, fund_action_stack uses {_r['in_force_pct']}%. "
+                    f"{_bmd.get('diagnosis')} Left in force pending Raj (one constant).")
+        for _d in (_rar.get("defects_observed") or []):
+            warnings.append(f"Step 6.08 {_d['code']}: {_d['detail']}")
+        print(f"  A {_sa['value_pct']}% {_sa.get('verdict')} | B {_sb['value_pct']}% "
+              f"{_sb.get('verdict')} | C {_sc['value_pct']}% {_sc.get('verdict')} "
+              f"(short {_sc.get('shortfall_pp')}pp) | invariants "
+              f"{len(_rar['invariants']) - len(_bad)}/{len(_rar['invariants'])}")
+    except Exception as _e:
+        _mf_measure(status="ERROR", note=f"{type(_e).__name__}: {_e}")
+        errors.append(f"Step 6.08 (return_architecture): {type(_e).__name__}: {_e}")
+        print(f"  FAILED: {_e}")
+
 
     print("\n[8b] Building Step 9 conviction skeleton (judgement capture)...")
     _mf_begin("8b", "conviction_capture")
@@ -2810,11 +3205,26 @@ def main():
     try:
         import shadow_ledger as _sl
         _coh, _written = _sl.freeze(month_label, here=SCRIPT_DIR)
+        # ⚑ THREE OUTCOMES, THREE MESSAGES (ISA-0554). `written=False` used to mean exactly one
+        # thing — "already frozen, identical". Since freeze() now REFUSES an empty cohort
+        # rather than making the month immutable against its own real stack, False also means
+        # "nothing to freeze yet". Printing the old sentence for the new case would report a
+        # freeze that never happened, which is the failure mode this whole file guards against.
+        _refused = _coh.get("freeze_refused")
+        if _written:
+            _state = "frozen"
+        elif _refused:
+            _state = "NOT FROZEN — 0 BUY rows; will freeze on the pass that produces a stack"
+        else:
+            _state = "already frozen — identical"
         print(f"  Cohort {month_label}: {_coh['n_buys']} BUY recommendations, "
-              f"hash {_coh['stack_hash']} "
-              f"({'frozen' if _written else 'already frozen — identical'})")
+              f"hash {_coh['stack_hash']} ({_state})")
+        if _refused:
+            warnings.append("Step 8c: " + _refused)
         _mf_measure(rows_out=_coh["n_buys"], coverage=1.0,
-                    note=f"stack_hash={_coh['stack_hash']} written={_written}")
+                    status=("SKIPPED" if _refused else None),
+                    note=f"stack_hash={_coh['stack_hash']} written={_written}"
+                         + ("; refused: empty cohort" if _refused else ""))
         if not args.dry_run:
             try:
                 _marks = _sl.mark(asof=run_date.isoformat(), here=SCRIPT_DIR)
@@ -3610,11 +4020,27 @@ def main():
     try:
         sys.path.insert(0, SCRIPT_DIR)
         import consistency_check as _cchk
-        _mismatches = _cchk.check_all()
-        if _mismatches:
-            for _m in _mismatches:
-                errors.append(f"A18 consistency: {_m}")
-            print(f"  A18: {len(_mismatches)} MISMATCH(ES) -> errors[]")
+        # ⚑ ISA-0546 (02-Sep-2026) — SEVERITY IS ROUTED, NOT FLATTENED. check_all() used to
+        # return bare strings and EVERY one landed in errors[], so the two permanently
+        # stale-stamped SQ regime rows (ISA-0517 refuses the documented remedy) opened every run
+        # at ERROR. A permanent ERROR that must be ignored is how a reader stops reading the
+        # list that every real prose-vs-config divergence arrives on.
+        # ⚑ SEVERITY IS DECLARED AT THE POINT OF PRODUCTION and anything unmarked is ERROR, so
+        # the fail-safe direction is preserved: a new pair has to opt IN to being a warning.
+        _recs = _cchk.check_all(tagged=True)
+        _a18_err = [r["message"] for r in _recs if r["severity"] == "ERROR"]
+        _a18_warn = [r["message"] for r in _recs if r["severity"] != "ERROR"]
+        for _m in _a18_err:
+            errors.append(f"Step 9d A18 consistency: {_m}")
+        for _m in _a18_warn:
+            warnings.append(f"Step 9d A18 consistency (WARN, not an error): {_m}")
+        summary["a18_consistency"] = {"n_error": len(_a18_err), "n_warn": len(_a18_warn),
+                                      "basis": "ISA-0546 - severity declared at production"}
+        if _a18_err:
+            print(f"  A18: {len(_a18_err)} MISMATCH(ES) -> errors[], "
+                  f"{len(_a18_warn)} -> warnings[]")
+        elif _a18_warn:
+            print(f"  A18: ALL PAIRS GREEN at ERROR grade; {len(_a18_warn)} warning(s)")
         else:
             print("  A18: ALL PAIRS GREEN")
     except Exception as _e:
@@ -3734,6 +4160,44 @@ def main():
                          f"{_n_raised} raised a warning or error")
     except Exception:
         pass
+
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 6.99 — EXECUTION-LEDGER RECONCILIATION + THE RANKED INTEGRITY QUEUE (P0.1/P0.6)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ LAST, because it reports on what the run ACTUALLY EXECUTED. Reconciling earlier would
+    # answer the question using a partial ledger, which is the shape of every finding this
+    # instrument exists to catch.
+    # ⚑ THE LEDGER WRITE COMES FIRST and its failure is REPORTED: a monitoring layer that
+    # degrades silently is worse than none.
+    print("\n[6.99] Execution-ledger reconciliation + ranked integrity queue...")
+    _mf_begin("6.99", "framework_integrity.report")
+    try:
+        import framework_integrity as _fi2
+        _lp = _fi2.flush_ledger()
+        _rec = _fi2.reconcile(SCRIPT_DIR)
+        _rep = _fi2.report(SCRIPT_DIR)
+        summary["execution_ledger"] = _rec
+        summary["integrity_report"] = _rep
+        for _e in _rec.get("errors", [])[:10]:
+            warnings.append("EXECUTION LEDGER " + _e)
+        _mf_measure(rows_out=_rep.get("n_total"),
+                    status=("OK" if _rep.get("state") == "OK" else "DEGRADED"),
+                    note=("%s; top finding %s; %s"
+                          % (_rep.get("state"),
+                             (_rep.get("queue") or [{}])[0].get("subject", "none"),
+                             _rep.get("suppressed", {}).get("line", ""))))
+        print("  ledger %s (%s) — integrity %s, %d finding(s); %s"
+              % (_rec.get("state"), _lp, _rep.get("state"), _rep.get("n_total"),
+                 _rep.get("suppressed", {}).get("line", "")))
+        for _q in (_rep.get("queue") or [])[:5]:
+            print("    £%12s  %-22s %s" % (format(_q.get("gbp_exposure", 0.0), ",.2f"),
+                                           _q.get("source"), str(_q.get("subject"))[:60]))
+    except Exception as _e:                                    # noqa: BLE001
+        summary["integrity_report"] = {"state": "UNAVAILABLE",
+                                       "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="framework_integrity unavailable: %s" % _e)
+        warnings.append("STEP 6.99 UNAVAILABLE — %s: %s" % (type(_e).__name__, _e))
+        print("  UNAVAILABLE — %s" % _e)
 
     # CAPTURE LAYER ITEM 2 — close the last open step and write the manifest BEFORE
     # run_context, so run_context can carry the manifest's own verdict rather than a

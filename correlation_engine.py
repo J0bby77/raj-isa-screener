@@ -41,6 +41,18 @@ import os
 import statistics
 from typing import Dict, List, Optional
 
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── declared constants (A2.2 / A2.1). PROVISIONAL: must be measured before they gate ──────
@@ -224,6 +236,7 @@ def n_eff(weights: Dict[str, float], sigmas: Dict[str, float], matrix: dict) -> 
 
 def assess(returns_by_name, weights, sigmas=None, candidates=None) -> dict:
     """The run-level artefact. Every field states its basis (R4.2)."""
+    _fi_mark("correlation_engine", "assess")
     m = pairwise_matrix(returns_by_name)
     sig = sigmas or {n: (statistics.pstdev(list(r.values())) if len(r) >= 8 else None)
                      for n, r in returns_by_name.items()}

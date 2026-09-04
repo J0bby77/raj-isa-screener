@@ -1,0 +1,224 @@
+{
+ "_what": "P0.2 quantity register — every quantity that reaches a capital decision, declared once: one computer, one set of units, at least one surface, one assertion. Enforced by framework_integrity.quantity_register_report (Q1-Q4).",
+ "_authority": "ISA_BuildSpec_FrameworkIntegrity_and_CapitalDeployment_27Aug2026.md P0.2",
+ "_raised": "ISA-0467 / ISA-0468, 27-Aug-2026",
+ "_rule_computer": "EXACTLY ONE function may COMPUTE a registered quantity. A function that reads it from elsewhere and passes it on is a RELAY and does not count (Q1 distinguishes them by AST, not by grep).",
+ "_rule_null": "computer:null is UNADJUDICATED and COSTS A LIVE REGISTER ITEM (ISA-0448). Writing a plausible computer where the truth is 'nobody has looked' would launder a backlog into a reassuring category.",
+ "quantities": [
+  {
+   "name": "stock_max_gbp",
+   "computer": "position_sizing.stock_max",
+   "units": "GBP",
+   "surface": [
+    "email.s2.capital_router",
+    "capital_destination_[mmm]_[yyyy].json"
+   ],
+   "assertion": "pair_single_stock_max_authority",
+   "vocabulary": null,
+   "gbp_exposure": 11250.0,
+   "note": "⚑ TWO COMPUTERS TODAY (spec F1). capital_destination.sleeve_split derives it from the band floor and returns GBP 547.94; position_sizing.stock_max is the demand-pull rule and is reached only from a synthetic probe. 10x apart, wrong one live. P4 DELETES derive_stock_max — it does not re-point it (ISA-0442)."
+  },
+  {
+   "name": "fund_max_gbp",
+   "computer": "capital_destination.sleeve_split",
+   "units": "GBP",
+   "surface": [
+    "email.s2.capital_router"
+   ],
+   "assertion": "pair_capital_router_render",
+   "vocabulary": null,
+   "gbp_exposure": 10702.06
+  },
+  {
+   "name": "min_entry_gbp",
+   "computer": "position_sizing.allocate",
+   "units": "GBP",
+   "surface": [
+    "email.s2.capital_router",
+    "email.s2.stock_allocation"
+   ],
+   "assertion": "pair_entry_and_review_fractions_distinct",
+   "vocabulary": null,
+   "gbp_exposure": 4377.0,
+   "note": "D16: MIN_ENTRY_FRACTION_OF_STARTER 0.80 x STARTER, derived from the ladder every run and never typed. Distinct from risk_contribution's 0.75 review fraction — two rules, guarded by an assertion because a future session WILL unify them."
+  },
+  {
+   "name": "target_pct",
+   "computer": "position_sizing.target_pct",
+   "units": "pct_of_nav",
+   "surface": [
+    "email.s2.stock_allocation",
+    "email.s7.thesis_states"
+   ],
+   "assertion": "pair_prose_sizing_numbers",
+   "vocabulary": null,
+   "gbp_exposure": 1563.21,
+   "note": "GBP 1,563 per position — the NORMAL/STARTER rung difference at NAV 156,321.05. FIVE live authorities disagree on it today (spec F8), three of them in prose that Steps 8-10 EXECUTE.",
+   "key_scope": [
+    "position_sizing"
+   ]
+  },
+  {
+   "name": "rho_sleeve",
+   "computer": "correlation_engine.candidate_correlation",
+   "units": "correlation",
+   "surface": [
+    "email.s7.correlation_matrix"
+   ],
+   "assertion": "pair_correlation_universe_covers_candidates",
+   "vocabulary": {
+    "field": "rho_basis",
+    "declared": [
+     "MEASURED",
+     "MEASURED_SHRUNK",
+     "MEASURED_SHORT",
+     "UNMEASURED_ADVERSE_DEFAULT"
+    ]
+   },
+   "gbp_exposure": 1563.21,
+   "key_scope": [
+    "correlation_engine"
+   ]
+  },
+  {
+   "name": "mctr",
+   "computer": "risk_contribution.contributions",
+   "units": "fraction_of_sigma_p",
+   "surface": [
+    "email.s7.risk_contribution_mctr"
+   ],
+   "assertion": "pair_risk_contribution_basis",
+   "vocabulary": {
+    "field": "rc_basis",
+    "declared": [
+     "w_sigma_proxy",
+     "covariance_mctr"
+    ]
+   },
+   "gbp_exposure": 5471.24,
+   "note": "The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3).",
+   "key_scope": [
+    "risk_contribution"
+   ]
+  },
+  {
+   "name": "evidence_state",
+   "computer": "evidence_state.classify",
+   "units": "enum",
+   "surface": [
+    "email.s7.stock_candidates",
+    "email.s2.stock_allocation"
+   ],
+   "assertion": "pair_evidence_channel_coverage",
+   "vocabulary": {
+    "field": "evidence_state",
+    "declared": [
+     "STRONG",
+     "CONFIRMED",
+     "THIN",
+     "DEGRADED_UNMEASURED",
+     "DEGRADED_REVERSED"
+    ]
+   },
+   "gbp_exposure": 1563.21,
+   "key_scope": [
+    "evidence_state"
+   ]
+  },
+  {
+   "name": "thesis_state",
+   "computer": "thesis_state.apply",
+   "units": "enum",
+   "surface": [
+    "email.s7.thesis_states"
+   ],
+   "assertion": "pair_thesis_state_never_upsizes",
+   "vocabulary": {
+    "field": "thesis_state",
+    "declared": [
+     "STRENGTHENING",
+     "INTACT",
+     "WATCH",
+     "BROKEN"
+    ]
+   },
+   "gbp_exposure": 1563.21,
+   "note": "⚑ DOES NOT EXIST TODAY (spec F9). The clean spec relocates judgement into it and no module defines, writes or reads it — judgement was evicted from the /100 and given nowhere to go, so it never left. P7.2 builds it.",
+   "key_scope": [
+    "thesis_state"
+   ]
+  },
+  {
+   "name": "ratchet_route",
+   "computer": "retention.route_attribution",
+   "units": "enum",
+   "surface": [
+    "email.s2.ratchet_status"
+   ],
+   "assertion": "pair_quantity_register_complete",
+   "vocabulary": {
+    "field": "route",
+    "declared": [
+     "main",
+     "vci",
+     "growth",
+     "growth_stock",
+     "sleeve",
+     "pre_framework",
+     "override"
+    ]
+   },
+   "gbp_exposure": 0.0,
+   "note": "⚑ `route == \"forward_led\"` filters on a value NO live producer emits (spec F4). The published n=1 came from a fixture. GBP 0 today — the ratchet cannot fire before ~Aug-2027 whatever is built — which is why P5 is sequenced last and cut first."
+  },
+  {
+   "name": "stock_sleeve_weight_now_pct",
+   "computer": "capital_destination.sleeve_split",
+   "units": "pct_of_nav",
+   "surface": [
+    "email.s2.capital_router"
+   ],
+   "assertion": "pair_capital_router_render",
+   "vocabulary": null,
+   "gbp_exposure": 0.0,
+   "key_scope": [
+    "capital_destination"
+   ]
+  },
+  {
+   "name": "gbp",
+   "computer": "stock_return_store.record_level",
+   "units": "GBP",
+   "surface": [
+    "email.s7.fetch_report"
+   ],
+   "assertion": "pair_execution_ledger_reconciles",
+   "vocabulary": {
+    "field": "stamp_basis",
+    "declared": [
+     "point_in_time",
+     "backfilled_not_pit"
+    ]
+   },
+   "gbp_exposure": 1563.21,
+   "note": "⚑ The store has never been written to and `stamp_basis` certifies backfill as point-in-time (spec F2/F10). record_level() is a capture instrument that has never captured.",
+   "key_scope": [
+    "stock_return_store"
+   ]
+  },
+  {
+   "name": "underfilled_obligation_gbp",
+   "computer": null,
+   "units": "GBP",
+   "surface": [
+    "email.s2.underfilled_obligations"
+   ],
+   "assertion": "pair_fill_obligation_store",
+   "vocabulary": null,
+   "gbp_exposure": 942.48,
+   "register_item": "ISA-0470",
+   "note": "UNADJUDICATED by design until P4.6 ships the store. Declared here so the gap costs a live register item rather than being invisible."
+  }
+ ],
+ "_rule_scope": "key_scope declares which modules legitimately own a GENERIC key name. `target_pct` is the stock ladder rung in position_sizing and a fund's band target in fund_returns — two quantities, one key. A computer OUTSIDE the scope is reported as OUT_OF_SCOPE, never dropped: scope narrows the GATE, it never narrows the ENUMERATION. A quantity with no key_scope is scoped to the whole tree, which is the strict default."
+}

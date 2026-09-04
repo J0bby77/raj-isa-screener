@@ -52,7 +52,11 @@
    "decision": "Raj, 26-Aug-2026 (D5). The clean spec s1 - 'a position reaches 3.5% or it does not exist. No sub-scale holdings.' - is the build authority and supersedes the 0.75% Stage-1 probe pre-registered on 01-Aug-2026 in ISA_Stock_Sleeve_Confidence_Roadmap_Aug2026.md. The two were TWO HOMES FOR ONE RULE (D5, open since 22-Aug) and the ladder wins.",
    "what_is_given_up": "The staged de-risking ramp. This is a real cost, recorded rather than glossed: ISA-0429 measured the stock sleeve trailing VUAG by ~22pp ex-MU since April, so the caution the probe encoded was well founded. The replacement control is NOT size - it is QUALIFICATION (evidence state, s6) plus the correlation gate (s7) plus the step-down ratchet (s3). If those do not hold, nothing is protecting the sleeve, because the percentage ceiling was removed in the same change.",
    "note": "Retained as a record rather than deleted so a grep for stage1_probe_pct lands here."
-  }
+  },
+  "tier1_soft_cap_pct": 0.05,
+  "tier2_hard_cap_pct": 0.075,
+  "_tier_caps_basis": "Post-appreciation CONCENTRATION control on an OPEN direct-stock position — a different rule from the entry ladder, which is why both exist (cf. FLAG_FRACTION_OF_STARTER 0.75 vs MIN_ENTRY_FRACTION_OF_STARTER 0.80). Transcribed 28-Aug-2026 from Run_Context Standing Constraints so the rule has ONE home. ⚑⚑ ISA-0496 RESOLVED (Raj, 02-Sep-2026) — tier1_soft_cap_pct 5.0% is BELOW the ladder's EARNED_MAX 6.5%, so a top-rung position used to be in 'soft cap breached' the moment it opened, with a five-question FAIL trimming it to 3.5% and a Tier 2 breach trimming it to 5% — both BELOW what its evidence earned. NEITHER NUMBER MOVED. The TRIGGER became relative: position_sizing.effective_soft_cap_pct(evidence_state) = max(tier1_soft_cap_pct, that position's own earned ladder rung), and both remedies trim to that same figure. Nothing stops an EARNED_MAX position; a STARTER or NORMAL position is still reviewed at 5.0%, unchanged. Raising the cap flat to 6.5% was the simpler fix and was REJECTED: it would have deleted the drift control for every position below the top rung, letting a STARTER name triple without review. Enforced by consistency_check.pair_tier_caps_rung_aware().",
+  "_tier1_trigger_home": "position_sizing.effective_soft_cap_pct"
  },
  "buckets": {
   "B1": {
@@ -331,19 +335,32 @@
   "phase1_target_basis": "RETAINED FOR REPORTING ONLY - phase1_target_low/high are no longer a cap on new capital. They remain as the band the monthly email reports position against, and phase1_target_low (10%) is the ratchet FLOOR in the s3 step-down rule.",
   "stepdown_ratchet": {
    "replaces": "the D6 probation rule at email_prefill.py:1514",
-   "population": "forward_led_framework_decisions_only",
-   "trigger": "trails VUAG by >5pp cumulative over 12 months with >=3 positions",
+   "population": "all_open_direct_stock_positions",
+   "population_superseded_26aug": "forward_led_framework_decisions_only",
+   "population_basis": "D18 (Raj, 27-Aug-2026). VCI INCLUDED - the ceiling is a capital question and VCI is the same capital. The superseded route filter could never have been true: no live producer emits route='forward_led' (the string occurs only in a selftest and two fixtures), so the published 'n=1, only COCO' was a FIXTURE result while the live filter returned 0 (F4 / ISA-0457).",
+   "trigger": "THREE-LEG CONJUNCTION (D19), all three required: (a) trails VUAG by >=5pp; AND (b) trailed in >=9 of the last 12 measured months; AND (c) still trails by >=5pp with the LARGEST position excluded. Population >=3 open direct-stock positions is a precondition, not a leg.",
+   "trigger_legs": {
+    "a_trail_pp": 5.0,
+    "b_min_trailing_months_of_12": 9,
+    "c_ex_largest_position": "the largest position is read PER MONTH from freeze_history.largest_position_ticker and is NEVER hard-coded to MU - a hard-coded ex-MU leg becomes an ex-nothing leg the month MU is trimmed",
+    "why_three": "leg (a) alone is 0.1295 SD against a measured sleeve tracking error of 38.6%/yr and fires ~44% of the time on ZERO true alpha, at 6, 12 AND 24 months. Widening the window does not repair a threshold expressed in the units of the quantity rather than of its noise (R3.11). The conjunction is what buys discrimination.",
+    "unmeasured_behaviour": "ANY leg unmeasured => ACTIVE_UNMEASURED, never 'does not fire' (ISA-0429). The two spellings are asserted distinct."
+   },
+   "early_warning_months": 6,
+   "early_warning_gates": false,
    "consequence": "new_ceiling = floor(current_sleeve_weight_pct / 5) * 5",
    "ratchet_floor_pct": 10.0,
    "increment_routing": "capital_destination",
-   "basis": "The forward-led framework went live ~05-Jul-2026. AVGO, MU and ONT predate it; ABCL was an A13 override; QBTS is VCI/Path B. COCO (02-Aug) is the only forward-led decision, so n=1 and the rule CANNOT FIRE YET - which is correct, not a loophole. Measuring the framework on a book it did not assemble is measuring the wrong thing, in either direction."
+   "basis": "P5, built 29-Aug-2026. The population is every OPEN DIRECT-STOCK position including VCI (D18), which on the September book is 6. Route is still RECORDED - retention.route_attribution() buckets by route with pre_framework as its own bucket - but it is NON-GATING and makes NO counterfactual claim about whether a pre-framework position would have qualified (R2.2 bars a hypothesis from a decision). The rule still cannot fire before ~Aug-2027: freeze_history holds ONE measured month against the 12 leg (b) requires, and the pre-run prints which condition binds each month rather than reporting a bare 'cannot fire'."
   },
   "funding_sources": {
    "new_subscription": "AVAILABLE_IN_FULL",
    "stock_to_stock_recycling": "PERMITTED",
    "fund_to_stock_recall": "BARRED_UNTIL_2026-11-01_OVERRIDE_2026-12-01_MECHANICAL",
    "basis": "clean spec s4. stock_max is NOT capped at the band floor (ISA-0430): the reallocation_only semantics exempted a subscription from the freeze and then bound it to the band FLOOR, which is tighter than the unfrozen policy - GBP 548 against GBP 8,364, a 15.3x difference from one word."
-  }
+  },
+  "cash_reserve_gbp": 250,
+  "cash_reserve_gbp_basis": "RAJ D23, 02-Sep-2026 (ISA-0544). GBP 250 is retained as ISA cash and is the SINGLE control on residual deployment: deployable = max(residual - 250, 0), to funds or stocks alike. Raj's worked example: two whole positions funded, GBP 1,000 left, GBP 750 deployable. There is NO per-ticket top-up floor - `min_topup_gbp` is deliberately ABSENT and asserted absent, because two controls on one quantity is the FC-D two-homes class (R4.4, R14.2)."
  },
  "signal_logic": {
   "hold": "Within band AND estimated return >= bucket minimum",
@@ -365,9 +382,10 @@
   "basis_declared_by": "Raj, 20-Aug-2026 (ISA-0387)",
   "basis_declared_on": "2026-08-20",
   "basis_semantics": {
-   "reallocation_only": "The freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A new subscription, and uninvested account cash, are not 'scaling' for the purposes of the freeze. stock_max is therefore the amount that restores the declared stock-sleeve band FLOOR, capped by the capital on offer. ⚑ CONSEQUENCE THAT TRAVELS WITH THE CHOICE: the ISA-0390 recall leg (trim funds -> buy stocks) IS a disposal from the fund sleeve and is therefore BARRED while the freeze is active, until 2026-11-01 (override) or 2026-12-01 (mechanical).",
+   "reallocation_only": "The freeze binds only capital whose SOURCE is a disposal from the fund sleeve. Capital from a subscription or from uninvested cash is not scaling and is not bound; its destination is decided by the demand-pull rule in `position_sizing.stock_max`, not by the Phase-1 band. The band remains a reporting and Phase-transition measure and is no longer a cap. (Raj, D20, 26-Aug-2026.) ⚑ REWRITTEN 28-Aug-2026 (P4.2). The previous text said stock_max 'is therefore the amount that restores the declared band FLOOR' — the ISA-0430 non-sequitur: the premise is about the SOURCE of capital and the conclusion was about its SIZE, and those do not follow. It derived GBP 547.94 on the September book, NOT_EXECUTABLE against a GBP 5,471.24 position, sending GBP 10,702.06 to a fund sleeve measured at 6.24% forward E[r] against a required 13.8-13.9%. The prior text is retained above under `_superseded_reallocation_only_pre_28aug2026` (R2.13). ⚑⚑ WHAT DOES **NOT** CHANGE: the freeze stays ACTIVE, and the ISA-0390 recall leg — trim funds to buy stocks — stays BARRED until 2026-11-01 (override) / 2026-12-01 (mechanical). D20 retires the band as a cap on SUBSCRIBED capital only.",
    "weight": "stock_max holds the sleeve's PRE-SUBSCRIPTION weight exactly, so a subscription takes no new PROPORTIONAL exposure to the unproven process. Measured 20-Aug-2026 on the September case: GBP 891.90 = 0.591% of the post-subscription total, which is BELOW every declared position size in the framework (Stage-1 probe 0.75%, typical 1.5-3.5%, max 5.0%) — a cap that cannot fund a compliant new position, only a top-up. NOT CHOSEN, and the reason is recorded so the measurement is not lost.",
-   "pounds": "stock_max = 0. The freeze is an absolute bar on pounds entering the sleeve and the resulting dilution (0.591pp on the September case, repeating on every subscription) is ACCEPTED and recorded as a chosen cost. NOT CHOSEN."
+   "pounds": "stock_max = 0. The freeze is an absolute bar on pounds entering the sleeve and the resulting dilution (0.591pp on the September case, repeating on every subscription) is ACCEPTED and recorded as a chosen cost. NOT CHOSEN.",
+   "_superseded_reallocation_only_pre_28aug2026": "The freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A new subscription, and uninvested account cash, are not 'scaling' for the purposes of the freeze. stock_max is therefore the amount that restores the declared stock-sleeve band FLOOR, capped by the capital on offer. ⚑ CONSEQUENCE THAT TRAVELS WITH THE CHOICE: the ISA-0390 recall leg (trim funds -> buy stocks) IS a disposal from the fund sleeve and is therefore BARRED while the freeze is active, until 2026-11-01 (override) or 2026-12-01 (mechanical)."
   },
   "basis_note": "⚑ R4.4 / ISA-0387. This field declares the UNIT the freeze is measured in. The NUMBER is DERIVED by capital_destination.sleeve_split() from this basis on every run and is never typed here. Changing this string is the whole rollback."
  }

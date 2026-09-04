@@ -100,12 +100,52 @@ V2_FLAGS: Dict[str, bool] = {
     "retention_realised_fraction": True,  # er_entry persistence + re-underwrite
     "stepdown_ratchet":           True,   # replaces the D6 probation revert-to-floor
     "a20_slot_competition":       True,   # SHADOW ONLY for >= 2 runs
+
+    # --- PHASE 0 (enforcement — the 27-Aug-2026 build spec) -----------------------------
+    # ⚑ These four move NO capital. They measure whether the capital-moving code above is
+    # actually EXECUTED, DECLARED and EVIDENCED. Phase 0 exists because none of the twelve
+    # defects found on 26/27-Aug required insight: every one was findable by a mechanical,
+    # enumerable procedure that nothing was running when nobody was building (spec §2.3).
+    # --- PHASE 1 (authority — MOVES CAPITAL) --------------------------------------------
+    "single_sizing_authority":    True,   # P7: thesis_state replaces the /100 as the gate
+
+    # --- PHASE 2/3 (measurement + selection) -------------------------------------------
+    # ⚑ ISA-0577 (03-Sep-2026). `symbol_map_refresh` gates Step 5x, which brings
+    # stock_symbol_map.json up to the live universe before 5y fetches it. Without it the map is
+    # a hand-run artefact frozen at its built_on date while the universe grows every month: on
+    # 03-Sep-2026, 119 of 178 names (66.9%) were unmapped, unfetched, UNMEASURED, sized on
+    # A2.3's adverse 0.70 and capped at STARTER. False reproduces 02-Sep-2026 behaviour exactly.
+    "symbol_map_refresh":         True,   # P1.2c: Step 5x refreshes the ticker->Yahoo symbol map
+    "stock_return_fetch":         True,   # P1: populate the weekly GBP total-return store
+    "stock_candidate_pipeline":   True,   # P3: a real candidate list reaches stock_max
+    "deployment_sequencer":       True,   # P6: correlation orders the queue, never the score
+
+    # --- PHASE 4 (capital — MOVES THE MOST CAPITAL IN THE BUILD) ------------------------
+    # ⚑ P4.7: False is a REFUSAL (stock_max = 0, STOCK_SLEEVE_REFUSED), never a band-floor
+    # number. A rollback that computes a DIFFERENT number is a second authority.
+    "demand_pull_live":           True,   # P4: sleeve_split reads position_sizing.stock_max
+    "partial_starter_entry":      True,   # P4: D15-D17 floor-then-priority fill
+    # ⚑ ISA-0490 (29-Aug-2026). The three flags above were ON and the three modules they
+    # govern were GREEN, and `build()` still called none of them: it passed candidates=None
+    # to sleeve_split, which read it as [] and routed every pound to funds. A flag that is ON
+    # over a call that does not happen is FC-E wearing a green light. This flag governs the
+    # CALL, not the capability — turning it off makes sleeve_split REFUSE, never fall back.
+    "capital_pipeline_wired":     True,   # P3->P6->P4 reached from capital_destination.build
+
+    "execution_ledger":           True,   # P0.1 reachable is not live
+    "quantity_register":          True,   # P0.2 one quantity, one computer, one surface
+    "threshold_register":         True,   # P0.3 = R15.2 — divide the threshold by the SD
+    "negative_claim_expiry":      True,   # P0.4 a claim of absence carries a test and a date
 }
 
 # A capability that ships in shadow may be ON without moving capital. Declared here so a
 # reader never has to infer it, and asserted by the battery.
 V2_SHADOW_ONLY = frozenset({
     "correlation_engine", "evidence_state", "n_eff_diagnostic", "a20_slot_competition",
+    # Phase 0 OBSERVES the framework; it never sizes, gates or routes a pound. It can fail a
+    # BUILD and it can fail a RUN — which is not the same thing as moving capital, and the
+    # distinction is declared here so a reader never has to infer it.
+    "execution_ledger", "quantity_register", "threshold_register", "negative_claim_expiry",
 })
 
 # NOTE: the strict-accessor rollback is the V2_FLAGS entry "policy_strict_accessor", read via

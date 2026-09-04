@@ -269,6 +269,29 @@ def freeze(month_label, here=None, store=None, force=False, **kw):
     doc.setdefault("cohorts", {})
     cohort = build_cohort(month_label, here=here, **kw)
     prev = doc["cohorts"].get(month_label)
+    # ⚑ AN EMPTY STACK IS NOT A COHORT (ISA-0554, 02-Sep-2026). Found in the pre-Saturday
+    # rehearsal. The documented operating model runs the orchestrator MORE THAN ONCE (the host
+    # shell caps a single invocation at ~175s), and 8c freezes on the FIRST pass. On a pass
+    # where the metrics fetch has not landed yet — or where Step 7.5 has crashed, as it did
+    # every run until ISA-0553 — the BUY stack is empty, and the month was frozen on nothing.
+    # Every later pass then raised ImmutableCohortError and BLOCKED the whole pre-run, with
+    # the only stated remedy being a hand edit. The month's real cohort could never be
+    # recorded at all.
+    # ⚑ THE FIX DOES NOT WEAKEN IMMUTABILITY, WHICH IS THE POINT OF THIS FILE. Immutability
+    # protects a MEASUREMENT; zero rows is an ABSENCE, and writing an absence into the store
+    # as though it were a measurement is the Class-A shape this framework exists to refuse.
+    # A month that genuinely has no BUY recommendation stays empty on every pass, produces no
+    # conflict, and has nothing to measure either way — so nothing real is lost. Only the
+    # degraded-then-real sequence is unblocked, and that sequence is a defect, not a rewrite.
+    if not prev and not cohort.get("n_buys") and not force:
+        cohort = dict(cohort)
+        cohort["freeze_refused"] = (
+            "shadow_ledger: %s has 0 BUY rows, so there is no cohort to freeze. Refusing to "
+            "write an empty cohort — it would make the month immutable against its own real "
+            "stack on a later pass (ISA-0554). Re-runs freeze it as soon as the stack is "
+            "non-empty; a month that genuinely ends with no BUY simply never freezes."
+            % month_label)
+        return cohort, False
     if prev and not force:
         if prev.get("stack_hash") != cohort["stack_hash"]:
             raise ImmutableCohortError(

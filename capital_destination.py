@@ -58,8 +58,21 @@ not been made, quantified (R2.14).
 ROLLBACK (R4.13): `ENABLED = False` -> build() returns state DISABLED and emits nothing.
 """
 from __future__ import annotations
+from typing import Optional
 import csv, datetime as dt, json, math, os, statistics as st, sys
 from pathlib import Path
+
+# ── P0.1 LIVE-PATH EXECUTION LEDGER (framework_integrity) ──────────────────────────────
+# ⚑ ONE LINE at the head of each capital-path function. `_mark` is a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False, and it never raises into the caller — a
+# monitoring hook that can break a capital run is a worse risk than the risk it monitors.
+# The CALLS STAY IN THE CODE when the flag is off; removing them is what makes it droppable.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(HERE))
@@ -1033,56 +1046,79 @@ FREEZE_BASES = ("pounds", "weight", "reallocation_only")
 
 
 def _smallest_declared_position_gbp(policy: dict, total_gbp: float):
-    """-> (GBP, label). The smallest position size the framework declares anywhere, so a derived
-    cap can be tested against the thing it is a cap ON. Read, never chosen."""
-    th = policy.get("thresholds") or {}
-    cands = [(th.get("stage1_probe_pct"), "stage-1 probe"),
-             (th.get("typical_stock_position_low"), "typical position low")]
-    live = [(float(p), lab) for p, lab in cands if p is not None]
-    if not live:
-        return None, "NO DECLARED POSITION SIZE"
-    p, lab = min(live)
-    return round(p * total_gbp, 2), lab
+    """-> (GBP, label). The smallest position the framework will actually OPEN, so a derived
+    cap can be tested against the thing it is a cap ON. Read, never chosen.
+
+    ⚑ P4.5 — THIS NOW READS `MIN_ENTRY`, AND THE OLD READING WAS WRONG IN A COSTLY DIRECTION.
+    It used `typical_stock_position_low` (3.5% = a full STARTER), so a perfectly executable
+    GBP 4,500 — above the GBP 4,377 entry floor and enough to open an UNDERFILLED position
+    under D15/D16 — reported `NOT_EXECUTABLE`. The test was measuring the cap against the FULL
+    rung when the question is whether a position can be OPENED AT ALL.
+
+    ⚑ `executability` TRAVELS WHOLE (ISA-0447): `NOT_EXECUTABLE` without the two pound figures
+    it fails against is an adjective, not a measurement."""
+    try:
+        import position_sizing as _ps
+        me = _ps.min_entry_gbp(total_gbp, policy)
+        return me["min_entry_gbp"], ("MIN_ENTRY = %.2f x STARTER (D16)"
+                                     % _ps.MIN_ENTRY_FRACTION_OF_STARTER)
+    except Exception as exc:                                            # noqa: BLE001
+        # ⚑ A REFUSAL, NOT A FALLBACK. Re-deriving the floor here from a policy key would put
+        # a second computer behind MIN_ENTRY — the very defect P4 exists to remove.
+        return None, ("UNTESTABLE — position_sizing.min_entry_gbp is unavailable (%s). The "
+                      "floor is NOT re-derived here: a second computer for MIN_ENTRY would be "
+                      "the two-homes defect this build just deleted." % str(exc)[:80])
 
 
-def derive_stock_max(basis: str, *, total0: float, total1: float, stock0: float,
-                     amount_gbp: float, band_low: float) -> dict:
-    """THE ONE HOME for the freeze arithmetic. R4.4 — the NUMBER is derived here from the DECLARED
-    basis on every run and is never typed into target_weights.json."""
-    if basis not in FREEZE_BASES:
-        raise DestinationRefused(
-            "scaling_freeze.basis is %r, which is not one of %s. A constraint expressed in a unit "
-            "nobody declared is exactly the defect ISA-0387 records; the router refuses rather "
-            "than picking a reading on Raj's behalf." % (basis, list(FREEZE_BASES)))
-    to_floor = max(band_low * total1 - stock0, 0.0)
-    if basis == "pounds":
-        raw, why = 0.0, ("the freeze is an absolute bar on pounds entering the sleeve; the "
-                         "resulting dilution is an ACCEPTED and recorded cost")
-    elif basis == "weight":
-        raw, why = max((stock0 / total0) * total1 - stock0, 0.0), (
-            "the amount that holds the sleeve's pre-subscription weight of %.3f%% exactly, so the "
-            "subscription takes no new PROPORTIONAL exposure to the unproven process"
-            % (stock0 / total0 * 100))
-    else:
-        raw, why = to_floor, (
-            "the freeze binds only capital whose SOURCE is a disposal from the fund sleeve; a "
-            "subscription and uninvested cash are not scaling, so the cap is the amount that "
-            "restores the declared band floor of %.0f%%" % (band_low * 100))
-    return {"basis": basis, "derived_gbp": round(min(raw, amount_gbp), 2),
-            "uncapped_by_amount_gbp": round(raw, 2), "gbp_to_band_floor": round(to_floor, 2),
-            "derivation": why,
-            "derived_not_typed": ("R4.4 — target_weights.json declares the BASIS; this function "
-                                  "computes the number from live portfolio values every run")}
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ⚑⚑ `derive_stock_max()` WAS DELETED HERE ON 28-Aug-2026 (P4.1 / ISA-0454). NOT RE-POINTED.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# It computed stock_max as "the amount that restores the declared band FLOOR" and returned
+# **GBP 547.94** on the September book — `NOT_EXECUTABLE` against a GBP 5,471.24 smallest
+# position, with GBP 10,702.06 routed to a fund sleeve measured at 6.24% forward E[r] against
+# a required 13.8-13.9%. Meanwhile `position_sizing.stock_max` — the demand-pull rule that is
+# the DECLARED single authority — was reached only from `_stock_side_sensitivity`, which
+# passes a synthetic `_PROBE` candidate that self-labels *"not a size anyone should act on"*.
+#
+# **Two functions named `stock_max`, ten times apart, and only the wrong one in the capital
+# path.** FC-E, 8th recorded occurrence.
+#
+# ⚑ WHY DELETED AND NOT RE-POINTED, which is the part that matters: ISA-0442 records that
+# `STARTER_SIZE_CAP_PCT` was DELETED rather than re-pointed for exactly this reason. **A
+# re-pointed function is a second home waiting to be repopulated by a future session that
+# finds an unused branch and "restores" it.** The band-floor arithmetic is gone from this file
+# and `consistency_check.pair_single_stock_max_authority()` asserts — BY AST ON A CALL NODE,
+# never by file text — that `sleeve_split` calls `position_sizing.stock_max` and that no
+# second computer exists.
+#
+# ⚑ AND THE BAND ITSELF IS NOT DELETED, ONLY ITS ROLE. D20: the Phase-1 band remains a
+# REPORTING and phase-transition measure. It is no longer a CAP on subscribed capital.
+# The pre-delivery copy of this function is in `_bak_isa0450_28aug2026/capital_destination.py`.
+
+
+def _demand_pull_live() -> bool:
+    """P4.7's rollback constant. Default TRUE — demand-pull is the declared rule, and turning
+    it off must be a DELIBERATE act rather than the consequence of a missing key."""
+    try:
+        import isa_policy as _p
+        if "demand_pull_live" in _p.V2_FLAGS:
+            return bool(_p.V2_FLAGS["demand_pull_live"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return True
 
 
 def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
-                 new_subscription_gbp: float = 0.0) -> dict:
+                 new_subscription_gbp: float = 0.0,
+                 candidates: Optional[list] = None,
+                 sequence: Optional[dict] = None) -> dict:
     """Decide how much of the marginal pound may reach the stock sleeve.
 
     R2.14 — where the verdict turns on an unmade choice, state the choice. There is still no
     strategic asset allocation TARGET (ISA-0333), so this function does not invent a split: it
     applies the DECLARED freeze basis (ISA-0387) and the declared band, and publishes both.
     """
+    _fi_mark("capital_destination", "sleeve_split")
     s = portfolio["summary"]
     total0_raw = float(s["total_value_gbp"])
     total1 = total0_raw + float(new_subscription_gbp or 0.0)
@@ -1116,32 +1152,188 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             "set_by": freeze.get("set_by"),
         },
     }
-    if binding:
-        if not basis:                                                 # R4.7 — RAISE, never default
-            raise DestinationRefused(
-                "the scaling freeze is ACTIVE and target_weights.scaling_freeze declares no "
-                "`basis`. ISA-0387: a constraint expressed in a unit nobody declared cannot be "
-                "applied — reading it as pounds silently dilutes the sleeve 0.591pp per "
-                "subscription. Declare one of %s." % list(FREEZE_BASES))
-        d = derive_stock_max(basis, total0=total0_raw, total1=total1, stock0=stock0,
-                             amount_gbp=amount_gbp, band_low=lo)
-        stock_max = d["derived_gbp"]
-        out["freeze_derivation"] = d
-        out["state"] = ("STOCK_SLEEVE_BLOCKED" if stock_max <= 0 else "STOCK_SLEEVE_CAPPED")
-        out["stock_max_gbp"] = stock_max
-        out["fund_max_gbp"] = round(amount_gbp - stock_max, 2)
-        out["reason"] = (
-            "The stock sleeve is %.2f%% against its declared %.0f%%-%.0f%% band. The scaling "
-            "freeze set on %s is ACTIVE and its declared BASIS is `%s` (%s), so %s"
-            % (w_now * 100, lo * 100, hi * 100, freeze.get("clock_start"), basis,
-               freeze.get("basis_declared_by") or "basis declarer NOT RECORDED", d["derivation"]))
+    if binding and not basis:                                     # R4.7 — RAISE, never default
+        raise DestinationRefused(
+            "the scaling freeze is ACTIVE and target_weights.scaling_freeze declares no "
+            "`basis`. ISA-0387: a constraint expressed in a unit nobody declared cannot be "
+            "applied — reading it as pounds silently dilutes the sleeve 0.591pp per "
+            "subscription. Declare one of %s." % list(FREEZE_BASES))
+
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # P4 — stock_max COMES FROM `position_sizing.stock_max`, THE DEMAND-PULL RULE
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ D20: the freeze binds only capital whose SOURCE is a DISPOSAL FROM THE FUND SLEEVE. A
+    # subscription and uninvested cash are NOT scaling and are NOT bound; their destination is
+    # decided by demand-pull, not by the Phase-1 band. The band remains a REPORTING and
+    # phase-transition measure and is no longer a cap.
+    # ⚑ THE FREEZE STAYS ACTIVE and the ISA-0390 recall leg — trim funds to buy stocks — STAYS
+    # BARRED until 2026-11-01 (override) / 2026-12-01 (mechanical). That is unchanged.
+    if not _demand_pull_live():
+        # ⚑⚑ P4.7 — THE ROLLBACK IS A REFUSAL, NOT AN ALTERNATIVE COMPUTATION (C5). The 26-Aug
+        # design re-created the band-floor expression behind a flag — which is the re-pointing
+        # ISA-0442 forbids, wearing a flag. A rollback that computes a DIFFERENT number is a
+        # SECOND AUTHORITY; a rollback that refuses is not.
+        stock_max = 0.0
+        out["state"] = "STOCK_SLEEVE_REFUSED"
+        out["stock_max_gbp"] = 0.0
+        out["fund_max_gbp"] = round(amount_gbp, 2)
+        out["reason"] = ("demand-pull is disabled (V2_FLAGS['demand_pull_live'] = False) and "
+                         "NO ALTERNATIVE SIZING RULE EXISTS. Capital routes to funds until it "
+                         "is re-enabled. ⚑ This is a REFUSAL, not a smaller number: a rollback "
+                         "that returned a band-floor figure would be a second authority "
+                         "(P4.7 / C5).")
         out["decision_owner"] = None
     else:
-        stock_max = round(min(need_to_floor, amount_gbp), 2)
-        out["state"] = "STOCK_SLEEVE_OPEN"
+        # ⚑⚑ ISA-0490 — `None` AND `[]` ARE OPPOSITE FACTS AND THIS LINE USED TO MERGE THEM.
+        # It read `cands = candidates if candidates is not None else []`, so a router that
+        # never ran a candidate pipeline summed demand over an empty list, returned GBP 0 and
+        # reported STOCK_SLEEVE_BLOCKED — the identical output to "the gate ran and rejected
+        # every name". That is R2.10 inside the very function P4 built to enforce it: a
+        # default and a measurement, indistinguishable in the output and opposite in meaning.
+        #
+        # `[]` is a MEASUREMENT (the pipeline ran; nothing qualified) and still routes to
+        # funds. `None` is an ABSENCE (nobody asked) and REFUSES.
+        if candidates is None:
+            raise DestinationRefused(
+                "sleeve_split was given candidates=None — no candidate pipeline supplied a "
+                "demand list. Reading that as an empty list would size the stock sleeve at "
+                "GBP 0 and publish it as though every name had been assessed and rejected "
+                "(R2.10). Run `capital_destination.capital_pipeline()`, or pass [] to state "
+                "explicitly that the list is empty by measurement.")
+        cands = list(candidates)
+        order_basis = (sequence or {}).get("basis") if sequence else None
+        try:
+            import position_sizing as _ps
+            # ⚑ ISA-0535 — carry the candidate population's OWN verdict across the seam.
+            #   `sequence`/`candidates` arrive from `capital_pipeline`, which knows whether the
+            #   list was never built, was built and wholly rejected, or was refused. Without
+            #   this, all three print `nothing_qualifies` and the email says every name was
+            #   assessed and rejected on a book where nothing was assessed at all.
+            sm = _ps.stock_max(cands, nav_gbp=total1, capital_on_offer_gbp=amount_gbp,
+                               policy=policy,
+                               population_binding=(sequence or {}).get("population_binding"))
+        except Exception as exc:                                        # noqa: BLE001
+            raise DestinationRefused(
+                "position_sizing.stock_max could not price this book (%s: %s). The router "
+                "REFUSES rather than substituting a band-floor number — that substitution is "
+                "exactly the defect P4 removed (ISA-0454)."
+                % (type(exc).__name__, exc)) from exc
+        stock_max = sm["stock_max_gbp"]
+        out["demand_pull"] = sm
+        out["ranking_basis"] = order_basis or "declared_conviction_order"
+        if sequence is None:
+            # ⚑ P6 -> P4 gate: if the sequencer ships OFF, §2 must SAY the order is the
+            # declared conviction order rather than implying a sequence happened.
+            out["sequencer"] = {"state": "OFF",
+                                "note": ("the deployment sequencer did not run; the order is "
+                                         "the DECLARED conviction order and §2 says so")}
+        else:
+            out["sequencer"] = {"state": sequence.get("state"),
+                                "order": sequence.get("order"),
+                                "displacement": sequence.get("displacement"),
+                                "method": sequence.get("banding", {}).get("method")}
+        # ── P4.3 — WHICH POSITIONS ACTUALLY OPEN (D15/D16/D17). ISA-0491. ─────────────
+        # ⚑ `position_sizing.allocate` was built 28-Aug with all five of Raj's worked
+        # outcomes reproducing exactly — and was CALLED BY NOTHING. `stock_max` answers
+        # "how much MAY reach the sleeve"; `allocate` answers "and therefore WHICH positions
+        # open, at what size, with what residual". Publishing the first without the second
+        # gives Raj a ceiling and no instruction, which is the number he cannot act on.
+        # ⚑ It consumes the SEQUENCER's order when one exists, so P6's work reaches capital
+        # rather than stopping at a printed list.
+        if stock_max > 0:
+            try:
+                _order = (sequence or {}).get("order") or None
+                # ⚑ `allocate()` RETURNS the obligation store and does NOT persist it, which
+                # is what makes it safe to call from a REPORTING run. Do not add a
+                # `save_fill_obligations()` call here: the pre-run would then record a FIRST
+                # CLAIM on next month's tranche for a position nobody has bought, and a
+                # fabricated obligation outranks every real new position (D17). The store is
+                # written when a trade is EXECUTED, not when one is proposed.
+                out["allocation"] = _ps.allocate(
+                    sm.get("qualifying_uses") or [], capital_gbp=stock_max, nav_gbp=total1,
+                    ranking_basis=(order_basis or "source_score"),
+                    policy=policy, sequencer_order=_order)
+                # one envelope shape across all three branches, so a reader can tell
+                # "allocated" from "refused" by one key rather than by absence
+                out["allocation"]["state"] = "OK"
+            except Exception as exc:                                    # noqa: BLE001
+                # ⚑ NAMED REFUSAL, never a silent absence. An allocation that could not be
+                # computed and an allocation of nothing are different facts (R2.10).
+                out["allocation"] = {
+                    "state": "REFUSED",
+                    "reason": "%s: %s" % (type(exc).__name__, exc),
+                    "note": ("the sleeve cap stands and is stated above; WHICH positions it "
+                             "opens is UNRESOLVED this run and must not be inferred from the "
+                             "cap. `min_topup_gbp` ships ABSENT by design (§3.1), so a run "
+                             "that needs a top-up refuses here until Raj declares it.")}
+        else:
+            out["allocation"] = {
+                "state": "NOT_APPLICABLE",
+                "reason": "stock_max is GBP 0.00, so there is nothing to allocate.",
+                "binding": sm.get("binding")}
+        out["state"] = ("STOCK_SLEEVE_BLOCKED" if stock_max <= 0 else
+                        ("STOCK_SLEEVE_OPEN" if not binding else "STOCK_SLEEVE_DEMAND_PULL"))
         out["stock_max_gbp"] = stock_max
-        out["fund_max_gbp"] = round(amount_gbp - stock_max, 2)
-        out["reason"] = "no freeze binding; capital may restore the stock sleeve to its band floor"
+        # ⚑ FUNDS ARE OFFERED WHAT THE STOCK SLEEVE ACTUALLY SPENT, NOT WHAT IT CLAIMED
+        # (ISA-0563, 02-Sep-2026). This read `amount_gbp - stock_max`, and `stock_max` is a
+        # DEMAND-PULL CAP — a claim, not a spend. With GBP 195,893.86 of qualified demand the
+        # stock sleeve claimed the entire GBP 915.39, the sizing layer then opened nothing
+        # (every candidate below the D16 entry floor of GBP 4,093.30), and the funds were
+        # offered GBP 0.00. Nothing re-offered the residual, so it reached no destination at
+        # all: not a stock, not a fund, not the MMF sweep. Claim-then-refuse with no hand-back.
+        # ⚑ The subtraction is now the ALLOCATED figure, which is what `every pound must count`
+        # actually requires: capital the sleeve declines is capital still looking for a home.
+        # Falls back to the cap only when the allocation could not be computed — a refusal is
+        # not a spend of zero, and offering the funds money the stock sleeve may still take
+        # would double-count it (R2.10).
+        _alloc_block = out.get("allocation") or {}
+        if _alloc_block.get("state") == "OK":
+            _stock_spent = float(_alloc_block.get("allocated_gbp") or 0.0)
+            _reserve_held = float(_alloc_block.get("reserve_held_gbp") or 0.0)
+            out["fund_max_gbp"] = round(max(amount_gbp - _stock_spent - _reserve_held, 0.0), 2)
+            out["fund_max_basis"] = (
+                "amount - stock ALLOCATED (GBP %.2f) - D23 reserve (GBP %.2f). The stock sleeve "
+                "claimed GBP %.2f and spent GBP %.2f; the difference is re-offered here rather "
+                "than left with no destination (ISA-0563)."
+                % (_stock_spent, _reserve_held, stock_max, _stock_spent))
+        else:
+            out["fund_max_gbp"] = round(max(amount_gbp - stock_max, 0.0), 2)
+            out["fund_max_basis"] = (
+                "amount - stock_max CAP, because the stock allocation is %s rather than OK. A "
+                "refusal is not a spend of zero, so the cap is held back rather than re-offered."
+                % (_alloc_block.get("state") or "ABSENT"))
+        out["reason"] = (
+            "The stock sleeve is %.2f%% against its declared %.0f%%-%.0f%% band (a REPORTING "
+            "measure, not a cap — D20). stock_max is the DEMAND-PULL sum over qualifying uses "
+            "and is %s: %s. The scaling freeze set on %s remains ACTIVE and binds only capital "
+            "SOURCED from a fund-sleeve disposal; the ISA-0390 recall leg stays BARRED."
+            % (w_now * 100, lo * 100, hi * 100, sm["binding"], sm["basis"][:160],
+               freeze.get("clock_start")))
+        out["decision_owner"] = None
+
+    # ── ISA-0492 — WHERE THE SLEEVE LANDS, STATED RATHER THAN INFERRED ──────────────────
+    # ⚑ D20 makes the Phase-1 band a REPORTING measure and NOT a cap, so demand-pull can and
+    # will carry the sleeve through its own band high. That is the declared rule working — and
+    # it is exactly the kind of consequence that must be PUBLISHED at the point of decision.
+    # The pre-deployment weight alone answers a question nobody asked: Raj is deciding whether
+    # to deploy, so the number he needs is where the sleeve ENDS UP if he does.
+    # ⚑ ISA-0447's lesson in reverse: a constraint printed underneath the decision it
+    # constrains has been published, not communicated. This sits in the same dict as the cap.
+    _sleeve_after = stock0 + float(out.get("stock_max_gbp") or 0.0)
+    _w_after = (_sleeve_after / total1) if total1 else None
+    out["post_deployment"] = {
+        "stock_sleeve_gbp": round(_sleeve_after, 2),
+        "nav_gbp": round(total1, 2),
+        "stock_sleeve_weight_pct": (None if _w_after is None else round(_w_after * 100, 2)),
+        "declared_band_pct": [lo * 100, hi * 100],
+        "in_band": (None if _w_after is None else bool(lo <= _w_after <= hi)),
+        "above_band_high": (None if _w_after is None else bool(_w_after > hi)),
+        "movement_pp": (None if _w_after is None else round((_w_after - w_now) * 100, 2)),
+        "basis": ("D20 — the band is a REPORTING measure, not a cap, and demand-pull is "
+                  "UNCAPPED by it. A weight above the band high is therefore the rule working "
+                  "as declared, not a breach to be corrected; it is published here so the "
+                  "phase-transition question is asked deliberately rather than discovered."),
+    }
 
     # ⚑ IS THE CAP SPENDABLE? The test that caught the `weight` reading (ISA-0387, 20-Aug-2026).
     smallest, label = _smallest_declared_position_gbp(policy, total1)
@@ -1377,6 +1569,294 @@ def no_trailing_return_ordering(portfolio, universe, eligible, policy, rows,
             "as_of": _today()}
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0490 — THE CAPITAL PIPELINE.  P3 -> P6 -> P4, wired into the LIVE router (29-Aug-2026)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ⚑⚑ WHAT THIS CLOSES. `stock_candidates` (P3), `deployment_sequencer` (P6) and
+# `position_sizing.stock_max`/`allocate` (P4) were built, tested and green on 28-Aug-2026 —
+# and `build()` called none of them. It passed `candidates=None` to `sleeve_split`, which read
+# it as `[]`, so demand-pull summed over an empty list, returned GBP 0, and the router reported
+# `STOCK_SLEEVE_BLOCKED` with every pound to funds.
+#
+# ⚑ THAT OUTPUT IS INDISTINGUISHABLE FROM "THE GATE RAN AND REJECTED EVERY NAME." Four modules
+# with 68 green assertions between them, reachable from a test and reached by nothing in the
+# capital path — FC-E, the framework's dominant failure class, in the one function that routes
+# the money. The modules were the easy part; the call was the whole defect.
+#
+# ⚑ ORDER IS A SAFETY PROPERTY, NOT A CONVENIENCE (spec §4). P3 decides WHO may receive
+# capital, P6 decides IN WHAT ORDER given what the sleeve already holds, P4 decides HOW MUCH.
+# Running P4 before P6 would size names the sequencer would not have admitted; running P6
+# before P3 would order a set nobody had qualified.
+#
+# ROLLBACK (R4.13): `isa_policy.V2_FLAGS["capital_pipeline_wired"] = False` => the pipeline
+# returns state DISABLED and `sleeve_split` receives `candidates=None`, which it now REFUSES
+# rather than reading as an empty demand list. The rollback is a REFUSAL, not a smaller number
+# (P4.7 / C5).
+
+def _pipeline_flag(name: str = "capital_pipeline_wired", default: bool = True) -> bool:
+    try:
+        import isa_policy as _p
+        if name in getattr(_p, "V2_FLAGS", {}):
+            return bool(_p.V2_FLAGS[name])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return default
+
+
+def _latest_step9_pre() -> tuple:
+    """-> (doc, name). Newest `step9_pre_*.json` by its OWN declared `_meta`, never by filename.
+
+    ⚑ Same rule as `_load_portfolio`, for the same reason: the month label is the RUN month and
+    'aug' sorts before 'jul'. A file whose stamp cannot be read is COUNTED and named (R4.9)."""
+    cands, unreadable = [], []
+    for p in sorted(HERE.glob("step9_pre_*.json")):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            meta = d.get("_meta") or {}
+            # ⚑ `produced_at` is the builder's own stamp and is the ONLY admissible key.
+            # A file with no stamp is UNREADABLE for ordering purposes and is COUNTED, not
+            # quietly ordered by filename or mtime: 'aug' sorts before 'jul', and an mtime is
+            # reset by any copy between machines (ISA-0476, F10 in mirror image).
+            stamp = str(meta.get("produced_at") or "").strip()
+            if not stamp:
+                unreadable.append("%s (no _meta.produced_at)" % p.name)
+                continue
+        except Exception as e:                                          # noqa: BLE001
+            unreadable.append("%s (%s)" % (p.name, type(e).__name__))
+            continue
+        cands.append((stamp, p, d))
+    if not cands:
+        raise DestinationRefused(
+            "no readable `step9_pre_*.json`. The candidate pipeline has no population to read, "
+            "and an EMPTY candidate list would be indistinguishable from a measured rejection "
+            "of every name (R2.10). Unreachable: %s" % (", ".join(unreadable) or "none found"))
+    cands.sort(key=lambda t: t[0])
+    _k, p, d = cands[-1]
+    return d, p.name
+
+
+def _mmm_yyyy_of(as_of) -> str:
+    """'2026-09-02' -> 'sep_2026'. The action stack is month-labelled by the RUN month."""
+    import datetime as _dt
+    d = as_of
+    if isinstance(d, str):
+        d = _dt.date.fromisoformat(d[:10])
+    if d is None:
+        d = _dt.date.today()
+    return d.strftime("%b_%Y").lower()
+
+
+def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
+    """P3 -> P6. Returns the qualified candidate list and the deployment order for P4.
+
+    ⚑ EVERY FAILURE IS A NAMED REFUSAL, never an empty list. `candidates: None` in the result
+    means *the pipeline could not build a list*; `candidates: []` means *it built one and
+    nothing qualified*. `sleeve_split` treats those differently and must."""
+    _fi_mark("capital_destination", "capital_pipeline")
+    as_of = as_of or _today()
+    if not _pipeline_flag():
+        return {"state": "DISABLED", "candidates": None, "sequence": None,
+                "reason": ("rollback: V2_FLAGS['capital_pipeline_wired'] is False. The router "
+                           "receives candidates=None and REFUSES to size — it does not fall "
+                           "back to a different computation (P4.7 / C5).")}
+
+    notes = []
+    try:
+        import stock_candidates as _sc
+        import deployment_sequencer as _ds
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "UNAVAILABLE", "candidates": None, "sequence": None,
+                "reason": ("the candidate pipeline modules are not importable (%s: %s). The "
+                           "router REFUSES rather than sizing on an empty list."
+                           % (type(exc).__name__, exc))}
+
+    # ── inputs, each named, each degrading to a STATED gap rather than a silent default ────
+    try:
+        s9, s9_name = _latest_step9_pre()
+    except DestinationRefused as exc:
+        return {"state": "REFUSED", "candidates": None, "sequence": None, "reason": str(exc)}
+
+    def _opt(loader, label):
+        try:
+            return loader()
+        except Exception as e:                                          # noqa: BLE001
+            notes.append("%s unavailable (%s: %s)" % (label, type(e).__name__, e))
+            return None
+
+    vci = _opt(lambda: json.loads((HERE / "vci_deploy_aug_2026.json").read_text("utf-8")),
+               "vci_deploy")
+    scored = _opt(lambda: _newest_scored(), "watchlist_scored")
+
+    # ── correlation: ONE home (correlation_engine.assess) over the measured store ──────────
+    corr, weekly, chan = None, None, None
+    try:
+        import stock_return_store as _srs
+        import correlation_engine as _ce
+        import stock_price_fetch as _spf
+        store = _srs.load()
+        sleeve = [s.get("ticker") for s in (portfolio.get("stocks") or []) if s.get("ticker")]
+        sleeve = [_suffix(t, portfolio) for t in sleeve]
+        cand_tickers = [r.get("ticker") for r in (s9.get("deployable_stack") or [])
+                        if r.get("ticker")]
+        universe = sorted(set(sleeve) | set(cand_tickers))
+        weekly = {}
+        for t in universe:
+            r, _meta = _srs.weekly_returns(store, t)
+            if r:
+                weekly[t] = r
+        nav = float(portfolio["summary"]["total_value_gbp"])
+        vals = {t: float(s.get("value_gbp") or 0.0)
+                for s in (portfolio.get("stocks") or [])
+                for t in [_suffix(s.get("ticker"), portfolio)] if t}
+        wts = {t: (vals.get(t, 0.0) / nav) for t in weekly}
+        corr = _ce.assess(weekly, wts, candidates=cand_tickers)
+        rows = (scored or {}).get("tickers") or {}
+        # ⚑ CHANNELS OVER THE WHOLE UNIVERSE, NOT JUST THE CANDIDATES (ISA-0563, 02-Sep-2026).
+        # `universe` three lines above is already sleeve + candidates, because CORRELATION
+        # needs the holdings; the channel report was handed candidates only. Evidence states
+        # are derived from these rows, and `position_sizing` keys the ladder rung — hence the
+        # SIZE of a top-up — on the evidence state. So a held name had no state, and
+        # `stock_candidates` correctly REFUSED to size it rather than defaulting: the top-up
+        # could never happen, and the refusal named a missing input rather than the real cause.
+        # Two populations for one question, and the narrower one fed the decision.
+        chan = _spf.channel_report(universe, store=store, rows=rows,
+                                   frame_rows=list(rows.values()))
+    except Exception as e:                                              # noqa: BLE001
+        notes.append("correlation/channels unavailable (%s: %s) — every candidate therefore "
+                     "carries the A2.3 ADVERSE default and caps at STARTER, which is a "
+                     "MEASURED refusal and not an estimate" % (type(e).__name__, e))
+
+    # ── evidence states, from the CLASSIFIER, over the SOURCED channels (P3.3 / D22) ───────
+    ev_states, ev_detail = {}, {}
+    if chan:
+        try:
+            import evidence_state as _es
+            for t, ch in (chan.get("rows") or {}).items():
+                # ⚑ D22 — an UNSOURCEABLE channel is None and is NOT a coverage failure.
+                # coverage_ok asks "the inputs this name SHOULD have, does it have them?", and
+                # E1/E2/E3 have no source for ANY name (three registered claims). Marking them
+                # a coverage failure would put every name in DEGRADED_UNMEASURED and route the
+                # whole GBP 11,250 to funds on a data-model gap.
+                r = _es.classify(dict(ch), route="main", coverage_ok=True)
+                ev_states[t] = r["state"]
+                ev_detail[t] = {"state": r["state"], "confirming": r["confirming"],
+                                "families": r["families"],
+                                "unmeasured_channels": r["unmeasured_channels"]}
+        except Exception as e:                                          # noqa: BLE001
+            notes.append("evidence_state.classify failed (%s: %s)" % (type(e).__name__, e))
+
+    floor = None
+    try:
+        import scoring_config as _cfg
+        floor = float(getattr(_cfg, "ER_DEPLOY_FLOOR"))
+    except Exception:                                                   # noqa: BLE001
+        notes.append("ER_DEPLOY_FLOOR unreadable — er_ca_margin_pp is None, never 0.0 (R4.1)")
+
+    # ── P3 ────────────────────────────────────────────────────────────────────────────────
+    try:
+        # ⚑ THE POPULATION IS THE SUPERSET, NOT THE CANDIDATE LIST (ISA-0563, 02-Sep-2026).
+        # `step9_pre.deployable_stack` holds names Raj does NOT own — `update_watchlist` purges
+        # a name from the watchlist the moment it is bought — so the router could rank only new
+        # entries and a held position could never receive a pound. The action stack has ranked
+        # held and candidate names on ONE Source Score since 04-Jul-2026; this reads its
+        # add_worthy held rows and hands them to P3 alongside the candidates.
+        # ⚑ IT IS READ, NOT RECOMPUTED. `rerank_watchlist` owns that judgement (R4.4); a second
+        # derivation here would be a second home for "does this holding deserve more capital".
+        # ⚑ AN ABSENT STACK IS NAMED, NOT TREATED AS "no holding qualifies" — those are
+        # different facts, and the second one silently reinstates the defect (R2.10).
+        _held_topups, _hs_note = [], None
+        try:
+            _as_path = HERE / ("action_stack_%s.json" % _mmm_yyyy_of(as_of))
+            if _as_path.exists():
+                _as_doc = json.loads(_as_path.read_text(encoding="utf-8"))
+                _as_rows = _as_doc.get("stack") if isinstance(_as_doc, dict) else _as_doc
+                _held_topups = [r for r in (_as_rows or []) if r.get("held_axis")]
+                _hs_note = ("action_stack %s: %d held row(s), %d add_worthy"
+                            % (_as_path.name, len(_held_topups),
+                               sum(1 for r in _held_topups
+                                   if str(r.get("held_axis")).lower() == "add_worthy")))
+            else:
+                _hs_note = ("action_stack for %s is ABSENT (%s) — held positions were NOT "
+                            "considered for a top-up this run. That is a COVERAGE GAP, not a "
+                            "finding that no holding qualifies."
+                            % (_mmm_yyyy_of(as_of), _as_path.name))
+        except Exception as _ase:                                       # noqa: BLE001
+            _hs_note = ("action_stack unreadable (%s: %s) — held positions were NOT considered "
+                        "for a top-up this run." % (type(_ase).__name__, _ase))
+        if _hs_note:
+            notes.append(_hs_note)
+        cands = _sc.build(portfolio_data=portfolio, step9_pre=s9, watchlist_scored=scored,
+                          vci_deploy=vci, correlation_assessment=corr,
+                          weekly_returns=weekly, policy=policy, held_topups=_held_topups,
+                          evidence_states=ev_states, deploy_floor_pct=floor, today=as_of)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "REFUSED", "candidates": None, "sequence": None,
+                "step9_pre_source": s9_name, "notes": notes,
+                "reason": ("stock_candidates.build REFUSED (%s: %s). The router does NOT "
+                           "substitute an empty list: an empty list would size the sleeve at "
+                           "GBP 0 and read exactly like a measured rejection of every name "
+                           "(R2.10)." % (type(exc).__name__, exc))}
+
+    # ── P6 ────────────────────────────────────────────────────────────────────────────────
+    seq = None
+    try:
+        held = [_suffix(s.get("ticker"), portfolio) for s in (portfolio.get("stocks") or [])
+                if s.get("ticker")]
+        mtx = ((corr or {}).get("matrix") or {}).get("rho") or (corr or {}).get("matrix") or {}
+        se = _ds.measure_score_se().get("se")
+        seq = _ds.sequence(cands, held=held, matrix=mtx, se_rho=None,
+                           ranking_basis=cands.get("ranking_basis", "source_score"))
+        seq["score_se"] = se
+    except Exception as e:                                              # noqa: BLE001
+        notes.append("deployment_sequencer.sequence failed (%s: %s) — §2 must say the order is "
+                     "the DECLARED conviction order, not a sequenced one"
+                     % (type(e).__name__, e))
+
+    return {
+        "state": cands.get("state", "OK"),
+        # ⚑ THE FULL LIST, NOT THE QUALIFYING SUBSET. `position_sizing.stock_max` is built to
+        # filter on `qualifies` and to PUBLISH each rejection with the gate's named reason.
+        # Handing it a pre-filtered list would make its `rejected` array empty and silently
+        # move the reason trail out of the capital artefact — the reader would see 13 uses and
+        # no record that 19 names were assessed and why each failed.
+        # ⚑ ISA-0535 — the population's own verdict travels WITH the list, so an empty list
+        #   arrives at `position_sizing.stock_max` already attributed.
+        "population_binding": cands.get("binding"),
+        "candidates": cands.get("candidates", []),
+        "qualifying": cands.get("qualifying", []),
+        "all_candidates": cands,
+        "sequence": seq,
+        "evidence_states": ev_detail,
+        "channel_report": chan,
+        "correlation": (corr or {}).get("summary"),
+        "step9_pre_source": s9_name,
+        "notes": notes,
+        "detail": ("P3 -> P6 -> P4, wired 29-Aug-2026 (ISA-0490). `candidates` is the QUALIFYING "
+                   "subset; `all_candidates.binding` states WHY the list is the length it is."),
+    }
+
+
+def _suffix(ticker, portfolio):
+    """Restore the LSE suffix from the broker's own `full_name`, as P3 does — one rule, and
+    both sides of the correlation join must spell a name identically or the join silently
+    misses (the ONT class)."""
+    if not ticker:
+        return ticker
+    for h in (portfolio.get("stocks") or []):
+        if (h.get("ticker") or "").strip() == ticker:
+            if "LSE:" in (h.get("full_name") or "") and not ticker.endswith(".L"):
+                return ticker + ".L"
+    return ticker
+
+
+def _newest_scored():
+    ps = sorted(HERE.glob("watchlist_scored_*.json"))
+    if not ps:
+        raise FileNotFoundError("no watchlist_scored_*.json")
+    best = max(ps, key=lambda p: p.stat().st_mtime)
+    return json.loads(best.read_text(encoding="utf-8"))
+
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 # BUILD
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1385,7 +1865,21 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
     if not ENABLED:
         return {"state": "DISABLED", "reason": "capital_destination.ENABLED is False (R4.13)"}
     as_of = as_of or _today()
-    portfolio = json.load(open(portfolio_path or HERE / "portfolio_data_aug_2026.json"))
+    # ── ISA-0488 (29-Aug-2026) — THE ROUTER MUST NOT NAME ITS OWN BOOK ─────────────────
+    # This line read `portfolio_path or HERE / "portfolio_data_aug_2026.json"`. `_load_portfolio`
+    # exists precisely to answer "which book is current", resolves it from each file's OWN
+    # declared `_meta.data_date`, carries a docstring explaining why the FILENAME must not be
+    # trusted (the label is the RUN month, not the data month, and 'aug' sorts before 'jul') —
+    # and was called by `_deployment_context` and `_fixture` but NOT by `build()`, the one
+    # function that routes the money.
+    #
+    # ⚑ TWO HOMES FOR "WHICH BOOK IS CURRENT", AND THE FROZEN ONE WAS IN THE CAPITAL PATH
+    # (R4.4). On 05-Sep-2026 this would have routed £11,250 using the 31-Jul book — four
+    # stocks, no COCO, no QBTS — *after* the September extract had been written, and the
+    # output would have looked entirely normal. The stale-sleeve risk the register records
+    # against the ARTEFACT was really this literal: the August artefact is correctly built
+    # and correctly stamped; the router simply never asked for a newer one.
+    portfolio = _load_portfolio(portfolio_path)
     universe = json.load(open(universe_path or HERE / "fund_universe.json"))
     tw = json.load(open(weights_path or HERE / "target_weights.json"))
     nav = Path(nav_dir or HERE / "nav_cache")
@@ -1409,7 +1903,22 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
     s = portfolio["summary"]
     if amount_gbp is None:
         amount_gbp = float(s.get("cash_deployable_gbp") or 0.0) + float(new_subscription_gbp or 0.0)
-    split = sleeve_split(amount_gbp, portfolio, policy, new_subscription_gbp)
+    # ── ISA-0490 — P3 -> P6 -> P4. The router now ASKS who qualifies before sizing. ───────
+    pipe = capital_pipeline(portfolio, policy, as_of=as_of)
+    split = sleeve_split(amount_gbp, portfolio, policy, new_subscription_gbp,
+                         candidates=pipe.get("candidates"),
+                         sequence=dict(pipe.get("sequence") or {},
+                                       population_binding=pipe.get("population_binding")))
+    split["pipeline"] = {k: pipe.get(k) for k in
+                         ("state", "step9_pre_source", "notes", "detail", "correlation")}
+    _ac = pipe.get("all_candidates") or {}
+    split["pipeline"]["binding"] = _ac.get("binding")
+    split["pipeline"]["n_candidates"] = _ac.get("n_candidates")
+    split["pipeline"]["n_qualifying"] = _ac.get("n_qualifying")
+    split["pipeline"]["n_rejected"] = _ac.get("n_rejected")
+    split["pipeline"]["n_refused"] = _ac.get("n_refused")
+    split["pipeline"]["channel_report"] = pipe.get("channel_report")
+    split["pipeline"]["evidence_states"] = pipe.get("evidence_states")
     fund_amount = split["fund_max_gbp"]
     # ⚑ ISA-0386. Built ONCE and passed down, so every call site — the allocation and all four
     # negative controls — orders on the SAME table. Recomputing it per call would let the parity
@@ -1437,9 +1946,41 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
         req_src, req_as_of = "target_state.required_return_operative_pct", ts.get("derived_at")
     except Exception as _e:                                     # noqa: BLE001
         req, req_src, req_as_of = None, f"UNAVAILABLE: {type(_e).__name__}", None
-    idle = round(fa.get("unallocated_gbp", 0.0) + split.get("stock_max_gbp", 0.0)
-                 - min(split.get("stock_max_gbp", 0.0), 0.0), 2)
-    idle = round(fa.get("unallocated_gbp", 0.0), 2)
+    # ⚑ FIXED 02-Sep-2026 (rehearsal, ISA-0562). These were TWO assignments to `idle`, and the
+    # second silently discarded the first. What survived counted only the FUND router's
+    # unallocated pounds - and the fund router is handed nothing when the stock sleeve has
+    # already claimed the capital as `stock_max_gbp`. So on the September book the router
+    # published `unallocated_gbp: 0.0`, `state: FULLY_DEPLOYED` and
+    # `annual_opportunity_cost_gbp: null` while GBP 665.39 sat in cash: the stock sleeve
+    # claimed all GBP 915.39, the sizing layer then refused every candidate at the D16 entry
+    # floor (GBP 4,093.30), and the returned residual was never added back to the count.
+    # ⚑ THE FAILURE IS EXACTLY THE ONE THE COMMENT ABOVE FORBIDS. "Capital with nowhere to go
+    # is priced, never silent" - and the instrument that prices it was reporting zero. A
+    # reader of run_context sees FULLY_DEPLOYED and stops looking.
+    # ⚑ IDLE IS NOW A CONSERVATION RESIDUAL, NOT A COMPONENT SUM. Deriving it by adding up the
+    # pieces that happened to be tracked is what let a whole sleeve's refusal go uncounted;
+    # deriving it by subtraction means anything NOT placed shows up whether or not the path
+    # that failed to place it was anticipated (R5.2 - prefer an invariant to a rule).
+    # The D23 reserve is NOT idle: it is capital with a declared job, so it is subtracted as a
+    # placement rather than counted as a gap.
+    _alloc = split.get("allocation") or {}
+    _reserve_held = float(_alloc.get("reserve_held_gbp") or 0.0)
+    _stock_placed = float(_alloc.get("allocated_gbp") or 0.0)
+    _fund_placed = round(sum(float(v or 0.0) for v in (fa.get("allocation") or {}).values()), 2)
+    _offered = float(split.get("amount_available_gbp") or amount_gbp or 0.0)
+    idle = round(max(_offered - _reserve_held - _stock_placed - _fund_placed, 0.0), 2)
+    _conservation = {
+        "capital_offered_gbp": round(_offered, 2),
+        "reserve_held_gbp": round(_reserve_held, 2),
+        "stock_allocated_gbp": round(_stock_placed, 2),
+        "fund_allocated_gbp": _fund_placed,
+        "idle_gbp": idle,
+        "identity": "offered = reserve + stock + fund + idle",
+        "balances": abs(round(_offered - (_reserve_held + _stock_placed + _fund_placed + idle), 2)) <= 0.01,
+        "why_the_reserve_is_not_idle": (
+            "the D23 GBP 250 ISA cash reserve is capital with a declared job, not capital with "
+            "nowhere to go, so it is a PLACEMENT in this identity and never a gap"),
+    }
     # ⚑ THE WAITING-ROOM YIELD IS DERIVABLE, so refusing to measure it would itself be a defect.
     # `return_architecture.derive_cash_rate` computes interest actually credited over a
     # time-weighted average balance from the AJ Bell cash statement (Aug-2026: 1.757%, ONE
@@ -1479,6 +2020,9 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
                                    "only when it is observed (R4.1 - the gap is not zero, it is "
                                    "unmeasured, and those are different facts)"),
         "state": ("IDLE_CAPITAL_PRICED" if idle > 0 else "FULLY_DEPLOYED"),
+        # ⚑ The identity is PUBLISHED, not just used: a future reader can check the four
+        # components add to the capital offered without re-deriving anything (ISA-0562).
+        "conservation": _conservation,
     }
 
     doc = {
@@ -1492,7 +2036,9 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
             "new_subscription_gbp": _fig(round(float(new_subscription_gbp or 0.0), 2), as_of=as_of,
                                          source="caller (broker-confirmed subscription)", unit="GBP"),
             "portfolio_total_gbp": _fig(s["total_value_gbp"], as_of=portfolio["_meta"].get("as_of")
-                                        or as_of, source="portfolio_data_aug_2026.json",
+                                        or as_of,
+                                        source=((portfolio.get("_meta") or {}).get("source_file")
+                                                or "portfolio_data_*.json (resolved by data_date)"),
                                         unit="GBP"),
             "policy_source": policy["_source"], "policy_as_of": policy["_as_of"],
             "funds_measured": len(rows), "funds_unmatched": unmatched,
@@ -1650,8 +2196,15 @@ _A12_OBSERVER_FUNCS = ("_module_reads", "_stock_side_sensitivity", "plan_stabili
                        "_plan_signature", "_plan_delta", "_scaled_portfolio")
 
 
-def _module_reads(name: str, *, exclude=_A12_OBSERVER_FUNCS) -> dict:
+def _module_reads(name: str, *, exclude=_A12_OBSERVER_FUNCS, scope=None) -> dict:
     """-> whether this module's PLAN-PRODUCING CODE ever reads `name`. AST, not grep.
+
+    ⚑ `scope` (ISA-0493, 29-Aug-2026): when given a tuple of function names, ONLY those
+    functions are scanned. A12's claim is about the FUND PLAN, and once P6 landed `rho` became
+    a legitimate input to the STOCK side — a module-wide scan then reported A12's finding
+    broken by a change that never touched the fund plan. The scope must be the claim.
+    ⚑ An UNSCOPED call keeps the old whole-module behaviour, so the negative control that
+    proves the scanner still finds a real input is unaffected.
 
     ⚑ A grep answers "does this word appear", and in this file `er_ca` appears several times in
     prose about other people's findings. The question A12 needs answered is "can this quantity
@@ -1670,9 +2223,32 @@ def _module_reads(name: str, *, exclude=_A12_OBSERVER_FUNCS) -> dict:
         if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name in exclude:
             for sub in _ast.walk(node):
                 skip.add(id(sub))
+    keep = None
+    if scope:
+        keep, _found = set(), set()
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
+               and node.name in scope:
+                _found.add(node.name)
+                for sub in _ast.walk(node):
+                    keep.add(id(sub))
+        # ⚑ BLIND, NOT GREEN. If a scoped function has been renamed away, this scan can no
+        # longer see the code it claims to check, and must SAY so rather than return False —
+        # "I found no reads" and "I looked at nothing" are the same output and opposite facts.
+        missing = sorted(set(scope) - _found)
+        if missing:
+            return {"quantity": name, "read_by_code": None, "sites": [],
+                    "scope": list(scope), "scope_missing": missing,
+                    "blind": True,
+                    "detail": ("SCAN IS BLIND, not clean: the scoped function(s) %s were not "
+                               "found in this module, so this check examined less code than it "
+                               "claims to. Re-point the scope before trusting the verdict."
+                               % missing)}
     hits = []
     for node in _ast.walk(tree):
         if id(node) in skip:
+            continue
+        if keep is not None and id(node) not in keep:
             continue
         if isinstance(node, _ast.Name) and node.id == name:
             hits.append(getattr(node, "lineno", None))
@@ -1768,6 +2344,14 @@ def _stock_side_sensitivity(nav_gbp: float, capital_on_offer_gbp: float,
     return out
 
 
+# ⚑ THE FUND PLAN, ENUMERATED. A12 claims `er_ca` and `rho` are not inputs to the FUND plan;
+# this is the set of functions that IS the fund plan, so the claim is checked over exactly its
+# own subject. Adding a fund-plan function here is part of writing one.
+FUND_PLAN_FUNCTIONS = ("allocate_funds", "rank_inputs", "_rank_key", "_deviation_key",
+                       "declared_band_state", "_fund_absorption", "donor_order",
+                       "no_trailing_return_ordering")
+
+
 def plan_stability(*, portfolio=None, base_doc=None, amount_gbp=None,
                    new_subscription_gbp=0.0, out_path=None) -> dict:
     """-> A12's robustness grid for the marginal-pound plan. Never mutates anything on disk."""
@@ -1798,12 +2382,89 @@ def plan_stability(*, portfolio=None, base_doc=None, amount_gbp=None,
 
     not_inputs = {}
     for nm in ("er_ca", "rho_sleeve", "rho"):
-        not_inputs[nm] = _module_reads(nm)
+        # ⚑ ISA-0493 (29-Aug-2026) — SCOPED TO THE FUND PLAN, which is the claim A12 makes.
+        # `_module_reads` scanned the WHOLE module, and A12's finding is specifically that
+        # `er_ca` and `rho` are not inputs to the FUND PLAN. Once P6 landed, `rho` legitimately
+        # became an input to the STOCK side — that is the sequencer's entire purpose — and a
+        # module-wide scan reported the A12 claim broken by a change that does not touch it.
+        # ⚑ A check broader than the claim it defends produces a false positive that reads
+        # exactly like the defect, which is ISA-0447's lesson in mirror image: a class-killer
+        # scoped too WIDE cries wolf, and one scoped too NARROW misses the class. The scope
+        # must be the claim.
+        not_inputs[nm] = _module_reads(nm, scope=FUND_PLAN_FUNCTIONS)
+
+    # ── ISA-0512 (02-Sep-2026) — ONE HOME FOR THE ARTEFACT'S SHAPE, NOT TWO ──────────────
+    # ⚑⚑ THE DEFECT: ISA-0493 added `scope` (and ISA-0494 added `observer_excluded`) to the
+    # NOT_APPLICABLE arm ONLY, and the comment asserting *"THE SHAPE IS THE SAME IN BOTH
+    # ARMS"* was written ON that arm — so the sentence that would have caught the divergence
+    # WAS the divergence. The 29-Aug session ran an empty fund plan, so only that arm was
+    # exercised and the suite was GREEN; in the delivered tree, where the fund plan is not
+    # empty, `not_an_input.scope` was absent and test_isa0440 was RED. Third recorded
+    # occurrence of a sandbox GREEN over a delivered RED.
+    #
+    # ⚑ Two return arms are two homes for one artefact contract (R4.4/FC-D). The KEY SET now
+    # has exactly one home — this builder — and only the prose differs by arm, because only
+    # the prose legitimately differs. `test_isa0440` asserts the two arms' key sets are EQUAL
+    # rather than checking each arm separately, so extending either one fails until both move.
+    def _not_an_input_block(why: str) -> dict:
+        return {
+            "state": "MEASURED_BY_AST",
+            "quantities": not_inputs,
+            "observer_excluded": list(_A12_OBSERVER_FUNCS),
+            "scope": list(FUND_PLAN_FUNCTIONS),
+            "why_this_is_reported_rather_than_perturbed": why,
+        }
 
     s = portfolio["summary"]
     nav = float(s["total_value_gbp"])
     offer = (amount_gbp if amount_gbp is not None
              else float(s.get("cash_deployable_gbp") or 0.0) + float(new_subscription_gbp or 0.0))
+
+    # ── ISA-0494 (29-Aug-2026) — AN EMPTY FUND PLAN IS NOT A STABLE ONE ──────────────────
+    # ⚑⚑ THE DEFECT THIS BUILD INTRODUCED AND THIS GUARD CATCHES. Once demand-pull was wired
+    # (ISA-0490) the stock sleeve could take the WHOLE tranche, leaving the fund plan GBP 0.
+    # A12 then perturbed NAV by ±5%, watched an empty plan stay empty, measured GBP 0.00 of
+    # churn and reported *"the fund plan keeps the same destinations and order"* — with
+    # `state: MEASURED`. It does not keep the same destinations; it HAS none.
+    #
+    # ⚑ That is a GREEN produced by a blind instrument, which is worse than a red: the reading
+    # is most reassuring exactly when there is nothing to reassure about. Zero churn from
+    # "nothing moved because nothing was offered" and zero churn from "the plan is robust" are
+    # the same number and opposite facts (R2.10), and only one of them is evidence.
+    _fund_offered = float((base.get("sleeve_split") or {}).get("fund_max_gbp") or 0.0)
+    _fund_placed = sum((base.get("fund_allocation") or {}).get("allocation", {}).values() or [0])
+    if _fund_offered <= 0.0 or _fund_placed <= 0.0:
+        return {
+            "state": "NOT_APPLICABLE", "as_of": _today(), "item": "ISA-0440 / A12",
+            "enabled": A12_STABILITY_ENABLED,
+            "base_plan": base_sig, "grid": [], "unstable": [],
+            "fund_offered_gbp": round(_fund_offered, 2),
+            "fund_placed_gbp": round(_fund_placed, 2),
+            # ⚑ THE SHAPE IS THE SAME IN BOTH ARMS — and it is the same because BOTH ARMS
+            # CALL `_not_an_input_block`, not because this comment says so. ISA-0512: this
+            # sentence sat here while the OTHER arm was missing two of these keys, so it was
+            # a claim about the arm it was written on. A consumer that reads
+            # `not_an_input.scope` or `routed_to_stock_side` must not KeyError on the month
+            # the instrument goes blind — a refusal that changes the artefact's shape breaks
+            # the readers it is trying to warn.
+            "not_an_input": _not_an_input_block(
+                "unchanged from the MEASURED arm: neither quantity reaches the FUND plan, "
+                "and perturbing one the plan never reads would publish a fabricated "
+                "reassurance."),
+            # ⚑ AND THE STOCK SIDE IS STILL MEASURED — it is where the capital actually went
+            # this month, so blanking it would hide the very thing that made the fund plan empty.
+            "routed_to_stock_side": _stock_side_sensitivity(nav, offer),
+            "reading": ("A12 CANNOT MEASURE PLAN STABILITY THIS MONTH: the fund plan was "
+                        "offered GBP %.2f and placed GBP %.2f, so there is no plan to perturb. "
+                        "This is NOT a finding that the plan is stable — a ±5%% NAV move moves "
+                        "GBP 0.00 because nothing was offered, not because the destinations "
+                        "held. Under demand-pull (D20) the stock sleeve may take the whole "
+                        "tranche, and in those months this instrument is BLIND and says so."
+                        % (_fund_offered, _fund_placed)),
+            "detail": ("state NOT_APPLICABLE, never MEASURED-and-stable. An instrument that "
+                       "reports robustness on an empty plan is most reassuring precisely when "
+                       "it is least informative."),
+        }
 
     doc = {
         "state": "MEASURED", "as_of": _today(), "item": "ISA-0440 / A12",
@@ -1813,17 +2474,13 @@ def plan_stability(*, portfolio=None, base_doc=None, amount_gbp=None,
         "grid": grid,
         "unstable": [g["perturbation"] for g in grid
                      if g["receiver_set_changed"] or g["order_changed"]],
-        "not_an_input": {
-            "state": "MEASURED_BY_AST",
-            "quantities": not_inputs,
-            "why_this_is_reported_rather_than_perturbed": (
+        "not_an_input": _not_an_input_block(
                 "A12 asks for er_ca +/-1pp and rho_sleeve +/-0.05. Neither reaches this plan: the "
                 "fund destination is decided by portfolio values, declared bands, the freeze basis "
                 "and the C1..C5 ranking. Perturbing a quantity the plan never reads and printing "
                 "'0.0% change' would publish a fabricated reassurance — it reads as 'robust to "
                 "expected return' when the truth is 'never consulted expected return'. The AST "
                 "evidence is above and the perturbation is routed to where it BITES, below."),
-        },
         "routed_to_stock_side": _stock_side_sensitivity(nav, offer),
         "reading": None,
     }
@@ -1951,7 +2608,25 @@ def _weight_basis_is_not_executable() -> bool:
     p2 = json.loads(json.dumps(policy))
     p2["scaling_freeze"]["basis"] = "weight"
     p2["scaling_freeze"]["active"] = True
-    out = sleeve_split(20799.54, portfolio, p2, 11250.0)
+    # ⚑ FIXED 02-Sep-2026 (rehearsal, ISA-0563). This called sleeve_split with no `candidates`,
+    # and ISA-0535 later made `candidates=None` a REFUSAL — correctly, because reading None as
+    # an empty list sizes the sleeve at GBP 0 and publishes it as though every name had been
+    # assessed and rejected. The build that added the refusal did not update this caller, so
+    # `capital_destination --selftest` has raised DestinationRefused in the DELIVERED tree ever
+    # since: a red control nobody was looking at, which is ISA-0436's class exactly.
+    # ⚑ `candidates=[]` is NOT the fix. It makes stock_max GBP 0 and executability
+    # NOT_APPLICABLE, so the assertion would pass on a different measurement from the one this
+    # function names. ISA-0387 turned on the WEIGHT basis deriving GBP 891.90 — below the
+    # smallest position the framework declares — and for that cap to bind, demand must exceed
+    # it. ONE qualified use is the minimum honest fixture, and it is stated rather than implied.
+    # The record shape is the one this module already declares for its own probe candidate
+    # (see the `base_cands` default): an UNMEASURED correlation carrying A2.3's adverse default,
+    # which is the most conservative record the vocabulary allows and cannot flatter the cap.
+    _one_use = [{"ticker": "FIXTURE", "qualifies": True, "evidence_state": "THIN",
+                 "current_value_gbp": 0.0, "disqualified_reason": None,
+                 "correlation": {"measured": False, "rho_sleeve": None,
+                                 "rho_basis": "UNMEASURED_ADVERSE_DEFAULT"}}]
+    out = sleeve_split(20799.54, portfolio, p2, 11250.0, candidates=_one_use)
     return out["executability"]["state"] == "NOT_EXECUTABLE"
 
 
@@ -2011,6 +2686,17 @@ def summary_for_run_context(doc: dict) -> dict:
     # the WHOLE executability dict: a refusal must render with the number it fails
     # against, or "NOT_EXECUTABLE" is an adjective rather than a measurement (R2.10)
     "executability": _sl.get("executability") or {},
+    # ── ISA-0490 / ISA-0492 — THE PIPELINE AND THE ALLOCATION REACH THE DECISION SURFACE ──
+    # ⚑ ISA-0447's rule, applied at the moment the capability lands rather than six days
+    # later: a present execution reporting to NOBODY is the mirror of an absent execution
+    # reporting success. The pipeline decides WHO may receive capital and `allocate` decides
+    # WHICH positions open — publishing the cap without them would hand Raj a ceiling and no
+    # instruction, which is the number he cannot act on.
+    "pipeline": _sl.get("pipeline") or {},
+    "allocation": _sl.get("allocation") or {},
+    "post_deployment": _sl.get("post_deployment") or {},
+    "sequencer": _sl.get("sequencer") or {},
+    "demand_pull": _sl.get("demand_pull") or {},
     "ranking_order": _rk.get("order"),
     "ranking_state": _rk.get("state"),
     "trailing_return": _rk.get("trailing_return"),

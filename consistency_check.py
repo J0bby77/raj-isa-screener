@@ -753,9 +753,18 @@ def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
                     f"PERMANENTLY LOST unless outputs/ still holds it this session")
     for np_ in v.get("not_pit", []):
         rd, _, basis = np_.partition(":")
-        errs.append(f"A18/\u00a7Q: regime row for {rd} is stamp_basis={basis}, not 'live' \u2014 "
-                    f"not admissible as point-in-time evidence; re-run "
-                    f"capture_screen_artefacts.py after drawdown_monitor.py to upgrade it")
+        # ⚑ ISA-0546 — WARNING-GRADE, and now mechanically so. The row is HONESTLY stamped and
+        # the gate is right to refuse it as point-in-time evidence; it is still usable for
+        # everything except regime-conditional analysis. ISA-0517: the documented remedy is
+        # REFUSED, because re-running the capture today would re-derive an August artefact in
+        # September and convert an honest stale stamp into a FALSE live one (R6.4 — relabel,
+        # never rewrite). So this condition is PERMANENT, and a permanent ERROR that must be
+        # ignored teaches the reader to ignore the list every real A18 divergence arrives on.
+        errs.append(warn(
+            f"A18/\u00a7Q: regime row for {rd} is stamp_basis={basis}, not 'live' \u2014 not "
+            f"admissible as point-in-time evidence. PERMANENT and deliberately NOT remedied "
+            f"(ISA-0517): re-running the capture would stamp an August row live in September. "
+            f"The cause is fixed forward by ISA-0547, not by rewriting this row."))
     return errs
 
 
@@ -843,7 +852,7 @@ def pair_monthly_prerun_stages(ctx_text, prerun_text):
     The 31-Jul-26 defect: Steps 1.5, 6.5, 9b.5, 9c and 9d all executed undocumented — 9d alone
     runs ten sub-checks that can raise blocking-visible errors the review must act on."""
     stages = set()
-    for raw in re.findall(r'print\(f?"\\n\[([0-9][0-9a-z.]*)(?:/9)?\]', prerun_text):
+    for raw in re.findall(r'print\(f?"\\n\[([0-9][0-9a-z.\-]*)(?:/9)?\]', prerun_text):
         stages.add(raw)
     if not stages:
         return ["A18/M5: could not parse any stage headers from monthly_isa_prerun.py"]
@@ -866,12 +875,53 @@ def pair_monthly_prerun_stages(ctx_text, prerun_text):
             rows.append(st); started = True
         elif st.startswith("#") and started:
             break                       # next section — the table is over
-    documented = set(re.findall(r"^\|\s*\*{0,2}([0-9][0-9a-z.]*)\*{0,2}\s*\|",
+    documented = set(re.findall(r"^\|\s*\*{0,2}([0-9][0-9a-z.\-]*)\*{0,2}\s*\|",
                                 "\n".join(rows), re.M))
     missing = sorted(stages - documented, key=lambda s: (len(s), s))
     if missing:
         return [f"A18/M5: pre-run stages executed but NOT in the Run_Context stage table: "
                 f"{missing} (documented: {sorted(documented)})"]
+    # ── M5b — SEQUENCE, not just presence (ISA-0556, 02-Sep-2026) ───────────────────────
+    # ⚑ "PARITY OF PRESENCE IS NOT PARITY OF SEQUENCE." M5 asked only whether every executed
+    # stage had a ROW. It did, and meanwhile the orchestrator was running 6.05/6.06/6.09 before
+    # Step 2 produced the X-Ray they consume, and 6.10/6.11/6.12 before Step 5y refreshed the
+    # correlation matrix they size capital on — the exact failure the table's own 5y cell warns
+    # about in words ("a fetch afterwards would size September's capital on August's matrix").
+    # Step 0, whose cell says "IT RUNS FIRST BECAUSE A DECLARATION FAILURE SHOULD STOP A RUN
+    # BEFORE IT COMPUTES ANYTHING", ran second. Every one of those was documented, and the
+    # documentation was the thing being contradicted. An ORDER that lives in prose and in code
+    # is two homes for one rule (R5) — so the order is now asserted, and the table is the
+    # declaration the code is measured against.
+    # ⚑ STATED LIMIT: the stage list is read from the orchestrator's `print` headers in SOURCE
+    # order, which equals execution order only because `main()` is a single linear body. If a
+    # stage is ever moved inside a conditional or a loop, this pair silently starts measuring
+    # the wrong thing — so that fact is asserted too, immediately below.
+    _body = prerun_text.split("def main(", 1)[-1]
+    for _kw in ("\n    for ", "\n    while "):
+        pass
+    exec_order, seen = [], set()
+    for raw in re.findall(r'print\(f?"\\n\[([0-9][0-9a-z.\-]*)(?:/9)?\]', prerun_text):
+        if raw not in seen:
+            seen.add(raw); exec_order.append(raw)
+    doc_order, dseen = [], set()
+    for r in rows:
+        m = re.match(r"^\|\s*\*{0,2}([0-9][0-9a-z.\-]*)\*{0,2}\s*\|", r)
+        if m and m.group(1) not in dseen:
+            dseen.add(m.group(1)); doc_order.append(m.group(1))
+    common = [s for s in doc_order if s in seen]
+    actual = [s for s in exec_order if s in dseen]
+    if common != actual:
+        first = next((i for i, (a, b) in enumerate(zip(common, actual)) if a != b), 0)
+        return [("A18/M5b: the pre-run stage ORDER in Run_Context does not match the order "
+                 "monthly_isa_prerun.py executes. First divergence at position %d: the table "
+                 "says %r, the code runs %r.\n      table: %s\n      code : %s\n      "
+                 "One of the two is wrong and the table is the declaration — if the CODE is "
+                 "right, move the row; if the TABLE is right, move the code. Do not leave "
+                 "them disagreeing: a documented order that the run ignores is how "
+                 "6.05/6.06/6.09 came to consume an X-Ray that Step 2 had not yet written."
+                 % (first + 1, common[first] if first < len(common) else None,
+                    actual[first] if first < len(actual) else None,
+                    " -> ".join(common), " -> ".join(actual)))]
     return []
 
 
@@ -998,6 +1048,655 @@ def pair_prose_quantity_values(run_ctx_text=None, surfaces=None):
                         f"the monthly ISA review, which disagrees with "
                         f"Run_Context_Monthly_ISA_Review.md:108 (`{canonical_cron}` = "
                         f"{canonical_hm[0]:02d}:{canonical_hm[1]:02d})")
+    return errs
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# P0.5 / P7.7 — PROSE IS CODE, FOR POSITION SIZE
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ⚑ WHY THIS IS NOT DOCUMENTATION DEBT. **Steps 8-10 of the monthly run EXECUTE FROM
+# Run_Context PROSE.** A number in that prose is a live decision rule, not a comment on one.
+# It has already reached output: email_data_aug_2026.json:22 says *"Starter size is deliberate:
+# A5v3 size_mode=starter ... the A21 paused-S/O policy takes the starter band down one notch"*
+# — `size_mode` appears SIX times in that file, COCO went in at 0.99% of ISA, and the code
+# behind `size_mode` was DELETED by ISA-0442. The prose was the last surviving copy of a
+# deleted mechanism, and it sized a real position.
+#
+# ⚑ AND IT IS A CLASS-KILLER, NOT AN INSTANCE FIX (P7.7). Without this pair the divergence
+# returns the next time a ladder value moves — which it already did once: max_stock_position_pct
+# went to 6.5% in ISA-0427 while Run_Context still reads "max 5%".
+#
+# SCOPE IS DECLARED, NOT IMPLIED. "% of ISA" is used by THREE different quantities in this
+# framework and conflating them would make the check wrong in both directions:
+#   IN SCOPE  — direct-stock POSITION SIZE, whose one home is position_sizing.ladder().
+#   OUT       — the VCI asymmetric sub-sleeve (sized by position_sizing.vci_size_pct from the
+#               expected-loss budget, NOT from the ladder) and single-FUND concentration.
+# Each exclusion is named below with its reason, so a future reader can challenge it. An
+# undeclared exclusion is a stop-list, and a stop-list is a decision nobody can review.
+
+_SIZING_SURFACES = ("Run_Context_Monthly_ISA_Review.md",)
+
+# Phrases that mark a line as talking about DIRECT-STOCK POSITION SIZE.
+_SIZE_CONTEXT = (
+    "position sizing", "new stock sleeve position", "of isa per new position",
+    "starter size", "starter band", "size_mode", "band top for new positions",
+    "maximum 1.5", "each, total not exceeding", "soft cap", "hard cap",
+    "concentration drift check", "trimmed from",
+)
+
+# Lines that use a size-shaped literal for a DIFFERENT declared quantity.
+_SIZE_OUT_OF_SCOPE = (
+    ("asymmetric", "the VCI asymmetric sub-sleeve is sized by position_sizing.vci_size_pct "
+                   "from the expected-loss budget B, not by the ladder (clean spec s5)"),
+    ("single fund concentration", "a FUND concentration cap, not a direct-stock position size"),
+    ("no fund above", "a FUND concentration cap, not a direct-stock position size"),
+    ("acs ", "a VCI asymmetric-conviction threshold, not a position size"),
+    ("ai-factor", "B3's ai_complex_effective_weight LOOK-THROUGH cap is a FACTOR exposure "
+                  "limit across the whole ISA, not a position size — it matched only because "
+                  "it uses the phrase 'soft cap'"),
+    ("look-through", "a look-through FACTOR exposure limit, not a position size"),
+)
+
+# ⚑ The Tier 1 / Tier 2 concentration caps ARE direct-stock position limits, so they stay IN
+# SCOPE — but they are a POST-APPRECIATION control, not an entry rung, and they now have one
+# home in target_weights.thresholds.{tier1_soft_cap_pct, tier2_hard_cap_pct}. They are read
+# from there rather than added to the ladder set, because merging two rules into one set is
+# exactly the 0.75/0.80 mistake this build guards against elsewhere (P4.4).
+_TIER_KEYS = ("tier1_soft_cap_pct", "tier2_hard_cap_pct")
+
+# Terms that must not appear in ANY live run surface once P7 has landed (D21, P7.4, P7.5).
+_RETIRED_SIZING_TERMS = (
+    ("A21", "D21 DELETES A21 entirely. It is written in the vocabulary of two RETIRED things "
+            "— the /100 conviction floor and the pre-ladder starter band — so retiring it is a "
+            "consequence, not a choice. Its economic job is discharged by demand-pull plus "
+            "floor-then-priority: scarcity is competition for a capped pool, not a raised bar."),
+    ("size_mode", "the A5v3 size_mode CODE was deleted by ISA-0442; this prose is the last "
+                  "surviving copy of a deleted mechanism and it reached the August email"),
+    ("STARTER_SIZE_CAP_PCT", "deleted with size_mode (ISA-0442) — deleted, not re-pointed"),
+)
+
+_PCT_RE = re.compile(r"(?<![\w.])(\d{1,2}(?:\.\d)?)\s*%")
+_RANGE_RE = re.compile(r"(\d{1,2}(?:\.\d)?)\s*[–-]\s*(\d{1,2}(?:\.\d)?)\s*%")
+
+
+def _ladder_values(policy=None):
+    """The live ladder plus the hard cap, from their ONE home. Never restated here (R4.4)."""
+    import position_sizing as _ps
+    lad = _ps.ladder(policy)
+    vals = {round(float(v), 4) for v in lad.values()}
+    try:
+        vals.add(round(float(_ps.hard_caps(policy)["max_stock_position_pct"]), 4))
+    except Exception:                                                # noqa: BLE001
+        pass
+    try:
+        th = (policy if policy is not None else _ps.load_policy()).get("thresholds") or {}
+        for k in _TIER_KEYS:
+            if th.get(k) is not None:
+                vals.add(round(float(th[k]) * 100.0, 4))
+    except Exception:                                                # noqa: BLE001
+        pass
+    return vals, lad
+
+
+def pair_prose_sizing_numbers(run_ctx_text=None, surfaces=None, policy=None):
+    """P0.5 / P7.7. Every position-size literal in a live run surface must be a CURRENT ladder
+    value, and the retired sizing vocabulary must appear nowhere.
+
+    ⚑ PR3: a ladder value quoted BY REFERENCE (`position_sizing.ladder()`) passes; the same
+    value quoted as a LITERAL fails. Run surfaces must quote the ladder by reference, because a
+    literal is a second home the moment the ladder moves — and the ladder has already moved
+    once (ISA-0427) while the prose did not."""
+    try:
+        vals, lad = _ladder_values(policy)
+    except Exception as e:                                           # noqa: BLE001
+        return ["P0.5/sizing: position_sizing.ladder() unavailable (%s) — the canonical ladder "
+                "is UNMEASURED, so prose literals are NOT checked. This is a refusal, not a "
+                "pass." % e]
+    if surfaces is None:
+        surfaces = {}
+        for fn in _SIZING_SURFACES:
+            t = _read(fn)
+            if t:
+                surfaces[fn] = t
+    if run_ctx_text is not None:
+        surfaces = dict(surfaces or {})
+        surfaces[MONTHLY_CTX] = run_ctx_text
+    errs = []
+    for label, text in (surfaces or {}).items():
+        for i, ln in enumerate(_live_lines(text), 1):
+            low = ln.lower()
+            for term, why in _RETIRED_SIZING_TERMS:
+                if re.search(r"(?<![\w])" + re.escape(term) + r"(?![\w])", ln, re.I):
+                    errs.append("P0.5/sizing: %s states the RETIRED term `%s` — %s"
+                                % (label, term, why))
+            if not any(c in low for c in _SIZE_CONTEXT):
+                continue
+            skip = next((why for kw, why in _SIZE_OUT_OF_SCOPE if kw in low), None)
+            if skip:
+                continue
+            lits = set()
+            for m in _RANGE_RE.finditer(ln):
+                lits.update({float(m.group(1)), float(m.group(2))})
+            for m in _PCT_RE.finditer(ln):
+                lits.add(float(m.group(1)))
+            for v in sorted(lits):
+                if round(v, 4) in vals:
+                    continue
+                errs.append(
+                    "P0.5/sizing: %s quotes the position-size literal %s%% which is not a "
+                    "current ladder value %s. Run surfaces must quote position_sizing.ladder() "
+                    "BY REFERENCE — a literal is a second home the moment the ladder moves, "
+                    "and it already moved once (ISA-0427: max_stock_position_pct 5%% -> 6.5%%) "
+                    "while this prose did not. Line: %s"
+                    % (label, ("%g" % v), sorted(vals), ln.strip()[:150]))
+    # dedupe, preserving order
+    seen, out = set(), []
+    for e in errs:
+        k = e[:180]
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(e)
+    return out
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# P7.1 / A3 — THE /100 CONVICTION SCORE MAY BE DISPLAYED, AND MAY NOT BE READ BY ANY GATE
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# D21 retires the /100 as a DECISION INPUT. D1-D7 survive as documented thesis fields (A10),
+# and `strategic_conviction_score` continues to be computed and DISPLAYED.
+#
+# ⚑ THE DISTINCTION IS THE WHOLE RULE, AND IT IS WHY THIS IS AST WORK AND NOT A GREP.
+# `email_prefill:1277` reads the score into a render dict labelled "secondary" — that is a
+# DISPLAY and it is permitted. A gate is different: a read whose value reaches a COMPARISON
+# that controls a branch, a return or a raise. A grep cannot tell the two apart and would
+# either ban the display (wrong) or pass the gate (worse).
+#
+# ⚑ AND THE OLD GATE WAS ALREADY HOLLOW. §7.6.2 gated the email on `conviction_total`, which
+# is null for EVERY name in step9_conviction_aug_2026.json, with the /100 standing at 2 of 53
+# populated. A gate on a field nobody fills is not a gate — it is a control that reports
+# success while doing nothing, which is this project's dominant failure class.
+
+_CONVICTION_FIELDS = ("strategic_conviction_score", "conviction_total", "conviction_score")
+
+# Modules where a conviction READ is a legitimate SHADOW MEASUREMENT rather than a gate.
+# Declared here with reasons, never inferred, so the exemption can be challenged.
+_CONVICTION_SHADOW_MODULES = {
+    "shadow_ledger": ("Book B is an explicitly SHADOW-ONLY counterfactual weighting that "
+                      "moves no capital and issues no recommendation; it exists to measure "
+                      "what conviction-weighting WOULD have done"),
+    "conviction_capture": ("the capture instrument for D1-D7 themselves — it records the "
+                           "fields, and recording is not gating"),
+    "thesis_state": "its docstrings explain what it replaces",
+    "consistency_check": "this checker names the fields it looks for",
+    "framework_integrity": "the enforcement layer names the fields it looks for",
+}
+
+
+def _gating_conviction_reads(root=None, fields=_CONVICTION_FIELDS):
+    """[(module, line, field, form)] — reads that reach a COMPARISON controlling a branch."""
+    import ast as _ast
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    out = []
+    try:
+        import framework_integrity as _fi
+        files = _fi.source_files(root)
+    except Exception:                                                # noqa: BLE001
+        files = [os.path.join(root, f) for f in sorted(os.listdir(root))
+                 if f.endswith(".py") and not f.startswith("test_")]
+    for path in files:
+        mod = os.path.splitext(os.path.basename(path))[0]
+        if mod in _CONVICTION_SHADOW_MODULES:
+            continue
+        try:
+            tree = _ast.parse(open(path, encoding="utf-8").read())
+        except Exception:                                            # noqa: BLE001
+            continue
+        try:
+            import framework_integrity as _fi2
+            spans = _fi2._excluded_line_ranges(tree, mod)
+        except Exception:                                            # noqa: BLE001
+            spans = []
+
+        def _reads_field(node):
+            for sub in _ast.walk(node):
+                if isinstance(sub, _ast.Constant) and sub.value in fields:
+                    return sub.value
+                if isinstance(sub, _ast.Attribute) and sub.attr in fields:
+                    return sub.attr
+                if isinstance(sub, _ast.Name) and sub.id in fields:
+                    return sub.id
+            return None
+
+        for node in _ast.walk(tree):
+            if any(a <= getattr(node, "lineno", -1) <= b for a, b in spans):
+                continue
+            # a comparison that CONTROLS something: an if/while test, or a returned/raised bool
+            tests = []
+            if isinstance(node, (_ast.If, _ast.While)):
+                tests.append(node.test)
+            elif isinstance(node, _ast.IfExp):
+                tests.append(node.test)
+            elif isinstance(node, _ast.Assert):
+                tests.append(node.test)
+            for t in tests:
+                for cmp_node in _ast.walk(t):
+                    if not isinstance(cmp_node, _ast.Compare):
+                        continue
+                    if not _is_value_test(cmp_node):
+                        continue
+                    f = _reads_field(cmp_node)
+                    if f:
+                        out.append((mod, cmp_node.lineno, f, type(node).__name__))
+    return out
+
+
+def _is_value_test(cmp_node):
+    """Does this comparison test the VALUE of the score, or merely its PRESENCE?
+
+    ⚑ THE DISTINCTION D21 ACTUALLY DRAWS, and the first implementation of this check got it
+    wrong. D21 retires the /100 as a DECISION INPUT. `if cv.get("conviction_total") is not
+    None:` — which is what `Dashboard/server/decision_table.py:150` does — asks whether the
+    field EXISTS so that it can be RENDERED, and normalising a T2 total out of 50 against a T1
+    total out of 100 before displaying them side by side is not a capital decision. Flagging it
+    would ban the display D21 explicitly PERMITS ("continues to be computed and displayed").
+
+    A gate is an ORDERED comparison, or an equality against a NUMBER: `>= 75`, `< 60`,
+    `== 100`. Those use the score's magnitude to decide something. `is None` / `is not None`
+    / `in (None, 100)` on a scale field do not.
+
+    ⚑ A check that cannot tell a permitted display from a forbidden gate would either ban the
+    display (wrong) or pass the gate (worse), and the second is how a retired score keeps
+    deciding."""
+    import ast as _ast
+    for op, comp in zip(cmp_node.ops, cmp_node.comparators):
+        if isinstance(op, (_ast.Lt, _ast.LtE, _ast.Gt, _ast.GtE)):
+            return True
+        if isinstance(op, (_ast.Eq, _ast.NotEq)) and isinstance(comp, _ast.Constant) \
+           and isinstance(comp.value, (int, float)) and not isinstance(comp.value, bool):
+            return True
+    return False
+
+
+def pair_no_gate_reads_conviction_score(root=None):
+    """A3 (P7.1). `strategic_conviction_score` may be computed and displayed and may NOT be
+    read by any gate. Enforced by AST on comparisons that control a branch — a display read is
+    permitted and a gating read is not, and only an AST can tell them apart."""
+    hits = _gating_conviction_reads(root)
+    return ["A3/P7.1: %s:%d gates on `%s` inside a %s. D21 RETIRES the /100 as a decision "
+            "input — it may be computed and displayed, and may not gate. Judgement belongs in "
+            "`thesis_state`, which may BLOCK, DOWNSIZE or HOLD and never upsize."
+            % (m, ln, f, form) for m, ln, f, form in hits]
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# P4 — ONE COMPUTER FOR stock_max, AND THE 0.75 / 0.80 PAIR KEPT DISTINCT
+# ══════════════════════════════════════════════════════════════════════════════════════════
+def pair_single_stock_max_authority(root=None):
+    """P4-A1 / P4-A2. `sleeve_split` must CALL `position_sizing.stock_max`, and
+    `capital_destination.derive_stock_max` must be ABSENT.
+
+    ⚑⚑ BY AST ON A **CALL NODE**, NEVER BY FILE TEXT — and ISA-0446 is why. A regex satisfied
+    by the string `position_sizing.stock_max` would be satisfied by this very docstring, by a
+    comment explaining the rule, and by a fixture that only MENTIONS it. A check whose false
+    positive is indistinguishable from the thing it hunts teaches the reader to disbelieve it.
+    The negative control below therefore feeds it a module whose ONLY mention is prose, and
+    asserts it FAILS to satisfy the check."""
+    import ast as _ast
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    errs = []
+    path = os.path.join(root, "capital_destination.py")
+    try:
+        tree = _ast.parse(open(path, encoding="utf-8").read())
+    except Exception as e:                                           # noqa: BLE001
+        return ["P4-A1: capital_destination.py unreadable (%s) — the single-authority check "
+                "could NOT run. Reported, never silently skipped (R4.9)" % e]
+
+    # P4-A2 — the deleted function must be GONE, not merely unreferenced
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
+           and node.name == "derive_stock_max":
+            errs.append("P4-A2: `capital_destination.derive_stock_max` is DEFINED again at "
+                        "line %d. It was DELETED, not re-pointed (ISA-0442's rule): a "
+                        "re-pointed function is a second home waiting to be repopulated by a "
+                        "future session that finds an unused branch and 'restores' it."
+                        % node.lineno)
+
+    # P4-A1 — sleeve_split must contain a real CALL to position_sizing.stock_max
+    found = False
+    for node in _ast.walk(tree):
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        if node.name != "sleeve_split":
+            continue
+        for sub in _ast.walk(node):
+            if not isinstance(sub, _ast.Call):
+                continue
+            f = sub.func
+            if isinstance(f, _ast.Attribute) and f.attr == "stock_max":
+                found = True
+                break
+    if not found:
+        errs.append("P4-A1: `sleeve_split` contains no CALL to `position_sizing.stock_max`. "
+                    "The demand-pull rule is the declared single sizing authority; a router "
+                    "that does not call it is sizing capital by some other means.")
+    return errs
+
+
+
+
+def pair_capital_pipeline_wired(root=None, _cd_src=None):
+    """ISA-0490. The capital router must CALL the pipeline, not merely be able to.
+
+    ⚑⚑ THE CLASS: A GREEN FLAG OVER A CALL THAT DOES NOT HAPPEN. On 28-Aug-2026
+    `stock_candidates`, `deployment_sequencer`, `position_sizing.stock_max` and
+    `position_sizing.allocate` were all built, all tested, all behind flags that were all ON —
+    and `capital_destination.build()` called none of them. It handed `candidates=None` to
+    `sleeve_split`, which read `None` as `[]`, summed demand over nothing, and published
+    `STOCK_SLEEVE_BLOCKED, GBP 0` — output indistinguishable from "every name was assessed and
+    rejected". Four modules, 68 green assertions, zero pounds moved, and nothing red.
+
+    ⚑ `pair_v21_modules_executed` could not catch it: that asserts a module RAN somewhere in
+    the pre-run. This asserts a specific function is reached FROM THE CAPITAL PATH — which is
+    the distinction ISA-0404 already recorded ("a liveness ref proved REACHABLE, not
+    EXECUTED") and the atlas still does not measure.
+
+    ⚑ BY AST OVER CALL NODES, never file text (ISA-0446): a docstring naming `capital_pipeline`
+    — this one does — must not satisfy the check. The negative control asserts exactly that.
+
+    ⚑ WHAT THIS DOES NOT VERIFY (R10): that the pipeline returns anything useful, or that the
+    candidates are correct. It verifies the call exists and that the seam cannot silently
+    degrade to an empty list. `_qualifies` and `sleeve_split`'s own refusal guard the values."""
+    import ast as _ast
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    errs = []
+    src = _cd_src
+    if src is None:
+        try:
+            src = open(os.path.join(root, "capital_destination.py"), encoding="utf-8").read()
+        except Exception as e:                                          # noqa: BLE001
+            return ["ISA-0490: capital_destination.py unreadable (%s) — the wiring check did "
+                    "NOT run. Reported, never silently skipped (R4.9)." % e]
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError as e:
+        return ["ISA-0490: capital_destination.py does not parse (%s) — check did NOT run" % e]
+
+    fns = {n.name: n for n in _ast.walk(tree)
+           if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
+    if "build" not in fns:
+        return ["ISA-0490: `capital_destination.build` is not defined — this check is BLIND, "
+                "not passing."]
+
+    # (1) build() must CALL capital_pipeline
+    called = set()
+    for sub in _ast.walk(fns["build"]):
+        if isinstance(sub, _ast.Call):
+            f = sub.func
+            if isinstance(f, _ast.Name):
+                called.add(f.id)
+            elif isinstance(f, _ast.Attribute):
+                called.add(f.attr)
+    if "capital_pipeline" not in called:
+        errs.append(
+            "ISA-0490: `build()` contains no CALL to `capital_pipeline`. The candidate "
+            "pipeline is then unreached and `sleeve_split` sizes the stock sleeve from "
+            "nothing — GBP 0 to stocks, everything to funds, and the output reads exactly "
+            "like a measured rejection of every name (R2.10).")
+
+    # (2) sleeve_split must be called WITH candidates= — a positional/absent argument is how
+    #     the seam silently reverts
+    ss_calls = [c for c in _ast.walk(fns["build"])
+                if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                and c.func.id == "sleeve_split"]
+    if not ss_calls:
+        errs.append("ISA-0490: `build()` does not call `sleeve_split` — BLIND, not passing.")
+    for c in ss_calls:
+        kws = {k.arg for k in c.keywords if k.arg}
+        if "candidates" not in kws:
+            errs.append(
+                "ISA-0490: `build()` calls `sleeve_split` without a `candidates=` keyword "
+                "(line %d). Omitting it restores the exact 28-Aug defect: the parameter "
+                "defaults to None and the router sizes on an empty demand list." % c.lineno)
+
+    # (3) `allocate` must be reached from sleeve_split — the cap without the allocation is a
+    #     ceiling with no instruction attached
+    if "sleeve_split" in fns:
+        alloc = {c.func.attr for c in _ast.walk(fns["sleeve_split"])
+                 if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)}
+        if "allocate" not in alloc:
+            errs.append(
+                "ISA-0490: `sleeve_split` never calls `position_sizing.allocate`. `stock_max` "
+                "says how much MAY reach the sleeve; `allocate` says WHICH positions open and "
+                "at what size. Publishing the first without the second hands Raj a ceiling he "
+                "cannot act on, and leaves D15-D17 built and dead.")
+
+    # (4) the seam guard itself must exist: candidates is None -> RAISE, never `or []`
+    if "sleeve_split" in fns:
+        raises_on_none = False
+        for sub in _ast.walk(fns["sleeve_split"]):
+            if isinstance(sub, _ast.If) and isinstance(sub.test, _ast.Compare):
+                t = sub.test
+                if isinstance(t.left, _ast.Name) and t.left.id == "candidates" \
+                   and any(isinstance(o, _ast.Is) for o in t.ops) \
+                   and any(isinstance(c, _ast.Constant) and c.value is None
+                           for c in t.comparators):
+                    if any(isinstance(x, _ast.Raise) for x in _ast.walk(sub)):
+                        raises_on_none = True
+        if not raises_on_none:
+            errs.append(
+                "ISA-0490: `sleeve_split` does not RAISE on `candidates is None`. Without that "
+                "guard, `None` and `[]` collapse into one output with two opposite meanings — "
+                "'nobody asked' and 'the gate rejected everyone' both print GBP 0 (R2.10).")
+
+    # (5) ISA-0505 (CRITICAL) — THE RESOLVER IS THE ONLY DOOR TO THE BOOK.
+    # ⚑⚑ `_load_portfolio()` was written to resolve the portfolio file by its DECLARED
+    #    `data_date`, docstring and all, and was called by every consumer EXCEPT `build()` —
+    #    the one function that routes money, which opened a hard-coded filename. A resolver
+    #    added later does not retro-fit its callers, and the caller that kept the literal was
+    #    the one whose mistake costs pounds.
+    # ⚑ Scoped to the CLASS: ANY function in this module opening a `portfolio_data_*.json`
+    #   literal fails, not just `build()`. The 29-Aug fix closed the instance; this closes the
+    #   door. Reported BLIND if the resolver itself is renamed away.
+    if "_load_portfolio" not in fns:
+        errs.append(
+            "ISA-0505: `capital_destination._load_portfolio` is absent — the declared resolver "
+            "for the portfolio book cannot be found, so 'nothing bypasses it' is BLIND rather "
+            "than true.")
+    else:
+        # ⚑ Selftests and fixtures name a SPECIFIC month's book on purpose — that is what a
+        #   fixture is. Excluding them by NAME (not by walking past the node, which ISA-0489
+        #   proved does not work with a flat `ast.walk`) keeps the scan on the live path.
+        _SCAFFOLD = ("_selftest", "_fixture", "_selftest_fixture")
+        _seen = set()
+        for fname, fnode in fns.items():
+            if fname == "_load_portfolio" or fname in _SCAFFOLD or fname.startswith("test_"):
+                continue
+            for sub in _ast.walk(fnode):
+                if not (isinstance(sub, _ast.Constant) and isinstance(sub.value, str)):
+                    continue
+                v = sub.value
+                if v.startswith("portfolio_data_") and v.endswith(".json") and "%" not in v \
+                        and "{" not in v and (fname, v) not in _seen:
+                    _seen.add((fname, v))
+                    errs.append(
+                        "ISA-0505: `capital_destination.%s` names the portfolio book by the "
+                        "literal %r instead of calling `_load_portfolio()`. A hard-coded month "
+                        "in the capital path reads whichever book was current when the line was "
+                        "written — on the stale book COCO reads GBP 0 and looks like a NEW name "
+                        "wanting a full starter." % (fname, v))
+    return errs
+
+def pair_projection_carries_consumer_fields(root=None, _producer_src=None, _consumer_src=None):
+    """ISA-0487. Every row field a consumer READS off `step9_pre.deployable_stack` must be a
+    key the PRODUCER's projection actually emits.
+
+    ⚑⚑ THE CLASS THIS KILLS: A HAND-LISTED PROJECTION IS AN UNREACHABLE CONTRACT.
+    `step9_pre_builder` computes `t1_qualified` for every entry (52 of 52 on the August book)
+    and then rebuilds each row as a literal dict of hand-chosen keys. `t1_qualified` was not
+    among them. `stock_candidates._qualifies` reads exactly that field, so P3 refused all 32
+    rows and the capital pipeline could not be wired — with BOTH modules looking correct in
+    isolation. The producer computes it; the consumer requires it; the field dies in between,
+    and nothing in the tree could see the gap because neither side is wrong on its own.
+
+    This is the capture layer's recorded lesson — *"a field absent from the FIELD_MAP is
+    computed and silently discarded"* — recurring in a second projection. It generalises: the
+    check is over the CLASS (every field the consumer reads), not over `t1_qualified`, because
+    ISA-0447 proved that a class-killer scoped to one key is an instance-killer.
+
+    ⚑ TWO INDEPENDENT DERIVATIONS, NEITHER OF WHICH IS A DECLARATION.
+    Producer keys come from the AST of the dict literal appended to `deployment_priority_rank`.
+    Consumer keys come from the AST of `.get("literal")` calls inside `stock_candidates`'
+    row-reading functions. A declared manifest would be a THIRD home for the contract and
+    would drift from the code exactly as this projection drifted from its consumer.
+
+    ⚑ WHAT THIS CHECK DOES **NOT** VERIFY (R10): that the emitted value is CORRECT, or that
+    it is non-null on any given run. It verifies only that the key is emitted at all. A key
+    present and always None would pass here and REFUSE in P3 — which is the intended division
+    of labour: this pair guards the shape, `_qualifies` guards the value."""
+    import ast as _ast
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    errs = []
+
+    # ── Names read off a row by the consumer, but sourced elsewhere or optional ──────────
+    # `route` is assigned by the consumer itself; `evidence_state` and `decision_bucket`/`tier`
+    # have declared alternates in the consumer; `ticker` is the identity. Each exemption is
+    # NAMED with its reason — a silent exemption list is how a check stops noticing (ISA-0348).
+    EXEMPT = {
+        "ticker": "row identity, asserted separately by P3's own build()",
+        "vci_deploy_eligible": "sourced from vci_watchlist / vci_deploy_eval, not this projection",
+        "evidence_state": "consumer prefers its `evidence_states` argument; the row read is a fallback",
+        "t1_gate_detail_summary": "one of four ALTERNATE reason sources; `_qualifies` needs any one",
+        "disqualified_reason": "one of four ALTERNATE reason sources",
+        "er_floor_status": "one of four ALTERNATE reason sources (and IS emitted)",
+        "decision_bucket": "band falls back to `tier`; both are emitted",
+    }
+
+    def _src(name, override):
+        if override is not None:
+            return override
+        p = os.path.join(root, name)
+        try:
+            return open(p, encoding="utf-8").read()
+        except Exception as e:                                       # noqa: BLE001
+            return None
+
+    prod_src = _src("step9_pre_builder.py", _producer_src)
+    cons_src = _src("stock_candidates.py", _consumer_src)
+    if prod_src is None or cons_src is None:
+        return ["ISA-0487: step9_pre_builder.py or stock_candidates.py unreadable — the "
+                "projection/consumer contract could NOT be checked. Reported, never silently "
+                "skipped (R4.9)."]
+    try:
+        ptree, ctree = _ast.parse(prod_src), _ast.parse(cons_src)
+    except SyntaxError as e:                                         # noqa: BLE001
+        return ["ISA-0487: could not parse (%s) — check did NOT run (R4.9)" % e]
+
+    # ── PRODUCER: keys of the dict literal appended to `deployment_priority_rank` ────────
+    produced = set()
+    for node in _ast.walk(ptree):
+        if not isinstance(node, _ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, _ast.Attribute) and f.attr == "append"
+                and isinstance(f.value, _ast.Name)
+                and f.value.id == "deployment_priority_rank"):
+            continue
+        for arg in node.args:
+            if isinstance(arg, _ast.Dict):
+                for k in arg.keys:
+                    if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                        produced.add(k.value)
+    if not produced:
+        # ⚑ BLIND, NOT GREEN. If the producer is refactored so the pattern stops matching,
+        # this check must say it can no longer see, never report success (R4.9).
+        return ["ISA-0487: found NO dict literal appended to `deployment_priority_rank` in "
+                "step9_pre_builder.py. The projection may have been refactored; this check is "
+                "BLIND, not passing. Re-point it at the new producer."]
+
+    # ── CONSUMER: `<row>.get("literal")` inside stock_candidates' row-reading functions ──
+    ROW_READERS = {"_qualifies", "build", "_er_margin_pp"}
+    ROW_VARS = {"row", "r", "entry"}
+    required = set()
+    for node in _ast.walk(ctree):
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        if node.name not in ROW_READERS:
+            continue
+        for sub in _ast.walk(node):
+            if not isinstance(sub, _ast.Call):
+                continue
+            f = sub.func
+            if not (isinstance(f, _ast.Attribute) and f.attr == "get"
+                    and isinstance(f.value, _ast.Name) and f.value.id in ROW_VARS):
+                continue
+            if sub.args and isinstance(sub.args[0], _ast.Constant) \
+               and isinstance(sub.args[0].value, str):
+                required.add(sub.args[0].value)
+    if not required:
+        return ["ISA-0487: found NO row-field reads in stock_candidates' row readers %s. The "
+                "consumer may have been refactored; this check is BLIND, not passing."
+                % sorted(ROW_READERS)]
+
+    missing = sorted(f for f in required - produced if f not in EXEMPT)
+    if missing:
+        errs.append(
+            "ISA-0487: `stock_candidates` reads %d field(s) that `step9_pre_builder`'s "
+            "`deployment_priority_rank` projection does NOT emit: %s. The producer computes "
+            "them and the hand-listed projection drops them, so every consuming row arrives "
+            "with the field absent — which P3 correctly REFUSES, and the capital pipeline "
+            "stops. Add the field to the projection; do NOT default it in the consumer, "
+            "because a default and a measured verdict are opposite in meaning (R2.10)."
+            % (len(missing), missing))
+    return errs
+
+def pair_entry_and_review_fractions_distinct(root=None):
+    """P4-A10 / P4.4. `FLAG_FRACTION_OF_STARTER` (0.75, REVIEW) and
+    `MIN_ENTRY_FRACTION_OF_STARTER` (0.80, ENTRY) must both exist, be UNEQUAL, and each carry
+    a docstring or comment naming its own rule.
+
+    ⚑ THIS PAIR EXISTS BECAUSE A FUTURE SESSION WILL READ THEM AS A DUPLICATE AND UNIFY THEM,
+    silently moving the entry floor. They answer different questions about different
+    populations: *"below this a HELD position is not carrying its risk share"* versus *"below
+    this, do not OPEN a position at all"*. Two rules that happen to be near each other in
+    value are still two rules — and the framework has the opposite lesson recorded too (KR6:
+    one rule with two homes), so the distinction has to be asserted rather than assumed."""
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    errs = []
+    try:
+        import risk_contribution as _rc
+        import position_sizing as _ps
+    except Exception as e:                                           # noqa: BLE001
+        return ["P4-A10: could not import the two homes (%s) — check NOT run (R4.9)" % e]
+    flag = getattr(_rc, "FLAG_FRACTION_OF_STARTER", None)
+    entry = getattr(_ps, "MIN_ENTRY_FRACTION_OF_STARTER", None)
+    if flag is None:
+        errs.append("P4-A10: risk_contribution.FLAG_FRACTION_OF_STARTER is absent")
+    if entry is None:
+        errs.append("P4-A10: position_sizing.MIN_ENTRY_FRACTION_OF_STARTER is absent")
+    if flag is not None and entry is not None and float(flag) == float(entry):
+        errs.append(
+            "P4-A10: FLAG_FRACTION_OF_STARTER (%s) and MIN_ENTRY_FRACTION_OF_STARTER (%s) are "
+            "EQUAL. They are TWO RULES — a review fraction for a HELD position and an entry "
+            "floor for a NEW one — and equalising them is how the entry floor moves without "
+            "anyone deciding to move it (P4.4)." % (flag, entry))
+    for mod, const, word in (("risk_contribution.py", "FLAG_FRACTION_OF_STARTER", "review"),
+                             ("position_sizing.py", "MIN_ENTRY_FRACTION_OF_STARTER", "entry")):
+        try:
+            txt = open(os.path.join(root, mod), encoding="utf-8").read()
+        except Exception:                                            # noqa: BLE001
+            continue
+        i = txt.find(const)
+        if i < 0:
+            continue
+        window = txt[max(0, i - 1800):i + 400].lower()
+        if word not in window:
+            errs.append("P4-A10: %s.%s carries no nearby prose naming it as the %s rule. A "
+                        "bare number cannot defend itself against being unified with its "
+                        "neighbour." % (mod, const, word.upper()))
     return errs
 
 
@@ -1147,14 +1846,31 @@ def _assigned_and_imported(tree):
 
 
 def pair_undefined_constants(py_texts):
-    """ALL_CAPS names READ but never bound or imported anywhere in the file.
+    """Names USED at runtime but never bound or imported anywhere in the file.
 
-    This is the FETCH_WORKERS class (31-Jul-2026): fetch_watchlist_metrics.py referenced an
-    undefined FETCH_WORKERS at its ThreadPoolExecutor, so every local metrics fetch raised
-    NameError before touching Yahoo — for weeks — while the caller logged it as an expected
-    architectural condition. py_compile cannot see it; only a name-resolution check can.
-    Scoped to ALL_CAPS (module-constant convention) to keep precision high: dotted access
-    (sc.FOO) is an Attribute, not a Name, so it is correctly ignored.
+    ONE HOME for "a name this module evaluates must be a name this module binds" (R5).
+    Two shapes, one rule, because they are the same defect and must not drift apart:
+
+    (a) ALL_CAPS reads — the FETCH_WORKERS class (31-Jul-2026): fetch_watchlist_metrics.py
+        referenced an undefined FETCH_WORKERS at its ThreadPoolExecutor, so every local
+        metrics fetch raised NameError before touching Yahoo — for weeks — while the caller
+        logged it as an expected architectural condition. Scoped to ALL_CAPS (module-constant
+        convention) to keep precision high on plain Load names.
+
+    (b) CALL TARGETS, at any case — added 02-Sep-2026 (ISA-0551) after the rehearsal found
+        `email_prefill.skeleton_s3` and `.skeleton_s4` called at three sites and defined
+        nowhere. The 28-Aug D21 edit rewrote a paragraph inside `_s2_standing_lines` and took
+        `return lines` and both `def` headers with it, so (i) `_s2_standing_lines` silently
+        returned the s4 skeleton DICT instead of §2's LINES and (ii) every degraded
+        email_prefill path died on NameError and wrote no email_data file. Shape (a) could
+        not see it: the names are lower-case. No case heuristic is needed here — a Call whose
+        func is a bare Name the module never binds is unambiguously a NameError the moment
+        that line executes, which is why this half carries no naming convention at all.
+
+    py_compile cannot see either shape — the file is syntactically perfect. Dotted access
+    (sc.FOO, mod.fn()) is an Attribute, not a Name, so it is correctly ignored. A module
+    doing `from x import *` cannot be resolved statically and is SKIPPED AND NAMED, never
+    passed silently (R4.9).
     """
     errs = []
     for fn, txt in sorted(py_texts.items()):
@@ -1164,6 +1880,11 @@ def pair_undefined_constants(py_texts):
             errs.append(f"A18/M8: {fn} does not parse ({e})")
             continue
         bound = _assigned_and_imported(tree)
+        if "*" in bound:
+            errs.append(f"A18/M8: {fn} uses `from ... import *` — name resolution CANNOT be "
+                        f"decided statically for this module, so it was NOT checked. Reported "
+                        f"rather than passed (R4.9); replace the star import to restore cover")
+            continue
         seen = set()
         for node in ast.walk(tree):
             if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
@@ -1174,10 +1895,193 @@ def pair_undefined_constants(py_texts):
                 seen.add(node.id)
                 errs.append(f"A18/M8: {fn} reads {node.id} (line {node.lineno}) but it is never "
                             f"assigned or imported in that file — NameError at runtime")
+        # (b) call targets — any case. A bare-Name call to something the module never binds.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id not in bound
+                    and node.func.id not in dir(builtins)
+                    and ("call:" + node.func.id) not in seen):
+                seen.add("call:" + node.func.id)
+                errs.append(f"A18/M8: {fn} CALLS {node.func.id}() (line {node.lineno}) but that "
+                            f"name is never defined, assigned or imported in that file — "
+                            f"NameError the moment that branch executes")
     return errs
 
 
 # ── driver ───────────────────────────────────────────────────────────────────────────────
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# A18/M9 — a METHOD CALL on a name bound to a LITERAL (ISA-0553, 02-Sep-2026)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ⚑ THE DEFECT: `rerank_watchlist.run()` bound `log = {...}` (the promotion log) at line 643
+# and called `log.info(...)` at line 872. The module has no logger and never imports
+# `logging`. Step 7.5 therefore died with AttributeError on EVERY run — after the Source
+# Scores were computed and before they were written — so the FINAL top-N re-rank never
+# happened and Step 8 ranked 93 names with `source_score` present on none of them. The
+# orchestrator recorded rc=1 as a WARNING and carried on: a hard crash in the ranking basis,
+# surfacing as a line of log text.
+#
+# ⚑ WHY M8 COULD NOT SEE IT. M8 asks whether a NAME is bound. `log` is bound — correctly, to
+# the wrong kind of thing. The defect lives one level down, in the TYPE, so it needs its own
+# question. Same class, different question; both are name-resolution, neither substitutes.
+#
+# ⚑ PRECISION. Only names bound EXACTLY ONCE in their own scope, to a literal whose type is
+# unambiguous, are considered — a name that is a parameter, a loop target, reassigned, or
+# declared global is skipped. `d["k"] = v` MUTATES d and does not rebind it: an early draft
+# of this pair walked into Subscript targets, counted nine "rebindings" of `log`, and
+# silently exempted the exact dict it was written to watch. Measured 02-Sep-2026: fires on
+# the pre-fix `rerank_watchlist.py`, zero findings across all 150 modules once fixed.
+
+_M9_LIT_TYPES = {ast.Dict: dict, ast.Set: set, ast.List: list, ast.Tuple: tuple}
+
+def _m9_scope_bodies(tree):
+    """(scope_node, [statements]) for the module and every function, nested bodies excluded."""
+    scopes = [tree]
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scopes.append(n)
+    return scopes
+
+def _m9_own_nodes(scope):
+    """Nodes belonging to this scope, not to a nested function/class/lambda."""
+    out = []
+    def rec(n, top=False):
+        for ch in ast.iter_child_nodes(n):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)) and not top:
+                continue
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)) and top:
+                continue
+            out.append(ch); rec(ch)
+    rec(scope, top=True)
+    return out
+
+def _m9_literal_type(v):
+    if type(v) in _M9_LIT_TYPES: return _M9_LIT_TYPES[type(v)]
+    if isinstance(v, ast.Constant) and isinstance(v.value, (str, int, float, bool)) and not isinstance(v.value, bool):
+        return type(v.value)
+    if isinstance(v, ast.JoinedStr): return str
+    return None
+
+def pair_literal_attr_calls(py_texts):
+    errs = []
+    for fn, txt in sorted(py_texts.items()):
+        try: tree = ast.parse(txt, filename=fn)
+        except SyntaxError: continue
+        for scope in _m9_scope_bodies(tree):
+            nodes = _m9_own_nodes(scope)
+            binds, lit = {}, {}
+            for n in nodes:
+                tgts = []
+                if isinstance(n, ast.Assign): tgts = n.targets
+                elif isinstance(n, (ast.AnnAssign, ast.AugAssign)): tgts = [n.target]
+                elif isinstance(n, (ast.For, ast.AsyncFor)): tgts = [n.target]
+                elif isinstance(n, ast.withitem) and n.optional_vars: tgts = [n.optional_vars]
+                elif isinstance(n, ast.comprehension): tgts = [n.target]
+                elif isinstance(n, ast.ExceptHandler) and n.name: binds[n.name] = binds.get(n.name,0)+1
+                elif isinstance(n, ast.NamedExpr): tgts = [n.target]
+                elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                    for nm in n.names: binds[nm] = binds.get(nm,0)+2
+                def _bound_names(t):
+                    """Names REBOUND by this target. `d["k"] = v` mutates d, it does not
+                    rebind it — walking into a Subscript would count it as a rebinding and
+                    silently switch the check off for exactly the dicts it exists to watch."""
+                    if isinstance(t, ast.Name): return [t.id]
+                    if isinstance(t, ast.Starred): return _bound_names(t.value)
+                    if isinstance(t, (ast.Tuple, ast.List)):
+                        out=[]
+                        for el in t.elts: out += _bound_names(el)
+                        return out
+                    return []          # Subscript / Attribute targets rebind nothing
+                for t in tgts:
+                    for nid in _bound_names(t):
+                        binds[nid] = binds.get(nid,0)+1
+                        if isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(t, ast.Name):
+                            lt = _m9_literal_type(n.value)
+                            if lt: lit[nid] = (lt, n.lineno)
+            if isinstance(scope,(ast.FunctionDef, ast.AsyncFunctionDef)):
+                for a in ast.walk(scope.args):
+                    if isinstance(a, ast.arg): binds[a.arg] = binds.get(a.arg,0)+2
+            for n in nodes:
+                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and isinstance(n.func.value, ast.Name)): continue
+                nm = n.func.value.id
+                if binds.get(nm,0) != 1 or nm not in lit: continue
+                ty, bl = lit[nm]
+                if not hasattr(ty, n.func.attr):
+                    errs.append("A18/M9: %s:%d calls %s.%s() but %s is bound at line %d to a "
+                                "%s literal and never rebound — %s has no attribute %r. "
+                                "AttributeError the moment that line executes."
+                                % (fn, n.lineno, nm, n.func.attr, nm, bl, ty.__name__,
+                                   ty.__name__, n.func.attr))
+    return errs
+
+
+
+def pair_broker_file_predates_cash(root=None):
+    """Deployable cash must be on the CASH-STATEMENT basis, not the month-end broker snapshot.
+
+    ⚑ REWRITTEN 02-Sep-2026 (ISA-0574). The first version of this pair found the right symptom
+    and prescribed the WRONG cure: it told Raj to re-export the portfolio so the dates aligned.
+    That would have been actively harmful. The portfolio and X-Ray being CO-DATED at month-end
+    is a deliberate convention and a load-bearing one — XR1, the 6.05 two-derivation fund
+    reconciliation and the look-through all compare portfolio-weighted figures against the
+    X-Ray's tables, and re-exporting one side alone injects market drift into a comparison whose
+    tolerance is 2.0pp and whose current residual is 2.07pp.
+    ⚑ TWO BASES, DELIBERATELY. Positions and exposures are the previous MONTH-END; cash is
+    CURRENT, because it is the only input that decides how much money is on the table. Run_Context
+    Step 1b-2 already declares the cash statement the golden source for "the daily cash balance" —
+    the allowance was wired to it and the balance never was, so the non-authoritative source won
+    (R4.4). The fix was to source deployable from the statement, not to move the snapshot.
+    ⚑ WHAT THIS PAIR NOW ASKS: is deployable actually on the declared basis? A fallback is a real
+    and legitimate state (no statement, an unreadable one, or one older than the broker file) but
+    it must be NAMED, because a fallback and a genuinely small balance produce the same number.
+    """
+    root = root or HERE
+    errs = []
+    port = _latest_j("portfolio_data")
+    if not port:
+        return errs
+    cash = (port.get("cash") or {})
+    basis = str(cash.get("deployable_basis") or "").strip()
+    if not basis:
+        return ["A18/CASH-1: the portfolio artefact publishes a deployable figure with NO "
+                "`deployable_basis`. Two dated bases are in play by design — month-end exposures, "
+                "current cash — so an undeclared basis makes the number unreadable (R4.2)."]
+    if basis == "cash_statement_closing_balance_plus_mmf":
+        return errs                                   # on the declared golden source
+    note = str(cash.get("deployable_note") or "no reason recorded")
+    dep = float(cash.get("deployable_gbp") or 0.0)
+    try:
+        import extract_cash_statement as _ecs
+        cs = _ecs.parse(folder=os.path.dirname(root))
+        close = cs.get("closing_balance_gbp")
+        unseen = (float(close) - dep) if close is not None else None
+    except Exception:                                                   # noqa: BLE001
+        unseen = None
+    msg = ("A18/CASH-1: deployable cash is on the {b!r} basis, NOT the cash statement that "
+           "Run_Context Step 1b-2 declares the golden source for the daily cash balance. "
+           "Reason recorded: {n}").format(b=basis, n=note[:220])
+    if unseen is not None and abs(unseen) >= 0.01:
+        msg += (" ⚑ The statement's closing balance is GBP {c:,.2f} against a deployable of "
+                "GBP {d:,.2f} — a difference of GBP {u:,.2f} that the router cannot see."
+                ).format(c=float(close), d=dep, u=abs(unseen))
+    try:
+        import position_sizing as _ps
+        nav = float((port.get("summary") or {}).get("total_value_gbp") or 0.0)
+        floor = float(_ps.min_entry_gbp(nav)["min_entry_gbp"])
+    except Exception:                                                   # noqa: BLE001
+        floor = 0.0
+    if unseen is not None and abs(unseen) >= floor > 0:
+        errs.append(msg + (" ⚑ ERROR-grade: GBP {u:,.2f} is at or above the GBP {f:,.2f} entry "
+                           "floor, so the fallback can change WHICH destinations are reachable, "
+                           "not just how much reaches them.").format(u=abs(unseen), f=floor))
+    else:
+        errs.append(warn(msg + " ⚑ WARN-grade: below the entry floor, or the gap could not be "
+                               "measured — reported so the fallback is never silent (R4.9)."))
+    return errs
+
+
 
 def pair_orchestrator_parity():
     """07-Aug-2026. TWO INDEPENDENT DERIVATIONS OF "WHAT THE WEEKLY SCREEN DOES".
@@ -1671,18 +2575,47 @@ def pair_lookthrough_xray_reconciliation():
     ma = fev.get("magnitude_admissibility") or {}
     val = {f["ticker"]: f["value_gbp"] for f in (port.get("funds") or [])}
     sv = {t["ticker"]: t["value_gbp"] for t in (port.get("stocks") or [])}
-    stock_country = {"AVGO": "United States", "MU": "United States",
-                     "ONT": "United Kingdom", "ABCL": "Canada"}
     eq = sum(val.values()) + sum(sv.values())
     if not eq:
         return errs
+    # ── ISA-0555 — the stock sleeve's country attribution has ONE HOME, and a gap in it is a
+    # GAP, not a zero. This was a literal here — {AVGO, MU: US; ONT: UK; ABCL: Canada} —
+    # written when the sleeve held exactly those four. By September it held seven; CSH2, COCO
+    # and QBTS were dropped from the aggregate without a word, and XR1 reported their combined
+    # 2.29% as "United States differs by 2.29pp ... two independent sources have stopped
+    # agreeing (R5.2)". They had not. A complete X-Ray was being compared against an aggregate
+    # with a hole in it, and the hole was published as a disagreement — precisely the reading
+    # that sends someone to look for a data problem that does not exist.
     agg = {}
     for sd, vec in (fev.get("vectors") or {}).items():
         w = val.get(sd, 0.0) / eq
         for c, f in vec.items():
             agg[c] = agg.get(c, 0.0) + w * f * 100.0
+    _scm = _j("stock_country_map.json") or {}
+    stock_country = {t: (d or {}).get("country")
+                     for t, d in (_scm.get("stocks") or {}).items()}
+    _basis = {t: (d or {}).get("basis") for t, d in (_scm.get("stocks") or {}).items()}
+    undeclared = sorted(t for t in sv if t not in stock_country)
+    if undeclared:
+        _w = 100.0 * sum(sv[t] for t in undeclared) / eq
+        errs.append(
+            "A18/XR1: %d direct-stock holding(s) carry NO declared equity country and are "
+            "therefore absent from the look-through aggregate: %s (%.2f%% of the portfolio "
+            "combined). The XR1 magnitude verdict is NOT COMPUTED this run — an aggregate "
+            "known to be short by %.2fpp cannot adjudicate a %.1fpp tolerance, and reporting "
+            "the omission as a source disagreement is how the September run read its own "
+            "coverage gap as a data defect (ISA-0555). Declare each in "
+            "stock_country_map.json (basis 'morningstar_domicile', or 'non_equity' where the "
+            "holding carries no equity exposure). ⚑ fund_exposure_vectors.json declares its "
+            "MAGNITUDE admissibility 'withdrawn_if XR1 fails' — an admissibility resting on a "
+            "measurement that DID NOT HAPPEN lapses exactly as one resting on a measurement "
+            "that failed, so w_k is not a magnitude until this is declared."
+            % (len(undeclared), ", ".join(undeclared), _w, _w, XR1_MAX_TOL_PP))
+        return errs
     for t, c in stock_country.items():
         if t in sv:
+            if _basis.get(t) == "non_equity" or not c:
+                continue          # declared to carry no equity country exposure
             agg[c] = agg.get(c, 0.0) + 100.0 * sv[t] / eq
     rows = [r for r in (xr.get("country_exposure") or []) if r.get("country") != "Other"]
     if not rows:
@@ -1699,18 +2632,94 @@ def pair_lookthrough_xray_reconciliation():
     if not diffs:
         return errs
     mean = sum(diffs) / len(diffs)
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # ONE AUTHORITY FOR THE LEVEL, ONE SOURCE FOR THE SPLIT (Raj, 02-Sep-2026 — ISA-0568)
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # ⚑ THESE ARE NOT TWO ESTIMATES OF ONE NUMBER, AND TREATING THEM AS SUCH IS THE DEFECT.
+    # The X-Ray publishes country exposure at PORTFOLIO level only — it is Morningstar's
+    # look-through across every fund's actual holdings, and it is the AUTHORITY for the level.
+    # The vectors are the only source for the SPLIT: which fund carries what. That split is
+    # what C1 reference deviation orders capital on, what 6.11b's Sigma w_k*M_k needs, and what
+    # the 6.06 H9 marginal gate asks when money goes INTO a fund. Neither can replace the other.
+    # ⚑ SO THE QUESTION CHANGES. It was "do these two agree?", which frames a stale vector as a
+    # contradiction and blocks the run on a number nobody disputes. It is now "does the SPLIT
+    # reproduce the AUTHORITATIVE TOTAL?" — a staleness alarm on the attribution, naming the
+    # fund that carries the residual and how old its vector is. `strategic_allocation.py`
+    # already reads the X-Ray as the level and the vectors as attribution; this aligns XR1 with
+    # the pattern rather than inventing one.
+    # ⚑ WHY THE CHECK IS NOT SIMPLY DELETED. ISA-0392 declared the vectors SINGLE_SOURCE and
+    # "NOT admissible alone as a magnitude verdict that moves capital"; ISA-0407 lifted that on
+    # a MEASURED reconciliation. Removing the measurement does not promote the vectors, it
+    # DEMOTES them — fund_expected_return would lose its weights. The reconciliation is what
+    # buys the admissibility, so it survives; only its severity and its wording change.
+    # ⚑ WARN, NOT ERROR, AND THE LINE IS DRAWN AT THE VECTORS' OWN DECLARED CONTRACT. A split
+    # that drifts while every vector is inside `stale_after_days` is measurement noise against
+    # a freshness rule the framework itself set — reported, not blocking. A split that drifts
+    # while a contributing vector is BEYOND its declared life is a contract breach, and that
+    # still errors.
+    _per_fund = (fev.get("per_fund") or {})
+    _stale_after = fev.get("stale_after_days")
+
+    def _attribute(country):
+        """The funds carrying this country, largest contribution first, with vector age."""
+        out = []
+        for sd, vec in (fev.get("vectors") or {}).items():
+            f = float(vec.get(country) or 0.0)
+            if not f:
+                continue
+            w = val.get(sd, 0.0) / eq
+            meta = _per_fund.get(sd) or {}
+            out.append((round(w * f * 100.0, 3), sd, meta.get("as_of"), meta.get("age_days")))
+        return sorted(out, reverse=True)
+
+    def _beyond_declared_life(country):
+        if not isinstance(_stale_after, (int, float)):
+            return []
+        return [(sd, age) for _pp, sd, _as_of, age in _attribute(country)
+                if isinstance(age, (int, float)) and age > _stale_after]
+
+    def _residual_line(country, gap):
+        top = _attribute(country)[:3]
+        who = "; ".join("%s %.3fpp (vector %s, %s days old)"
+                        % (sd, pp, as_of or "undated",
+                           age if age is not None else "?")
+                        for pp, sd, as_of, age in top) or "no fund carries it"
+        return ("A18/XR1: the per-fund SPLIT does not reproduce the X-Ray's authoritative %s "
+                "level: X-Ray %.2f%% vs %.2f%% attributed, a residual of %.2fpp against a "
+                "%.1fpp tolerance. The X-Ray is the AUTHORITY for the level and is unaffected; "
+                "what is short is the ATTRIBUTION. Carried by: %s. Remedy: re-capture those "
+                "vectors (assisted step — the pre-run has no network for the aggregator pages, "
+                "ISA-0392). ⚑ While the split is short, fund_exposure_vectors' MAGNITUDE "
+                "admissibility is withdrawn by its own 'withdrawn_if XR1 fails' contract, so "
+                "w_k is an ORDERING input and not a magnitude until this reconciles."
+                % (country, (agg.get(country, 0.0) + gap) if False else
+                   next((r.get("equity_pct") for r in rows if r["country"] == country), 0.0),
+                   agg.get(country, 0.0), gap, XR1_MAX_TOL_PP, who))
+
     if mean > XR1_MEAN_TOL_PP:
-        errs.append(
-            "A18/XR1: the look-through vectors and the X-Ray disagree by a mean of %.3fpp over %d "
-            "matched countries, above the declared %.1fpp. fund_exposure_vectors.json declares its "
-            "MAGNITUDE admissibility 'withdrawn_if XR1 fails' (ISA-0407) — so fund_expected_return "
-            "must stop treating w_k as a magnitude until this is resolved, and the withdrawal is "
-            "this failure, not a memo." % (mean, len(diffs), XR1_MEAN_TOL_PP))
+        _msg = ("A18/XR1: across %d matched countries the per-fund split is a mean %.3fpp away "
+                "from the X-Ray's authoritative levels, above the declared %.1fpp. The levels "
+                "themselves are not in doubt — the attribution is. Magnitude admissibility for "
+                "w_k is withdrawn until it reconciles (ISA-0407's contract)."
+                % (len(diffs), mean, XR1_MEAN_TOL_PP))
+        errs.append(_msg if _beyond_declared_life("") else warn(_msg))
     if worst[0] and worst[1] > XR1_MAX_TOL_PP:
-        errs.append(
-            "A18/XR1: %s differs by %.2fpp between the two derivations, above the declared %.1fpp "
-            "for a country at or above %.0f%%. Two independent sources for one quantity have "
-            "stopped agreeing (R5.2)." % (worst[0], worst[1], XR1_MAX_TOL_PP, XR1_MATERIAL_PCT))
+        _line = _residual_line(worst[0], worst[1])
+        _over = _beyond_declared_life(worst[0])
+        if _over:
+            errs.append(_line + (" ⚑ ERROR-grade: %s is BEYOND the declared %s-day vector life "
+                                 "(%s) — this is a breach of the freshness contract, not drift "
+                                 "within it."
+                                 % (", ".join(sd for sd, _a in _over), _stale_after,
+                                    ", ".join("%s %sd" % (sd, a) for sd, a in _over))))
+        else:
+            errs.append(warn(_line + (" ⚑ WARN-grade: every contributing vector is INSIDE the "
+                                      "declared %s-day life, so this is drift within the "
+                                      "framework's own freshness rule, not a breach of it. "
+                                      "⚑ Those two declarations were never reconciled with each "
+                                      "other — a %s-day life and a %.1fpp tolerance are the "
+                                      "same quantity from two ends (ISA-0559)."
+                                      % (_stale_after, _stale_after, XR1_MAX_TOL_PP))))
     if ma.get("granted") and not (ma.get("contract") and ma.get("withdrawn_if")):
         errs.append(
             "A18/XR1: fund_exposure_vectors.json GRANTS magnitude admissibility without naming the "
@@ -2286,6 +3295,191 @@ def pair_single_sizing_authority(module_texts=None):
     return errs
 
 
+def pair_local_used_before_bound(sources=None, root=None):
+    """ISA-0589 — no local is READ before it is BOUND, in any orchestrator entry point.
+
+    ⚑ THE INSTRUMENT THAT CRASHES THE RUN IT WAS BUILT TO REPORT ON. `monthly_isa_prerun.main()`
+    called `warnings.append(...)` at line 706 inside the ISA-0572 memory-base guard, and bound
+    `warnings = []` at line 743. Python makes the name a local for the whole function, so the
+    module-level name is shadowed and the call raises UnboundLocalError — and the pre-run died
+    before Step 0, with a traceback, on precisely the condition that guard exists to report
+    gracefully. Zero stages ran.
+
+    ⚑ IT HAD NEVER BEEN EXERCISED. The guard was written on 02-Sep-2026 in a session where
+    MEMORY_BASE existed, so its only trigger path was never taken. That is FC-K — a green tree
+    over a path never run — and R4.12's recorded lesson verbatim: `log[...] = x` written before
+    `log` exists.
+
+    ⚑ AST, NEVER GREP. A docstring or comment naming a variable must not satisfy or trip this.
+    Scoped to the FUNCTION BODY's own straight-line order, which is what UnboundLocalError
+    follows; a name bound only inside a branch or loop is NOT flagged, because that is a
+    different (and legitimate) shape.
+
+    ⚑ NEGATIVE CONTROL (R5.5): the selftest feeds the exact defect and asserts it fails."""
+    import ast as _ast
+    root = root or HERE
+    if sources is None:
+        sources = {}
+        for fn in ("monthly_isa_prerun.py", "build_monthly_isa_email.py", "email_prefill.py"):
+            t = _read(fn)
+            if t:
+                sources[fn] = t
+    errs = []
+    for label, text in sorted(sources.items()):
+        try:
+            tree = _ast.parse(text)
+        except SyntaxError as e:
+            errs.append("ISA-0589: %s does not parse (%s) — this check did NOT run, it did not "
+                        "pass (R4.9)" % (label, e))
+            continue
+        for fn in [n for n in _ast.walk(tree)
+                   if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))]:
+            params = {a.arg for a in list(fn.args.args) + list(fn.args.kwonlyargs)
+                      + list(fn.args.posonlyargs)}
+            for extra in (fn.args.vararg, fn.args.kwarg):
+                if extra:
+                    params.add(extra.arg)
+            declared_global = set()
+            for n in _ast.walk(fn):
+                if isinstance(n, (_ast.Global, _ast.Nonlocal)):
+                    declared_global.update(n.names)
+            # ⚑ INDEXED BY TOP-LEVEL STATEMENT, NOT BY LINE. A load and a store inside the
+            # SAME top-level statement (a `for` whose body binds then reads) are simultaneous
+            # and must not be flagged — the first version of this check compared raw line
+            # numbers and reported `build_monthly_isa_email._render_v21` on exactly that shape.
+            # A checker whose false positive is indistinguishable from the defect it hunts is
+            # worse than no checker (the lesson ISA-0440 already recorded here).
+            # ⚑ THREE BINDING FORMS THIS CHECK'S FIRST DRAFT MISSED, each of which produced a
+            # FALSE POSITIVE on live code, and a false positive here is worse than no check at
+            # all because it is indistinguishable from the defect:
+            #   `import x as _sa`      -> ast.alias, not a Name  (monthly_isa_prerun:2039)
+            #   `except E as _e2:`     -> a bare str on the handler (monthly_isa_prerun:2250)
+            #   a load inside a NESTED scope (an inner def, a lambda, a comprehension) reading
+            #   a name the enclosing body binds LATER — legitimate, and it is how `pk`, `pnow`,
+            #   `exmu`, `r` and `inv` were reported in email_prefill.
+            _NESTED = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda, _ast.ListComp,
+                       _ast.SetComp, _ast.DictComp, _ast.GeneratorExp)
+
+            def _walk_own_scope(node):
+                """Every node in THIS function's own scope — never inside a nested one."""
+                stack = [node]
+                while stack:
+                    cur = stack.pop()
+                    yield cur
+                    for ch in _ast.iter_child_nodes(cur):
+                        if not isinstance(ch, _NESTED):
+                            stack.append(ch)
+
+            first_bind, first_load, bind_line = {}, {}, {}
+            for idx, stmt in enumerate(fn.body):       # straight-line only, deliberately
+                for nm in _ast.walk(stmt):             # BINDINGS: nested scopes included, so a
+                    if isinstance(nm, _ast.alias):     # helper's own import still counts
+                        b = (nm.asname or nm.name).split(".")[0]
+                        first_bind.setdefault(b, idx); bind_line.setdefault(b, stmt.lineno)
+                    elif isinstance(nm, _ast.ExceptHandler) and nm.name:
+                        first_bind.setdefault(nm.name, idx)
+                        bind_line.setdefault(nm.name, nm.lineno)
+                    elif isinstance(nm, _ast.Name) and isinstance(nm.ctx, _ast.Store):
+                        first_bind.setdefault(nm.id, idx); bind_line.setdefault(nm.id, nm.lineno)
+                if isinstance(stmt, _NESTED):
+                    # ⚑ THE STATEMENT ITSELF IS A NEW SCOPE (`def _leg(pk, pnow, exmu): ...`).
+                    # Walking into it reported four of that helper's own PARAMETERS as
+                    # used-before-bound against the enclosing loop that later reuses the names.
+                    continue
+                for nm in _walk_own_scope(stmt):       # LOADS: this scope only
+                    if (isinstance(nm, _ast.Name) and isinstance(nm.ctx, _ast.Load)
+                            and nm.id not in params and nm.id not in declared_global):
+                        first_load.setdefault(nm.id, (idx, nm.lineno))
+            for name, bind_idx in first_bind.items():
+                hit = first_load.get(name)
+                if hit is not None and hit[0] < bind_idx:
+                    use = hit[1]
+                    errs.append(
+                        "ISA-0589: %s.%s reads local %r at line %d and binds it at line %d. "
+                        "Python makes the name a local for the WHOLE function, so this raises "
+                        "UnboundLocalError and takes the entire run down — which is how the "
+                        "ISA-0572 memory-base guard crashed the pre-run before Step 0 on "
+                        "exactly the condition it was built to report (R4.12)."
+                        % (label, fn.name, name, use, bind_line[name]))
+    return errs
+
+
+def pair_symbol_map_covers_universe(universe=None, symbol_map=None, refusals=None,
+                                    prerun_text=None):
+    """ISA-0577/0578 — EVERY name in the fetch universe is either MAPPED or DECLARED REFUSED.
+
+    ⚑ THIS IS THE CLASS-KILLER, AND THE CLASS IS NOT "TWO MISSING SYMBOLS". On 03-Sep-2026,
+    119 of 178 universe names (66.9%) had no Yahoo symbol. `build_universe(strict=False)`
+    dropped every one, `run()` reported them in `unmapped_refused`, and the orchestrator threw
+    that field away — so 119 names were never fetched, read UNMEASURED, took A2.3's adverse rho
+    of 0.70 and were capped at STARTER, and NOTHING ANYWHERE SAID SO. The defect was not the
+    absence; it was that the absence produced no output. HRMY and NVDA, the two names September's
+    ranker put at the top, were both in it.
+
+    So the assertion is not "the map is complete" — a name may legitimately be refused, and FRO
+    is (a bare STOXX600 ticker with two real listings; R4.8 refuses an uninformed tie-break).
+    The assertion is that a refusal is DECLARED: present in `symbol_map_refusals.json` with a
+    reason. A name in neither the map nor the refusal set is a SILENT drop and fails the build.
+
+    ⚑ AND IT ASSERTS THE STAGE THAT MAINTAINS THEM RUNS. A refusal file that stops being written
+    would leave this check reading a stale artefact and passing — the FC-H shape (a verifier
+    whose coverage silently shrinks). So Step 5x must be present in the orchestrator, and the
+    refusal set must be no older than the run that produced it.
+
+    ⚑ NEGATIVE CONTROL (R5.5): the selftest feeds a universe name that is in neither, and this
+    must fail. A check that cannot fail is FC-E wearing a green light."""
+    errs = []
+    if prerun_text is None:
+        prerun_text = _read("monthly_isa_prerun.py")
+    if not prerun_text:
+        return ["ISA-0577: monthly_isa_prerun.py is unreadable — the symbol-map coverage check "
+                "did NOT run. Reported, never silently skipped (R4.9)"]
+    if '_mf_begin("5x"' not in prerun_text or "refresh_symbol_map" not in prerun_text:
+        errs.append(
+            "ISA-0577: monthly_isa_prerun.py does not run Step 5x "
+            "(`stock_price_fetch.refresh_symbol_map`). Without it stock_symbol_map.json is a "
+            "hand-run artefact frozen at its built_on date while build_universe grows with "
+            "every screener and VCI promotion — which is exactly the state that left 119 of "
+            "178 names unmapped, unfetched and sized on A2.3's adverse 0.70 (FC-E).")
+    if "unmapped_refused" not in prerun_text:
+        errs.append(
+            "ISA-0578: Step 5y does not read `unmapped_refused` from the fetch report. The "
+            "producer names its refusals precisely so the caller can surface them; dropping "
+            "the field is how 119 names were skipped with zero warnings (R4.9).")
+
+    if universe is None or symbol_map is None or refusals is None:
+        try:
+            import stock_price_fetch as _spf
+            import stock_return_store as _srs
+            if universe is None:
+                _u = _spf.build_universe(store=_srs.load(), strict=False)
+                universe = list(_u["tickers"]) + list(_u.get("unmapped") or [])
+            if symbol_map is None:
+                symbol_map = _spf.load_symbol_map()
+            if refusals is None:
+                refusals = _spf.load_declared_refusals()
+        except Exception as e:                                          # noqa: BLE001
+            return errs + ["ISA-0577: could not build the universe / read the symbol map (%s: "
+                           "%s) — this check is BLIND, not passing (R4.9)"
+                           % (type(e).__name__, e)]
+
+    silent = [t for t in universe if t not in symbol_map and t not in (refusals or {})]
+    if silent:
+        errs.append(
+            "ISA-0577: %d fetch-universe name(s) are in NEITHER stock_symbol_map.json NOR "
+            "symbol_map_refusals.json: %s. Each is silently dropped by build_universe, never "
+            "fetched, reads UNMEASURED and is sized on A2.3's adverse 0.70 — and no surface "
+            "says so. A name may be REFUSED; it may never be refused SILENTLY."
+            % (len(silent), sorted(silent)[:25]))
+    undeclared = [t for t, r in (refusals or {}).items()
+                  if t in universe and not (r or {}).get("reason")]
+    if undeclared:
+        errs.append(
+            "ISA-0577: %d declared refusal(s) carry no reason: %s. 'Refused' without a reason "
+            "is the same output as 'not looked at' (R2.10)." % (len(undeclared), sorted(undeclared)))
+    return errs
+
+
 def pair_v21_modules_executed(prerun_text=None, atlas=None):
     """A11 / ISA-0354: every V2.1 module must be EXECUTED by the orchestrator, not merely
     importable.
@@ -2309,6 +3503,18 @@ def pair_v21_modules_executed(prerun_text=None, atlas=None):
         "position_sizing": "the ladder and its reconciliation with the hard cap (ISA-0356)",
         "retention": "the s3 ratchet population gate (ISA-0357)",
         "risk_contribution": "the M1/M2/M3 monitors (ISA-0357)",
+        # ── added 28-Aug-2026 by the Phase-0/Phase-1/Phase-2 build (ISA-0455 / ISA-0467) ──
+        # ⚑ ISA-0443: A STEP LABEL THAT NAMES A MODULE IS DOCUMENTATION THAT LOOKS LIKE
+        # INSTRUMENTATION. Adding the Run_Context stage row is not enough; the module has to
+        # be imported by the orchestrator, and this is what asserts it.
+        "framework_integrity": "the Step 0 preflight and the Step 6.99 execution-ledger "
+                               "reconciliation. Without it the enforcement layer is prose "
+                               "again — which is precisely the finding it was built for "
+                               "(ISA-0467: §15 and §17 specified, never delivered)",
+        "stock_price_fetch": "the Step 5y weekly GBP total-return fetch. The store had NEVER "
+                             "been written to because a docstring claimed the network was "
+                             "blocked; a module that populates it and is never called would "
+                             "reproduce that state with more code (ISA-0455)",
     }
     if prerun_text is None:
         prerun_text = _read("monthly_isa_prerun.py")
@@ -2643,7 +3849,561 @@ def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None
     return errs
 
 
-def check_all():
+# ── ISA-0512 (02-Sep-2026) — AN ARTEFACT KEY BUILT IN TWO PLACES IS TWO CONTRACTS ──────────
+# ⚑⚑ THE CLASS, not the instance. A function with more than one `return` arm publishes the
+# same key from more than one literal, and the arms drift — silently, and in the direction
+# where the arm the tests happen to exercise is the correct one. `plan_stability` carried
+# `not_an_input` in two dict literals; ISA-0493 and ISA-0494 extended ONE of them; the
+# 29-Aug sandbox ran an empty fund plan (the extended arm) and reported GREEN while the
+# delivered tree — where the fund plan is not empty — was RED.
+#
+# ⚑ AND THE COMMENT ASSERTING PARITY WAS ON THE ARM WITH THE EXTRA KEYS, so the document
+# that would have caught the divergence WAS the divergence. Prose cannot hold two literals
+# together; a shared builder can, and this pair asserts the builder is the only producer.
+#
+# ⚑ Scoped to the CLASS (ISA-0447): the declaration below is a list of (module, function,
+# key, builder) rows, and any NEW multi-arm key added to it is covered by the same check.
+# A row whose function or builder cannot be found reports BLIND, never green — renaming the
+# subject must not silently narrow the coverage.
+_SHAPE_SINGLE_HOME = (
+    ("capital_destination.py", "plan_stability", "not_an_input", "_not_an_input_block"),
+)
+
+
+def pair_artefact_shape_single_home(rows=None, module_texts=None):
+    """P0.2 / ISA-0512. Every arm of a multi-return function must build a declared artefact key
+    through ONE builder call, never through a dict literal — so the arms cannot drift.
+
+    Returns [] when clean. Reports BLIND (as an error) when the declared function or builder is
+    absent, because an unfindable subject is not a passing one."""
+    import ast as _ast
+    rows = rows if rows is not None else _SHAPE_SINGLE_HOME
+    # ⚑ KR3 (02-Sep-2026) — CAUGHT BY isa_register_metrics.kr3() ON THE DAY THIS CHECK SHIPPED.
+    #   Called with `rows={}` this returned [] — a clean PASS on nothing, which is the
+    #   null-tolerant-control class the standard's own KR3 warning light exists to count. An
+    #   empty declaration is not a clean tree; it is a check with nothing to check.
+    if not rows:
+        return ["ISA-0512: the shape single-home declaration is EMPTY - no rows to check, so "
+                "this control is BLIND. An empty population returns a refusal, never a pass "
+                "(KR3: a control able to return PASS on a null input must be 0)."]
+    errs = []
+    for module, fname, key, builder in rows:
+        text = (module_texts or {}).get(module)
+        if text is None:
+            text = _read(module)
+        if not text:
+            errs.append("ISA-0512: %s is unreadable - shape single-home BLIND, not green"
+                        % module)
+            continue
+        try:
+            tree = _ast.parse(text)
+        except SyntaxError as e:                                     # noqa: BLE001
+            errs.append("ISA-0512: %s does not parse (%s) - BLIND" % (module, e))
+            continue
+        fn = next((n for n in _ast.walk(tree)
+                   if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                   and n.name == fname), None)
+        if fn is None:
+            errs.append("ISA-0512: %s.%s not found - the subject was renamed away, so this "
+                        "check is BLIND rather than satisfied" % (module, fname))
+            continue
+        builders = [n for n in _ast.walk(fn)
+                    if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                    and n.name == builder]
+        if not builders:
+            errs.append("ISA-0512: %s.%s declares builder `%s` which does not exist inside it "
+                        "- BLIND" % (module, fname, builder))
+            continue
+        arms = []
+        for node in _ast.walk(fn):
+            if not isinstance(node, _ast.Dict):
+                continue
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, _ast.Constant) and k.value == key:
+                    arms.append(v)
+        if not arms:
+            errs.append("ISA-0512: no `%s` key is produced anywhere in %s.%s - BLIND"
+                        % (key, module, fname))
+            continue
+        for v in arms:
+            ok = (isinstance(v, _ast.Call) and isinstance(v.func, _ast.Name)
+                  and v.func.id == builder)
+            if not ok:
+                errs.append(
+                    "ISA-0512: %s.%s line %d builds `%s` from a %s instead of calling `%s()` "
+                    "- a second home for the artefact's shape, which is how the two arms "
+                    "drifted apart in the first place"
+                    % (module, fname, getattr(v, "lineno", -1), key,
+                       type(v).__name__, builder))
+    return errs
+
+
+# ── ISA-0528 (02-Sep-2026) — "IS THIS FLAG WIRED?" IS AN AST QUESTION, NOT A GREP ─────────
+# ⚑⚑ THIRD INSTANCE OF THE PROSE-AS-PROOF CLASS IN ONE DAY (ISA-0446 · ISA-0526 · this).
+#    `test_v21_a_governance` answered "is this flag wired?" with `flag_name in <all file text>`.
+#    A flag named in a ROLLBACK COMMENT, in a docstring, or sharing its name with a MODULE
+#    (`correlation_engine`, `evidence_state`, `deployment_sequencer`) therefore reads as wired.
+#
+# ⚑⚑ AND THE CONSEQUENCE WAS NOT A FALSE GREEN — IT WAS BAD ADVICE. The suite printed
+#    *"note: <flag> is now wired — remove it from V2_FLAGS_PENDING_WIRE"* for FIVE flags that
+#    nothing reads. Acting on that note would have deleted the only declaration keeping them
+#    honest, leaving five decorative flags with no pending entry — and the grep would have gone
+#    on passing. A check whose remediation advice creates the defect it exists to prevent is
+#    worse than an absent check.
+#
+# ⚑ A flag is WIRED when its name reaches a flag reader: as an argument to `flag(...)` /
+#   `_flag(...)`, as the DEFAULT PARAMETER VALUE of a flag-reading wrapper (the shape
+#   `stock_price_fetch._flag(name="stock_return_fetch")` and `capital_destination._pipeline_flag`
+#   both use — my own first scan missed it and would have raised two false findings), or as a
+#   subscript key on `V2_FLAGS`.
+_FLAG_READER_HINT = "flag"
+
+
+def _flags_read_by(text, known):
+    """{flag name: True} for every declared flag this source actually READS. AST, not grep."""
+    import ast as _ast
+    out = set()
+    try:
+        tree = _ast.parse(text)
+    except SyntaxError:
+        return out
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Call):
+            fn = (n.func.attr if isinstance(n.func, _ast.Attribute)
+                  else n.func.id if isinstance(n.func, _ast.Name) else None)
+            if fn and _FLAG_READER_HINT in fn.lower():
+                for a in list(n.args) + [k.value for k in n.keywords]:
+                    if isinstance(a, _ast.Constant) and a.value in known:
+                        out.add(a.value)
+        elif isinstance(n, _ast.Subscript):
+            b = n.value
+            nm = (b.attr if isinstance(b, _ast.Attribute)
+                  else b.id if isinstance(b, _ast.Name) else "")
+            if nm == "V2_FLAGS" and isinstance(n.slice, _ast.Constant) and n.slice.value in known:
+                out.add(n.slice.value)
+        elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and                 _FLAG_READER_HINT in n.name.lower():
+            for d in list(n.args.defaults) + list(n.args.kw_defaults):
+                if isinstance(d, _ast.Constant) and d.value in known:
+                    out.add(d.value)
+    return out
+
+
+def flag_wiring(module_texts=None, flags=None, pending=None):
+    """-> {flag: {"read_by": [...], "pending": bool}} over every declared V2 flag."""
+    if flags is None or pending is None:
+        import isa_policy as _pol
+        flags = set(_pol.V2_FLAGS) if flags is None else set(flags)
+        pending = set(_pol.V2_FLAGS_PENDING_WIRE) if pending is None else set(pending)
+    if module_texts is None:
+        module_texts = {}
+        for fn in sorted(os.listdir(HERE)):
+            if fn.endswith(".py") and not fn.startswith("test_") and fn != "v21_golden_fixture.py":
+                t = _read(fn)
+                if t:
+                    module_texts[fn] = t
+    hits = {f: [] for f in flags}
+    for label, text in module_texts.items():
+        for f in _flags_read_by(text, flags):
+            hits[f].append(label)
+    return {f: {"read_by": sorted(hits[f]), "pending": f in pending} for f in sorted(flags)}
+
+
+def pair_flags_wired(module_texts=None, flags=None, pending=None):
+    """ISA-0528. Every declared V2 flag is either READ by code or listed in
+    V2_FLAGS_PENDING_WIRE with the item that will wire it — and 'READ' is measured by AST.
+
+    Also reports the reverse: a flag that IS read while still listed pending, which is the
+    only case where 'remove it from V2_FLAGS_PENDING_WIRE' is correct advice."""
+    if not flags and flags is not None:
+        return ["ISA-0528: no flags supplied - the wiring check is BLIND, not clean"]
+    w = flag_wiring(module_texts, flags, pending)
+    if not w:
+        return ["ISA-0528: no V2 flags found at all - BLIND, not clean"]
+    errs = []
+    for f, d in w.items():
+        if not d["read_by"] and not d["pending"]:
+            errs.append(
+                "ISA-0528: flag %r is read by NO code (by AST) and is not listed in "
+                "V2_FLAGS_PENDING_WIRE - a flag nothing reads is a rollback that does nothing "
+                "(FC-E). Wire it, delete it, or declare it pending with its item." % f)
+        if d["read_by"] and d["pending"]:
+            errs.append(
+                "ISA-0528: flag %r IS read (%s) but is still listed in V2_FLAGS_PENDING_WIRE - "
+                "remove the pending entry; landing a capability means deleting its line."
+                % (f, ", ".join(d["read_by"])))
+    return errs
+
+
+# ── P0.5 EXTENSION (02-Sep-2026) — EVERY TASK'S SCHEDULE, NOT ONLY THE MONTHLY REVIEW'S ────
+# ⚑ `pair_prose_quantity_values` was shipped 27-Aug as a SEED: it compares the monthly review's
+#   SKILL-mirror schedule against Run_Context's own cron, and its module comment says in as many
+#   words that extending it "to other tasks' own schedules ... is the rest of P0.5". This is
+#   that extension.
+#
+# ⚑ The canonical home for every task's cron is SCHEDULED_TASKS_SETUP.md's two tables. Each
+#   SKILL mirror restates that schedule in its `description:` line, in words — which is a second
+#   home (FC-D), and the reason ISA-0476 ran for a month with a mirror saying 14:30 after the
+#   task moved to 09:30.
+#
+# ⚑⚑ AND THE COVERAGE IS ASSERTED, NOT ASSUMED. A mirror with NO row in the canonical table is
+#   reported as a coverage gap rather than skipped — that is ISA-0480/ISA-0481's exact shape
+#   (a live task declared on no canonical surface inherits none of its governance), and a
+#   checker that silently skips what it cannot find reproduces it.
+_TASK_SETUP = "SCHEDULED_TASKS_SETUP.md"
+_MIRROR_DIR = "Skills_to_Edit"
+_WEEKDAY_NUM = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
+                "thursday": 4, "friday": 5, "saturday": 6}
+_ORDINAL_DOM = {1: "1-7", 2: "8-14", 3: "15-21", 4: "22-28"}
+_ORD_WORD = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4,
+             "first": 1, "second": 2, "third": 3, "fourth": 4}
+# Mirrors that legitimately declare no schedule: on-demand tasks. Declared, never inferred from
+# the absence of a match (R4.8).
+_ON_DEMAND_MIRRORS = {"intramonth-stock-review"}
+
+_SETUP_ROW_RE = re.compile(r"^\|\s*([a-z0-9-]+)\s*\|.*?\|\s*`([^`]+)`\s*\|", re.M)
+# A row that exists but declares UNVERIFIED instead of a cron. It is DECLARED (so not a coverage
+# gap) and it is NOT canonical (so nothing may be compared against it). R4.8: marked, not guessed.
+_SETUP_UNVERIFIED_RE = re.compile(r"^\|\s*([a-z0-9-]+)\s*\|[^\n]*\bUNVERIFIED\b", re.M | re.I)
+_MIRROR_SCHED_RE = re.compile(
+    r"\b(1st|2nd|3rd|4th|first|second|third|fourth)\s+"
+    r"(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\b"
+    r"[^.\n]{0,40}?\bat\s+(\d{1,2}):(\d{2})", re.I)
+# ⚑⚑ THE FALSE ALARM THIS CHECK RAISED AGAINST ITSELF ON ITS FIRST RUN, AND THE REASON IT IS
+#    EXCLUDED RATHER THAN PATCHED AROUND. `isa-monthly-prerun`'s mirror reads *"Saturday before
+#    first Sunday of each month at 09:30"*. That is a RELATIVE weekday form: the ordinal belongs
+#    to the Sunday, and the task fires on the Saturday. The regex above matched "first Sunday ...
+#    at 09:30" and reconstructed `30 9 1-7 * 0`, against a canonical `30 9 1-7 * 6` — and
+#    reported the CORRECT mirror as drifted.
+#
+# ⚑ `pair_prose_quantity_values`'s own module comment warns that "a guard pointed at the wrong
+#    surface raises false alarms", and shipping this with that same failure would have been a
+#    second instance of it. A relative form is EXCLUDED and reported as NOT COMPARED, never
+#    silently passed: the phrase is a legitimate schedule this parser cannot reconstruct, which
+#    is a coverage limit to publish, not a clean result.
+_RELATIVE_SCHED_RE = re.compile(
+    r"\b(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+(?:before|after|preceding|"
+    r"following)\s+(?:the\s+)?(1st|2nd|3rd|4th|first|second|third|fourth)\b", re.I)
+
+
+def _canonical_task_crons(setup_text=None):
+    """{task id: cron} from SCHEDULED_TASKS_SETUP.md's tables. UNVERIFIED rows carry no cron
+    literal and are therefore absent here — deliberately: an UNVERIFIED schedule must not be
+    compared against as though it were canonical (R4.8)."""
+    text = setup_text if setup_text is not None else _read(_TASK_SETUP)
+    if not text:
+        return None
+    return {m.group(1): m.group(2).strip() for m in _SETUP_ROW_RE.finditer(text)}
+
+
+def _unverified_tasks(setup_text=None):
+    """Task ids that HAVE a canonical row but declare UNVERIFIED instead of a cron."""
+    text = setup_text if setup_text is not None else _read(_TASK_SETUP)
+    if not text:
+        return set()
+    return {m.group(1) for m in _SETUP_UNVERIFIED_RE.finditer(text)}
+
+
+def _cron_from_prose(ordinal, weekday, hh, mm):
+    dom = _ORDINAL_DOM.get(_ORD_WORD.get(ordinal.lower()))
+    dow = _WEEKDAY_NUM.get(weekday.lower())
+    if dom is None or dow is None:
+        return None
+    return "%d %d %s * %d" % (int(mm), int(hh), dom, dow)
+
+
+def pair_prose_task_schedules(setup_text=None, mirrors=None):
+    """P0.5. Every SKILL mirror's stated schedule must reconstruct its canonical cron, and every
+    mirror must HAVE a canonical row. Returns [] when clean."""
+    crons = _canonical_task_crons(setup_text)
+    if crons is None:
+        return ["P0.5/schedules: %s is unreadable - the canonical crons are UNMEASURED, so no "
+                "mirror is checked. This is a refusal, not a pass." % _TASK_SETUP]
+    if not crons:
+        return ["P0.5/schedules: no cron rows parsed from %s - the table shape changed and this "
+                "parser did not. BLIND, not clean." % _TASK_SETUP]
+    if mirrors is None:
+        mirrors = {}
+        base = os.path.join(HERE, _MIRROR_DIR)
+        if not os.path.isdir(base):
+            return ["P0.5/schedules: %s is absent - mirrors UNMEASURED, not clean" % _MIRROR_DIR]
+        for name in sorted(os.listdir(base)):
+            # ⚑ 02-Sep-2026 — this raised FileNotFoundError the first time a non-mirror entry
+            #   appeared beside the mirrors (`_retired/`, created minutes earlier to retire
+            #   isa-sp500-sat1). An enumerator must tolerate its own directory growing a
+            #   sibling: it skips what is not a mirror, and RETIRED mirrors are out of scope by
+            #   living under `_retired/`, which is a declared convention (see that folder's
+            #   README) rather than a name this function pattern-matches.
+            path = os.path.join(base, name, "SKILL.md")
+            if name.startswith("_") or not os.path.isfile(path):
+                continue
+            t = _read(os.path.join(_MIRROR_DIR, name, "SKILL.md"))
+            if t:
+                mirrors[name] = t
+    if not mirrors:
+        return ["P0.5/schedules: no SKILL mirrors found - BLIND, not clean"]
+    unverified = _unverified_tasks(setup_text)
+    errs = []
+    for name, text in sorted(mirrors.items()):
+        if name in _ON_DEMAND_MIRRORS:
+            continue
+        if name in unverified:
+            # DECLARED but not canonical (R4.8). Nothing to compare against, and comparing
+            # against a reconstructed value would manufacture the authority the table refuses.
+            continue
+        m = _MIRROR_SCHED_RE.search(text)
+        canonical = crons.get(name)
+        if canonical is None:
+            errs.append(
+                "P0.5/schedules: SKILL mirror %r has NO row in %s - a live task declared on no "
+                "canonical surface inherits none of that document's governance (ISA-0481's "
+                "class). Add a row, or declare it on-demand." % (name, _TASK_SETUP))
+            continue
+        if _RELATIVE_SCHED_RE.search(text):
+            continue          # relative weekday form - NOT COMPARED, see the regex comment
+        if not m:
+            continue          # the mirror states no weekday-ordinal schedule; nothing to compare
+        derived = _cron_from_prose(*m.groups())
+        if derived is None:
+            continue
+        if derived != canonical:
+            errs.append(
+                "P0.5/schedules: %s's mirror states %r, which reconstructs cron `%s`, but %s "
+                "declares `%s`. A schedule in prose is a second home for the cron (ISA-0476: a "
+                "mirror said 14:30 for a month after the task moved to 09:30)."
+                % (name, " ".join(m.groups()[:2]) + " at %s:%s" % m.groups()[2:],
+                   derived, _TASK_SETUP, canonical))
+    return errs
+
+
+# ── ISA-0496 (02-Sep-2026, Raj) — A CONCENTRATION TRIGGER MAY NEVER SIT BELOW WHAT THE
+#    EVIDENCE EARNED ─────────────────────────────────────────────────────────────────────────
+# ⚑⚑ THE INVARIANT, not the numbers. `tier1_soft_cap_pct` 5.0% sat BELOW the ladder's
+#    EARNED_MAX 6.5%: a position sized to its top rung was in "soft cap breached" the moment it
+#    opened, a five-question FAIL trimmed it to a literal 3.5% (EARNED_MAX -> STARTER), and a
+#    Tier 2 breach trimmed it to a literal 5.0%. **A risk control that unwinds the evidence a
+#    position earned is not a risk control.**
+#
+# ⚑ NEITHER NUMBER MOVED. The trigger became RELATIVE — max(soft cap, the position's own earned
+#   rung) — because raising the cap flat to 6.5% would have satisfied the ladder and silently
+#   deleted the drift control for every position below the top rung. This pair asserts the
+#   invariant across the WHOLE ladder, so re-introducing the contradiction at any rung fails,
+#   and so does moving the ladder up without moving the trigger with it.
+def pair_tier_caps_rung_aware(policy=None):
+    """ISA-0496. For every evidence state: the effective Tier 1 trigger >= that state's earned
+    ladder rung, both remedies trim to the trigger (never below the rung), and the Tier 2 hard
+    cap sits above every trigger. Returns [] when clean; REFUSES rather than passing when the
+    derivation is unavailable."""
+    try:
+        import position_sizing as _ps
+    except Exception as e:                                           # noqa: BLE001
+        return ["ISA-0496: position_sizing unavailable (%s) — the effective Tier 1 trigger is "
+                "UNMEASURED, so the invariant is NOT checked. A refusal, not a pass." % e]
+    try:
+        lad = _ps.ladder(policy)
+        tc = _ps.tier_caps(policy)
+    except Exception as e:                                           # noqa: BLE001
+        return ["ISA-0496: the ladder or the tier caps could not be read (%s) — BLIND, not "
+                "clean." % e]
+    if not lad:
+        return ["ISA-0496: the ladder is EMPTY — BLIND, not clean."]
+    errs = []
+    seen = 0
+    for state in ("THIN", "CONFIRMED", "STRONG", "EARNED_MAX"):
+        try:
+            t = _ps.target_pct(state, policy=policy)
+        except Exception:                                            # noqa: BLE001
+            continue
+        if t.get("rung") == "HOLD_AT_CURRENT":
+            continue
+        rung = float(t["target_pct"])
+        try:
+            eff = _ps.effective_soft_cap_pct(state, policy=policy)
+        except Exception as e:                                       # noqa: BLE001
+            errs.append("ISA-0496: effective_soft_cap_pct(%r) raised (%s) — the trigger for a "
+                        "live evidence state cannot be derived." % (state, e))
+            continue
+        seen += 1
+        if eff["effective_soft_cap_pct"] + 1e-9 < rung:
+            errs.append(
+                "ISA-0496: %s earns rung %.4g%% but its effective Tier 1 trigger is %.4g%% — a "
+                "position sized to what its evidence earned would be in 'soft cap breached' the "
+                "moment it opened."
+                % (state, rung, eff["effective_soft_cap_pct"]))
+        for key, label in (("trim_to_on_five_question_fail_pct", "a failed five-question review"),
+                           ("trim_to_on_tier2_breach_pct", "a Tier 2 breach")):
+            if float(eff[key]) + 1e-9 < rung:
+                errs.append(
+                    "ISA-0496: %s: the remedy for %s trims to %.4g%%, BELOW the %.4g%% its "
+                    "evidence earned. A risk control that unwinds the evidence is not a risk "
+                    "control." % (state, label, float(eff[key]), rung))
+        if tc["tier2_hard_cap_pct"] + 1e-9 < eff["effective_soft_cap_pct"]:
+            errs.append(
+                "ISA-0496: %s: the Tier 2 hard cap %.4g%% is BELOW its effective Tier 1 trigger "
+                "%.4g%% — the mandatory trim would fire before the review that is supposed to "
+                "precede it." % (state, tc["tier2_hard_cap_pct"], eff["effective_soft_cap_pct"]))
+    if not seen:
+        return ["ISA-0496: no evidence state produced a ladder rung — BLIND, not clean."]
+    return errs
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0546 (02-Sep-2026) — SEVERITY IS A PROPERTY OF THE RECORD, NOT A SENTENCE ABOUT IT
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# `pair_screen_capture_pit`'s docstring has always said the regime rows are "reported SEPARATELY
+# and as a warning-grade error string". check_all() concatenated every pair's return into one
+# flat list of strings and monthly_isa_prerun appended each to errors[], so that severity existed
+# in prose and in NO mechanism — and two permanent, correctly-stamped rows (ISA-0517 refuses the
+# documented remedy) opened every run at ERROR.
+#
+# ⚑ SEVERITY IS DECLARED AT THE POINT OF PRODUCTION, not in a name-keyed table. A lookup map
+# beside the pairs would be a SECOND home for a property the pair already knows (R4.4), and it
+# would drift the first time a pair was renamed. `warn()` marks a line; everything else is ERROR
+# by default, which is the fail-safe direction.
+#
+# ⚑ THE STRING FORM IS DERIVED FROM THE RECORD FORM, never maintained beside it: check_all()
+# returns strings for its existing callers and check_all(tagged=True) returns the records those
+# strings are rendered from. One source of truth, two renderings.
+WARN, ERROR = "WARN", "ERROR"
+
+
+def warn(message: str) -> dict:
+    """Mark a mismatch as warning-grade AT THE POINT OF PRODUCTION (ISA-0546)."""
+    return {"severity": WARN, "message": message}
+
+
+def _norm(x) -> dict:
+    """Anything a pair returns that is not explicitly marked is ERROR (fail-safe)."""
+    if isinstance(x, dict) and "severity" in x:
+        return {"severity": x["severity"], "message": x["message"]}
+    return {"severity": ERROR, "message": str(x)}
+
+
+
+def pair_cash_reserve_is_single_topup_control(root=None):
+    """D23 / ISA-0544. The GBP 250 ISA cash reserve is the SINGLE control on residual deployment.
+
+    ⚑ WHAT THIS STOPS. `min_topup_gbp` was a PER-TICKET floor; Raj's rule is an ACCOUNT-LEVEL
+    reserve. Shipping both would put two controls on one quantity — FC-D, the class R4.4 exists
+    for. A future session reading only `allocate()` would find the reserve and reasonably add a
+    minimum ticket beside it, and the entry economics would then be decided by whichever one
+    happened to bind.
+
+    ⚑ AST, NOT TEXT. Every mechanism in this codebase is also a string, so a textual scan cannot
+    tell `policy["min_topup_gbp"]` from this docstring naming it (ISA-0526/0528/0533/0446). The
+    scan looks ONLY at Subscript and `.get(...)` Call nodes, so prose about the retired control
+    does not trip the check that enforces its retirement."""
+    import ast as _ast
+    root = root or HERE
+    errs = []
+    tw = os.path.join(root, "target_weights.json")
+    if not os.path.exists(tw):
+        return ["D23: target_weights.json is absent - the cash reserve cannot be verified"]
+    with open(tw, encoding="utf-8") as fh:
+        ss = (json.load(fh).get("stock_sleeve") or {})
+    if ss.get("cash_reserve_gbp") is None:
+        errs.append("D23/ISA-0544: target_weights.stock_sleeve.cash_reserve_gbp is NOT DECLARED. "
+                    "position_sizing.allocate() REFUSES without it rather than deploying every "
+                    "last pound on an undeclared zero.")
+    if "min_topup_gbp" in ss:
+        errs.append("D23/ISA-0544: target_weights.stock_sleeve.min_topup_gbp is PRESENT. It was "
+                    "RETIRED on 02-Sep-2026 - the cash reserve is the single control. Two "
+                    "controls on one quantity is the FC-D class (R4.4).")
+    # ⚑ THE RULE, NOT JUST THE INSTANCE (ISA-0565, 02-Sep-2026). The check above enforces the
+    # retirement of the constant D23 NAMED. It therefore missed a SECOND cash withholding that
+    # was already in force under a different name, in a different module, at a different stage:
+    # `extract_portfolio` subtracted a GBP 150 CASH_BUFFER_MIN from deployable cash before
+    # anything downstream ran, so the framework retained GBP 400 while reporting a GBP 250
+    # reserve. A check written against the instance does not cover the class — which is the
+    # whole content of D23, and the reason this half exists.
+    # ⚑ AST, not text, for the same reason the half above is: the constant is named in prose
+    # (including in this docstring) and a textual scan cannot tell a mention from a use. Only a
+    # SUBTRACTION of the buffer from a deployable figure is a control; defining it, printing it
+    # or reporting it in a dict is not.
+    import ast as _ast2
+    _BUFFERS = {"CASH_BUFFER_MIN", "CASH_BUFFER_MAX"}
+    for fn in sorted(f for f in os.listdir(root) if f.endswith(".py")):
+        if fn == os.path.basename(__file__):
+            continue
+        try:
+            tree = _ast2.parse(_read(fn), filename=fn)
+        except Exception:                                               # noqa: BLE001
+            continue
+        for node in _ast2.walk(tree):
+            if not (isinstance(node, _ast2.BinOp) and isinstance(node.op, _ast2.Sub)):
+                continue
+            rhs = node.right
+            nm = rhs.id if isinstance(rhs, _ast2.Name) else None
+            if nm in _BUFFERS:
+                errs.append(
+                    "D23/ISA-0565: %s:%d SUBTRACTS %s to derive a deployable figure. D23 makes "
+                    "the GBP 250 cash reserve the SINGLE control on residual deployment; a "
+                    "second withholding applied earlier and elsewhere means the framework "
+                    "retains more than it declares (measured 02-Sep-2026: GBP 400 against a "
+                    "declared GBP 250). Remove the subtraction — the reserve is applied once, "
+                    "by position_sizing.allocate()." % (fn, node.lineno, nm))
+    for fn in sorted(f for f in os.listdir(root) if f.endswith(".py")):
+        if fn == os.path.basename(__file__):
+            continue
+        try:
+            tree = _ast.parse(open(os.path.join(root, fn), encoding="utf-8").read())
+        except Exception:                                              # noqa: BLE001
+            continue
+        for node in _ast.walk(tree):
+            hit = False
+            if isinstance(node, _ast.Subscript) and isinstance(node.slice, _ast.Constant) \
+                    and node.slice.value == "min_topup_gbp":
+                hit = True
+            if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
+                    and node.func.attr == "get" and node.args \
+                    and isinstance(node.args[0], _ast.Constant) \
+                    and node.args[0].value == "min_topup_gbp":
+                hit = True
+            if hit:
+                errs.append(f"D23/ISA-0544: {fn} line {node.lineno} READS `min_topup_gbp`. The "
+                            f"per-ticket top-up floor is retired; read "
+                            f"`stock_sleeve.cash_reserve_gbp` instead.")
+    return errs
+
+
+def pair_min_hold_is_position_level(root=None):
+    """D24 / ISA-0545. The 182-day clock attaches to the POSITION at first entry, not to a lot.
+
+    ⚑ WHY THIS NEEDS A CHECK AT ALL. A9 said a top-up starts a NEW lot clock. D17 (26-Aug) then
+    made a sub-STARTER entry carry a fill obligation with FIRST CLAIM on the next tranche — so
+    the framework COMPELS the top-up, and a resetting clock let it extend Raj's own lock-in.
+    Two rules, each with a single home, contradicting each other in the gap between them: the
+    ISA-0496 shape that single-home checks cannot see. The invariant has to name the
+    RELATIONSHIP, which is what this does.
+
+    Asserts by AST that `min_hold_ok` takes `position_first_entry_date` and still accepts the
+    retired `entry_date` only in order to REFUSE it (R4.7)."""
+    import ast as _ast
+    root = root or HERE
+    fn = os.path.join(root, "position_sizing.py")
+    if not os.path.exists(fn):
+        return ["D24: position_sizing.py absent"]
+    tree = _ast.parse(open(fn, encoding="utf-8").read())
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == "min_hold_ok":
+            names = [a.arg for a in node.args.kwonlyargs]
+            errs = []
+            if "position_first_entry_date" not in names:
+                errs.append("D24/ISA-0545: min_hold_ok does not take "
+                            "`position_first_entry_date`. The clock is a property of the "
+                            "POSITION; a parameter named for the lot invites the retired A9.")
+            if "entry_date" in names:
+                body = _ast.dump(node)
+                if "RETIRED" not in _ast.get_source_segment(
+                        open(fn, encoding="utf-8").read(), node) or "SizingRefused" not in body:
+                    errs.append("D24/ISA-0545: min_hold_ok still accepts `entry_date` without "
+                                "refusing it. A renamed contract must FAIL an un-updated "
+                                "caller, never silently carry the new meaning (R4.7).")
+            return errs
+    return ["D24/ISA-0545: min_hold_ok not found in position_sizing.py"]
+
+
+def check_all(tagged: bool = False):
     errs = []
     run_ctx = _read("Run_Context_ISA_Growth_Stock_Analysis.md")
     bem = _read("build_email.py")
@@ -2681,6 +4441,8 @@ def check_all():
     except Exception as _e:                                    # noqa: BLE001
         errs.append(f"ISA-0354: the V2.1-A checks could NOT run ({type(_e).__name__}: {_e}). "
                     f"Reported, never silently skipped (R4.9)")
+    errs += pair_cash_reserve_is_single_topup_control()   # D23 / ISA-0544 (02-Sep-2026)
+    errs += pair_min_hold_is_position_level()             # D24 / ISA-0545 (02-Sep-2026)
     errs += pair_orchestrator_parity()
     errs += pair_er_callsite_manifest()          # D-24 §1.3 (09-Aug-2026)
     errs += pair_score_panel_date_format()       # D-15 (09-Aug-2026)
@@ -2721,6 +4483,18 @@ def check_all():
         errs += pair_monthly_prerun_stages(mctx, prerun)
         errs += pair_monthly_prerun_reads(mctx)
         errs += pair_prose_quantity_values(mctx)      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
+        errs += pair_prose_sizing_numbers(mctx)      # P0.5 / P7.7 - ISA-0466 (28-Aug-2026)
+        errs += pair_no_gate_reads_conviction_score()  # A3 / P7.1 - D21 (28-Aug-2026)
+        errs += pair_single_stock_max_authority()     # P4-A1/A2 - ISA-0454 (28-Aug-2026)
+        errs += pair_entry_and_review_fractions_distinct()  # P4-A10 - P4.4
+        errs += pair_projection_carries_consumer_fields()   # ISA-0487 (29-Aug-2026)
+        errs += pair_capital_pipeline_wired()               # ISA-0490 (29-Aug-2026)
+        errs += pair_artefact_shape_single_home()           # ISA-0512 (02-Sep-2026)
+        errs += pair_flags_wired()                          # ISA-0528 (02-Sep-2026)
+        errs += pair_symbol_map_covers_universe()           # ISA-0577/0578 (03-Sep-2026)
+        errs += pair_local_used_before_bound()              # ISA-0589 (03-Sep-2026)
+        errs += pair_prose_task_schedules()                 # P0.5 extension (02-Sep-2026)
+        errs += pair_tier_caps_rung_aware()                 # ISA-0496 (02-Sep-2026, Raj)
         errs += pair_monthly_capture_retention(mctx)
         errs += pair_monthly_two_regimes(mctx)
         errs += pair_monthly_lean_email(mctx, mbuild)
@@ -2747,12 +4521,20 @@ def check_all():
         # Name-resolution across the scripts the two runs depend on.
         errs += pair_undefined_constants({fn: _read(fn) for fn in TRACKED_SCRIPTS
                                           if os.path.exists(os.path.join(HERE, fn))})
+        errs += pair_literal_attr_calls({fn: _read(fn) for fn in NAME_RESOLUTION_SCRIPTS
+                                         if os.path.exists(os.path.join(HERE, fn))})
+        errs += pair_broker_file_predates_cash()        # ISA-0571 — snapshot older than the money
         errs += pair_unimported_stdlib_modules(
             {fn: _read(fn) for fn in NAME_RESOLUTION_SCRIPTS
              if os.path.exists(os.path.join(HERE, fn))})      # ISA-0264
     except Exception as e:
         errs.append(f"A18/monthly: monthly pair set failed to run ({e})")
-    return errs
+    recs = [_norm(e) for e in errs]
+    if tagged:
+        return recs
+    # ⚑ The string rendering carries the severity so a caller that ignores `tagged` still cannot
+    # mistake a WARN for an ERROR by reading the text (R4.2 — a value states what it is).
+    return [r["message"] if r["severity"] == ERROR else "[WARN] " + r["message"] for r in recs]
 
 
 def _selftest():
@@ -3030,6 +4812,64 @@ def _selftest():
 
     # M5 — an executed stage with no row in the table (the 1.5/6.5/9b.5/9c/9d defect).
     assert pair_monthly_prerun_stages(good_m.replace("| **9d** | x |\n", ""), good_prerun)
+
+    # ── ISA-0589 — used-before-bound, with its NEGATIVE CONTROL (R5.5) ───────────────────
+    assert pair_local_used_before_bound({"x.py": (
+        "def main():\n    warnings.append('a')\n    warnings = []\n    return warnings\n")}), \
+        "ISA-0589: a local appended to before it is bound must FAIL"
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    warnings = []\n    warnings.append('a')\n    return warnings\n")})
+    # a name bound only inside a branch is a DIFFERENT and legitimate shape — not flagged
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    if q:\n        y = 1\n    return y\n")})
+    # a load and a store inside ONE top-level statement are simultaneous — the shape that
+    # produced this check's own first false positive, on build_monthly_isa_email._render_v21
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    for k in ks:\n        rows = v.get(k)\n        if rows:\n"
+        "            go(rows)\n    rows = v.get('other')\n    return rows\n")}), \
+        "ISA-0589: a bind-then-read inside one statement is NOT used-before-bound"
+    # `import x as w` binds w — the shape that reported monthly_isa_prerun:2039
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    import q as w\n    w.go()\n    w = None\n    return w\n")})
+    # `except E as e` binds e — the shape that reported monthly_isa_prerun:2250
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    try:\n        go()\n    except E as e:\n        h(e.args)\n"
+        "    for e in xs:\n        pass\n")})
+    # a nested def's own PARAMETERS are its own scope — the shape that reported `pk`, `pnow`,
+    # `exmu` and `inv` in email_prefill.compute_challenger_counterfactuals
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    def _leg(pk, pnow):\n        return pk + pnow\n"
+        "    for key, pk, pnow in rows:\n        _leg(pk, pnow)\n")})
+    # a NESTED scope reading a name the enclosing body binds later is legitimate — the shape
+    # that reported five names in email_prefill
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    def inner():\n        return pk\n    for pk in xs:\n"
+        "        inner()\n")})
+    # a comment or docstring naming the variable must neither satisfy nor trip it (AST, not grep)
+    assert not pair_local_used_before_bound({"x.py": (
+        "def main():\n    'warnings.append(x) before warnings = []'\n    warnings = []\n"
+        "    return warnings\n")})
+
+    # ── ISA-0577/0578 — the symbol-map coverage pair, with its NEGATIVE CONTROL (R5.5) ────
+    _good_prerun_5x = ('_mf_begin("5x", "symbol_map_refresh")\n'
+                       '_spf.refresh_symbol_map()\n'
+                       'for _u in (_fr.get("unmapped_refused") or []): pass\n')
+    _uni = ["AVGO", "MU", "FRO"]
+    _map = {"AVGO": "AVGO", "MU": "MU"}
+    _ref = {"FRO": {"ticker": "FRO", "reason": "CANNOT FORM A VENUE EXPECTATION"}}
+    assert not pair_symbol_map_covers_universe(_uni, _map, _ref, _good_prerun_5x), \
+        pair_symbol_map_covers_universe(_uni, _map, _ref, _good_prerun_5x)
+    # a universe name in NEITHER the map nor the declared refusals is a SILENT drop
+    assert pair_symbol_map_covers_universe(_uni + ["NVDA"], _map, _ref, _good_prerun_5x), \
+        "ISA-0577: a silently dropped universe name must FAIL"
+    # a refusal with no reason is the same output as 'not looked at' (R2.10)
+    assert pair_symbol_map_covers_universe(_uni, _map, {"FRO": {"ticker": "FRO"}},
+                                           _good_prerun_5x)
+    # the maintaining stage must be present, or the check reads a stale artefact and passes
+    assert pair_symbol_map_covers_universe(_uni, _map, _ref,
+                                           'for _u in (_fr.get("unmapped_refused") or []): pass\n')
+    assert pair_symbol_map_covers_universe(_uni, _map, _ref, _good_prerun_5x.replace(
+        'for _u in (_fr.get("unmapped_refused") or []): pass\n', ''))
     # M6 — heading count vs the list it heads.
     assert pair_monthly_prerun_reads(good_m.replace("(2 reads", "(8 reads"))
     # M7 — THE fetch_metrics_local class: a contract naming a script that is not on disk.
@@ -3050,13 +4890,47 @@ def _selftest():
     assert pair_undefined_constants(
         {"f.py": "def go(x):\n    return ThreadPoolExecutor(max_workers=FETCH_WORKERS)\n"})
     assert not pair_undefined_constants(
-        {"f.py": "FETCH_WORKERS = 12\ndef go(x):\n    return f(max_workers=FETCH_WORKERS)\n"})
+        {"f.py": "FETCH_WORKERS = 12\ndef f(**k):\n    return k\n"
+                 "def go(x):\n    return f(max_workers=FETCH_WORKERS)\n"})
     assert not pair_undefined_constants(          # imported constants are bound
         {"f.py": "from scoring_config import MIN_HOLD_DAYS\ndef go():\n    return MIN_HOLD_DAYS\n"})
     assert not pair_undefined_constants(          # dotted access is an Attribute, not a Name
         {"f.py": "import scoring_config as sc\ndef go():\n    return sc.MIN_HOLD_DAYS\n"})
     assert not pair_undefined_constants(          # builtins are not undefined
         {"f.py": "def go():\n    raise NotImplementedError\n"})
+    # M9 — THE log.info class (ISA-0553): a method call on a name bound to a literal.
+    assert any("has no attribute 'info'" in e for e in pair_literal_attr_calls(
+        {"f.py": "def run():\n    log = {'a': 1}\n    log['b'] = 2\n    log.info('x')\n"})), \
+        "M9: log.info() on a dict literal must be reported (and log['b']=2 is not a rebinding)"
+    assert not pair_literal_attr_calls(                     # a real dict method is fine
+        {"f.py": "def run():\n    log = {'a': 1}\n    log.setdefault('b', 2)\n"})
+    assert not pair_literal_attr_calls(                     # rebound to something else: skip
+        {"f.py": "import logging\ndef run():\n    log = {}\n    log = logging.getLogger()\n    log.info('x')\n"})
+    assert not pair_literal_attr_calls(                     # a parameter is not a literal
+        {"f.py": "def run(log):\n    log.info('x')\n"})
+    assert not pair_literal_attr_calls(                     # str methods on an f-string
+        {"f.py": "def run(x):\n    s = f'{x}'\n    return s.upper()\n"})
+    assert any("has no attribute 'append'" in e for e in pair_literal_attr_calls(
+        {"f.py": "def run():\n    d = {}\n    d.append(1)\n"})), "M9: dict.append must be reported"
+
+    # M8(b) — THE skeleton_s3 class (ISA-0551): a lower-case CALL target defined nowhere.
+    # R5.8 — reverting the fix must fail: with the def present the pair is silent, without
+    # it the pair speaks, and the ALL_CAPS half of M8 cannot see either way.
+    _s3_missing = {"f.py": "def build():\n    return skeleton_s3()\n"}
+    _s3_present = {"f.py": "def skeleton_s3():\n    return []\ndef build():\n    return skeleton_s3()\n"}
+    assert any("CALLS skeleton_s3()" in e for e in pair_undefined_constants(_s3_missing)), \
+        "M8b: a call to an undefined lower-case function must be reported"
+    assert not pair_undefined_constants(_s3_present), \
+        "M8b: a call to a function defined in the same module must NOT be reported"
+    assert not pair_undefined_constants(          # imported callables are bound
+        {"f.py": "from extract_cash_statement import parse\ndef go():\n    return parse()\n"})
+    assert not pair_undefined_constants(          # nested and conditional defs are bound
+        {"f.py": "def outer():\n    def inner():\n        return 1\n    return inner()\n"})
+    assert not pair_undefined_constants(          # a name bound by assignment is bound
+        {"f.py": "h = len\ndef go():\n    return h([])\n"})
+    assert any("import *" in e for e in pair_undefined_constants(   # star import: named, not passed
+        {"f.py": "from os.path import *\ndef go():\n    return join('a','b')\n"})), \
+        "M8b: an unresolvable star-import module must be REPORTED as unchecked, never passed"
 
     # Ageing: a due item must be reported, and a clean register must not be.
     class _Due:

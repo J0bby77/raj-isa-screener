@@ -1,0 +1,187 @@
+{
+ "_what": "P0.3 threshold register (= R15.2, specified since adoption and declared for ZERO gates until 28-Aug-2026). Every capital-gating threshold publishes the dispersion of the quantity it tests, itself expressed in standard deviations, and its realised fire rate.",
+ "_rule": "R3.11, adopted by this build — BEFORE DECLARING ANY THRESHOLD, DIVIDE IT BY THE STANDARD DEVIATION OF THE THING IT TESTS.",
+ "_verdicts": {
+  "DISCRIMINATING": "|t| >= 1.0",
+  "WEAK": "0.5 <= |t| < 1.0",
+  "NON_DISCRIMINATING": "|t| < 0.5 -> raises a register item automatically",
+  "NON_INFORMATIVE": "fire rate 0% or 100% over >= 6 runs -> raises",
+  "UNMEASURED": "the SD of the tested quantity has never been measured -> raises, and is NEVER rendered as DISCRIMINATING"
+ },
+ "_populate": "sd_of_quantity is populated by P1 (the 104-week store) and P2 (the covariance matrix). A null here is UNMEASURED and raises — it is not a pass.",
+ "thresholds": [
+  {
+   "name": "PROBATION_TRAIL_PP",
+   "value": 5.0,
+   "units": "pp",
+   "quantity_tested": "cumulative 12-month relative return of the direct-stock sleeve vs VUAG.L",
+   "sd_of_quantity": 38.623,
+   "sd_basis": "MEASURED 28-Aug-2026: SD of the cumulative 12-month relative return of the direct-stock sleeve vs VUAG.L = the annualised tracking error over 104 Friday-to-Friday GBP weeks. ⚑ CAVEAT THAT TRAVELS (R2.6): the sleeve return assumes today's names were held for two years. They were not. This is a valid TRACKING-ERROR magnitude — a VOLATILITY property — and NOT a performance measurement. ISA-0429's -22.5pp ex-MU remains the performance read.",
+   "fire_rate_history": [],
+   "gates": [
+    "retention.step_down_ratchet"
+   ],
+   "gbp_exposure": 0.0,
+   "register_item": "ISA-0458",
+   "note": "⚑ The spec measured 35.2%/yr TE on 27-Aug, which puts -5pp at 0.14 SD and a 44% false-fire rate on ZERO true alpha — at 6, 12 AND 24 months. The window was never the lever. Seeded null here on purpose: P1 re-measures it rather than this build copying a number across (R4.4)."
+  },
+  {
+   "name": "RHO_MAX_PAIRWISE_GATE",
+   "value": 0.7,
+   "units": "correlation",
+   "quantity_tested": "pairwise rho between a candidate and each held sleeve name",
+   "sd_of_quantity": 0.1387,
+   "sd_basis": "MEASURED 28-Aug-2026: cross-sectional SD of the 15 measured pairwise correlations (rho_bar 0.1931, max 0.4542 AVGO|MU, min -0.0396 ONT.L|COCO).",
+   "fire_rate_history": [],
+   "gates": [
+    "correlation_engine.admission"
+   ],
+   "gbp_exposure": 1563.21,
+   "register_item": "ISA-0464"
+  },
+  {
+   "name": "RHO_SLEEVE_GATE",
+   "value": 0.6,
+   "units": "correlation",
+   "quantity_tested": "rho between a candidate and the weighted sleeve",
+   "sd_of_quantity": 0.1387,
+   "sd_basis": "MEASURED 28-Aug-2026, same 104-week series",
+   "fire_rate_history": [],
+   "gates": [
+    "correlation_engine.admission"
+   ],
+   "gbp_exposure": 1563.21,
+   "register_item": "ISA-0464"
+  },
+  {
+   "name": "RHO_REORDER_SE_MULTIPLE",
+   "value": 1.0,
+   "units": "multiples_of_SE",
+   "quantity_tested": "rho_sleeve gap between two candidates in the same band",
+   "sd_of_quantity": 0.0995,
+   "sd_basis": "MEASURED 28-Aug-2026: SE(rho) = 1/sqrt(n-3) at n=104 common Fridays.",
+   "fire_rate_history": [],
+   "gates": [
+    "deployment_sequencer.sequence"
+   ],
+   "gbp_exposure": 5471.24,
+   "register_item": "ISA-0464",
+   "note": "⚑ P6.3, the self-critique of the 26-Aug design: it applied 'divide by the SD' to Raj's ratchet and not to its own sequencer. A sequencer that reorders on any rho difference resolves noise."
+  },
+  {
+   "name": "FLAG_FRACTION_OF_STARTER",
+   "value": 0.75,
+   "units": "fraction_of_STARTER",
+   "quantity_tested": "held position size as a fraction of the STARTER rung",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING",
+   "fire_rate_history": [],
+   "gates": [
+    "risk_contribution.flag"
+   ],
+   "gbp_exposure": 5471.24,
+   "note": "REVIEW fraction — 'below this a held position is not carrying its risk share'. DELIBERATELY DISTINCT from MIN_ENTRY_FRACTION_OF_STARTER 0.80 (P4.4)."
+  },
+  {
+   "name": "MIN_ENTRY_FRACTION_OF_STARTER",
+   "value": 0.8,
+   "units": "fraction_of_STARTER",
+   "quantity_tested": "proposed new position size as a fraction of the STARTER rung",
+   "sd_of_quantity": null,
+   "sd_basis": "DECLARED by Raj (D16), not fitted",
+   "fire_rate_history": [],
+   "gates": [
+    "position_sizing.allocate"
+   ],
+   "gbp_exposure": 4377.0,
+   "register_item": "ISA-0470",
+   "note": "ENTRY floor — 'below this, do not open a position at all'. ⚑ A future session will read 0.75 and 0.80 as a duplicate and unify them, silently moving the entry floor."
+  },
+  {
+   "name": "ER_DEPLOY_FLOOR",
+   "value": null,
+   "units": "pct",
+   "quantity_tested": "expected return of a candidate vs the derived anchor + friction buffer",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING — cross-sectional SD of candidate E[r]",
+   "fire_rate_history": [],
+   "gates": [
+    "t1_gates.T1",
+    "expected_return.deploy"
+   ],
+   "gbp_exposure": 11250.0,
+   "register_item": "ISA-0466",
+   "note": "⚑ Excluded 0 of 13 names in August. A21's +5 conviction floor was in practice the ONLY live tightening on this gate, and D21 retires A21 — so the residual is a MEASURED recalibration of this hurdle, never a reinstated +5 on a retired score. Value is DERIVED every run (isa_policy) and is deliberately not typed here."
+  },
+  {
+   "name": "FUND_GATE_PCT",
+   "value": null,
+   "units": "pct",
+   "quantity_tested": "forward E[r] of a fund vs the anchor less the stock-sleeve margin",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING",
+   "fire_rate_history": [],
+   "gates": [
+    "fund_returns.gate"
+   ],
+   "gbp_exposure": 10702.06,
+   "note": "The fund sleeve this build routes GBP 10,702 to was measured at 6.24% forward E[r] against a required 13.8-13.9%. Registered so that number is a published t-ratio rather than a fact somebody has to remember."
+  },
+  {
+   "name": "SLEEVE_SECTOR_CAP_ISA",
+   "value": 0.12,
+   "units": "fraction_of_isa",
+   "quantity_tested": "ISA weight of one GICS sector inside the direct-stock sleeve",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING",
+   "fire_rate_history": [],
+   "gates": [
+    "rerank_watchlist._apply_diversification"
+   ],
+   "gbp_exposure": 5471.24,
+   "register_item": "ISA-0465",
+   "note": "⚑ HAS NEVER FIRED. `action_stack_ctx.json` does not exist and no module writes it, so `_apply_diversification` runs with an empty sector map and no cap can bind. fire_rate_history is empty because there has never been a fire to record — which is exactly what NON_INFORMATIVE is for."
+  },
+  {
+   "name": "SLEEVE_THEME_CAP",
+   "value": 0.5,
+   "units": "fraction_of_sleeve",
+   "quantity_tested": "sleeve weight of one theme",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING",
+   "fire_rate_history": [],
+   "gates": [
+    "rerank_watchlist._apply_diversification"
+   ],
+   "gbp_exposure": 5471.24,
+   "register_item": "ISA-0465"
+  },
+  {
+   "name": "DIVERSIFY_OVERRIDE_DELTA",
+   "value": 10,
+   "units": "source_score_points",
+   "quantity_tested": "source_score gap required to override a diversification cap",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING P6 — measured SE of source_score",
+   "fire_rate_history": [],
+   "gates": [
+    "rerank_watchlist._apply_diversification"
+   ],
+   "gbp_exposure": 5471.24,
+   "register_item": "ISA-0465"
+  },
+  {
+   "name": "max_single_fund_pct",
+   "value": null,
+   "units": "fraction_of_isa",
+   "quantity_tested": "weight of one fund in the ISA",
+   "sd_of_quantity": null,
+   "sd_basis": "PENDING",
+   "fire_rate_history": [],
+   "gates": [
+    "capital_destination.allocate_funds"
+   ],
+   "gbp_exposure": 10702.06
+  }
+ ]
+}

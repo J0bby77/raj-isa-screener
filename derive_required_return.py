@@ -1203,7 +1203,21 @@ def main():
         + f". D-2 two-speed cadence, operative effective {out['operative_effective_from']} on "
         f"authority {cad['authority']}, next scheduled window {out['operative_next_window']}. "
         f"D-4 trigger {trig['status']} (fired={trig.get('fired')}).")
-    state.setdefault("derivation_history", []).append(
+    # ⚑ IDEMPOTENT PER DERIVATION DATE (ISA-0561, 02-Sep-2026). This appended unconditionally,
+    # and the pre-run is EXPECTED to be invoked more than once on a Saturday (the host shell
+    # caps one invocation at ~175s), so six rehearsal passes produced six identical
+    # 2026-09-02 rows. That is not cosmetic: `return_architecture._implied_m` resolves a
+    # retrospective anchor by MATCHING a derivation_history row to a valuation and REFUSES
+    # when more than one row matches with different anchors — so a duplicated history is one
+    # data correction away from making the retrospective unanswerable. It is also exactly the
+    # class ISA-0456 fixed in `risk_contribution.record_run()` on the same day, in a different
+    # file: a per-run ledger that appends rather than upserts counts re-runs as events.
+    # The LAST derivation for a date is the operative one, so a same-date row is REPLACED.
+    _hist = state.setdefault("derivation_history", [])
+    _dupes = [i for i, h in enumerate(_hist) if h.get("derived_at") == today]
+    for i in reversed(_dupes):
+        _hist.pop(i)
+    _hist.append(
         {"derived_at": today,
          "reported_floor_pct": out["required_return_reported_floor_pct"],
          "reported_stretch_pct": out["required_return_reported_stretch_pct"],
@@ -1220,7 +1234,8 @@ def main():
          "flow_trigger_fired": trig.get("fired"),
          "schedule": "; ".join(f"{s['monthly_gbp']}/mo from {s['from']}"
                                for s in state["contribution_schedule"]),
-         "trigger": a.trigger})
+         "trigger": a.trigger,
+         "superseded_same_day_rows": len(_dupes) or None})
     with open(a.state, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
     print(f"\nWROTE {a.state}\n  reported {out['required_return_reported_operative_pct']}  |  "

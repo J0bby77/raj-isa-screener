@@ -27,7 +27,27 @@ RUNTIME_JSON = {"watchlist_tickers.json", "target_weights.json",
                 "theme_opportunity.json",
                 "email_data_monthly_isa_TEMPLATE.json",
                 "vci_base_rates.json",     # VCI v2 E1 probability-weighted-floor priors (fallback needs it)
-                "vci_fv_inputs.json"}      # VCI v2 E2 structured §10.2 win-case inputs per watchlist name
+                "vci_fv_inputs.json",      # VCI v2 E2 structured §10.2 win-case inputs per watchlist name
+                # ── P0 ENFORCEMENT REGISTERS (28-Aug-2026, ISA-0467) ──────────────────────
+                # ⚑ THESE ARE INPUTS, NOT OUTPUTS, and omitting them would be a live defect
+                # rather than an untidiness. `local_py` auto-discovers new .py, so a fallback
+                # run would find `framework_integrity.py` PRESENT and its three registers
+                # ABSENT — and every loader RAISES `IntegrityRefused` on an absent register by
+                # design, because "the register is missing" must never read as "the register
+                # is clean". The Step 0 preflight would report REFUSED on a tree that is
+                # actually fine. Found by asking what this build had broken in the
+                # ORCHESTRATION rather than in the code (28-Aug-2026).
+                "quantity_register.json",     # P0.2 — one quantity, one computer, one surface
+                "threshold_register.json",    # P0.3 — every gate's own signal-to-noise
+                "negative_claims.json",       # P0.4 — a claim of absence carries a test + date
+                # ⚑ 02-Sep-2026 — the FOURTH P0 register, missed by the 28-Aug pass that added
+                #   the other three. It fails DIFFERENTLY and that is why it was missed:
+                #   `load_symbol_map()` falls back to the built-in SYMBOL_MAP when the file is
+                #   absent, so a fallback run loses every VERIFIED exchange mapping `--build-map`
+                #   persisted and reports nothing. The other three RAISE; this one degrades
+                #   quietly, which is FC-A — and a reviewer checking "does its absence break the
+                #   preflight?" would have concluded, correctly and uselessly, that it does not.
+                "stock_symbol_map.json"}      # P1 — venue-VERIFIED ticker→symbol resolutions
 
 def sha(p):
     h = hashlib.sha256()
