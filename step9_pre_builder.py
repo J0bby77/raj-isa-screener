@@ -1331,6 +1331,32 @@ def main():
                 "floors; this orders names that all cleared them. Reverts to source_score "
                 "ordering when the calibration IC gate is met.")
         _deployable_stack = _kept
+        # ⚑ ONE MEASUREMENT, VISIBLE TO EVERY CONSUMER (Raj, 05-Sep-2026). `deployable_stack`
+        # rows are COPIES of `deployment_priority_rank` rows, so stamping the gate on the copies
+        # left the canonical list blind: the dashboard, email_prefill's gate-anatomy lookup,
+        # missed_opportunity_diag and checkpoint_d all read `deployment_priority_rank` and would
+        # have shown WDC at source_score 79.3 with nothing saying it is barred from additions.
+        # A constraint that only one consumer can see is the ISA-0447 defect — a class-killer
+        # scoped to one key is an instance-killer. The ORDER of deployment_priority_rank is left
+        # on source_score, which is its documented contract; only the facts are added.
+        _gate_by_ticker = {r.get("ticker"): r for r in _kept}
+        _blocked_by_ticker = {b["ticker"]: b for b in _blocked}
+        for _r in deployment_priority_rank:
+            _t = _r.get("ticker")
+            if _t in _blocked_by_ticker:
+                _b = _blocked_by_ticker[_t]
+                _r["sleeve_beta"] = _b.get("beta")
+                _r["sleeve_gate"] = "BLOCKED"
+                _r["sleeve_gate_reason"] = _b.get("reason")
+                _r["deployable_as_addition"] = False
+                _r["deployable_as_switch"] = True
+            elif _t in _gate_by_ticker:
+                _g = _gate_by_ticker[_t]
+                _r["sleeve_beta"] = _g.get("sleeve_beta")
+                _r["sleeve_gate"] = _g.get("sleeve_gate")
+                _r["delta_sigma_add"] = _g.get("delta_sigma_add")
+                _r["deployable_as_addition"] = True
+                _r["deployable_as_switch"] = True
         _sleeve_gate = {"state": "OK", "beta_max": _pol.SLEEVE_BETA_MAX,
                         "dimson_lags": _pol.SLEEVE_BETA_DIMSON_LAGS,
                         "stale_zero_return_max": _pol.SLEEVE_STALE_ZERO_RETURN_MAX,
