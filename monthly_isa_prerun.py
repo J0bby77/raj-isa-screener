@@ -424,6 +424,18 @@ def _compliance_block():
 
 
 
+
+def _retract_assurance_warnings(warnings) -> None:
+    """Drop ASSURANCE warnings that a later stage has made untrue (ISA-0594).
+
+    ⚑ A WARNING THAT OUTLIVES ITS CONDITION IS A FALSE ONE. run_context is written up to three
+    times in a run and each copy must describe ITS OWN completeness, so the escalation is
+    retracted the moment the stage it names has actually run. Matching on the "ASSURANCE "
+    prefix is the same string the ISA-0447 escalation contract is declared against, so the
+    emit and the retract cannot drift apart."""
+    warnings[:] = [w for w in warnings if not str(w).startswith("ASSURANCE ")]
+
+
 def _run_plan_stability(_cd, _cdr, summary, warnings, _s610):
     """Step 6.10d, DEFERRED out of the pre-write path by ISA-0594.
 
@@ -496,17 +508,41 @@ def _plan_stability_only(args) -> int:
     _run_plan_stability(_cd_ps, _cdr, summary, warnings, lines)
     for line in lines:
         print("  " + line)
+    # ⚑ WHAT THIS STAGE KNOWS IS WHAT THIS STAGE DID. The prior assurance block is the only
+    # record of whether 9d and 6.99 ran, so it is READ, never assumed: hardcoding them as run
+    # would let a main pass that died before 9d be reported COMPLETE by the one command that
+    # cannot have observed them. It can only ever ADD 6.10d to what was already true.
+    _retract_assurance_warnings(warnings)   # this command changes the assurance state
     ok = "plan_stability" in summary
+    _prior = (summary.get("assurance") or {})
+    _prior_run = list(_prior.get("stages_run") or [])
+    _prior_pending = [x for x in (_prior.get("stages_not_yet_run") or [])
+                      if not str(x).startswith("6.10d")]
+    _this = "6.10d (plan stability under perturbation)"
     summary["assurance"] = {
-        "state": "COMPLETE" if ok else "PARTIAL",
-        "stages_run": ["9d (mechanical asserts)", "6.99 (execution ledger + integrity queue)"]
-                      + (["6.10d (plan stability under perturbation)"] if ok else []),
-        "stages_not_yet_run": [] if ok else ["6.10d (plan stability under perturbation)"],
-        "meaning": ("completed out of band by --plan-stability-only at %s; the grid reads "
+        "state": ("COMPLETE" if (ok and not _prior_pending)
+                  else "PARTIAL" if ok else _prior.get("state", "PENDING")),
+        "stages_run": _prior_run + ([_this] if ok and _this not in _prior_run else []),
+        "stages_not_yet_run": _prior_pending + ([] if ok else [_this]),
+        "meaning": ("6.10d completed out of band by --plan-stability-only at %s; the grid reads "
                     "capital_destination from disk, so it measures the same plan the main pass "
-                    "produced" % datetime.now().strftime("%Y-%m-%d %H:%M")),
+                    "produced. Any stage still listed in stages_not_yet_run was NOT observed by "
+                    "this command and remains absent, not clean (R2.10)."
+                    % datetime.now().strftime("%Y-%m-%d %H:%M")),
     }
+    if _prior_pending:
+        warnings.append(
+            "ASSURANCE PARTIAL — plan stability completed, but %s did not run in the main pass "
+            "and remain ABSENT. Re-run the pre-run to obtain them." % ", ".join(_prior_pending))
+    summary.setdefault("runtime", {})["plan_stability_completed_s"] = round(time.time() - t0, 1)
+    # a staging note from an earlier write describes a state this command has just ended
+    if str(ctx.get("error") or "").startswith(("provisional:", "interim:")):
+        ctx["error"] = ""
     ctx["summary"] = summary
+    # the ASSURANCE warnings written by the provisional/interim passes describe a state this run
+    # has just changed. Drop them rather than leaving the file arguing with itself.
+    if ok and not _prior_pending:
+        _retract_assurance_warnings(warnings)
     ctx["warnings"] = warnings
     ctx.setdefault("_meta", {})["assurance_completed_at"] = \
         datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -3653,12 +3689,22 @@ def main():
                     "you read it, the run was cut off after Step 9 and the assurance verdicts "
                     "are ABSENT, not clean (R2.10)."),
     }
+    # ⚑ THE WARNING GOES ON THE REAL ACCUMULATOR, and is RETRACTED when it stops being true.
+    # Composing it privately per-write would have kept `warnings` clean, but ISA-0447 reads the
+    # string literals passed to `warnings.append` to prove an ESCALATED summary key actually has
+    # a surface — and a check that cannot tell a mention from a use is one that gets deleted
+    # rather than fixed. So the escalation is a real append, and `_retract_assurance_warnings`
+    # removes it at each point where the state it describes has changed. One mechanism, visible
+    # to the checker, and never left asserting a state that has moved on.
+    warnings.append(
+        "ASSURANCE PENDING — this run_context was written before %s. Those checks have NOT RUN; "
+        "their absence is not a clean result (R2.10). Complete with: monthly_isa_prerun.py "
+        "--plan-stability-only, or re-run the pre-run." % ", ".join(_ASSURANCE_STAGES))
     try:
         _prov_path = write_run_context(
             month_label, run_month, portfolio_path, xray_path, analytics_path,
             watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
-            summary, flags, warnings, "PARTIAL",
-            "provisional: Steps 1-9 complete, assurance stages pending (ISA-0594)")
+            summary, flags, warnings, "PARTIAL", "")
         print("\n[9c] Provisional run_context written at %.0fs -- %s"
               % (_elapsed_9c, os.path.basename(_prov_path)))
     except Exception as _pe:                                       # noqa: BLE001
@@ -4353,12 +4399,23 @@ def main():
                     "listed in stages_not_yet_run has NOT run and is ABSENT, not clean (R2.10). "
                     "Complete it with:  monthly_isa_prerun.py --plan-stability-only"),
     }
+    # ⚑ EVERY COPY OF run_context CARRIES A TOTAL. Leaving elapsed_s_total to the final write
+    # meant the field was null in exactly the case it exists to describe — the run that did not
+    # get to the end. It is stamped at each write and overwritten by the next.
+    _e_now = round(time.time() - _RUN_STARTED_AT, 1)
+    summary.setdefault("runtime", {})["elapsed_s_total"] = _e_now
+    summary["runtime"]["state_total"] = ("WITHIN" if _e_now < HOST_SHELL_CEILING_S else "EXCEEDED")
+    _retract_assurance_warnings(warnings)      # 9d and 6.99 have now run
+    if _PLAN_STABILITY_PENDING:
+        warnings.append(
+            "ASSURANCE PARTIAL — 9d and 6.99 ran; Step 6.10d plan stability has NOT run and its "
+            "verdict is ABSENT, not clean (R2.10). Complete with: monthly_isa_prerun.py "
+            "--plan-stability-only")
     try:
         _ip = write_run_context(
             month_label, run_month, portfolio_path, xray_path, analytics_path,
             watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
-            summary, flags, warnings, "PARTIAL",
-            "interim: Steps 1-9 + 9d + 6.99 complete; plan stability pending (ISA-0594)")
+            summary, flags, warnings, status, "")
         print("\n[9e] Interim run_context written at %.0fs (9d + 6.99 captured) -- %s"
               % (round(time.time() - _RUN_STARTED_AT, 1), os.path.basename(_ip)))
     except Exception as _ie:                                       # noqa: BLE001
@@ -4411,6 +4468,7 @@ def main():
     summary.setdefault("runtime", {})["elapsed_s_total"] = _elapsed_end
     summary["runtime"]["state_total"] = ("WITHIN" if _elapsed_end < HOST_SHELL_CEILING_S
                                          else "EXCEEDED")
+    _retract_assurance_warnings(warnings)      # every assurance stage has now run
     summary["assurance"] = {"state": "COMPLETE", "stages_not_yet_run": [],
                             "meaning": "the assurance stages ran; their verdicts are in this file"}
     if watchlist_promotion_log:

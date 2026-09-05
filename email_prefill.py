@@ -2008,6 +2008,12 @@ SUMMARY_ESCALATED = {
     # reader that the §11 integrity queue does not already say. The pre-run emits each failure
     # with the "PREFLIGHT " prefix into the warning list the review reads before writing.
     "framework_integrity_preflight": "PREFLIGHT",   # Step 0 — declaration checks
+    # ⛑ ADMISSIBLE FOR THE SAME REASON, and the reason is the point (ISA-0594). When every
+    # assurance stage has run, `assurance` tells the reader nothing §11 does not already say.
+    # When one has NOT run, that is precisely what the reader must know, and the pre-run emits
+    # it as an ASSURANCE warning into the list the review reads before writing. PENDING is not
+    # passed — a key that stayed silent when incomplete would let absent read as clean (R2.10).
+    "assurance": "ASSURANCE",                       # Steps 9c/9e/6.10d — which checks ran
 }
 
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here
@@ -2022,6 +2028,11 @@ SUMMARY_OUT_OF_SCOPE = {
     "vci_repriced":             "a COUNT of the rows the Section 5 VCI table renders in full",
     "calibration":              "paths to the calibration report and IC table — a pointer to an "
                                 "artefact read during the run, not a figure to publish",
+    "runtime":                  "wall-clock metadata for the run itself (ISA-0594) — elapsed "
+                                "seconds against the declared host-shell ceiling. It governs "
+                                "whether the pipeline still FITS, an engineering question "
+                                "about the run rather than a figure about the portfolio; a "
+                                "breach surfaces as a RUNTIME warning, not an email row",
 }
 
 # key -> the LIVE register item tracking the decision that has not been made. ⚑ THIS IS NOT A
