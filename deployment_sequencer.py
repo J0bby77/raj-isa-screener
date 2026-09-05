@@ -57,6 +57,7 @@ from __future__ import annotations
 import csv
 import datetime
 import itertools
+import math
 import json
 import os
 import statistics
@@ -147,6 +148,39 @@ def measure_score_se(panel_path: Optional[str] = None) -> dict:
                       "two readings." % (len(deltas), sum(1 for v in by.values() if len(v) >= 2)))}
 
 
+def measure_rho_se(pairs: Dict[str, object], *, min_weeks: int = 30) -> dict:
+    """SE of a measured pairwise correlation — the second half of the P6.3 noise gate.
+
+    ⚑ ISA-0601. `measure_score_se` existed and `se_rho` did not, so `sequence()` was called with
+    `se_rho=None` and its own noise gate took the `len(scored) < 2 or se_rho is None` branch on
+    EVERY comparison: 29 suppressed reorders, 0 fired, correlation ordering nothing. A gate with
+    one of its two thresholds permanently absent is not a conservative gate, it is an off one.
+
+    MEASURED, not declared: Fisher's standard error (1 - rho^2) / sqrt(n - 3) is computed per
+    pair from that pair's OWN measured `weeks`, and the median is returned. Reporting the median
+    rather than the mean keeps one short series from setting the threshold for the whole book.
+    """
+    ses, used = [], 0
+    for _k, v in (pairs or {}).items():
+        rho = v.get("rho") if isinstance(v, dict) else v
+        wk = v.get("weeks") if isinstance(v, dict) else None
+        if rho is None or not wk or wk < min_weeks:
+            continue
+        ses.append((1.0 - float(rho) ** 2) / math.sqrt(float(wk) - 3.0))
+        used += 1
+    if not ses:
+        return {"se": None, "n_pairs": 0,
+                "reason": ("no pair carried both a rho and >= %d weeks, so SE(rho) is UNMEASURED "
+                           "— the noise gate must say the declared order stands, not pretend to "
+                           "a threshold (R2.10)" % min_weeks)}
+    ses.sort()
+    med = ses[len(ses) // 2] if len(ses) % 2 else 0.5 * (ses[len(ses) // 2 - 1] + ses[len(ses) // 2])
+    return {"se": round(med, 6), "n_pairs": used,
+            "min": round(ses[0], 6), "max": round(ses[-1], 6),
+            "basis": ("median Fisher SE (1 - rho^2)/sqrt(n-3) across %d measured pairs, each on "
+                      "its own week count" % used)}
+
+
 def band(candidates: Sequence[dict], *, ranking_basis: str = "source_score",
          se: Optional[float] = None, panel_path: Optional[str] = None) -> dict:
     """Group candidates into statistically indistinguishable bands of width SE.
@@ -187,7 +221,14 @@ def _rho(a: str, b: str, matrix: Dict[str, float]) -> Optional[float]:
         return 1.0
     for k in ("%s|%s" % (a, b), "%s|%s" % (b, a)):
         if k in matrix and matrix[k] is not None:
-            return float(matrix[k])
+            v = matrix[k]
+            # ⚑ ISA-0601: `correlation_engine` publishes {"rho": .., "weeks": ..} per pair while
+            # every caller here wants the scalar. Accepting BOTH shapes at the one place that
+            # reads a pair is the fix; the alternative was each caller unwrapping it, which is
+            # how the wrapper-instead-of-pairs bug got in.
+            if isinstance(v, dict):
+                v = v.get("rho")
+            return float(v) if v is not None else None
     return None
 
 

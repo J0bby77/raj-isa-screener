@@ -1228,10 +1228,21 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                                 "note": ("the deployment sequencer did not run; the order is "
                                          "the DECLARED conviction order and §2 says so")}
         else:
+            # ⚑ ISA-0601 — THE NOISE GATE'S OWN NUMBERS TRAVEL WITH ITS ORDER. This block
+            # published state/order/displacement/method only, so a gate that fired 0 times out
+            # of 29 for want of an SE looked identical to one working perfectly. The inputs and
+            # the fire rate are now part of the artefact: an instrument nobody can see working
+            # is indistinguishable from one that is not (R4.9).
             out["sequencer"] = {"state": sequence.get("state"),
                                 "order": sequence.get("order"),
                                 "displacement": sequence.get("displacement"),
-                                "method": sequence.get("banding", {}).get("method")}
+                                "method": sequence.get("banding", {}).get("method"),
+                                "declared_order": sequence.get("declared_order"),
+                                "correlation_inputs": sequence.get("correlation_inputs"),
+                                "rho_se": sequence.get("rho_se"),
+                                "score_se": sequence.get("score_se"),
+                                "noise_gate": sequence.get("noise_gate"),
+                                "suppressed_reorders": sequence.get("suppressed_reorders")}
         # ── P4.3 — WHICH POSITIONS ACTUALLY OPEN (D15/D16/D17). ISA-0491. ─────────────
         # ⚑ `position_sizing.allocate` was built 28-Aug with all five of Raj's worked
         # outcomes reproducing exactly — and was CALLED BY NOTHING. `stock_max` answers
@@ -1803,11 +1814,66 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
     try:
         held = [_suffix(s.get("ticker"), portfolio) for s in (portfolio.get("stocks") or [])
                 if s.get("ticker")]
-        mtx = ((corr or {}).get("matrix") or {}).get("rho") or (corr or {}).get("matrix") or {}
+        # ── ISA-0601 — THE SEQUENCER WAS BEING HANDED THE MATRIX'S WRAPPER, NOT ITS PAIRS ────
+        # ⚑ THREE DEFECTS IN ONE SEAM, and each alone made the correlation tie-break inert.
+        #   (1) `correlation_engine.assess` publishes its pairs at matrix["pairs"]; this read
+        #       matrix["rho"], got None, and FELL BACK to `matrix` itself — so what reached
+        #       `_rho` was {n_pairs_measured, names, pairs, pairs_skipped, rho_bar}: five keys,
+        #       every lookup a miss, against 2,278 genuinely measured pairs sitting one level
+        #       down. An `or` chain that ends in the wrapper cannot fail loudly.
+        #   (2) pairs[k] is {"rho": .., "weeks": ..}; `_rho` does float(matrix[k]). Even with
+        #       the right key the shape would have raised.
+        #   (3) `sigmas` and `weights` were never passed, so `sigma_p` returned None, `choose`
+        #       scored every subset as inf, and the band profile alone decided the order.
+        # The result was a sequencer reporting BANDED_ON_MEASURED_SE while the correlation half
+        # of its own docstring — "then minimise the resulting sleeve sigma_p" — did nothing.
+        _pairs = ((corr or {}).get("matrix") or {}).get("pairs") or {}
+        mtx = {k: (v.get("rho") if isinstance(v, dict) else v) for k, v in _pairs.items()}
+        # sigmas and weights, from the SAME weekly returns the matrix was measured on
+        import math as _math
+        _sig = {}
+        for _t, _r in (weekly or {}).items():
+            # ⚑ `weekly_returns` yields a DATE-KEYED MAPPING, not a list. Summing it directly
+            # sums the date strings, which is how this first went in.
+            _xs = list(_r.values()) if isinstance(_r, dict) else list(_r or [])
+            _xs = [float(x) for x in _xs if isinstance(x, (int, float))]
+            if len(_xs) > 2:
+                _m = sum(_xs) / len(_xs)
+                _v = sum((x - _m) ** 2 for x in _xs) / (len(_xs) - 1)
+                _sig[_t] = _math.sqrt(max(_v, 0.0) * 52.0)
+        _nav_w = {t: (vals.get(t, 0.0) / nav) for t in (weekly or {})} if nav else {}
+        # ⚑ COVERAGE IS MEASURED, NOT ASSUMED. A matrix that does not span held x candidate is
+        # a silent reversion to band-profile ordering, which is what this item existed to end.
+        _cl = (cands.get("qualifying") if isinstance(cands, dict) else cands) or []
+        _ct = [x.get("ticker") for x in _cl if isinstance(x, dict) and x.get("ticker")]
+        _need = [(h, c) for h in held for c in _ct if c and h != c]
+        _have = sum(1 for h, c in _need
+                    if ("%s|%s" % (h, c)) in mtx or ("%s|%s" % (c, h)) in mtx)
+        _cov = (_have / len(_need)) if _need else None
         se = _ds.measure_score_se().get("se")
-        seq = _ds.sequence(cands, held=held, matrix=mtx, se_rho=None,
+        # ⚑ ISA-0601 — se_rho WAS HARD-CODED None, which put the P6.3 noise gate on the
+        # "SE unavailable" branch for every comparison (29 suppressed, 0 fired). It is measured
+        # from the same pairs the matrix was built from.
+        _rse = _ds.measure_rho_se(_pairs)
+        seq = _ds.sequence(cands, held=held, matrix=mtx, sigmas=_sig, weights=_nav_w,
+                           se_rho=_rse.get("se"),
                            ranking_basis=cands.get("ranking_basis", "source_score"))
         seq["score_se"] = se
+        seq["rho_se"] = _rse
+        seq["correlation_inputs"] = {
+            "rho_pairs_supplied": len(mtx), "sigmas_supplied": len(_sig),
+            "weights_supplied": len(_nav_w),
+            "held_x_candidate_pairs_needed": len(_need),
+            "held_x_candidate_pairs_measured": _have,
+            "coverage": (round(_cov, 4) if _cov is not None else None),
+            "basis": ("ISA-0601: rho from correlation_engine.assess().matrix.pairs, sigmas and "
+                      "weights from the same weekly GBP total-return series. Coverage below 1.0 "
+                      "means some subset sigma_p is UNMEASURED and the band profile decides "
+                      "those ties -- reported, never silent (R2.10).")}
+        if _cov is not None and _cov < 0.95:
+            notes.append("ISA-0601: the sequencer's correlation coverage is %.0f%% of held x "
+                         "candidate pairs (%d of %d). Subsets touching an unmeasured pair are "
+                         "ordered on band profile alone." % (100 * _cov, _have, len(_need)))
     except Exception as e:                                              # noqa: BLE001
         notes.append("deployment_sequencer.sequence failed (%s: %s) — §2 must say the order is "
                      "the DECLARED conviction order, not a sequenced one"
