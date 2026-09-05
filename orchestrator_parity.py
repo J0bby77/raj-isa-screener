@@ -48,6 +48,7 @@ CLI:
 """
 from __future__ import annotations
 import argparse, ast, json, os, sys
+import isa_source_cache as _sc                 # ISA-0594: one home for read/parse/walk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA_VERSION = 1
@@ -78,7 +79,7 @@ def _read(name):
 def _called_names(node):
     """Every function name invoked below `node`, by bare name or attribute (core.foo())."""
     out = set()
-    for n in ast.walk(node):
+    for n in _sc.walk(node):
         if isinstance(n, ast.Call):
             f = n.func
             if isinstance(f, ast.Name):
@@ -89,15 +90,15 @@ def _called_names(node):
 
 
 def _module_functions(tree):
-    return {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return {n.name: n for n in _sc.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 # ── 1. CAPABILITY PARITY ─────────────────────────────────────────────────────────────────────
 def capability_diff(core_src=None, local_src=None):
-    core_tree = ast.parse(core_src if core_src is not None else _read(CORE))
-    local_tree = ast.parse(local_src if local_src is not None else _read(LOCAL))
+    core_tree = _sc.parse_text(core_src if core_src is not None else _read(CORE))
+    local_tree = _sc.parse_text(local_src if local_src is not None else _read(LOCAL))
 
-    ref = [n for n in ast.walk(core_tree)
+    ref = [n for n in _sc.walk(core_tree)
            if isinstance(n, ast.FunctionDef) and n.name == REFERENCE_ORCHESTRATOR]
     if not ref:
         return {"ok": False, "reason": f"{REFERENCE_ORCHESTRATOR} not found in {CORE} — the "
@@ -134,7 +135,7 @@ def _reachable(entry_mod_src, other_src, entry_fn):
     false 'unreachable' makes it a nuisance alarm. A check that cries wolf gets switched off, so
     it errs toward silence and reports only what it is sure about.
     """
-    entry_tree, other_tree = ast.parse(entry_mod_src), ast.parse(other_src)
+    entry_tree, other_tree = _sc.parse_text(entry_mod_src), _sc.parse_text(other_src)
     entry_funcs = _module_functions(entry_tree)
     other_funcs = _module_functions(other_tree)
 
@@ -172,10 +173,10 @@ def _reachable(entry_mod_src, other_src, entry_fn):
 
 def _constant_reads(src):
     """{CONST_NAME: {enclosing function names that read it}} for getattr(_cfg,"X") / cfg.X / X."""
-    tree = ast.parse(src)
+    tree = _sc.parse_text(src)
     reads = {}
     parent = {}
-    for n in ast.walk(tree):
+    for n in _sc.walk(tree):
         for ch in ast.iter_child_nodes(n):
             parent[ch] = n
 
@@ -189,7 +190,7 @@ def _constant_reads(src):
     def note(name, node):
         reads.setdefault(name, set()).add(enclosing(node))
 
-    for n in ast.walk(tree):
+    for n in _sc.walk(tree):
         # getattr(_cfg, "NAME", default)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" \
            and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant) \
@@ -211,7 +212,7 @@ def unreachable_config_reads(core_src=None, local_src=None, config_src=None):
     local_src = local_src if local_src is not None else _read(LOCAL)
     config_src = config_src if config_src is not None else _read(CONFIG)
 
-    declared = {n.targets[0].id for n in ast.parse(config_src).body
+    declared = {n.targets[0].id for n in _sc.parse_text(config_src).body
                 if isinstance(n, ast.Assign) and n.targets and isinstance(n.targets[0], ast.Name)
                 and n.targets[0].id.isupper()}
 
@@ -261,10 +262,10 @@ def _er_importers(root=None):
                 continue
             fp = os.path.join(dirpath, fn)
             try:
-                tree = ast.parse(open(fp, encoding="utf-8").read())
+                tree = _sc.parse_path(fp)
             except Exception:                                # noqa: BLE001
                 continue
-            for n in ast.walk(tree):
+            for n in _sc.walk(tree):
                 if isinstance(n, ast.Import) and any(a.name == ER_MODULE for a in n.names):
                     found.add(os.path.relpath(fp, root).replace(os.sep, "/"))
                 elif isinstance(n, ast.ImportFrom) and n.module == ER_MODULE:

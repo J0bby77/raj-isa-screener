@@ -666,7 +666,7 @@ def _in_spans(line: int, spans: Sequence[Tuple[int, int]]) -> bool:
     return any(a <= line <= b for a, b in spans)
 
 
-def _computers_of(qname: str, root: str = HERE) -> List[dict]:
+def _computers_of_scan(qname: str, root: str = HERE) -> List[dict]:
     """Every function in the tree that COMPUTES `qname`. Tests are excluded by construction:
     a test that builds a fixture with the key is not a second authority."""
     hits = []
@@ -710,6 +710,211 @@ def _computers_of(qname: str, root: str = HERE) -> List[dict]:
     # one row per (module, function)
     seen, out = set(), []
     for h in hits:
+        k = (h["module"], h["function"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(h)
+    return out
+
+
+
+# ── ISA-0594 (05-Sep-2026): THE SCAN IS INVERTED, ONCE, INSTEAD OF RE-RUN PER QUERY ────────
+# ⚑ COST ONLY. The two enumerators below answered "who produces (field, literal)?" and "who
+# computes qname?" by walking all ~150 file ASTs ONCE PER QUERY. With 389 live vocabulary
+# pairs that is ~58,000 file-walks, and `quantity_register_report` — which BOTH `preflight`
+# (Step 0) and `report` (Step 6.99) call — cost 80.5s of a ~178s host-shell budget. The
+# pre-run needed ~300s and so never reached `write_run_context`: run_context_sep_2026.json
+# had never existed. ISA-0552 already fixed this class once by memoising the per-file walk;
+# the walk was not the cost, the RE-WALK was, and a per-file cache cannot remove a loop that
+# is inside-out. So the loop is turned the right way round: one pass over the tree builds an
+# index keyed by the LITERAL (for producers) and by the QUANTITY NAME (for computers), and a
+# query becomes a dict lookup plus a handful of predicate evaluations on a short list.
+#
+# The predicates that depend on the FIELD (`t.id.lower().endswith(field)`, the vocabulary
+# `field in name` test) are NOT resolved at index time — they cannot be, the field space is
+# open — so each entry carries the raw material and the predicate runs at query time against
+# a few candidates rather than against every node in the tree. Semantics are unchanged, and
+# that is not asserted in prose: `_producers_of_scan` / `_computers_of_scan` above ARE the
+# previous implementations, kept verbatim, and `producer_equivalence` / `computer_equivalence`
+# re-derive every live pair through both paths and compare. A cache that changes an answer is
+# not a cache (R5.8).
+_PRODUCER_INDEX: dict = {}
+_COMPUTER_INDEX: dict = {}
+
+
+def _emitted_literals(value: ast.AST, out=None) -> list:
+    """Every literal this VALUE node can emit — the exact inverse of `_emits_literal`.
+
+    Kept structurally identical to `_emits_literal` on purpose: the two must recognise the
+    same producer shapes (bare constant, conditional, boolean short-circuit, the get/setdefault
+    /pop fallback) or the index and the scan diverge on exactly the shapes ISA-0552 was fixed
+    to catch."""
+    if out is None:
+        out = []
+    if isinstance(value, ast.Constant):
+        out.append(value.value)
+    elif isinstance(value, ast.IfExp):
+        _emitted_literals(value.body, out)
+        _emitted_literals(value.orelse, out)
+    elif isinstance(value, ast.BoolOp):
+        for v in value.values:
+            _emitted_literals(v, out)
+    elif isinstance(value, ast.Call):
+        f = value.func
+        if isinstance(f, ast.Attribute) and f.attr in ("get", "setdefault", "pop"):
+            for a in value.args[1:]:
+                _emitted_literals(a, out)
+    return out
+
+
+def _hashable(v) -> bool:
+    try:
+        hash(v)
+        return True
+    except TypeError:
+        return False
+
+
+def _build_producer_index(root: str) -> dict:
+    """literal -> [(kind, module, lineno, key)] for every producer shape in the tree.
+
+    `key` is whatever the field predicate needs: the dict key, the subscript slice, the
+    assigned Name id, the tuple of vocabulary target names, or the keyword-argument name.
+    Data files are indexed separately, by `_data_blobs`, at query time."""
+    idx: dict = {}
+
+    def add(lit, entry):
+        if _hashable(lit):
+            idx.setdefault(lit, []).append(entry)
+
+    for path in source_files(root):                       # tests excluded by source_files
+        src_, tree = parsed(path)
+        if tree is None:
+            continue
+        m = modname(path)
+        spans = _spans_cached(path, tree, m)
+        for node in _walk_cached(path, tree):
+            if _in_spans(getattr(node, "lineno", -1), spans):
+                continue                   # a selftest or a declared probe is NOT a producer
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant):
+                        for lit in _emitted_literals(v):
+                            add(lit, ("dict", m, node.lineno, k.value))
+            if isinstance(node, ast.Assign):
+                for lit in _emitted_literals(node.value):
+                    for t in node.targets:
+                        if isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant):
+                            add(lit, ("assign", m, node.lineno, t.slice.value))
+                        elif isinstance(t, ast.Name):
+                            add(lit, ("name", m, node.lineno, t.id))
+                if isinstance(node.value, (ast.Set, ast.Tuple, ast.List)):
+                    names = tuple(t.id for t in node.targets if isinstance(t, ast.Name))
+                    if names:
+                        for e in node.value.elts:
+                            if isinstance(e, ast.Constant):
+                                add(e.value, ("vocab", m, node.lineno, names))
+            if isinstance(node, ast.Call):
+                for kw in node.keywords or []:
+                    if kw.arg is not None:
+                        for lit in _emitted_literals(kw.value):
+                            add(lit, ("kwarg", m, node.lineno, kw.arg))
+    return idx
+
+
+def _producers_of(field: str, literal: str, root: str = HERE) -> List[str]:
+    """Where the literal is EMITTED as a value for that field, in non-test source and in data.
+
+    ⚑ TESTS AND SELFTESTS ARE NOT PRODUCERS. That is the entire content of F4: `forward_led`
+    occurs only in `retention._selftest` and two fixtures, and every instrument that counted
+    those as producers reported the filter healthy.
+
+    Indexed since ISA-0594; `_producers_of_scan` is the same answer computed the slow way and
+    `producer_equivalence` compares them."""
+    idx = _PRODUCER_INDEX.get(root)
+    if idx is None:
+        idx = _PRODUCER_INDEX[root] = _build_producer_index(root)
+    field_l = field.lower()
+    hits = []
+    for kind, m, lineno, key in idx.get(literal, ()):
+        if kind == "dict":
+            if key == field:
+                hits.append("%s:%d dict" % (m, lineno))
+        elif kind == "assign":
+            if key == field:
+                hits.append("%s:%d assign" % (m, lineno))
+        elif kind == "name":
+            if key.lower().endswith(field_l):
+                hits.append("%s:%d name" % (m, lineno))
+        elif kind == "vocab":
+            if any(field_l in n.lower() for n in key):
+                hits.append("%s:%d vocab" % (m, lineno))
+        elif kind == "kwarg":
+            if key == field:
+                hits.append("%s:%d kwarg" % (m, lineno))
+    # data files: a live artefact that carries the value IS a producer
+    pat = re.compile(r'"%s"\s*:\s*"%s"' % (re.escape(field), re.escape(literal)))
+    for label, blob in _data_blobs(root):
+        if pat.search(blob):
+            hits.append(label)
+    return sorted(set(hits))
+
+
+def _build_computer_index(root: str) -> dict:
+    """qname -> [row] for every function that COMPUTES it, one row per (module, function).
+
+    Mirrors `_computers_of_scan`'s `break`: the FIRST non-relay sub-node in walk order wins
+    for a given function and quantity, and a relay is skipped rather than ending the search."""
+    idx: dict = {}
+    for path in source_files(root):
+        _, tree = parsed(path)
+        if tree is None:
+            continue
+        m = modname(path)
+        spans = _spans_cached(path, tree, m)
+        rel = os.path.relpath(path, root)
+        for node in _walk_cached(path, tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if _in_spans(node.lineno, spans):
+                continue
+            taken = set()                     # quantities already recorded for THIS function
+            for sub in ast.walk(node):
+                cands = {}                    # qname -> (value_node, form)
+                if isinstance(sub, ast.Assign):
+                    for t in sub.targets:
+                        if isinstance(t, ast.Name):
+                            cands[t.id] = (sub.value, "name_assign")
+                        elif (isinstance(t, ast.Subscript)
+                              and isinstance(t.slice, ast.Constant)
+                              and isinstance(t.slice.value, str)):
+                            cands[t.slice.value] = (sub.value, "key_assign")
+                elif isinstance(sub, ast.Dict):
+                    for k, v in zip(sub.keys, sub.values):
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                            cands[k.value] = (v, "dict_literal")
+                for qname, (val, where) in cands.items():
+                    if qname in taken or _is_relay_value(val, qname):
+                        continue
+                    taken.add(qname)
+                    idx.setdefault(qname, []).append(
+                        {"module": m, "function": node.name, "line": sub.lineno,
+                         "form": where, "path": rel})
+    return idx
+
+
+def _computers_of(qname: str, root: str = HERE) -> List[dict]:
+    """Every function in the tree that COMPUTES `qname`. Tests are excluded by construction:
+    a test that builds a fixture with the key is not a second authority.
+
+    Indexed since ISA-0594; `_computers_of_scan` is the same answer computed the slow way and
+    `computer_equivalence` compares them."""
+    idx = _COMPUTER_INDEX.get(root)
+    if idx is None:
+        idx = _COMPUTER_INDEX[root] = _build_computer_index(root)
+    seen, out = set(), []
+    for h in idx.get(qname, ()):              # one row per (module, function)
         k = (h["module"], h["function"])
         if k in seen:
             continue
@@ -965,7 +1170,7 @@ def _emits_literal(value: ast.AST, literal: str) -> bool:
     return False
 
 
-def _producers_of(field: str, literal: str, root: str = HERE) -> List[str]:
+def _producers_of_scan(field: str, literal: str, root: str = HERE) -> List[str]:
     """Where the literal is EMITTED as a value for that field, in non-test source and in data.
 
     ⚑ TESTS AND SELFTESTS ARE NOT PRODUCERS. That is the entire content of F4: `forward_led`
@@ -1963,7 +2168,9 @@ def _raises(fn, exc_type) -> bool:
     return False
 
 
-def producer_equivalence(root: str = HERE, sample: Optional[int] = 25) -> dict:
+def producer_equivalence(root: str = HERE, sample: Optional[int] = 25,
+                         offset: int = 0, count: Optional[int] = None,
+                         reference: str = "uncached") -> dict:
     """R5.8 for the ISA-0552 caches: the fast path must find exactly what the slow path finds.
 
     Re-derives `_producers_of` for real (field, literal) pairs taken from the live tree with
@@ -2032,22 +2239,67 @@ def producer_equivalence(root: str = HERE, sample: Optional[int] = 25) -> dict:
             seen.add(k)
             pairs.append(k)
     pairs.sort()
+    n_all = len(pairs)
     if sample:
         step = max(1, len(pairs) // sample)
         pairs = pairs[::step][:sample]
+    # ISA-0594: the exhaustive proof costs more than one host-shell call, so it is drivable in
+    # slices. `offset`/`count` NEVER change which pairs exist — only how many are proved per
+    # invocation — and the slices are recombined by the caller into a single verdict.
+    if count is not None:
+        pairs = pairs[offset:offset + count]
     mismatches = []
     for field, literal in pairs:
-        if _producers_of(field, literal, root) != _slow(field, literal):
-            mismatches.append({"field": field, "literal": literal})
-    return {"checked": len(pairs), "mismatches": mismatches,
+        fast = _producers_of(field, literal, root)          # ISA-0594 index
+        scan = _producers_of_scan(field, literal, root)     # the pre-ISA-0594 implementation
+        # ⚑ TWO REFERENCES, DELIBERATELY. `_slow` disables every acceleration and is the
+        # strongest statement, but it costs ~2.5s a pair, so proving all 252 live pairs
+        # against it exceeds a single host-shell call. `reference="scan"` proves the index
+        # against the implementation it REPLACED, exhaustively and affordably; the uncached
+        # reference is then run over a slice. Coverage is reported, never implied.
+        ref = scan if reference == "scan" else _slow(field, literal)
+        if fast != ref or scan != ref:
+            mismatches.append({"field": field, "literal": literal,
+                               "index_vs_reference": "DIFFER" if fast != ref else "same",
+                               "scan_vs_reference": "DIFFER" if scan != ref else "same",
+                               "n_index": len(fast), "n_scan": len(scan), "n_reference": len(ref)})
+    return {"checked": len(pairs), "n_pairs_total": n_all, "offset": offset,
+            "mismatches": mismatches, "reference": reference,
+            "compares": "index vs pre-ISA-0594 scan vs %s reference" % reference,
+            "state": "PASS" if not mismatches else "FAIL"}
+
+
+def computer_equivalence(root: str = HERE, sample=None) -> dict:
+    """R5.8 for the ISA-0594 computer index: the indexed path must find exactly what the
+    per-quantity scan finds, for every quantity the register actually declares.
+
+    The register is small (12 entries at 05-Sep-2026), so this runs EXHAUSTIVELY by default —
+    a sampled proof of a 12-element space would be a choice to not know."""
+    try:
+        names = [r.get("name") for r in load_quantity_register() if r.get("name")]
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "UNAVAILABLE", "reason": "%s: %s" % (type(exc).__name__, exc)}
+    names = sorted(set(names))
+    if sample:
+        names = names[:sample]
+    mismatches = []
+    for q in names:
+        fast = _computers_of(q, root)
+        scan = _computers_of_scan(q, root)
+        if fast != scan:
+            mismatches.append({"quantity": q, "n_index": len(fast), "n_scan": len(scan),
+                               "index": fast, "scan": scan})
+    return {"checked": len(names), "mismatches": mismatches,
+            "compares": "index vs pre-ISA-0594 per-quantity scan",
             "state": "PASS" if not mismatches else "FAIL"}
 
 
 if __name__ == "__main__":
     if "--equivalence-full" in sys.argv:
         _eq = producer_equivalence(sample=None)
-        print(json.dumps(_eq, indent=1))
-        sys.exit(0 if _eq["state"] == "PASS" else 1)
+        _ce = computer_equivalence()
+        print(json.dumps({"producers": _eq, "computers": _ce}, indent=1))
+        sys.exit(0 if _eq["state"] == "PASS" and _ce["state"] == "PASS" else 1)
     if "--selftest" in sys.argv:
         _o = print
         def print(*a, **k):                                             # noqa: A001

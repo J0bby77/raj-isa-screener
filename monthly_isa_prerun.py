@@ -56,6 +56,15 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
+# ISA-0594 — ONE HOME for the wall-clock ceiling this pipeline must live inside. Measured, not
+# assumed: the host kills a tool call at ~178s (observed 173954ms and 177988ms on 05-Sep-2026),
+# and that applies to the SCHEDULED TASK too, which had been believed exempt.
+HOST_SHELL_CEILING_S = 175.0
+
+# ISA-0594 — plans deferred out of the pre-write path (see _run_plan_stability). A list, not a
+# scalar, so "nothing was deferred" and "one plan was deferred" are distinguishable states.
+_PLAN_STABILITY_PENDING = []
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -414,6 +423,102 @@ def _compliance_block():
                 "status_line": "Compliance module unavailable - assume preclearance REQUIRED."}
 
 
+
+def _run_plan_stability(_cd, _cdr, summary, warnings, _s610):
+    """Step 6.10d, DEFERRED out of the pre-write path by ISA-0594.
+
+    ⚑ THIS IS ASSURANCE ABOUT THE PLAN, NOT AN INPUT TO IT. `capital_destination.plan_stability`
+    re-derives the plan across a perturbation grid to ask whether the lexicographic ranking is
+    resolving economics or noise. It costs 37-43s, it changes no destination and no amount, and
+    nothing downstream of Step 6.10 reads it. Running it BEFORE run_context was written meant a
+    run that overran lost the entire staging file to a check about that file. It now runs after
+    the provisional write, with the other assurance stages, and its verdict lands in the final
+    rewrite. The body is unchanged from the 6.10d block it was lifted out of."""
+    try:
+        _ps12 = _cd.plan_stability(base_doc=_cdr)
+        summary["plan_stability"] = {
+            "state": _ps12.get("state"), "unstable": _ps12.get("unstable"),
+            "reading": _ps12.get("reading"),
+            "grid": [{k: g[k] for k in ("perturbation", "pounds_churned_gbp",
+                                        "churn_share_of_plan", "receiver_set_changed",
+                                        "order_changed")} for g in _ps12.get("grid", [])],
+            "not_an_input": {k: v["read_by_code"] for k, v in
+                             (_ps12.get("not_an_input") or {})
+                             .get("quantities", {}).items()},
+            "stock_side": _ps12.get("routed_to_stock_side"),
+        }
+        _s610.append("plan stability %s" % ("UNSTABLE: " + ", ".join(_ps12["unstable"])
+                                            if _ps12.get("unstable") else "stable"))
+        if _ps12.get("unstable"):
+            warnings.append(
+                "Step 6.10d PLAN UNSTABLE under %s: the capital plan changes its "
+                "DESTINATIONS or their order under a perturbation this small, which "
+                "means the lexicographic ranking is resolving noise rather than "
+                "economics (A12). %s" % (", ".join(_ps12["unstable"]),
+                                         _ps12.get("reading") or ""))
+        _nai = [k for k, v in (_ps12.get("not_an_input") or {})
+                .get("quantities", {}).items() if v.get("read_by_code")]
+        if _nai:
+            warnings.append(
+                "Step 6.10d: %s now READ by the capital router. A12 was built on the "
+                "measured fact that they were not, and the grid reports them as "
+                "NOT_AN_INPUT — that statement is now false and the grid must start "
+                "perturbing them for real." % ", ".join(sorted(_nai)))
+    except Exception as _e:                                        # noqa: BLE001
+        warnings.append(f"Step 6.10d (plan_stability): {type(_e).__name__}: {_e}")
+
+
+
+def _plan_stability_only(args) -> int:
+    """ISA-0594 — complete the one assurance stage that does not fit in the main call.
+
+    Reads the run_context the main pass already wrote, runs the plan-stability grid against a
+    freshly derived capital_destination document, merges the verdict in and rewrites the file.
+    It REFUSES rather than inventing a context: no run_context means the main pass has not run,
+    and a stage that reports on a run that did not happen is worse than one that did not run
+    (R2.10, R4.9)."""
+    # same derivation as main() — one shape for the label, not a second one (R4.4)
+    month_label = date.today().strftime("%b_%Y").lower()
+    path = os.path.join(SCRIPT_DIR, "run_context_%s.json" % month_label)
+    if not os.path.exists(path):
+        print("REFUSED: %s does not exist — run the main pre-run first." % os.path.basename(path))
+        return 2
+    with open(path, encoding="utf-8") as fh:
+        ctx = json.load(fh)
+    summary = ctx.get("summary") or {}
+    warnings = list(ctx.get("warnings") or [])
+    import capital_destination as _cd_ps
+    t0 = time.time()
+    print("[6.10d] Plan stability under perturbation (standalone completion, ISA-0594)...")
+    _cdr = _cd_ps.build(out_path=os.path.join(SCRIPT_DIR,
+                                              "capital_destination_%s.json" % month_label))
+    lines = []
+    _run_plan_stability(_cd_ps, _cdr, summary, warnings, lines)
+    for line in lines:
+        print("  " + line)
+    ok = "plan_stability" in summary
+    summary["assurance"] = {
+        "state": "COMPLETE" if ok else "PARTIAL",
+        "stages_run": ["9d (mechanical asserts)", "6.99 (execution ledger + integrity queue)"]
+                      + (["6.10d (plan stability under perturbation)"] if ok else []),
+        "stages_not_yet_run": [] if ok else ["6.10d (plan stability under perturbation)"],
+        "meaning": ("completed out of band by --plan-stability-only at %s; the grid reads "
+                    "capital_destination from disk, so it measures the same plan the main pass "
+                    "produced" % datetime.now().strftime("%Y-%m-%d %H:%M")),
+    }
+    ctx["summary"] = summary
+    ctx["warnings"] = warnings
+    ctx.setdefault("_meta", {})["assurance_completed_at"] = \
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(ctx, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    print("  run_context updated: assurance=%s  (%.0fs)"
+          % (summary["assurance"]["state"], time.time() - t0))
+    return 0 if ok else 1
+
+
 def write_run_context(
     month_label:            str,
     run_month:              str,
@@ -673,7 +778,15 @@ def main():
                              "defers work; it never loses any.")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Print commands without executing them.")
+    parser.add_argument("--plan-stability-only", action="store_true",
+                        help="ISA-0594: run ONLY the deferred Step 6.10d plan-stability grid "
+                             "and merge its verdict into the existing run_context. For use "
+                             "after a run whose assurance state is PARTIAL; needs no re-run of "
+                             "Steps 1-9, because the grid reads capital_destination from disk.")
     args = parser.parse_args()
+
+    if args.plan_stability_only:
+        sys.exit(_plan_stability_only(args))
 
     isa_folder = args.isa_folder or os.path.dirname(SCRIPT_DIR)
     run_date   = date.today()
@@ -2919,35 +3032,8 @@ def main():
             # inputs can flip on noise. A12's point is that the instability must be VISIBLE
             # rather than inferred, so the grid runs every month whether or not it finds any.
             try:
-                _ps12 = _cd.plan_stability(base_doc=_cdr)
-                summary["plan_stability"] = {
-                    "state": _ps12.get("state"), "unstable": _ps12.get("unstable"),
-                    "reading": _ps12.get("reading"),
-                    "grid": [{k: g[k] for k in ("perturbation", "pounds_churned_gbp",
-                                                "churn_share_of_plan", "receiver_set_changed",
-                                                "order_changed")} for g in _ps12.get("grid", [])],
-                    "not_an_input": {k: v["read_by_code"] for k, v in
-                                     (_ps12.get("not_an_input") or {})
-                                     .get("quantities", {}).items()},
-                    "stock_side": _ps12.get("routed_to_stock_side"),
-                }
-                _s610.append("plan stability %s" % ("UNSTABLE: " + ", ".join(_ps12["unstable"])
-                                                    if _ps12.get("unstable") else "stable"))
-                if _ps12.get("unstable"):
-                    warnings.append(
-                        "Step 6.10d PLAN UNSTABLE under %s: the capital plan changes its "
-                        "DESTINATIONS or their order under a perturbation this small, which "
-                        "means the lexicographic ranking is resolving noise rather than "
-                        "economics (A12). %s" % (", ".join(_ps12["unstable"]),
-                                                 _ps12.get("reading") or ""))
-                _nai = [k for k, v in (_ps12.get("not_an_input") or {})
-                        .get("quantities", {}).items() if v.get("read_by_code")]
-                if _nai:
-                    warnings.append(
-                        "Step 6.10d: %s now READ by the capital router. A12 was built on the "
-                        "measured fact that they were not, and the grid reports them as "
-                        "NOT_AN_INPUT — that statement is now false and the grid must start "
-                        "perturbing them for real." % ", ".join(sorted(_nai)))
+                _PLAN_STABILITY_PENDING.append(_cdr)
+                _s610.append("plan stability DEFERRED to the assurance group (ISA-0594)")
             except Exception as _e:                                # noqa: BLE001
                 warnings.append(f"Step 6.10d (plan_stability): {type(_e).__name__}: {_e}")
         else:
@@ -3530,6 +3616,55 @@ def main():
               f"-- {_reg['category8']['reason'][:110]}")
     except Exception as _rge:
         warnings.append(f"Two-regime resolution skipped: {_rge}")
+
+    # ── ISA-0594: run_context IS WRITTEN HERE, BEFORE THE ASSURANCE STAGES, AND AGAIN AFTER ──
+    # ⚑ THE REVIEW'S PRIMARY INPUT MUST NOT BE HOSTAGE TO THE TAIL OF THE RUN. Steps 1-9 are
+    # what tomorrow reads; 6.10d, 9d and 6.99 are assurance ABOUT that work, not inputs to it.
+    # While run_context was written once, at the very end, an overrun anywhere after this point
+    # discarded a completed pre-run entirely: on 05-Sep-2026 the run needed ~300s against a
+    # ~178s host-shell ceiling and run_context_sep_2026.json had NEVER existed for September.
+    # So the staging file lands as soon as its contents are complete, marked PENDING, and is
+    # REPLACED by the full picture when the assurance stages finish.
+    # ⚑ PENDING IS NOT PASSED (R2.10). The provisional file carries status PARTIAL and names
+    # every stage that has not run, so a consumer can never read "assurance absent" as
+    # "assurance clean" — which is the whole failure mode this guards against.
+    _ASSURANCE_STAGES = ["6.10d (plan stability under perturbation)",
+                         "9d (mechanical asserts A10/A11/A18/A19/A20/A22 + P7a)",
+                         "6.99 (execution-ledger reconciliation + integrity queue)"]
+    _elapsed_9c = round(time.time() - _RUN_STARTED_AT, 1)
+    summary["runtime"] = {
+        "started_at": datetime.fromtimestamp(_RUN_STARTED_AT).strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsed_s_at_provisional_write": _elapsed_9c,
+        "host_shell_ceiling_s": HOST_SHELL_CEILING_S,
+        "state": ("WITHIN" if _elapsed_9c < HOST_SHELL_CEILING_S else "EXCEEDED"),
+        "basis": ("measured wall clock; the ceiling is the observed host MCP tool-call limit "
+                  "(kills at 173954ms and 177988ms, 05-Sep-2026, ISA-0594)"),
+    }
+    if _elapsed_9c >= HOST_SHELL_CEILING_S:
+        warnings.append(
+            "RUNTIME: Steps 1-9 took %.0fs against a %.0fs host-shell ceiling (ISA-0594). The "
+            "provisional run_context still landed, but the assurance stages will be cut off. "
+            "Profile the run before adding work to it." % (_elapsed_9c, HOST_SHELL_CEILING_S))
+    summary["assurance"] = {
+        "state": "PENDING",
+        "stages_not_yet_run": list(_ASSURANCE_STAGES),
+        "meaning": ("This file was written BEFORE the assurance stages. PENDING means they have "
+                    "NOT RUN — it does not mean they passed. If this value is still PENDING when "
+                    "you read it, the run was cut off after Step 9 and the assurance verdicts "
+                    "are ABSENT, not clean (R2.10)."),
+    }
+    try:
+        _prov_path = write_run_context(
+            month_label, run_month, portfolio_path, xray_path, analytics_path,
+            watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
+            summary, flags, warnings, "PARTIAL",
+            "provisional: Steps 1-9 complete, assurance stages pending (ISA-0594)")
+        print("\n[9c] Provisional run_context written at %.0fs -- %s"
+              % (_elapsed_9c, os.path.basename(_prov_path)))
+    except Exception as _pe:                                       # noqa: BLE001
+        warnings.append("ISA-0594 provisional run_context write FAILED: %s: %s"
+                        % (type(_pe).__name__, _pe))
+        print("  [9c] provisional run_context FAILED: %s" % _pe)
 
     _w_before_9d = len(warnings)
     _e_before_9d = len(errors)
@@ -4203,6 +4338,41 @@ def main():
         warnings.append("STEP 6.99 UNAVAILABLE — %s: %s" % (type(_e).__name__, _e))
         print("  UNAVAILABLE — %s" % _e)
 
+    # ── ISA-0594: THE ASSURANCE STAGES ARE ORDERED CHEAPEST-FIRST AND CHECKPOINTED ──────────
+    # 9d (~30s) and 6.99 (~8s) are done by here. `plan_stability` costs 37-43s on its own and
+    # is the one stage that reliably does NOT fit inside what remains of a ~175s call, so the
+    # staging file is rewritten HERE — carrying the 9d and 6.99 verdicts — before it is
+    # attempted. Ordering assurance by cost is not cosmetic: it decides which verdicts survive
+    # an overrun, and the cheap ones are also the blocking ones.
+    summary["assurance"] = {
+        "state": "PARTIAL",
+        "stages_run": ["9d (mechanical asserts)", "6.99 (execution ledger + integrity queue)"],
+        "stages_not_yet_run": (["6.10d (plan stability under perturbation)"]
+                               if _PLAN_STABILITY_PENDING else []),
+        "meaning": ("9d and 6.99 have run and their verdicts are in this file. Anything still "
+                    "listed in stages_not_yet_run has NOT run and is ABSENT, not clean (R2.10). "
+                    "Complete it with:  monthly_isa_prerun.py --plan-stability-only"),
+    }
+    try:
+        _ip = write_run_context(
+            month_label, run_month, portfolio_path, xray_path, analytics_path,
+            watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
+            summary, flags, warnings, "PARTIAL",
+            "interim: Steps 1-9 + 9d + 6.99 complete; plan stability pending (ISA-0594)")
+        print("\n[9e] Interim run_context written at %.0fs (9d + 6.99 captured) -- %s"
+              % (round(time.time() - _RUN_STARTED_AT, 1), os.path.basename(_ip)))
+    except Exception as _ie:                                       # noqa: BLE001
+        warnings.append("ISA-0594 interim run_context write FAILED: %s: %s"
+                        % (type(_ie).__name__, _ie))
+
+    if _PLAN_STABILITY_PENDING:
+        print("\n[6.10d] Plan stability under perturbation (deferred assurance, ISA-0594)...")
+        import capital_destination as _cd_ps
+        _s610_late = []
+        _run_plan_stability(_cd_ps, _PLAN_STABILITY_PENDING[0], summary, warnings, _s610_late)
+        for _line in _s610_late:
+            print("  " + _line)
+
     # CAPTURE LAYER ITEM 2 — close the last open step and write the manifest BEFORE
     # run_context, so run_context can carry the manifest's own verdict rather than a
     # separately-derived one.
@@ -4237,6 +4407,12 @@ def main():
 
     error_msg = "; ".join(errors) if errors else ""
     print("Writing run_context_" + month_label + ".json...")
+    _elapsed_end = round(time.time() - _RUN_STARTED_AT, 1)
+    summary.setdefault("runtime", {})["elapsed_s_total"] = _elapsed_end
+    summary["runtime"]["state_total"] = ("WITHIN" if _elapsed_end < HOST_SHELL_CEILING_S
+                                         else "EXCEEDED")
+    summary["assurance"] = {"state": "COMPLETE", "stages_not_yet_run": [],
+                            "meaning": "the assurance stages ran; their verdicts are in this file"}
     if watchlist_promotion_log:
         summary["watchlist_promotion_log"] = watchlist_promotion_log
 

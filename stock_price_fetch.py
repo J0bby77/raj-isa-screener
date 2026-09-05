@@ -466,6 +466,47 @@ def build_universe(*, store: Optional[dict] = None, portfolio_data: Optional[dic
 # ══════════════════════════════════════════════════════════════════════════════════════
 # P1.7 BATCHING AND RESUME  ·  P1.8 REFUSALS  ·  run()
 # ══════════════════════════════════════════════════════════════════════════════════════
+def last_settled_friday(today: Optional[datetime.date] = None) -> datetime.date:
+    """The most recent Friday whose weekly close is FINAL.
+
+    ⚑ A Friday is not settled while it is still Friday. Using today's own Friday would let an
+    intraday level be stored as that week's close and then be skipped as "current" forever, so
+    a Friday run steps back a week. Being one week conservative costs a refetch; being one day
+    optimistic writes a wrong number that nothing would ever revisit."""
+    d = today or datetime.date.today()
+    back = (d.weekday() - 4) % 7                       # 4 = Friday
+    if back == 0:                                      # today IS Friday: not settled yet
+        back = 7
+    return d - datetime.timedelta(days=back)
+
+
+def is_current(store: dict, ticker: str, today: Optional[datetime.date] = None) -> bool:
+    """Is this NAME already current, on the evidence of the store itself?
+
+    ⚑ ISA-0595. The resume file answers "is this CYCLE finished" and is shrunk to
+    {"status":"done"} at ALL_DONE, which `_load_partial` reads back as idle — so every later
+    orchestrator pass in the same day re-fetched all 178 names (~140s of a ~178s host-shell
+    budget) over a store that had been refreshed minutes earlier. A completion marker is not a
+    freshness record. The store already knows: each observation carries its own `as_of`, and
+    every attempted name carries `last_fetched_on`. Ask the artefact that holds the RESULT,
+    not the bookkeeping file that describes the last ATTEMPT.
+
+    Two independent grounds, either sufficient:
+      · the name already holds the last settled Friday — there is nothing to add; or
+      · the name was ATTEMPTED today — which covers the name that legitimately has no new
+        observation (a young listing, a holiday, a delisting) and would otherwise be refetched
+        on every pass forever.
+    """
+    rec = ((store.get("names") or {}).get(ticker) or {})
+    d = today or datetime.date.today()
+    if rec.get("last_fetched_on") == d.isoformat():
+        return True
+    obs = rec.get("observations") or {}
+    if not obs:
+        return False
+    return max(obs) >= last_settled_friday(d).isoformat()
+
+
 def _load_partial() -> dict:
     d = _read_json(PARTIAL)
     if not isinstance(d, dict) or d.get("status") == "done":
@@ -518,21 +559,32 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
 
     part = _load_partial()
     done = set(part.get("done") or [])
+    # ISA-0595 — a name the STORE says is current is done for this cycle, whatever the resume
+    # file remembers. Counted and named in the report below, never silently dropped (R2.10).
+    already = [t for t in tickers if t not in done and is_current(store, t, rec_on)]
+    done |= set(already)
     todo = [t for t in tickers if t not in done]
     batch = todo[:batch_size]
 
     # FX first — no conversion may happen before the direction contract has been asserted.
-    try:
+    # ⚑ ISA-0594: ...but only when there is something to convert. With ISA-0595's freshness test
+    # a settled store leaves `batch` empty, and fetching three 3-year FX series to convert zero
+    # observations cost ~12s of a ~175s budget on every run. NO CONVERSION, NO FX — the contract
+    # is asserted where it bites, which is at the point of conversion, not unconditionally.
+    if not batch:
+        fx = {}
+    else:
+      try:
         fx = fetch_fx(rng=rng)
-    except FetchRefused:
+      except FetchRefused:
         raise
-    except Exception as exc:                                            # noqa: BLE001
+      except Exception as exc:                                          # noqa: BLE001
         return {"state": "FETCH_UNAVAILABLE", "stage": "fx",
-                "reason": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
-                "store_unchanged": True,
-                "detail": ("⚑ THE FETCH FAILED — the store is UNCHANGED and this is NOT an "
-                           "absence of data. Step 6.12b must name the fetch failure as the "
-                           "cause (R2.10).")}
+                 "reason": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                 "store_unchanged": True,
+                 "detail": ("⚑ THE FETCH FAILED — the store is UNCHANGED and this is NOT an "
+                            "absence of data. Step 6.12b must name the fetch failure as the "
+                            "cause (R2.10).")}
 
     ok, failed, skipped_obs = [], [], 0
     for t in batch:
@@ -542,6 +594,7 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
             failed.append({"ticker": t, "symbol": smap[t],
                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
             continue
+        store.setdefault("names", {}).setdefault(t, {})["last_fetched_on"] = rec_on.isoformat()
         cur = d["currency"] or "GBP"
         wk = to_friday(d["daily"])
         # `GBp` is PENCE. It is not a foreign currency and it needs no FX pair — it needs a
@@ -591,6 +644,9 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
             "unmapped_refused": unmapped, "n_unmapped_refused": len(unmapped),
             "skipped_observations": skipped_obs,
             "remaining": len(remaining), "n_universe": len(tickers),
+            "skipped_already_current": len(already),
+            "skipped_basis": ("ISA-0595: store holds the last settled Friday (%s) or the name "
+                              "was attempted today" % last_settled_friday(rec_on).isoformat()),
             "fx_pairs": sorted(fx), "store_path": srs.STORE, "recorded_on": rec_on.isoformat(),
             "detail": ("a still-failing ticker is COUNTED and NAMED and its history is "
                        "untouched — run() never deletes a name (P1.7)")}

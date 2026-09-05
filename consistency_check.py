@@ -18,13 +18,13 @@ Library:
 Stdlib only.
 """
 import argparse, ast, builtins, hashlib, json, os, re, sys
+import isa_source_cache as _sc                    # ISA-0594: one home for read/parse/walk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _read(name):
-    with open(os.path.join(HERE, name), encoding="utf-8", errors="ignore") as f:
-        return f.read()
+    return _sc.read(os.path.join(HERE, name), errors="ignore")
 
 
 # ── pair implementations (take text so the self-test can feed mutations) ────────────────
@@ -847,7 +847,7 @@ def pair_monthly_return_architecture(ctx_text, prefill_text, ra_text):
     # cannot tell a mention from a use is a check that gets deleted rather than fixed.
     try:
         import ast as _ast
-        _lits = [n.value for n in _ast.walk(_ast.parse(prefill_text))
+        _lits = [n.value for n in _sc.walk(_sc.parse_text(prefill_text))
                  if isinstance(n, _ast.Constant) and isinstance(n.value, str)]
     except SyntaxError:
         _lits = []
@@ -1275,7 +1275,7 @@ def _gating_conviction_reads(root=None, fields=_CONVICTION_FIELDS):
         if mod in _CONVICTION_SHADOW_MODULES:
             continue
         try:
-            tree = _ast.parse(open(path, encoding="utf-8").read())
+            tree = _sc.parse_path(path)
         except Exception:                                            # noqa: BLE001
             continue
         try:
@@ -1285,7 +1285,7 @@ def _gating_conviction_reads(root=None, fields=_CONVICTION_FIELDS):
             spans = []
 
         def _reads_field(node):
-            for sub in _ast.walk(node):
+            for sub in _sc.walk(node):
                 if isinstance(sub, _ast.Constant) and sub.value in fields:
                     return sub.value
                 if isinstance(sub, _ast.Attribute) and sub.attr in fields:
@@ -1294,7 +1294,7 @@ def _gating_conviction_reads(root=None, fields=_CONVICTION_FIELDS):
                     return sub.id
             return None
 
-        for node in _ast.walk(tree):
+        for node in _sc.walk(tree):
             if any(a <= getattr(node, "lineno", -1) <= b for a, b in spans):
                 continue
             # a comparison that CONTROLS something: an if/while test, or a returned/raised bool
@@ -1306,7 +1306,7 @@ def _gating_conviction_reads(root=None, fields=_CONVICTION_FIELDS):
             elif isinstance(node, _ast.Assert):
                 tests.append(node.test)
             for t in tests:
-                for cmp_node in _ast.walk(t):
+                for cmp_node in _sc.walk(t):
                     if not isinstance(cmp_node, _ast.Compare):
                         continue
                     if not _is_value_test(cmp_node):
@@ -1374,13 +1374,13 @@ def pair_single_stock_max_authority(root=None):
     errs = []
     path = os.path.join(root, "capital_destination.py")
     try:
-        tree = _ast.parse(open(path, encoding="utf-8").read())
+        tree = _sc.parse_path(path)
     except Exception as e:                                           # noqa: BLE001
         return ["P4-A1: capital_destination.py unreadable (%s) — the single-authority check "
                 "could NOT run. Reported, never silently skipped (R4.9)" % e]
 
     # P4-A2 — the deleted function must be GONE, not merely unreferenced
-    for node in _ast.walk(tree):
+    for node in _sc.walk(tree):
         if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
            and node.name == "derive_stock_max":
             errs.append("P4-A2: `capital_destination.derive_stock_max` is DEFINED again at "
@@ -1391,12 +1391,12 @@ def pair_single_stock_max_authority(root=None):
 
     # P4-A1 — sleeve_split must contain a real CALL to position_sizing.stock_max
     found = False
-    for node in _ast.walk(tree):
+    for node in _sc.walk(tree):
         if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             continue
         if node.name != "sleeve_split":
             continue
-        for sub in _ast.walk(node):
+        for sub in _sc.walk(node):
             if not isinstance(sub, _ast.Call):
                 continue
             f = sub.func
@@ -1440,16 +1440,16 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
     src = _cd_src
     if src is None:
         try:
-            src = open(os.path.join(root, "capital_destination.py"), encoding="utf-8").read()
+            src = _sc.read(os.path.join(root, "capital_destination.py"))
         except Exception as e:                                          # noqa: BLE001
             return ["ISA-0490: capital_destination.py unreadable (%s) — the wiring check did "
                     "NOT run. Reported, never silently skipped (R4.9)." % e]
     try:
-        tree = _ast.parse(src)
+        tree = _sc.parse_text(src)
     except SyntaxError as e:
         return ["ISA-0490: capital_destination.py does not parse (%s) — check did NOT run" % e]
 
-    fns = {n.name: n for n in _ast.walk(tree)
+    fns = {n.name: n for n in _sc.walk(tree)
            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
     if "build" not in fns:
         return ["ISA-0490: `capital_destination.build` is not defined — this check is BLIND, "
@@ -1457,7 +1457,7 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
 
     # (1) build() must CALL capital_pipeline
     called = set()
-    for sub in _ast.walk(fns["build"]):
+    for sub in _sc.walk(fns["build"]):
         if isinstance(sub, _ast.Call):
             f = sub.func
             if isinstance(f, _ast.Name):
@@ -1473,7 +1473,7 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
 
     # (2) sleeve_split must be called WITH candidates= — a positional/absent argument is how
     #     the seam silently reverts
-    ss_calls = [c for c in _ast.walk(fns["build"])
+    ss_calls = [c for c in _sc.walk(fns["build"])
                 if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
                 and c.func.id == "sleeve_split"]
     if not ss_calls:
@@ -1489,7 +1489,7 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
     # (3) `allocate` must be reached from sleeve_split — the cap without the allocation is a
     #     ceiling with no instruction attached
     if "sleeve_split" in fns:
-        alloc = {c.func.attr for c in _ast.walk(fns["sleeve_split"])
+        alloc = {c.func.attr for c in _sc.walk(fns["sleeve_split"])
                  if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)}
         if "allocate" not in alloc:
             errs.append(
@@ -1501,14 +1501,14 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
     # (4) the seam guard itself must exist: candidates is None -> RAISE, never `or []`
     if "sleeve_split" in fns:
         raises_on_none = False
-        for sub in _ast.walk(fns["sleeve_split"]):
+        for sub in _sc.walk(fns["sleeve_split"]):
             if isinstance(sub, _ast.If) and isinstance(sub.test, _ast.Compare):
                 t = sub.test
                 if isinstance(t.left, _ast.Name) and t.left.id == "candidates" \
                    and any(isinstance(o, _ast.Is) for o in t.ops) \
                    and any(isinstance(c, _ast.Constant) and c.value is None
                            for c in t.comparators):
-                    if any(isinstance(x, _ast.Raise) for x in _ast.walk(sub)):
+                    if any(isinstance(x, _ast.Raise) for x in _sc.walk(sub)):
                         raises_on_none = True
         if not raises_on_none:
             errs.append(
@@ -1539,7 +1539,7 @@ def pair_capital_pipeline_wired(root=None, _cd_src=None):
         for fname, fnode in fns.items():
             if fname == "_load_portfolio" or fname in _SCAFFOLD or fname.startswith("test_"):
                 continue
-            for sub in _ast.walk(fnode):
+            for sub in _sc.walk(fnode):
                 if not (isinstance(sub, _ast.Constant) and isinstance(sub.value, str)):
                     continue
                 v = sub.value
@@ -1604,7 +1604,7 @@ def pair_projection_carries_consumer_fields(root=None, _producer_src=None, _cons
             return override
         p = os.path.join(root, name)
         try:
-            return open(p, encoding="utf-8").read()
+            return _sc.read(p)
         except Exception as e:                                       # noqa: BLE001
             return None
 
@@ -1615,13 +1615,13 @@ def pair_projection_carries_consumer_fields(root=None, _producer_src=None, _cons
                 "projection/consumer contract could NOT be checked. Reported, never silently "
                 "skipped (R4.9)."]
     try:
-        ptree, ctree = _ast.parse(prod_src), _ast.parse(cons_src)
+        ptree, ctree = _sc.parse_text(prod_src), _sc.parse_text(cons_src)
     except SyntaxError as e:                                         # noqa: BLE001
         return ["ISA-0487: could not parse (%s) — check did NOT run (R4.9)" % e]
 
     # ── PRODUCER: keys of the dict literal appended to `deployment_priority_rank` ────────
     produced = set()
-    for node in _ast.walk(ptree):
+    for node in _sc.walk(ptree):
         if not isinstance(node, _ast.Call):
             continue
         f = node.func
@@ -1645,12 +1645,12 @@ def pair_projection_carries_consumer_fields(root=None, _producer_src=None, _cons
     ROW_READERS = {"_qualifies", "build", "_er_margin_pp"}
     ROW_VARS = {"row", "r", "entry"}
     required = set()
-    for node in _ast.walk(ctree):
+    for node in _sc.walk(ctree):
         if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             continue
         if node.name not in ROW_READERS:
             continue
-        for sub in _ast.walk(node):
+        for sub in _sc.walk(node):
             if not isinstance(sub, _ast.Call):
                 continue
             f = sub.func
@@ -1710,7 +1710,7 @@ def pair_entry_and_review_fractions_distinct(root=None):
     for mod, const, word in (("risk_contribution.py", "FLAG_FRACTION_OF_STARTER", "review"),
                              ("position_sizing.py", "MIN_ENTRY_FRACTION_OF_STARTER", "entry")):
         try:
-            txt = open(os.path.join(root, mod), encoding="utf-8").read()
+            txt = _sc.read(os.path.join(root, mod))
         except Exception:                                            # noqa: BLE001
             continue
         i = txt.find(const)
@@ -1849,7 +1849,7 @@ def pair_referenced_scripts_exist(texts, exists=os.path.exists):
 def _assigned_and_imported(tree):
     """Every name bound anywhere in a module (any scope) plus every imported name."""
     bound = set()
-    for node in ast.walk(tree):
+    for node in _sc.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bound.add(node.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1899,7 +1899,7 @@ def pair_undefined_constants(py_texts):
     errs = []
     for fn, txt in sorted(py_texts.items()):
         try:
-            tree = ast.parse(txt, filename=fn)
+            tree = _sc.parse_text(txt, filename=fn)
         except SyntaxError as e:
             errs.append(f"A18/M8: {fn} does not parse ({e})")
             continue
@@ -1910,7 +1910,7 @@ def pair_undefined_constants(py_texts):
                         f"rather than passed (R4.9); replace the star import to restore cover")
             continue
         seen = set()
-        for node in ast.walk(tree):
+        for node in _sc.walk(tree):
             if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
                     and re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", node.id)
                     and node.id not in bound
@@ -1920,7 +1920,7 @@ def pair_undefined_constants(py_texts):
                 errs.append(f"A18/M8: {fn} reads {node.id} (line {node.lineno}) but it is never "
                             f"assigned or imported in that file — NameError at runtime")
         # (b) call targets — any case. A bare-Name call to something the module never binds.
-        for node in ast.walk(tree):
+        for node in _sc.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id not in bound
                     and node.func.id not in dir(builtins)
@@ -1962,7 +1962,7 @@ _M9_LIT_TYPES = {ast.Dict: dict, ast.Set: set, ast.List: list, ast.Tuple: tuple}
 def _m9_scope_bodies(tree):
     """(scope_node, [statements]) for the module and every function, nested bodies excluded."""
     scopes = [tree]
-    for n in ast.walk(tree):
+    for n in _sc.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             scopes.append(n)
     return scopes
@@ -1990,7 +1990,7 @@ def _m9_literal_type(v):
 def pair_literal_attr_calls(py_texts):
     errs = []
     for fn, txt in sorted(py_texts.items()):
-        try: tree = ast.parse(txt, filename=fn)
+        try: tree = _sc.parse_text(txt, filename=fn)
         except SyntaxError: continue
         for scope in _m9_scope_bodies(tree):
             nodes = _m9_own_nodes(scope)
@@ -2024,7 +2024,7 @@ def pair_literal_attr_calls(py_texts):
                             lt = _m9_literal_type(n.value)
                             if lt: lit[nid] = (lt, n.lineno)
             if isinstance(scope,(ast.FunctionDef, ast.AsyncFunctionDef)):
-                for a in ast.walk(scope.args):
+                for a in _sc.walk(scope.args):
                     if isinstance(a, ast.arg): binds[a.arg] = binds.get(a.arg,0)+2
             for n in nodes:
                 if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -2337,13 +2337,13 @@ def pair_unimported_stdlib_modules(py_texts):
     errs = []
     for fn, txt in sorted(py_texts.items()):
         try:
-            tree = ast.parse(txt, filename=fn)
+            tree = _sc.parse_text(txt, filename=fn)
         except SyntaxError as e:
             errs.append(f"A18/M9: {fn} does not parse ({e})")
             continue
         bound = _assigned_and_imported(tree)
         seen = set()
-        for node in ast.walk(tree):
+        for node in _sc.walk(tree):
             if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
                     and node.id in _STDLIB_MODULES and node.id not in bound
                     and node.id not in seen):
@@ -3001,10 +3001,10 @@ def pair_no_literal_fallback_for_derived_thresholds(py_texts=None):
         if fn in ("isa_policy.py", "consistency_check.py"):
             continue                      # the registry itself, and this checker's own fixtures
         try:
-            tree = _ast.parse(src)
+            tree = _sc.parse_text(src)
         except SyntaxError:
             continue
-        for node in _ast.walk(tree):
+        for node in _sc.walk(tree):
             # Form 1 — a numeric default in ANY argument position after the name
             if isinstance(node, _ast.Call):
                 for i, a in enumerate(node.args):
@@ -3033,11 +3033,11 @@ def pair_no_literal_fallback_for_derived_thresholds(py_texts=None):
         # Form 2 — a function whose name marks it an accessor for a derived threshold, whose
         # body contains a bare numeric return. Scoped to accessor-shaped names so this does not
         # flag every helper in the codebase.
-        for f in [n for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef)]:
+        for f in [n for n in _sc.walk(tree) if isinstance(n, _ast.FunctionDef)]:
             nm = f.name.lower()
             if not any(t in nm for t in ("anchor", "floor", "hurdle", "gate_pct", "required_return")):
                 continue
-            for r in [n for n in _ast.walk(f) if isinstance(n, _ast.Return)]:
+            for r in [n for n in _sc.walk(f) if isinstance(n, _ast.Return)]:
                 v = r.value
                 if (isinstance(v, _ast.Constant) and isinstance(v.value, (int, float))
                         and not isinstance(v.value, bool) and v.value not in (0, 1, -1)):
@@ -3208,7 +3208,7 @@ def pair_no_duplicate_module_constant(py_texts=None, modules=("scoring_config.py
                     if os.path.exists(os.path.join(HERE, fn))}
     for fn, src in sorted(py_texts.items()):
         try:
-            tree = _ast.parse(src)
+            tree = _sc.parse_text(src)
         except SyntaxError as e:
             errs.append(f"ISA-0432 Form 5: {fn} does not parse ({e})")
             continue
@@ -3351,12 +3351,12 @@ def pair_local_used_before_bound(sources=None, root=None):
     errs = []
     for label, text in sorted(sources.items()):
         try:
-            tree = _ast.parse(text)
+            tree = _sc.parse_text(text)
         except SyntaxError as e:
             errs.append("ISA-0589: %s does not parse (%s) — this check did NOT run, it did not "
                         "pass (R4.9)" % (label, e))
             continue
-        for fn in [n for n in _ast.walk(tree)
+        for fn in [n for n in _sc.walk(tree)
                    if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))]:
             params = {a.arg for a in list(fn.args.args) + list(fn.args.kwonlyargs)
                       + list(fn.args.posonlyargs)}
@@ -3364,7 +3364,7 @@ def pair_local_used_before_bound(sources=None, root=None):
                 if extra:
                     params.add(extra.arg)
             declared_global = set()
-            for n in _ast.walk(fn):
+            for n in _sc.walk(fn):
                 if isinstance(n, (_ast.Global, _ast.Nonlocal)):
                     declared_global.update(n.names)
             # ⚑ INDEXED BY TOP-LEVEL STATEMENT, NOT BY LINE. A load and a store inside the
@@ -3396,7 +3396,7 @@ def pair_local_used_before_bound(sources=None, root=None):
 
             first_bind, first_load, bind_line = {}, {}, {}
             for idx, stmt in enumerate(fn.body):       # straight-line only, deliberately
-                for nm in _ast.walk(stmt):             # BINDINGS: nested scopes included, so a
+                for nm in _sc.walk(stmt):             # BINDINGS: nested scopes included, so a
                     if isinstance(nm, _ast.alias):     # helper's own import still counts
                         b = (nm.asname or nm.name).split(".")[0]
                         first_bind.setdefault(b, idx); bind_line.setdefault(b, stmt.lineno)
@@ -3662,11 +3662,11 @@ def _summary_decls(prefill_text):
     truncated by a comment, a nested paren or a line break."""
     import ast as _ast
     try:
-        tree = _ast.parse(prefill_text)
+        tree = _sc.parse_text(prefill_text)
     except SyntaxError as e:
         return None, "email_prefill.py does not parse (%s)" % e
     found = {}
-    for n in _ast.walk(tree):
+    for n in _sc.walk(tree):
         if isinstance(n, _ast.Assign) and len(n.targets) == 1 \
                 and isinstance(n.targets[0], _ast.Name) \
                 and n.targets[0].id.startswith("SUMMARY_"):
@@ -3780,18 +3780,18 @@ def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None
     #    cannot tell a mention from a use is a check that gets deleted rather than fixed
     #    (pair_monthly_return_architecture learned this the same way).
     try:
-        _tree = _ast.parse(prerun_text)
+        _tree = _sc.parse_text(prerun_text)
     except SyntaxError:
         _tree = None
         errs.append("ISA-0447: monthly_isa_prerun.py does not parse — the escalation half of "
                     "this check could not run")
     if _tree is not None:
         warn_texts = []
-        for n in _ast.walk(_tree):
+        for n in _sc.walk(_tree):
             if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute) \
                     and n.func.attr == "append" \
                     and isinstance(n.func.value, _ast.Name) and n.func.value.id == "warnings":
-                for sub in _ast.walk(n):
+                for sub in _sc.walk(n):
                     if isinstance(sub, _ast.Constant) and isinstance(sub.value, str):
                         warn_texts.append(sub.value)
         blob = "\n".join(warn_texts)
@@ -3851,17 +3851,17 @@ def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None
         _openers = {"open", "glob", "iglob", "load_json_optional", "load_json", "join"}
         for _txt, _who in ((prefill_text, "email_prefill"), (_rend, "build_monthly_isa_email")):
             try:
-                _t2 = _ast.parse(_txt)
+                _t2 = _sc.parse_text(_txt)
             except SyntaxError:
                 continue
-            for n in _ast.walk(_t2):
+            for n in _sc.walk(_t2):
                 if not isinstance(n, _ast.Call):
                     continue
                 _fn = (n.func.attr if isinstance(n.func, _ast.Attribute)
                        else getattr(n.func, "id", ""))
                 if _fn not in _openers:
                     continue
-                for sub in _ast.walk(n):
+                for sub in _sc.walk(n):
                     if isinstance(sub, _ast.Constant) and isinstance(sub.value, str) \
                             and "capital_destination_" in sub.value:
                         errs.append(
@@ -3920,18 +3920,18 @@ def pair_artefact_shape_single_home(rows=None, module_texts=None):
                         % module)
             continue
         try:
-            tree = _ast.parse(text)
+            tree = _sc.parse_text(text)
         except SyntaxError as e:                                     # noqa: BLE001
             errs.append("ISA-0512: %s does not parse (%s) - BLIND" % (module, e))
             continue
-        fn = next((n for n in _ast.walk(tree)
+        fn = next((n for n in _sc.walk(tree)
                    if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
                    and n.name == fname), None)
         if fn is None:
             errs.append("ISA-0512: %s.%s not found - the subject was renamed away, so this "
                         "check is BLIND rather than satisfied" % (module, fname))
             continue
-        builders = [n for n in _ast.walk(fn)
+        builders = [n for n in _sc.walk(fn)
                     if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
                     and n.name == builder]
         if not builders:
@@ -3939,7 +3939,7 @@ def pair_artefact_shape_single_home(rows=None, module_texts=None):
                         "- BLIND" % (module, fname, builder))
             continue
         arms = []
-        for node in _ast.walk(fn):
+        for node in _sc.walk(fn):
             if not isinstance(node, _ast.Dict):
                 continue
             for k, v in zip(node.keys, node.values):
@@ -3988,10 +3988,10 @@ def _flags_read_by(text, known):
     import ast as _ast
     out = set()
     try:
-        tree = _ast.parse(text)
+        tree = _sc.parse_text(text)
     except SyntaxError:
         return out
-    for n in _ast.walk(tree):
+    for n in _sc.walk(tree):
         if isinstance(n, _ast.Call):
             fn = (n.func.attr if isinstance(n.func, _ast.Attribute)
                   else n.func.id if isinstance(n.func, _ast.Name) else None)
@@ -4370,10 +4370,10 @@ def pair_cash_reserve_is_single_topup_control(root=None):
         if fn == os.path.basename(__file__):
             continue
         try:
-            tree = _ast.parse(open(os.path.join(root, fn), encoding="utf-8").read())
+            tree = _sc.parse_path(os.path.join(root, fn))
         except Exception:                                              # noqa: BLE001
             continue
-        for node in _ast.walk(tree):
+        for node in _sc.walk(tree):
             hit = False
             if isinstance(node, _ast.Subscript) and isinstance(node.slice, _ast.Constant) \
                     and node.slice.value == "min_topup_gbp":
@@ -4407,8 +4407,8 @@ def pair_min_hold_is_position_level(root=None):
     fn = os.path.join(root, "position_sizing.py")
     if not os.path.exists(fn):
         return ["D24: position_sizing.py absent"]
-    tree = _ast.parse(open(fn, encoding="utf-8").read())
-    for node in _ast.walk(tree):
+    tree = _sc.parse_path(fn)
+    for node in _sc.walk(tree):
         if isinstance(node, _ast.FunctionDef) and node.name == "min_hold_ok":
             names = [a.arg for a in node.args.kwonlyargs]
             errs = []

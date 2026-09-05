@@ -1,8 +1,8 @@
 {
  "_what": "P1.2c VERIFIED ticker->Yahoo symbol map. An entry exists ONLY where (a) an index screen, the broker, a VCI artefact, the VCI watchlist or the declared benchmark list named the ticker, AND (b) the live listing's EXCHANGE is one its declared venue permits. \u2691 A symbol match is NOT a check: a bare `ONT` returns meta.symbol 'ONT' for Onterris, Inc. The EXCHANGE is the falsifier. \u2691 REFRESHED BY THE RUN THAT CONSUMES IT (Step 5x, ISA-0577) \u2014 this file was a hand-run artefact frozen at 2026-08-28 while the universe grew every month, and 119 of 178 names (66.9%) were unmapped, unfetched and sized on A2.3's adverse 0.70. \u2691 APPEND-ONLY: an existing entry is never re-decided (R4.8). \u2691 GENERATED \u2014 never hand-edited (R14.3).",
  "built_on": "2026-08-28",
- "n_map": 177,
- "n_refused": 3,
+ "n_map": 178,
+ "n_refused": 2,
  "map": {
   "AVGO": "AVGO",
   "MU": "MU",
@@ -180,7 +180,8 @@
   "WMG": "WMG",
   "XPO": "XPO",
   "XYZ": "XYZ",
-  "ZAB.WA": "ZAB.WA"
+  "ZAB.WA": "ZAB.WA",
+  "IONQ": "IONQ"
  },
  "verified": [
   {
@@ -1565,6 +1566,19 @@
    "company": "Infleqtion, Inc.",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "IONQ",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "NYQ",
+    "NYS"
+   ],
+   "source": "artefact:vci_prescore_aug_2026.json",
+   "company": "IonQ, Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-09-05"
   },
   {
    "ticker": "IPN.PA",
@@ -3139,15 +3153,6 @@
    "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
   },
   {
-   "ticker": "IONQ",
-   "group": "VCI",
-   "source": "artefact:vci_prescore_aug_2026.json",
-   "company": "IonQ, Inc.",
-   "declared_venue": null,
-   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"IONQ\": \"IONQ.L\" \u2014 deliberately, never guessed",
-   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
-  },
-  {
    "ticker": "SATL",
    "group": "VCI",
    "source": "artefact:vci_prescore_aug_2026.json",
@@ -3157,5 +3162,5 @@
    "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
   }
  ],
- "refreshed_on": "2026-09-04"
+ "refreshed_on": "2026-09-05"
 }
