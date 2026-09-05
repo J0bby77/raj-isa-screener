@@ -2014,6 +2014,11 @@ SUMMARY_ESCALATED = {
     # it as an ASSURANCE warning into the list the review reads before writing. PENDING is not
     # passed — a key that stayed silent when incomplete would let absent read as clean (R2.10).
     "assurance": "ASSURANCE",                       # Steps 9c/9e/6.10d — which checks ran
+    # ⚑ ESCALATED, not rendered as a figure. When the gate blocks nothing it has nothing to add
+    # to Section 5; when it withholds a name from the marginal pound the reader must be told
+    # WHICH name and on what measured beta, because that name is still a legitimate SWITCH
+    # candidate and the distinction changes what the review does with it (ISA-0600).
+    "sleeve_gate": "SLEEVE GATE",                   # Step 8 — the beta constraint on additions
 }
 
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here

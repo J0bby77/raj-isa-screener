@@ -646,6 +646,10 @@ def main():
                         help="Path to watchlist_tickers.json")
     parser.add_argument("--month-label",  required=True,
                         help="Month label e.g. jul_2026")
+    parser.add_argument("--portfolio",    default=None,
+                        help="portfolio_data_[mmm_yyyy].json — the held stock sleeve the "
+                             "ISA-0600 covariance gate measures beta against. Absent, the gate "
+                             "reports UNAVAILABLE rather than passing silently (R4.9).")
     parser.add_argument("--out",          required=True,
                         help="Output path for step9_pre_mmm_yyyy.json")
     args = parser.parse_args()
@@ -1260,6 +1264,97 @@ def main():
             _forward_ineligible_queue.append(
                 {**_r, "queue_rank": len(_forward_ineligible_queue) + 1})
 
+    # ── ISA-0600 — THE SLEEVE COVARIANCE GATE, APPLIED TO THE MARGINAL POUND ────────────────
+    # ⚑ THE RANKING SIGNAL IS UNPROVEN AND THE COVARIANCE IS MEASURED, so the deployable stack
+    # is constrained and then ORDERED on the measured quantity. source_score's IC has 0 matured
+    # 3-month observations against a pre-registered gate of 200; the correlation matrix covers
+    # 175 of 180 names on 156 weekly observations. Ranking on the first while ignoring the
+    # second had put the two most duplicative candidates in the book at the top of the
+    # in-window list (WDC beta 0.88, NVDA 0.67 to the held sleeve).
+    #
+    # ⚑ ADMISSION IS UNCHANGED. Every name reaching here has already cleared the forward-led
+    # viability floor, the hard quality floor and the E[r] floor. This gate removes names that
+    # would CONCENTRATE the sleeve and then orders the survivors by the risk each adds per
+    # pound. It is a constraint plus an ordering, never a re-scoring — and it applies to
+    # ADDITIONS FROM CASH only, because a switch is judged on net delta-sigma (Raj, 05-Sep-2026).
+    _sleeve_gate = {"state": "NOT_RUN", "blocked": [], "unmeasured": [], "n_admitted": 0}
+    try:
+        import sleeve_risk as _sr, stock_return_store as _srs, isa_policy as _pol
+        _store = _srs.load()
+        _pp = getattr(args, "portfolio", None)
+        if not _pp:
+            raise _sr.RiskRefused("--portfolio not supplied, so the held sleeve is unknown and "
+                                  "no beta can be measured against it")
+        _portfolio = json.load(open(_pp, encoding="utf-8"))
+        if not (_portfolio or {}).get("stocks"):
+            raise _sr.RiskRefused("no stock sleeve in portfolio_data — beta to it is undefined")
+        _held = {st.get("ticker") for st in _portfolio["stocks"]}
+        _kept, _blocked, _unmeasured = [], [], []
+        for _r in _deployable_stack:
+            _t = _r.get("ticker")
+            _g = _sr.gate_add(_store, _portfolio, _t)
+            _r["sleeve_beta"] = _g.get("beta")
+            _r["sleeve_beta_basis"] = _g.get("basis")
+            _r["sleeve_gate"] = _g["verdict"]
+            _r["sleeve_gate_reason"] = _g.get("reason")
+            _r["zero_return_share"] = _g.get("zero_return_share")
+            if _g["verdict"] == "BLOCKED":
+                _blocked.append({"ticker": _t, "beta": _g.get("beta"),
+                                 "zero_return_share": _g.get("zero_return_share"),
+                                 "source_score": _r.get("source_score"),
+                                 "reason": _g.get("reason")})
+            else:
+                if _g["verdict"] == "UNMEASURED":
+                    _unmeasured.append({"ticker": _t, "reason": _g.get("reason")})
+                _kept.append(_r)
+        # order the survivors by the risk each adds per pound, cheapest first
+        _size = float(getattr(_pol, "STARTER_GBP", 0) or 0) or 1000.0
+        _order = _sr.rank_by_marginal_risk(_store, _portfolio,
+                                           [r.get("ticker") for r in _kept], _size)
+        _pos = {d["ticker"]: i for i, d in enumerate(_order)}
+        _dsig = {d["ticker"]: d.get("delta_sigma") for d in _order}
+        # ⚑ LEXICOGRAPHIC, AND THE ORDER OF THE KEYS IS THE POLICY. The E[r] floor comes FIRST,
+        # so marginal risk can never float a name that fails the return bar above one that
+        # clears it. 16 of the 63 forward-eligible names fail that floor today; without this key
+        # a low-beta name among them could take rank 1 and the gate would have bought risk
+        # reduction with return, which is not the trade Raj asked for. Risk orders WITHIN the
+        # return floor, it does not substitute for it.
+        _kept.sort(key=lambda r: ((r.get("er_floor_status") != "pass"),
+                                  _pos.get(r.get("ticker"), 10 ** 6)))
+        for _i, _r in enumerate(_kept, 1):
+            _r["delta_sigma_add"] = _dsig.get(_r.get("ticker"))
+            _r["deployable_rank"] = _i
+            _r["deployable_rank_basis"] = (
+                "ISA-0600: E[r] floor status first, then marginal contribution to sleeve "
+                "volatility per pound ascending. "
+                "Admission is unchanged and still governed by the forward-led, quality and E[r] "
+                "floors; this orders names that all cleared them. Reverts to source_score "
+                "ordering when the calibration IC gate is met.")
+        _deployable_stack = _kept
+        _sleeve_gate = {"state": "OK", "beta_max": _pol.SLEEVE_BETA_MAX,
+                        "dimson_lags": _pol.SLEEVE_BETA_DIMSON_LAGS,
+                        "stale_zero_return_max": _pol.SLEEVE_STALE_ZERO_RETURN_MAX,
+                        "basis": _pol.SLEEVE_GATE_BASIS,
+                        "n_admitted": len(_kept), "n_blocked": len(_blocked),
+                        "blocked": _blocked, "unmeasured": _unmeasured,
+                        "applies_to": ("ADDITIONS FROM CASH only. A switch is judged on net "
+                                       "delta-sigma (sleeve_risk.delta_sigma_switch), so a "
+                                       "high-beta name is never blocked as a REPLACEMENT "
+                                       "candidate."),
+                        "ordering": ("deployable_stack is ordered lexicographically: E[r] floor "
+                                     "PASS before FAIL, then delta_sigma_add ascending, while "
+                                     "the calibration IC gate is unmet"),
+                        "n_er_floor_pass": sum(1 for r in _kept
+                                               if r.get("er_floor_status") == "pass")}
+    except Exception as _e:                                             # noqa: BLE001
+        # ⚑ AN UNAVAILABLE CONSTRAINT IS REPORTED, NEVER SILENTLY SKIPPED (R4.9). The stack
+        # keeps its source_score ordering and SAYS the gate did not run.
+        _sleeve_gate = {"state": "UNAVAILABLE",
+                        "reason": "%s: %s" % (type(_e).__name__, _e),
+                        "consequence": ("the deployable stack is ordered by source_score and NO "
+                                        "beta constraint was applied — this is the pre-ISA-0600 "
+                                        "behaviour, not a clean pass (R2.10)")}
+
     # Produce output
     output = {
         "_meta": {
@@ -1282,6 +1377,7 @@ def main():
             # CAP-4 coverage — surfaced, not inferred from a null count downstream.
             "undeployable_unmeasured":     _undeployable_unmeasured,
             "deployable_count":            len(_deployable_stack),
+            "sleeve_gate":                 _sleeve_gate,
             "forward_ineligible_count":    len(_forward_ineligible_queue),
             "deployment_rank_basis_note": (
                 "deployment_priority_rank is PARTITIONED: ranks 1.."

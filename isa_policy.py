@@ -269,7 +269,35 @@ ALIAS_REPORTERS = {
 DECLARED_CONSTANTS = frozenset({
     "MIN_HOLD_DAYS", "VCI_SLEEVE_BINARY_RISK_BUDGET", "ER_FRICTION_BUFFER",
     "FUND_MIN_COVERAGE", "VCI_FLOOR_MAX", "SLEEVE_PROBATION_PP",
+    "SLEEVE_BETA_MAX", "SLEEVE_BETA_DIMSON_LAGS", "SLEEVE_STALE_ZERO_RETURN_MAX",
 })
+
+
+# ── ISA-0600 — THE SLEEVE COVARIANCE GATE (Raj, 05-Sep-2026) ─────────────────────────────
+# ⚑ THESE ARE DECLARED, NOT DERIVED, AND THE DISTINCTION IS THE WHOLE POINT. The deployment
+# ranking runs on `source_score`, whose IC is UNVALIDATED — 0 matured 3-month observations
+# against a pre-registered gate of 200, and the only populated column (IC@1m) is NEGATIVE for
+# the ranking signals on 13% price coverage in a single regime. The covariance, by contrast, is
+# measured across 175 of 180 names on 156 weekly observations. Standard errors say the same
+# thing: a mean return carries SE ~ sigma/sqrt(T) ~ 24pp a year here and is not estimable, while
+# a correlation carries SE ~ (1-rho^2)/sqrt(T) ~ 0.08 and is. So the sleeve gate is set on the
+# quantity that can be measured, and it is set as a CONSTRAINT rather than a tilt because
+# constraints are robust to estimation error and tilts are not (Michaud).
+#
+# ⚑ THE GATE APPLIES TO ADDITIONS FROM CASH ONLY. A switch replaces one exposure with another
+# and is judged on the net change in sleeve risk instead (sleeve_risk.delta_sigma_switch), so a
+# high-beta name is never blocked as a REPLACEMENT candidate — if a held name clears its
+# min-hold and the pound is better deployed elsewhere, beta must not veto that.
+SLEEVE_BETA_MAX = 0.60          # Dimson beta to the held sleeve, self-excluded
+SLEEVE_BETA_DIMSON_LAGS = 1     # non-synchronous-trading correction
+SLEEVE_STALE_ZERO_RETURN_MAX = 0.30   # share of exactly-zero weekly returns tolerated
+SLEEVE_GATE_BASIS = (
+    "ISA-0600: additions from cash require Dimson beta <= SLEEVE_BETA_MAX against the held "
+    "sleeve (self-excluded) and a zero-return share <= SLEEVE_STALE_ZERO_RETURN_MAX. The "
+    "staleness test exists because non-synchronous pricing biases an illiquid name's beta "
+    "DOWNWARD, so an uncorrected low-beta preference would systematically reward illiquidity. "
+    "Switches are exempt and are judged on net delta-sigma."
+)
 
 
 def _target_state() -> Optional[dict]:

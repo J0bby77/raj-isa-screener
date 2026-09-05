@@ -163,18 +163,28 @@ def source_files(root: str = HERE, *, include_tests: bool = False,
 
 
 def parsed(path: str) -> Tuple[str, Optional[ast.Module]]:
+    """Source text and AST for a file, through the SHARED cache (ISA-0597).
+
+    ⚑ ONE HOME, AND IT PAYS TWICE. This module kept its own `_SRC_CACHE` beside
+    `isa_source_cache`, so the ~150 files parsed by `preflight` at Step 0 were parsed AGAIN by
+    the A18 checker inside Step 9d in the same process — 657 redundant `ast.parse` calls and 36s
+    of a ~175s budget. Sharing the cache means Step 0 warms it for everything downstream.
+    Semantics are unchanged and that is not asserted in prose: `producer_equivalence` and
+    `computer_equivalence` re-derive every live pair through the pre-ISA-0594 scanners and
+    compare (R5.8)."""
     if path in _SRC_CACHE:
         return _SRC_CACHE[path]
     try:
-        with open(path, encoding="utf-8") as fh:
-            src = fh.read()
+        import isa_source_cache as _sc
+        src = _sc.read(path)
+        if src is None:
+            raise OSError(path)
+        tree = _sc.parse_text(src, filename=path)
+    except SyntaxError:
+        src, tree = (_SRC_CACHE.get(path, ("", None))[0] or ""), None
     except Exception:                                                   # noqa: BLE001
         _SRC_CACHE[path] = ("", None)
         return _SRC_CACHE[path]
-    try:
-        tree = ast.parse(src, filename=path)
-    except SyntaxError:
-        tree = None
     _SRC_CACHE[path] = (src, tree)
     return _SRC_CACHE[path]
 
@@ -203,13 +213,19 @@ _DATA_BLOB_CACHE: dict = {}
 
 
 def _walk_cached(path: str, tree):
-    """list(ast.walk(tree)) memoised per file. ast.walk rebuilds a deque every call, and
-    `_producers_of` was walking the same 150 trees once per (field, literal) pair."""
-    got = _WALK_CACHE.get(path)
-    if got is None:
-        got = list(ast.walk(tree))
-        _WALK_CACHE[path] = got
-    return got
+    """list(ast.walk(tree)) memoised per NODE, through the shared cache (ISA-0597).
+
+    Keyed on the tree rather than the path, so a tree already walked by another consumer in this
+    process is not walked again."""
+    try:
+        import isa_source_cache as _sc
+        return _sc.walk(tree)
+    except Exception:                                                   # noqa: BLE001
+        got = _WALK_CACHE.get(path)
+        if got is None:
+            got = list(ast.walk(tree))
+            _WALK_CACHE[path] = got
+        return got
 
 
 def _spans_cached(path: str, tree, module: str):

@@ -2855,6 +2855,7 @@ def main():
                 "--scored",      watchlist_scored_path,
                 "--watchlist",   watchlist_config_path,
                 "--month-label", month_label,
+                "--portfolio",   portfolio_path,      # ISA-0600 sleeve covariance gate
                 "--out",         step9_pre_path,
             ],
             dry_run=args.dry_run,
@@ -2889,6 +2890,39 @@ def main():
                     coverage=(_scored8 / len(_dpr)) if _dpr else None,
                     non_null_share=(_scored8 / len(_dpr)) if _dpr else None,
                     note=f"deployment_priority_rank={len(_dpr)}, source_score present on {_scored8}")
+
+        # ── ISA-0600 — surface the sleeve covariance gate into run_context and the warnings ──
+        # ⚑ A CONSTRAINT NOBODY CAN SEE FIRING IS INDISTINGUISHABLE FROM ONE THAT NEVER RAN.
+        # The blocked names are carried with their measured beta so the review can see WHAT was
+        # withheld from the marginal pound and why, and can still consider any of them as a
+        # SWITCH candidate, which the gate does not touch.
+        _sg = (_s9.get("_meta") or {}).get("sleeve_gate") or {}
+        summary["sleeve_gate"] = _sg
+        if _sg.get("state") == "OK":
+            _bl = _sg.get("blocked") or []
+            print("  [ISA-0600] sleeve gate: %d admitted (%s pass the E[r] floor), %d blocked as "
+                  "ADDITIONS at beta > %.2f"
+                  % (_sg.get("n_admitted", 0), _sg.get("n_er_floor_pass"), len(_bl),
+                     _sg.get("beta_max", 0)))
+            for _b in _bl[:6]:
+                print("      blocked  %-10s beta %.2f  (source_score %s)"
+                      % (_b.get("ticker"), _b.get("beta") or 0, _b.get("source_score")))
+            if _bl:
+                warnings.append(
+                    "SLEEVE GATE (ISA-0600): %d name(s) blocked as ADDITIONS on Dimson beta > "
+                    "%.2f to the held sleeve -- %s. They remain available as SWITCH candidates, "
+                    "which are judged on net delta-sigma, not on beta."
+                    % (len(_bl), _sg.get("beta_max", 0),
+                       ", ".join("%s %.2f" % (b.get("ticker"), b.get("beta") or 0)
+                                 for b in _bl[:8])))
+            for _u in (_sg.get("unmeasured") or [])[:5]:
+                warnings.append("SLEEVE GATE (ISA-0600): %s is UNMEASURED against the sleeve -- "
+                                "absent is not clean (R2.10). %s"
+                                % (_u.get("ticker"), str(_u.get("reason"))[:160]))
+        elif _sg:
+            warnings.append("SLEEVE GATE (ISA-0600) %s -- %s. %s"
+                            % (_sg.get("state"), str(_sg.get("reason"))[:200],
+                               _sg.get("consequence", "")))
         # The action stack is a separate consumer with its own refusal threshold.
         _as_path = os.path.join(SCRIPT_DIR, f"action_stack_{month_label}.json")
         if os.path.exists(_as_path) and _RM is not None:
