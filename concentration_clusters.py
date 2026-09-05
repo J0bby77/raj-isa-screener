@@ -58,35 +58,117 @@ MIN_COMMON_MONTHS = 24
 
 
 # ────────────────────────────────────────────────────────────── data
-def gather_series(portfolio, universe=None):
-    """-> ({sedol: {month: return}}, excluded[]) . An excluded holding is NAMED WITH ITS WEIGHT,
-    because a concentration measure that quietly drops 15% of the risk assets is worse than none."""
+def _stock_monthly_returns(ticker, store):
+    """Monthly GBP TOTAL-RETURN series for a direct holding, from stock_weekly_returns.json.
+
+    ⚑ ISA-0598. The six direct holdings were excluded from this measure for want of a monthly
+    series while the weekly store held 157 GBP total-return observations for every one of them —
+    so `effective_bets` and PC1 described the FUND SLEEVE and were read as the portfolio's, with
+    MU (42.8% of stock-sleeve risk) invisible to them. The series exists; nothing resampled it.
+
+    COMMENSURABILITY (R-ISA-0429), asserted rather than assumed. The fund series this is mixed
+    with are MONTHLY, GBP, TOTAL RETURN. The store's `gbp` field is the GBP total-return LEVEL
+    (adjusted close x FX to GBP), so a month-end-to-month-end ratio of it is the same quantity on
+    the same basis. Two rules keep it that way:
+      · CONSECUTIVE MONTHS ONLY — a gap is skipped, never bridged. A return computed across a
+        missing month is a two-month return wearing a one-month label.
+      · THE CURRENT MONTH IS DROPPED — the store is stamped to the latest Friday, so the running
+        month is PARTIAL. A part-month return sitting in a column of full-month returns understates
+        its own volatility and corrupts every covariance it touches.
+    """
+    obs = ((store.get("names") or {}).get(ticker) or {}).get("observations") or {}
+    if not obs:
+        return []
+    today = dt.date.today()
+    this_month = (today.year, today.month)
+    last_in_month = {}
+    for d, rec in obs.items():
+        gbp = (rec or {}).get("gbp")
+        if gbp is None:
+            continue
+        ym = (int(d[:4]), int(d[5:7]))
+        if ym == this_month:
+            continue                       # incomplete: the month is still running
+        if ym not in last_in_month or d > last_in_month[ym][0]:
+            last_in_month[ym] = (d, float(gbp))
+    months = sorted(last_in_month)
+    out = []
+    for prev, cur in zip(months, months[1:]):
+        if (cur[0] - prev[0]) * 12 + (cur[1] - prev[1]) != 1:
+            continue                       # not consecutive — skip, never bridge
+        p = last_in_month[prev][1]
+        if p:
+            out.append((cur, last_in_month[cur][1] / p - 1.0))
+    return out
+
+
+def gather_series(portfolio, universe=None, store=None):
+    """-> ({sedol: {month: return}}, excluded[], basis{}) . An excluded holding is NAMED WITH ITS
+    WEIGHT, because a concentration measure that quietly drops 15% of the risk assets is worse
+    than none.
+
+    ⚑ EVERY HOLDING IS SOURCED THROUGH THE DOOR THAT ALREADY EXISTS FOR IT (ISA-0598):
+      · funds  -> `fund_performance.nav_series_for`, which takes the declared `local_series`
+        route BEFORE the feed. This module used to call `fetch_nav_history(yf_symbol)` directly
+        and so could not see Polar's manually supplied, factsheet-reconciled monthly series —
+        8.05% of the ISA excluded with "no NAV feed" while the golden source sat in nav_cache/.
+        That is ISA-0307 exactly (`the file was on disk for seven days and no code path read it`)
+        repeating in a second consumer, which is what having two doors always costs.
+      · stocks -> the weekly GBP total-return store, resampled to month end.
+    """
     import fund_action_stack as fas, fund_performance as fp
     universe = universe if universe is not None else fp.load_universe()
     wts = {f["ticker"]: f for f in (portfolio.get("funds") or [])}
-    series, excluded = {}, []
+    series, excluded, basis = {}, [], {}
     for sedol, u in universe.items():
         if str(sedol).startswith("_"):
             continue
         w = (wts.get(sedol) or {}).get("weight_pct") or 0.0
-        sym = u.get("yf_symbol")
-        m = (fas._monthly_returns(fp.fetch_nav_history(sym, use_cache=True,
-                                                       scale=fp._scale_for(u)))
-             if sym else [])
+        try:
+            nav = fp.nav_series_for(sedol, u)          # local_series first, then the feed
+        except Exception as exc:                                        # noqa: BLE001
+            nav = None
+            u = dict(u or {}, unresolved_reason="%s: %s" % (type(exc).__name__, str(exc)[:120]))
+        m = fas._monthly_returns(nav) if nav else []
         if len(m) >= MIN_COMMON_MONTHS:
             series[sedol] = dict(m)
+            basis[sedol] = ("fund NAV, monthly total return, via nav_series_for("
+                            + ("local_series" if (u or {}).get("local_series") else "feed") + ")")
         else:
-            excluded.append({"sedol": sedol, "name": u.get("name"), "weight_pct": w,
-                             "reason": (f"no NAV feed ({u.get('unresolved_reason', 'no yf_symbol')})"
-                                        if not sym else
+            excluded.append({"sedol": sedol, "name": (u or {}).get("name"), "weight_pct": w,
+                             "reason": (f"no NAV series ({(u or {}).get('unresolved_reason', 'no yf_symbol and no local_series')})"
+                                        if not nav else
                                         f"only {len(m)} monthly observations, {MIN_COMMON_MONTHS} required")})
-    for s in (portfolio.get("stocks") or []):
-        excluded.append({"sedol": s.get("ticker"), "name": s.get("name"),
-                         "weight_pct": s.get("weight_pct"),
-                         "reason": "direct holding — no cached monthly series in this pipeline",
-                         "what_would_resolve_it": "cache stock NAV history in the pre-run, where "
-                                                  "the price feed is available"})
-    return series, excluded
+    # ⚑ INJECTABLE. Defaulting to the on-disk store made a unit test read a LIVE artefact, so a
+    # fixture portfolio silently picked up real series and the suite stopped testing what it said
+    # it tested. `store` is a parameter for the same reason `universe` already is.
+    try:
+        if store is None:
+            import stock_return_store as srs
+            store = srs.load() or {}
+    except Exception as exc:                                            # noqa: BLE001
+        store = {}
+        excluded.append({"sedol": "_stock_store", "name": "stock_weekly_returns.json",
+                         "weight_pct": 0.0,
+                         "reason": "the weekly return store could not be loaded (%s: %s), so NO "
+                                   "direct holding could be measured" % (type(exc).__name__,
+                                                                         str(exc)[:100])})
+    for st in (portfolio.get("stocks") or []):
+        t = st.get("ticker")
+        m = _stock_monthly_returns(t, store) if store else []
+        if len(m) >= MIN_COMMON_MONTHS:
+            series[t] = dict(m)
+            basis[t] = ("direct holding, monthly GBP total return resampled from the weekly "
+                        "store (consecutive months only, running month dropped)")
+        else:
+            excluded.append({"sedol": t, "name": st.get("name"),
+                             "weight_pct": st.get("weight_pct"),
+                             "reason": (f"only {len(m)} monthly observations from the weekly "
+                                        f"store, {MIN_COMMON_MONTHS} required"),
+                             "what_would_resolve_it": ("the name needs %d more months in "
+                                                       "stock_weekly_returns.json"
+                                                       % (MIN_COMMON_MONTHS - len(m)))})
+    return series, excluded, basis
 
 
 def common_window(series):
@@ -131,12 +213,19 @@ def average_linkage(corr, labels, threshold):
 
 
 # ────────────────────────────────────────────────────────────── the build
-def build(portfolio, universe=None, run_date=None, out_path=None, append_history=True):
+def build(portfolio, universe=None, run_date=None, out_path=None, append_history=True,
+          store=None):
     run_date = run_date or dt.date.today()
-    series, excluded = gather_series(portfolio, universe)
+    series, excluded, series_basis = gather_series(portfolio, universe, store)
     total = (portfolio.get("summary") or {}).get("total_value_gbp") or 0.0
+    # ⚑ ISA-0598 — WEIGHTS MUST SPAN THE SAME SET AS THE SERIES. `wts` was built from funds
+    # alone, so a direct holding admitted to `series` would have carried weight 0.0: present in
+    # the covariance, absent from the portfolio it is supposed to be a part of, and silently
+    # contributing nothing to risk. The two dicts are built from one union.
     wts = {f["ticker"]: (f.get("weight_pct") or 0.0)
            for f in (portfolio.get("funds") or [])}
+    wts.update({st["ticker"]: (st.get("weight_pct") or 0.0)
+                for st in (portfolio.get("stocks") or []) if st.get("ticker")})
     names = {}
     try:
         import fund_performance as fp
@@ -144,6 +233,8 @@ def build(portfolio, universe=None, run_date=None, out_path=None, append_history
         names = {k: (v or {}).get("name") for k, v in u.items() if not str(k).startswith("_")}
     except Exception:
         pass
+    names.update({st["ticker"]: st.get("name")
+                  for st in (portfolio.get("stocks") or []) if st.get("ticker")})
 
     out = {"schema_version": SCHEMA_VERSION, "run_date": run_date.isoformat(),
            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -151,7 +242,11 @@ def build(portfolio, universe=None, run_date=None, out_path=None, append_history
            "sets_no_limit": ("this module measures and accumulates. It sets no cap and blocks "
                              "nothing. Raj, 06-Aug-2026: build the measurement first and set the "
                              "number against two runs of real data."),
-           "excluded": sorted(excluded, key=lambda e: -(e.get("weight_pct") or 0))}
+           "excluded": sorted(excluded, key=lambda e: -(e.get("weight_pct") or 0)),
+           "series_basis": series_basis,
+           "series_basis_note": ("where each measured holding's return series came from. Funds and "
+                                 "direct holdings are mixed in ONE covariance, so both must be the "
+                                 "same quantity: monthly, GBP, total return (ISA-0598).")}
 
     measured = sorted(series)
     cov = sum(wts.get(k, 0.0) for k in measured)
@@ -160,6 +255,8 @@ def build(portfolio, universe=None, run_date=None, out_path=None, append_history
         "excluded_pct_of_isa": round(sum(e.get("weight_pct") or 0 for e in excluded), 2),
         "cash_pct": (portfolio.get("summary") or {}).get("cash_pct"),
         "n_measured": len(measured),
+        "n_funds_measured": len([k for k in measured if k in {f.get("ticker") for f in (portfolio.get("funds") or [])}]),
+        "n_stocks_measured": len([k for k in measured if k in {st.get("ticker") for st in (portfolio.get("stocks") or [])}]),
         "note": ("every figure below describes the MEASURED portion only. Cash is correctly not "
                  "a bet; the excluded holdings above are risk assets whose contribution to "
                  "concentration is UNKNOWN, not zero.")}
