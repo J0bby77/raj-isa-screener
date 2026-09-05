@@ -1,8 +1,8 @@
 {
   "_meta": {
-    "description": "Machine-readable watchlist input for fetch_watchlist_metrics.py. Updated by Claude at the end of every monthly review run. Mirrors project_isa_watchlist.md — the two must stay in sync.",
-    "last_updated": "2026-09-03",
-    "updated_by_run": "Sep-2026 pre-run — update_watchlist.py",
+    "description": "Machine-readable watchlist input for fetch_watchlist_metrics.py. Updated by Claude at the end of every monthly review run. Mirrors project_isa_watchlist.md \u2014 the two must stay in sync.",
+    "last_updated": "2026-09-04",
+    "updated_by_run": "Sep-2026 pre-run \u2014 update_watchlist.py",
     "entry_levels_built_by": "entry_level_builder.py (sep_2026)",
     "last_claude_update": "2026-08-02",
     "last_claude_update_note": "Aug-2026 run: COCO entry level confirmed + recommended-buy note; BFT.WA proposed for removal (not dealable at AJ Bell); LOOMIS.ST flagged C-1 entry-stability FAIL. No stock_sleeve change - the COCO buy is a RECOMMENDATION and is added only when the September broker file confirms execution."
@@ -32,8 +32,8 @@
           "normalised": 92.6
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -119,7 +119,7 @@
       "stage_gate": "OK",
       "late_cycle_flag": false,
       "evidence_confirmed": true,
-      "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+      "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
       "t1_gate_detail": {
         "ns_floor": {
           "pass": true,
@@ -153,7 +153,7 @@
         "late_cycle_flag": false,
         "evidence": {
           "evidence_confirmed": true,
-          "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+          "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
           "basis": {
             "route": "sightings",
             "er_confidence": 0.9,
@@ -168,11 +168,11 @@
             "stage_ok": true,
             "screen_sightings": 5,
             "sightings_ok": true,
-            "note": "evidence certification only. The position TARGET is the ladder rung for this name's evidence_state, from position_sizing — this module has no opinion on pounds and no conviction input (ISA-0442)."
+            "note": "evidence certification only. The position TARGET is the ladder rung for this name's evidence_state, from position_sizing \u2014 this module has no opinion on pounds and no conviction input (ISA-0442)."
           }
         },
         "evidence_confirmed": true,
-        "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+        "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
         "cycles_seen": 1.0,
         "screen_sightings": 5
       }
@@ -201,8 +201,8 @@
           "normalised": 88.9
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -212,7 +212,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 2
+      "rank": 2,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FIX",
@@ -238,8 +239,8 @@
           "normalised": 88.9
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -249,7 +250,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 3
+      "rank": 3,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GE",
@@ -275,8 +277,8 @@
           "normalised": 88.9
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -286,7 +288,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 4
+      "rank": 4,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "HWM",
@@ -312,8 +315,8 @@
           "normalised": 88.9
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -323,7 +326,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 5
+      "rank": 5,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MORN",
@@ -349,8 +353,8 @@
           "normalised": 87.0
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -360,7 +364,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 6
+      "rank": 6,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GTT.PA",
@@ -386,8 +391,8 @@
           "normalised": 87.0
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -397,7 +402,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 7
+      "rank": 7,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "HRMY",
@@ -423,8 +429,8 @@
           "normalised": 85.2
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -510,7 +516,7 @@
       "stage_gate": "OK",
       "late_cycle_flag": false,
       "evidence_confirmed": true,
-      "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+      "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
       "t1_gate_detail": {
         "ns_floor": {
           "pass": true,
@@ -544,7 +550,7 @@
         "late_cycle_flag": false,
         "evidence": {
           "evidence_confirmed": true,
-          "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+          "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
           "basis": {
             "route": "fundamentals",
             "er_confidence": 0.9,
@@ -559,11 +565,11 @@
             "stage_ok": true,
             "screen_sightings": 4,
             "sightings_ok": true,
-            "note": "evidence certification only. The position TARGET is the ladder rung for this name's evidence_state, from position_sizing — this module has no opinion on pounds and no conviction input (ISA-0442)."
+            "note": "evidence certification only. The position TARGET is the ladder rung for this name's evidence_state, from position_sizing \u2014 this module has no opinion on pounds and no conviction input (ISA-0442)."
           }
         },
         "evidence_confirmed": true,
-        "size_authority": "position_sizing.target_pct(evidence_state) — the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
+        "size_authority": "position_sizing.target_pct(evidence_state) \u2014 the V2.1 fixed ladder. t1_gates certifies evidence and publishes NO size (ISA-0442).",
         "cycles_seen": 1.0,
         "screen_sightings": 4
       }
@@ -592,8 +598,8 @@
           "normalised": 85.2
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -603,7 +609,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 9
+      "rank": 9,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "EME",
@@ -629,8 +636,8 @@
           "normalised": 85.2
         }
       ],
-      "status": "Watchlist — newly promoted",
-      "thesis_break_summary": "[Claude fills at Step 10 — thesis-break conditions]",
+      "status": "Watchlist \u2014 newly promoted",
+      "thesis_break_summary": "[Claude fills at Step 10 \u2014 thesis-break conditions]",
       "probation_flag": false,
       "eligibility_override_reason": null,
       "cycles_seen": 1,
@@ -640,7 +647,8 @@
       "decay_state": "active",
       "in_pool": true,
       "reconfirm_required": false,
-      "rank": 10
+      "rank": 10,
+      "entry_level_status": "no_metrics"
     }
   ],
   "vci_watchlist": [
@@ -890,7 +898,7 @@
       "status": "FLOOR-CAPPED",
       "part_a_score": 11,
       "part_b_score": 11,
-      "acs_breakdown": "ACS1=5 ACS2=10 ACS3=5 ACS4=6 ACS5=7 ACS6=10 ACS7=5 ACS8=10 ACS9=5 | Raw=63 → Capped at 60 (B1+B2=3/6 floor)",
+      "acs_breakdown": "ACS1=5 ACS2=10 ACS3=5 ACS4=6 ACS5=7 ACS6=10 ACS7=5 ACS8=10 ACS9=5 | Raw=63 \u2192 Capped at 60 (B1+B2=3/6 floor)",
       "a10_score": null,
       "a11_score": null,
       "three_yr_pos_pct": 1.3,
@@ -961,7 +969,7 @@
     }
   ],
   "_vci_watchlist_meta": {
-    "description": "VCI (asymmetric) candidates promoted from project_isa_vci_watchlist.md. Populated at the end of each VCI run. fetch_watchlist_metrics.py fetches current price for in-window check but does NOT re-score via yfinance — ACS score is stored here from the VCI pipeline. score_partab.py uses the VCI formatting path for these entries.",
+    "description": "VCI (asymmetric) candidates promoted from project_isa_vci_watchlist.md. Populated at the end of each VCI run. fetch_watchlist_metrics.py fetches current price for in-window check but does NOT re-score via yfinance \u2014 ACS score is stored here from the VCI pipeline. score_partab.py uses the VCI formatting path for these entries.",
     "max_entries": 5,
     "required_fields": [
       "rank",
@@ -1017,7 +1025,7 @@
       "cost_per_share_usd": 289.2,
       "shares": 7,
       "include_in_metrics_pull": true,
-      "note": "+65% gain — reassess trim vs hold at June run",
+      "note": "+65% gain \u2014 reassess trim vs hold at June run",
       "source_pipeline": "growth_stock",
       "path": "A"
     },
@@ -1030,7 +1038,7 @@
       "cost_total_gbp": 1249.4,
       "shares": 880.0,
       "include_in_metrics_pull": true,
-      "note": "Auto-added from broker file 06-Jun-2026 — verify purchase_date / cost basis / thesis-break conditions | 02-Aug-2026: added yf_symbol='ONT.L'. The bare 'ONT' ticker resolves on yfinance to 'Onterris, Inc.' (a US namesake), which is why s7_sleeve_rows priced this position at GBP 18,471 against a broker value of GBP 997.92. Keep 'ticker' as ONT to match the AJ Bell file; resolvers must use yf_symbol.",
+      "note": "Auto-added from broker file 06-Jun-2026 \u2014 verify purchase_date / cost basis / thesis-break conditions | 02-Aug-2026: added yf_symbol='ONT.L'. The bare 'ONT' ticker resolves on yfinance to 'Onterris, Inc.' (a US namesake), which is why s7_sleeve_rows priced this position at GBP 18,471 against a broker value of GBP 997.92. Keep 'ticker' as ONT to match the AJ Bell file; resolvers must use yf_symbol.",
       "_auto_added": true,
       "source_pipeline": "vci",
       "path": "B",
@@ -1049,7 +1057,7 @@
       "cost_total_gbp": 1095.7,
       "shares": 209.0,
       "include_in_metrics_pull": true,
-      "note": "Auto-added from broker file 31-Jul-2026 — verify purchase_date / cost basis / thesis-break conditions",
+      "note": "Auto-added from broker file 31-Jul-2026 \u2014 verify purchase_date / cost basis / thesis-break conditions",
       "_auto_added": true,
       "source_pipeline": "vci",
       "path": "B",
@@ -1064,7 +1072,7 @@
       "cost_total_gbp": 1354.99,
       "shares": 28.0,
       "include_in_metrics_pull": true,
-      "note": "Auto-added from broker file 31-Aug-2026 — verify purchase_date / cost basis / thesis-break conditions",
+      "note": "Auto-added from broker file 31-Aug-2026 \u2014 verify purchase_date / cost basis / thesis-break conditions",
       "_auto_added": true,
       "path": "A",
       "source_pipeline": "growth_stock",
@@ -1079,15 +1087,15 @@
       "cost_total_gbp": 1049.56,
       "shares": 68.0,
       "include_in_metrics_pull": true,
-      "note": "Auto-added from broker file 31-Aug-2026 — verify purchase_date / cost basis / thesis-break conditions",
+      "note": "Auto-added from broker file 31-Aug-2026 \u2014 verify purchase_date / cost basis / thesis-break conditions",
       "_auto_added": true,
       "path": "B",
       "source_pipeline": "vci",
-      "path_basis": "Came from the VCI watchlist — the 02-Sep promotion log records held_removed_from_vci: QBTS 'now held in portfolio'. Path B is therefore read from where it came from, not inferred. Backfilled 02-Sep-2026 (ISA-0567)."
+      "path_basis": "Came from the VCI watchlist \u2014 the 02-Sep promotion log records held_removed_from_vci: QBTS 'now held in portfolio'. Path B is therefore read from where it came from, not inferred. Backfilled 02-Sep-2026 (ISA-0567)."
     }
   ],
   "in_window_threshold_pct": 10.0,
-  "_update_instructions": "After each monthly review run, Claude updates: (1) watchlist entries — adjust ranks, entry_levels, statuses, add/remove names; always include source_pipeline on every entry ('growth_stock' or 'energy') and path ('A' or 'C'); score_history and normalised_score are maintained by update_watchlist.py at pre-run — Claude does NOT manually update these; (2) stock_sleeve — add new purchases (set purchase_date + cost_per_share + source_pipeline), remove sold positions; (3) vci_watchlist — populated from project_isa_vci_watchlist.md at end of each VCI run; max 5 entries; set source_pipeline='vci', acs_score, vci_run_date, nvidia_signals, classification; (4) last_updated date. Keep in sync with project_isa_watchlist.md and project_isa_trades_log.md. ENERGY candidates promoted to watchlist from energy_screener use source_pipeline='energy' and path='C'. update_watchlist.py owns promotion/ranking logic and all score_history/normalised_score updates.",
+  "_update_instructions": "After each monthly review run, Claude updates: (1) watchlist entries \u2014 adjust ranks, entry_levels, statuses, add/remove names; always include source_pipeline on every entry ('growth_stock' or 'energy') and path ('A' or 'C'); score_history and normalised_score are maintained by update_watchlist.py at pre-run \u2014 Claude does NOT manually update these; (2) stock_sleeve \u2014 add new purchases (set purchase_date + cost_per_share + source_pipeline), remove sold positions; (3) vci_watchlist \u2014 populated from project_isa_vci_watchlist.md at end of each VCI run; max 5 entries; set source_pipeline='vci', acs_score, vci_run_date, nvidia_signals, classification; (4) last_updated date. Keep in sync with project_isa_watchlist.md and project_isa_trades_log.md. ENERGY candidates promoted to watchlist from energy_screener use source_pipeline='energy' and path='C'. update_watchlist.py owns promotion/ranking logic and all score_history/normalised_score updates.",
   "candidate_pool": [
     {
       "ticker": "VRT",
@@ -1111,7 +1119,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "APH",
@@ -1135,7 +1144,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ABBN.SW",
@@ -1159,7 +1169,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FTDR",
@@ -1183,7 +1194,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MA",
@@ -1207,7 +1219,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ASM.AS",
@@ -1231,7 +1244,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MOON.L",
@@ -1255,7 +1269,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "APN.L",
@@ -1279,7 +1294,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MSA",
@@ -1303,7 +1319,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ABNB",
@@ -1327,7 +1344,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IBKR",
@@ -1351,7 +1369,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "EXPE",
@@ -1375,7 +1394,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GMED",
@@ -1399,7 +1419,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IESC",
@@ -1423,7 +1444,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IDCC",
@@ -1447,7 +1469,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GRMN",
@@ -1471,7 +1494,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ASML",
@@ -1495,7 +1519,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "TER",
@@ -1519,7 +1544,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ANET",
@@ -1543,7 +1569,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GDWN.L",
@@ -1567,7 +1594,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "THC",
@@ -1591,7 +1619,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "KLAC",
@@ -1615,7 +1644,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LRCX",
@@ -1639,7 +1669,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MPWR",
@@ -1663,7 +1694,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "UFPT",
@@ -1687,7 +1719,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "KARO",
@@ -1711,7 +1744,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "WAB",
@@ -1735,7 +1769,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ENX.PA",
@@ -1759,7 +1794,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GFRD.L",
@@ -1783,7 +1819,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "HALO",
@@ -1807,7 +1844,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "PLTR",
@@ -1831,7 +1869,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ENR.DE",
@@ -1855,7 +1894,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SUBC.OL",
@@ -1879,7 +1919,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IPN.PA",
@@ -1903,7 +1944,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "REY.MI",
@@ -1927,7 +1969,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "BFT.WA",
@@ -1951,7 +1994,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "KLR.L",
@@ -1975,7 +2019,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SPXC",
@@ -1999,7 +2044,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ITT",
@@ -2023,7 +2069,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MNDY",
@@ -2047,7 +2094,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NXT",
@@ -2071,7 +2119,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "AMD",
@@ -2095,7 +2144,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "DAL",
@@ -2119,7 +2169,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FOUR.L",
@@ -2143,7 +2194,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CAKE",
@@ -2167,7 +2219,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NTAP",
@@ -2191,7 +2244,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SAF.PA",
@@ -2215,7 +2269,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IFCN.SW",
@@ -2239,7 +2294,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NVT",
@@ -2263,7 +2319,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ONC",
@@ -2287,7 +2344,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ARGX",
@@ -2311,7 +2369,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "AMAT",
@@ -2335,7 +2394,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MMSI",
@@ -2359,7 +2419,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ETN",
@@ -2383,7 +2444,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SAND.ST",
@@ -2407,7 +2469,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CKN.L",
@@ -2431,7 +2494,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ATI",
@@ -2455,7 +2519,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ALAB",
@@ -2479,7 +2544,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SHOP",
@@ -2503,7 +2569,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "IDR.MC",
@@ -2527,7 +2594,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ATCO-A.ST",
@@ -2551,7 +2619,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ROKU",
@@ -2575,7 +2644,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "TTMI",
@@ -2599,7 +2669,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "DGII",
@@ -2623,7 +2694,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LOTB.BR",
@@ -2647,7 +2719,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ZAB.WA",
@@ -2671,7 +2744,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "EDEN.PA",
@@ -2695,7 +2769,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "PR",
@@ -2719,7 +2794,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "TRU",
@@ -2743,7 +2819,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "AXTA",
@@ -2767,7 +2844,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "BKR",
@@ -2791,7 +2869,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MGNI",
@@ -2815,7 +2894,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GMAB",
@@ -2839,7 +2919,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CAT",
@@ -2863,7 +2944,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SHW",
@@ -2887,7 +2969,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MRVL",
@@ -2911,7 +2994,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SIE.DE",
@@ -2935,7 +3019,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LIVN",
@@ -2959,7 +3044,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "RPM",
@@ -2983,7 +3069,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NVST",
@@ -3007,7 +3094,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "WDC",
@@ -3031,7 +3119,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "DXPE",
@@ -3055,7 +3144,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FRSH",
@@ -3079,7 +3169,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CORT",
@@ -3103,7 +3194,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "BELFB",
@@ -3127,7 +3219,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "UAL",
@@ -3151,7 +3244,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "REGN",
@@ -3175,7 +3269,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CTSH",
@@ -3199,7 +3294,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "BMY",
@@ -3223,7 +3319,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "XYZ",
@@ -3247,7 +3344,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LMT",
@@ -3271,7 +3369,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FRO",
@@ -3295,7 +3394,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SANM",
@@ -3319,7 +3419,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LOOMIS.ST",
@@ -3343,7 +3444,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "VALMT.HE",
@@ -3367,7 +3469,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "RSW.L",
@@ -3391,7 +3494,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "ALHC",
@@ -3415,7 +3519,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FDX",
@@ -3439,7 +3544,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "GLW",
@@ -3463,7 +3569,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SOBI.ST",
@@ -3487,7 +3594,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MTSI",
@@ -3511,7 +3619,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "HXL",
@@ -3535,7 +3644,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NESR",
@@ -3559,7 +3669,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FORM",
@@ -3583,7 +3694,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LH",
@@ -3607,7 +3719,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SOLS",
@@ -3631,7 +3744,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FROG",
@@ -3655,7 +3769,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "JCI",
@@ -3679,7 +3794,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "PKG",
@@ -3703,7 +3819,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "RXL.PA",
@@ -3727,7 +3844,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SRP.L",
@@ -3751,7 +3869,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "XPO",
@@ -3775,7 +3894,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "CHEF",
@@ -3799,7 +3919,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "FRPT",
@@ -3823,7 +3944,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "HII",
@@ -3847,7 +3969,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "TGS.OL",
@@ -3871,7 +3994,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "DGX",
@@ -3895,7 +4019,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "RUSHA",
@@ -3919,7 +4044,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "URI",
@@ -3943,7 +4069,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "KRX.IR",
@@ -3967,7 +4094,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "WMG",
@@ -3991,7 +4119,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "LFST",
@@ -4015,7 +4144,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "SNDK",
@@ -4039,7 +4169,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "VSEC",
@@ -4063,7 +4194,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "MICC.AS",
@@ -4087,7 +4219,8 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     },
     {
       "ticker": "NTRA",
@@ -4111,14 +4244,15 @@
       "last_confirmed": "Sep-2026",
       "decay_state": "active",
       "in_pool": true,
-      "reconfirm_required": false
+      "reconfirm_required": false,
+      "entry_level_status": "no_metrics"
     }
   ],
   "_candidate_pool_meta": {
-    "last_updated": "2026-09-03",
+    "last_updated": "2026-09-04",
     "pool_month": "Sep-2026",
     "gate_threshold_pct": 70.0,
     "pool_size": 126,
-    "note": "EPHEMERAL — wiped and rewritten each pre-run by update_watchlist.py. Do not manually edit."
+    "note": "EPHEMERAL \u2014 wiped and rewritten each pre-run by update_watchlist.py. Do not manually edit."
   }
 }

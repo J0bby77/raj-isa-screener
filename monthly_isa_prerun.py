@@ -637,6 +637,7 @@ def main():
     # before Step 0 with a traceback — on exactly the condition ISA-0572 was built to report
     # gracefully. R4.12: `log[...] = x` written before `log` exists. The guard was never
     # exercised because the case it guards was false in the session that wrote it (FC-K).
+    _RUN_STARTED_AT = time.time()   # ISA-0590: the register gate's 'this run wrote it' test
     errors: list = []
     warnings: list = []
     summary: dict = {}
@@ -4027,7 +4028,10 @@ def main():
         # list that every real prose-vs-config divergence arrives on.
         # ⚑ SEVERITY IS DECLARED AT THE POINT OF PRODUCTION and anything unmarked is ERROR, so
         # the fail-safe direction is preserved: a new pair has to opt IN to being a warning.
-        _recs = _cchk.check_all(tagged=True)
+        # ⚑ ISA-0590 — the run's own start time, so the ISA-0321 register gate does not
+        # fire on the artefacts THIS run just wrote. Tighter than the prefix list:
+        # a file the run did NOT write still trips it.
+        _recs = _cchk.check_all(tagged=True, since_ts=_RUN_STARTED_AT)
         _a18_err = [r["message"] for r in _recs if r["severity"] == "ERROR"]
         _a18_warn = [r["message"] for r in _recs if r["severity"] != "ERROR"]
         for _m in _a18_err:
