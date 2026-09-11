@@ -212,6 +212,65 @@ _LOWER_CACHE: dict = {}
 _DATA_BLOB_CACHE: dict = {}
 
 
+def reset_caches() -> dict:
+    """Drop every memoised view of the tree. Returns what was dropped, so a caller can prove it.
+
+    ⚑⚑ ISA-0625 — THE CACHES OUTLIVED THE THING THEY CACHE. ISA-0552 added `_WALK_CACHE`,
+    `_SPANS_CACHE`, `_LOWER_CACHE` and `_DATA_BLOB_CACHE` under an explicit claim — "THESE CHANGE
+    COST, NEVER SEMANTICS" — and a real equivalence proof for it. ISA-0594 then added
+    `_PRODUCER_INDEX` and `_COMPUTER_INDEX`, whole-tree inverted indexes built once per root and
+    never invalidated. `_selftest()` still cleared only `_SRC_CACHE`, which the 02-Sep comment
+    says the others share a lifetime with. They do not.
+
+    The consequence was not theoretical: the two controls that prove Q1 and Q4 are NOT VACUOUS
+    write a rival computer into a temp tree and re-query. From 05-Sep-2026 the re-query was
+    answered from the index built before the rival existed, so **the control that proves the
+    duplicate-computer check works reported that there was no duplicate**, and
+    `test_isa0450_integrity_capital.py`'s P0 section went red with it for four days while no
+    build stopped. The equivalence proof could not see this: it compares cached and uncached
+    answers on ONE tree state, and the defect only exists in the second state, where the tree
+    changes and the cache does not.
+
+    So this is one function rather than six `.clear()` calls at each call site (R4.4, one home) —
+    an index added later cannot be forgotten here without failing the control below.
+    """
+    named = ("_SRC_CACHE", "_WALK_CACHE", "_SPANS_CACHE", "_LOWER_CACHE", "_DATA_BLOB_CACHE",
+             "_PRODUCER_INDEX", "_COMPUTER_INDEX", "_EXPOSURE_CACHE")
+    g = globals()
+    dropped = {}
+    for n in named:
+        c = g.get(n)
+        if isinstance(c, dict):
+            dropped[n] = len(c)
+            c.clear()
+    # ⚑ AND A SWEEP BEHIND THE LIST. The named tuple above says what this function INTENDS to
+    #   clear, which is what a reader needs. The sweep catches what a future change adds and
+    #   forgets — `_EXPOSURE_CACHE` was exactly that on the day this was written, found by the
+    #   totality control below within one run. A swept cache is CLEARED AND NAMED in `swept`
+    #   rather than cleared silently: "the list was incomplete" and "the list was complete" must
+    #   not render the same (R2.10, R4.9 — no silent partial).
+    swept = {}
+    for n, c in list(g.items()):
+        if n in named or not isinstance(c, dict):
+            continue
+        if n.endswith("_CACHE") or n.endswith("_INDEX"):
+            swept[n] = len(c)
+            c.clear()
+    if swept:
+        dropped["swept"] = swept
+    try:
+        import isa_source_cache as _sc
+        for _n in ("clear", "reset", "invalidate"):
+            _f = getattr(_sc, _n, None)
+            if callable(_f):
+                _f()
+                dropped["isa_source_cache." + _n] = "called"
+                break
+    except Exception:                                                   # noqa: BLE001
+        dropped["isa_source_cache"] = "unavailable"
+    return dropped
+
+
 def _walk_cached(path: str, tree):
     """list(ast.walk(tree)) memoised per NODE, through the shared cache (ISA-0597).
 
@@ -1972,16 +2031,16 @@ def _selftest() -> int:
     _write(tmp, "beta.py", 'def relay(src):\n    out = {}\n    out["thing_gbp"] = src["thing_gbp"]\n    return out\n')
     reg = [{"name": "thing_gbp", "computer": "alpha.compute", "units": "GBP",
             "surface": ["x"], "gbp_exposure": 100.0}]
-    _SRC_CACHE.clear()
+    reset_caches()
     r = q1_two_computers(tmp, reg)
     ok("Q-A1-neg a RELAY is not a second computer (post-P4 wiring must not fail)",
        r["state"] == "PASS", r)
     _write(tmp, "gamma.py", 'def rival(nav):\n    out = {}\n    out["thing_gbp"] = nav * 0.035\n    return out\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     r2 = q1_two_computers(tmp, reg)
     ok("Q-A1 two COMPUTERS for one quantity FAILS", r2["state"] == "FAIL", r2)
     os.remove(os.path.join(tmp, "gamma.py"))
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("Q-A1-neg deleting one clears it", q1_two_computers(tmp, reg)["state"] == "PASS")
 
     # ── P0.2 Q2 / Q4 ────────────────────────────────────────────────────────────────
@@ -2002,14 +2061,14 @@ def _selftest() -> int:
            '    if d.get("mode") == "live_mode":\n        return 2\n    return 0\n')
     _write(tmp2, "prod.py", 'def make():\n    return {"mode": "live_mode"}\n')
     _write(tmp2, "test_fixture.py", 'FX = {"route": "ghost_route"}\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     q4 = q4_dead_vocabulary(tmp2, [])
     lits = {f["literal"] for f in q4["findings"]}
     ok("Q-A3 a filter on a literal only a TEST emits is flagged",
        "ghost_route" in lits, q4["findings"])
     ok("Q-A4-neg a literal with a LIVE producer is NOT flagged", "live_mode" not in lits, lits)
     _write(tmp2, "filt2.py", 'def g(d):\n    return d.get("stage") == "phantom_stage"\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     q4b = q4_dead_vocabulary(tmp2, [])
     ok("Q-A4 CLASS SCOPE — a SECOND, unrelated dead vocabulary term is also flagged",
        {"ghost_route", "phantom_stage"} <= {f["literal"] for f in q4b["findings"]},
@@ -2031,7 +2090,7 @@ def _selftest() -> int:
            'def _selftest():\n'
            '    live = [{"ticker": "COCO", "route": "seance_route"}]\n'
            '    return live\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("Q-A3-neg a fixture inside a _selftest IN A LIVE MODULE is NOT a producer",
        _producers_of("route", "seance_route", tmp5) == [],
        _producers_of("route", "seance_route", tmp5))
@@ -2039,7 +2098,7 @@ def _selftest() -> int:
        "seance_route" in {f["literal"] for f in q4_dead_vocabulary(tmp5, [])["findings"]})
     _write(tmp5, "conviction_capture.py",
            'def emit():\n    return {"route": "seance_route"}\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("Q-A3-neg ...and a producer OUTSIDE a selftest DOES clear it (control is not vacuous)",
        _producers_of("route", "seance_route", tmp5) != [])
 
@@ -2048,7 +2107,7 @@ def _selftest() -> int:
     _write(tmp6, "capital_destination.py",
            'def _stock_side_sensitivity(n):\n'
            '    return {"evidence_state": "SEANCE_STATE"}\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("a DECLARED PROBE is not a producer either (same span rule, same reason)",
        _producers_of("evidence_state", "SEANCE_STATE", tmp6) == [],
        _producers_of("evidence_state", "SEANCE_STATE", tmp6))
@@ -2079,7 +2138,7 @@ def _selftest() -> int:
            '"""A module.\n\nYahoo is network-blocked from both the container and the device shell.\n"""\n')
     claims_empty = os.path.join(tmp3, "nc.json")
     json.dump({"claims": []}, open(claims_empty, "w"))
-    _SRC_CACHE.clear()
+    reset_caches()
     u = unregistered_negative_claims(tmp3, claims_empty)
     ok("N1 an unregistered negative claim in a capital-path docstring FAILS",
        u["state"] == "FAIL", u)
@@ -2089,7 +2148,7 @@ def _selftest() -> int:
                            "test_id": "t", "last_tested": "2026-08-26",
                            "runs_since_tested": 0, "expires_after_runs": 3}]},
               open(claims_one, "w"))
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("N1-neg registering it clears the unregistered finding",
        unregistered_negative_claims(tmp3, claims_one)["state"] == "PASS")
     exp = negative_claim_report(claims_one, tmp3)
@@ -2118,17 +2177,17 @@ def _selftest() -> int:
            '# Yahoo is network-blocked -- this COMMENT explains P0.4 and is not a claim.\n'
            'X = "a string constant saying network-blocked, also not a docstring"\n'
            'def f():\n    """A docstring with no claim in it."""\n    return 1\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     n4 = unregistered_negative_claims(tmp4, claims_empty)
     ok("N4 prose ABOUT the rule does not trip the rule (comments/constants are not docstrings)",
        n4["state"] == "PASS", n4["findings"])
     _write(tmp4, "retention.py", '"""It cannot fire because nothing emits the value."""\n')
-    _SRC_CACHE.clear()
+    reset_caches()
     ok("N4-neg the SAME phrase inside a real docstring IS flagged (control is not vacuous)",
        unregistered_negative_claims(tmp4, claims_empty)["state"] == "FAIL")
 
     # ── R10 self-exclusion ──────────────────────────────────────────────────────────
-    _SRC_CACHE.clear()
+    reset_caches()
     sx = self_exclusion_control(HERE)
     ok("R10 the instrument excludes its own functions from every enumerator",
        sx["excluded_from_enumerators"], sx)
@@ -2136,7 +2195,7 @@ def _selftest() -> int:
        (not sx["self_present_on_disk"]) or sx["negative_control_would_find"] > 0, sx)
 
     # ── P0.6 queue accounting ───────────────────────────────────────────────────────
-    _SRC_CACHE.clear()
+    reset_caches()
     pool = [{"source": "t", "gbp_exposure": float(i)} for i in range(25)]
     pool.sort(key=lambda f: -f["gbp_exposure"])
     top, rest = pool[:QUEUE_CAP], pool[QUEUE_CAP:]
@@ -2149,7 +2208,7 @@ def _selftest() -> int:
     # A speed fix that silently narrows a control is worse than the slowness, so the fast
     # path is compared against a deliberately slow re-derivation on REAL pairs from this
     # tree. Sampled here to stay affordable; `--equivalence-full` sweeps every pair.
-    _SRC_CACHE.clear(); _WALK_CACHE.clear(); _SPANS_CACHE.clear()
+    reset_caches(); _WALK_CACHE.clear(); _SPANS_CACHE.clear()
     _LOWER_CACHE.clear(); _DATA_BLOB_CACHE.clear()
     try:
         _eq = producer_equivalence(sample=12)
@@ -2158,6 +2217,46 @@ def _selftest() -> int:
            _eq["state"] == "PASS" and _eq["checked"] > 0, _eq["mismatches"])
     except Exception as _e:                                             # noqa: BLE001
         ok("ISA-0552 producer_equivalence ran", False, "%s: %s" % (type(_e).__name__, _e))
+
+    # ── ISA-0625 — THE RESET IS PROVED LOAD-BEARING, AND PROVED TOTAL ────────────────
+    # ⚑⚑ Two different failures, two different controls. The first proves the caches are real
+    #    and that clearing them changes the answer (without it, a no-op reset would pass every
+    #    control above by accident). The second is the one that survives a refactor: it walks
+    #    THIS MODULE'S OWN globals for anything shaped like a cache or an index and asserts
+    #    reset_caches() empties it, so an index added in six months and forgotten here fails
+    #    HERE rather than four days later in a control that quietly stops being able to fail.
+    _c = tempfile.mkdtemp()
+    _write(_c, "one.py", 'def a():\n    out = {}\n    out["cachetest_gbp"] = 1 + 1\n    return out\n')
+    reset_caches()
+    _first = _computers_of("cachetest_gbp", _c)
+    ok("ISA-0625 setup: one computer is found for a fresh quantity", len(_first) == 1, _first)
+    _write(_c, "two.py", 'def b(nav):\n    out = {}\n    out["cachetest_gbp"] = nav * 2\n    return out\n')
+    _stale = _computers_of("cachetest_gbp", _c)
+    ok("⚑ ISA-0625 POSITIVE CONTROL ON THE DEFECT: without a reset the index still reports ONE "
+       "computer after a second is written - this is the exact staleness that made Q1's "
+       "non-vacuity control report PASS on a tree with two computers, reproduced on demand",
+       len(_stale) == 1, _stale)
+    reset_caches()
+    _fresh = _computers_of("cachetest_gbp", _c)
+    ok("⚑ ISA-0625: after reset_caches() the index SEES the second computer - the reset is "
+       "load-bearing, not decorative", len(_fresh) == 2, _fresh)
+    _g = globals()
+    _cachelike = sorted(k for k, v in _g.items()
+                        if isinstance(v, dict) and (k.endswith("_CACHE") or k.endswith("_INDEX")))
+    for _k in _cachelike:
+        _g[_k][("__probe__", _k)] = 1
+    _dropped = reset_caches()
+    _still = [k for k in _cachelike if _g[k]]
+    ok("⚑ ISA-0625 TOTALITY CONTROL: reset_caches() empties EVERY module-level cache and index "
+       "this module owns, found by walking its own globals rather than by a hand-kept list - so "
+       "an index added later and forgotten cannot leave a control quietly unable to fail "
+       "(%d checked: %s)" % (len(_cachelike), ", ".join(_cachelike)), not _still, _still)
+    ok("⚑ ISA-0625: anything the named list MISSED is reported in `swept` rather than cleared "
+       "silently - `_EXPOSURE_CACHE` was exactly that on the day this control was written, and "
+       "'the list was complete' must not render the same as 'the sweep covered for it' (R2.10)",
+       set(_dropped) >= {"_SRC_CACHE", "_PRODUCER_INDEX", "_COMPUTER_INDEX"}
+       and all(k in _dropped or k in _dropped.get("swept", {}) for k in _cachelike),
+       {"dropped": sorted(_dropped), "cachelike": _cachelike})
 
     print("\nframework_integrity selftest: %d assertion(s), %d FAIL(s)%s"
           % (_ASSERTS[0], len(fails), (": " + ", ".join(fails)) if fails else ""))

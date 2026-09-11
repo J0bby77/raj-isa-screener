@@ -724,6 +724,93 @@ def close(item_id: str, *, verification: dict, corrective_action=None,
     return write(item, allow_update=True)
 
 
+# ------------------------------------------------- R7.8 / R7.9 / R7.10 build authority
+
+REVALIDATION_DISPOSITIONS = (
+    "STILL_VALID", "PARTLY_VALID", "SUPERSEDED", "DUPLICATE", "NO_LONGER_A_DEFECT",
+    "CORRECTIVE_ACTION_STALE",
+)
+
+
+def build_authority(item: dict, current_build_id) -> dict:
+    """R7.8 — BUILD_READY EXPIRES WHEN THE FRAMEWORK CHANGES.
+
+    ⚑⚑ THE RULE ISA-0467 ITSELF FAILED, AND THE FAILURE COST TWELVE DAYS. It was raised
+    27-Aug-2026 with a corrective action reading "build isa_register_metrics.py and
+    rule_audit.py". Both were built the next day. Six further builds shipped between 28-Aug and
+    06-Sep. Nothing touched the item, so on 09-Sep-2026 a CRITICAL P0 run-blocker's stated remedy
+    was to create two files that had existed for twelve days — and anyone executing it faithfully
+    would have rebuilt them.
+
+    An item is authority only while the architecture it was written against still stands. This
+    function does not guess: `validated_against_build_id` is either the current build or it is
+    not, and where it is absent the answer is REVALIDATION_REQUIRED rather than a benefit of the
+    doubt (R4.3 — a control fed a null BLOCKS, it never returns PASS)."""
+    declared = item.get("build_readiness")
+    if item.get("state") not in ("OPEN", "IN_PROGRESS"):
+        return {"authority": declared, "current": True,
+                "why": "not actionable; currency is not asked of a closed item"}
+    if declared != "BUILD_READY":
+        return {"authority": declared, "current": True,
+                "why": "the item does not claim BUILD_READY"}
+    against = item.get("validated_against_build_id")
+    if not against:
+        return {"authority": "REVALIDATION_REQUIRED", "current": False,
+                "validated_against_build_id": None,
+                "why": ("R7.8: BUILD_READY with no `validated_against_build_id`. Absence is not "
+                        "currency — the item may describe an architecture that no longer exists "
+                        "(KR13)")}
+    if current_build_id and against != current_build_id:
+        return {"authority": "REVALIDATION_REQUIRED", "current": False,
+                "validated_against_build_id": against,
+                "why": ("R7.8: validated against %s; the current Trusted Build is %s. The "
+                        "defect, its systemic cause and its corrective action must be proven "
+                        "still to fit before work starts (KR13)." % (against, current_build_id))}
+    return {"authority": "BUILD_READY", "current": True,
+            "validated_against_build_id": against,
+            "why": "validated against the current Trusted Build"}
+
+
+def revalidate(item_id: str, *, disposition: str, validated_against_build_id: str,
+               note: str, superseded_by=None, corrective_action=None,
+               build_readiness=None, **kwargs) -> dict:
+    """R7.9 / R7.10 — record a revalidation. RAISES on an undeclared disposition.
+
+    ⚑ SUPERSESSION IS A FIRST-CLASS DISPOSITION, NOT WONTFIX (R7.10). Closing a superseded item
+    as CLOSED_WONTFIX says nobody wanted it; the truth is usually that something else did it
+    better, and the difference matters to anyone reading the register to learn what the framework
+    does. `SUPERSEDED` requires `superseded_by`, because an item superseded by nothing named is
+    an item quietly dropped (R7.7: nothing is de-scoped by silence)."""
+    if disposition not in REVALIDATION_DISPOSITIONS:
+        raise ValueError(
+            "revalidate: %r is not a declared disposition. R7.10 names exactly six: %s. A new "
+            "one is a change to the standard, not a keyword argument."
+            % (disposition, ", ".join(REVALIDATION_DISPOSITIONS)))
+    if not note:
+        raise ValueError(
+            "revalidate: a revalidation with no note records that someone looked and not what "
+            "they found. R7.10 asks what changed since the item was raised and which parts of "
+            "the corrective action survive.")
+    if disposition == "SUPERSEDED" and not superseded_by:
+        raise ValueError(
+            "revalidate: SUPERSEDED requires `superseded_by`. An item superseded by nothing "
+            "named is an item quietly dropped (R7.7: nothing is de-scoped by silence).")
+    item = dict(get(item_id))
+    item["revalidation_disposition"] = disposition
+    item["revalidation_note"] = note
+    item["revalidated_on"] = kwargs.pop("revalidated_on", _today())
+    item["validated_against_build_id"] = validated_against_build_id
+    if superseded_by:
+        item["superseded_by"] = superseded_by
+        item["state"] = kwargs.pop("state", "SUPERSEDED")
+    if corrective_action:
+        item["corrective_action"] = corrective_action
+    if build_readiness:
+        item["build_readiness"] = build_readiness
+    item.update(kwargs)
+    return write(item, allow_update=True)
+
+
 # ---------------------------------------------------------------- ranking (spec s7)
 
 RUN_TYPES = ("weekly_screen", "monthly_prerun", "monthly_review", "vci")

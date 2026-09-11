@@ -21,8 +21,10 @@ import argparse, os, sys, hashlib, subprocess, shutil, datetime, re, ast, tempfi
 NEW_FILES = ["screener_local.py", "sync_repo_to_github.py"]   # may not be tracked yet
 NEVER = {".env", ".env.local"}
 # runtime INPUT data the scripts read (NOT run outputs/caches). New .py scripts are auto-discovered separately.
-RUNTIME_JSON = {"watchlist_tickers.json", "target_weights.json",
-                "source_performance_log.json", "yfinance_metric_label_map.json",
+# ⚑ 11-Sep-2026 (ISA-0637, Raj: keep the repo PUBLIC): watchlist_tickers.json, target_weights.json and
+#   source_performance_log.json were REMOVED from this set and moved to ONEDRIVE_BOOTSTRAP below —
+#   the fallback still gets them, straight from OneDrive, but they are no longer published.
+RUNTIME_JSON = {"yfinance_metric_label_map.json",
                 "update_vci_watchlist_TEMPLATE.json", "vci_email_data_TEMPLATE.json",
                 "theme_opportunity.json",
                 "email_data_monthly_isa_TEMPLATE.json",
@@ -48,6 +50,122 @@ RUNTIME_JSON = {"watchlist_tickers.json", "target_weights.json",
                 #   quietly, which is FC-A — and a reviewer checking "does its absence break the
                 #   preflight?" would have concluded, correctly and uselessly, that it does not.
                 "stock_symbol_map.json"}      # P1 — venue-VERIFIED ticker→symbol resolutions
+
+# ── FALLBACK INPUT CLASSIFICATION (ISA-0498 class-kill, 11-Sep-2026) ─────────────────────────
+# ⚑ WHY THIS EXISTS. RUNTIME_JSON above is a hand-kept allow-list, and on 11-Sep-2026 the
+#   first real fallback run in weeks (NASDAQ, local sandbox killed by Windows KB5124008) found
+#   target_state.json missing from the clone — the required-return anchor, so every
+#   anchor-derived threshold read None. ISA-0498 (02-Sep) had promised a battery check for
+#   exactly this; it covered only *_register.json names and was never wired (zero call sites).
+#   The allow-list is not replaced — it is now CHECKED: every data file the fallback's own code
+#   names must be classified into exactly one of the four sets below, or the sync prints
+#   FALLBACK_INPUT_UNCLASSIFIED and the battery (consistency_check.pair_fallback_inputs_
+#   classified) fails. A new input can no longer sit unnoticed until the day it is needed.
+#
+# ⚑ THE REPO IS PUBLIC (J0bby77 has 1 public repo, 0 private — verified via the Composio GitHub
+#   connection, 11-Sep-2026). So "the fallback needs it" is not a reason to push it. Files
+#   holding Raj's target, portfolio value or cash never go to git: they are fetched straight
+#   from OneDrive at Composio bootstrap (ONEDRIVE_BOOTSTRAP), which also means the fallback
+#   reads the CURRENT copy, not whatever the last local sync pushed.
+
+# The scripts the Composio Fallback Protocol actually runs (Run_Context_ISA_Growth_Stock_
+# Analysis.md, Steps A-C). The check follows their LOCAL import closure.
+FALLBACK_ENTRYPOINTS = ("screener_core.py", "screener_local.py", "build_excel.py", "build_email.py")
+
+# Private runtime inputs: fetched from OneDrive by the bootstrap, and NEVER pushed (see NEVER).
+ONEDRIVE_BOOTSTRAP = {
+    ".env":               "secrets (FINNHUB / ALPHA_VANTAGE / GH_PAT) — ISA-0129/0413",
+    "target_state.json":  "the required-return anchor; holds target £, target date and portfolio value",
+    "drawdown_state.json": "carries reserve_gbp (Raj's cash reserve) — read by build_email/expected_return",
+    # ISA-0637 (Raj, 11-Sep-2026: keep the repo public, stop publishing these):
+    "target_weights.json":  "Raj's fund target weights",
+    "watchlist_tickers.json": "Raj's watchlist, candidate pool and holdings list",
+    "source_performance_log.json": "screen history; written by every run and delivered to OneDrive, not git",
+}
+
+# Files the fallback WRITES (append-history / run-status). A fallback run produces a partial
+# copy in its sandbox; it must be reconciled back into OneDrive after the run (§Q) — the
+# 11-Sep NASDAQ run did this by download -> append -> upload. Listed so the retrospective
+# can name exactly what needs reconciling instead of rediscovering it.
+FALLBACK_WRITTEN = {
+    "constituents_history.csv":   "§Q capture — append rows",
+    "regime_history.csv":         "§Q capture — append row",
+    "score_panel.csv":            "§Q capture — append rows",
+    "gate_variables.csv":         "§Q capture — append rows",
+    "screen_capture_status.json": "§Q capture status — replace",
+    "plausibility_warns.jsonl":   "plausibility log — append",
+    "calibration_stamp_history.json": "calibration guard stamp — merge by key",
+    "calibration_pool_history.json":  "calibration guard pool — merge runs",
+    "source_performance_log.json":    "write back to OneDrive (Step D) — NEVER to git (ISA-0637)",
+}
+
+# Referenced by fallback code but not needed on the fallback path, each with its reason.
+FALLBACK_EXCLUDED = {
+    "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
+}
+
+# Public, non-personal inputs the fallback reads that were missing from RUNTIME_JSON on
+# 11-Sep-2026. Found by fallback_input_gaps() on its first run, not by inspection.
+RUNTIME_JSON |= {
+    "supplementary_constituents.json",   # screener_core universe supplement — absent = a SMALLER universe, silently
+    "delisting_registry.json",           # universe hygiene — absent = delisted names re-enter
+    "preferred_listing.json",            # listing_policy — absent = venue choice degrades
+    "er_anchor_store.json",              # expected_return anchor tables (per-ticker market data)
+    "er_anchor_learning.csv",            # expected_return L-10 anchor evidence (per-ticker market data)
+    "calibration_stamp_history.json",    # calibration_guard reads history before stamping
+    "calibration_pool_history.json",
+}
+
+NEVER = NEVER | set(ONEDRIVE_BOOTSTRAP)   # a private file can never be pushed, even if listed above
+
+_DATA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]*\.(json|jsonl|csv)$")
+
+
+def _fallback_closure(inv_dir, entrypoints=FALLBACK_ENTRYPOINTS):
+    """Local modules transitively imported by the fallback entry points (static, via ast)."""
+    local = {f[:-3] for f in os.listdir(inv_dir) if f.endswith(".py")}
+    seen, stack = set(), [e[:-3] for e in entrypoints]
+    while stack:
+        m = stack.pop()
+        if m in seen or m not in local:
+            continue
+        seen.add(m)
+        tree = ast.parse(open(os.path.join(inv_dir, m + ".py"), encoding="utf-8",
+                              errors="replace").read())
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                stack += [a.name.split(".")[0] for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+                stack.append(n.module.split(".")[0])
+            elif (isinstance(n, ast.Call) and n.args and isinstance(n.args[0], ast.Constant)
+                  and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("import_module", "__import__")):
+                stack.append(str(n.args[0].value).split(".")[0])
+    return seen
+
+
+def fallback_input_gaps(inv_dir, entrypoints=FALLBACK_ENTRYPOINTS):
+    """Data files named (as string literals) by the fallback's import closure that EXIST beside
+    the scripts and are in none of RUNTIME_JSON / ONEDRIVE_BOOTSTRAP / FALLBACK_WRITTEN /
+    FALLBACK_EXCLUDED. Returns {filename: [modules naming it]}; empty = fully classified.
+
+    LIMIT, stated not hidden (R4.9): a filename assembled at runtime (f-strings, month stamps)
+    is invisible to a literal scan. This is a FLOOR — it proves no LITERAL input is
+    unclassified, and it is what would have caught target_state.json and the three universe
+    inputs. Names that do not exist on OneDrive (test fixtures, month-stamped outputs) are
+    ignored because there is nothing to sync."""
+    classified = RUNTIME_JSON | set(ONEDRIVE_BOOTSTRAP) | set(FALLBACK_WRITTEN) | set(FALLBACK_EXCLUDED)
+    gaps = {}
+    for m in sorted(_fallback_closure(inv_dir, entrypoints)):
+        tree = ast.parse(open(os.path.join(inv_dir, m + ".py"), encoding="utf-8",
+                              errors="replace").read())
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and _DATA_NAME.match(n.value) and n.value not in classified
+                    and os.path.isfile(os.path.join(inv_dir, n.value))):
+                gaps.setdefault(n.value, [])
+                if m not in gaps[n.value]:
+                    gaps[n.value].append(m)
+    return gaps
 
 def sha(p):
     h = hashlib.sha256()
@@ -76,13 +194,75 @@ def read_token(inv_dir):
                 return m.group(1).strip().strip('"').strip("'")
     return None
 
+def _selftest(verbose=True):
+    """R5.5 — fallback-input classification, with negative controls built on a synthetic tree."""
+    import tempfile as _tf
+    fails = []
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+        if verbose:
+            print(("PASS " if cond else "FAIL ") + msg)
+    d = _tf.mkdtemp(prefix="srg_selftest_")
+    try:
+        def w(name, text):
+            with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        w("screener_core.py", "import helper_mod\nX = 'target_state.json'\n")
+        w("helper_mod.py", "Y = 'brand_new_input.json'\nZ = 'not_on_disk.json'\n")
+        w("screener_local.py", "")
+        w("build_excel.py", "")
+        w("build_email.py", "")
+        w("target_state.json", "{}")
+        w("brand_new_input.json", "{}")
+        g = fallback_input_gaps(d)
+        check("brand_new_input.json" in g,
+              "negative control: an unclassified input reached only through an import must FAIL the scan")
+        check(g.get("brand_new_input.json") == ["helper_mod"], "the gap names the module that references it")
+        check("target_state.json" not in g, "a classified (bootstrap) input is not a gap")
+        check("not_on_disk.json" not in g, "a name with no file beside the scripts is not a gap")
+        os.remove(os.path.join(d, "brand_new_input.json"))
+        check(not fallback_input_gaps(d), "positive control: a fully classified tree yields no gaps")
+        check(all(f in NEVER for f in ONEDRIVE_BOOTSTRAP),
+              "negative control: a private bootstrap file must not be pushable (it is in NEVER)")
+        check(not (set(ONEDRIVE_BOOTSTRAP) & RUNTIME_JSON), "no file is both public-synced and private")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("sync_repo_to_github selftest: %d FAIL(s)" % len(fails))
+    return 1 if fails else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--inv-dir", required=True)
     ap.add_argument("--repo", default="J0bby77/raj-isa-screener")
     ap.add_argument("--branch", default="main")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--check-inputs", action="store_true",
+                    help="classify the fallback's data inputs and exit (1 if any are unclassified)")
+    ap.add_argument("--list-bootstrap", action="store_true",
+                    help="print the private files the Composio bootstrap must fetch from OneDrive, one per line")
     a = ap.parse_args()
+
+    if a.list_bootstrap:
+        for fn in sorted(ONEDRIVE_BOOTSTRAP):
+            print(fn)
+        return
+
+    # ---- FALLBACK INPUT CLASSIFICATION (runs ALWAYS, before the token check) -----
+    try:
+        _gaps = fallback_input_gaps(a.inv_dir)
+    except Exception as _e:                                            # noqa: BLE001
+        _gaps = {"<scan failed: %s>" % _e: []}
+    if _gaps:
+        print("FALLBACK_INPUT_UNCLASSIFIED: %d data file(s) named by the fallback's code are in none of "
+              "RUNTIME_JSON / ONEDRIVE_BOOTSTRAP / FALLBACK_WRITTEN / FALLBACK_EXCLUDED, so a Composio "
+              "fallback run would start WITHOUT them: %s. Classify each in sync_repo_to_github.py (ISA-0498)."
+              % (len(_gaps), "; ".join("%s (%s)" % (k, ",".join(v)) for k, v in sorted(_gaps.items()))))
+    if a.check_inputs:
+        if not _gaps:
+            print("FALLBACK_INPUTS_CLASSIFIED")
+        sys.exit(1 if _gaps else 0)
 
     # ---- LOCAL COMPILE GATE (runs ALWAYS — even with no token / --dry-run) -------
     # A truncated/half-written .py is the recurring failure mode. Validate every local
@@ -198,4 +378,6 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv[1:]:
+        sys.exit(_selftest())
     main()

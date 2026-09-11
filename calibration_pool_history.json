@@ -1,0 +1,75 @@
+{
+ "schema_version": "1.0",
+ "runs": [
+  {
+   "group": "F250SPI",
+   "run_date": "2026-07-11",
+   "pool_size": 30,
+   "eligible_size": null,
+   "config_hash": "pre_wpm_legacy"
+  },
+  {
+   "group": "MIDCAP400",
+   "run_date": "2026-07-17",
+   "pool_size": 10,
+   "eligible_size": null,
+   "config_hash": "pre_wpm_legacy"
+  },
+  {
+   "group": "NASDAQ",
+   "run_date": "2026-07-24",
+   "pool_size": 15,
+   "eligible_size": null,
+   "config_hash": "pre_wpm_legacy"
+  },
+  {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-07-31",
+   "pool_size": 0,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-08-01",
+   "pool_size": 66,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-09-03",
+   "pool_size": 197,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-09-04",
+   "pool_size": 197,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-09-05",
+   "pool_size": 197,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
+   "group": "SP500",
+   "run_date": "2026-07-18",
+   "pool_size": 10,
+   "eligible_size": null,
+   "config_hash": "pre_wpm_legacy"
+  },
+  {
+   "group": "STOXX600",
+   "run_date": "2026-07-25",
+   "pool_size": 19,
+   "eligible_size": null,
+   "config_hash": "pre_wpm_legacy"
+  }
+ ]
+}

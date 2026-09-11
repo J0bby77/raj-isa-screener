@@ -31,7 +31,12 @@ from pathlib import Path
 ATLAS_VERSION = "1.0.0"
 
 EXCLUDE_DIR_PARTS = ("__pycache__", "archive", "_bak", "_baseline", ".git", "node_modules",
-                     "calibration_pathc_jul2026")
+                     "calibration_pathc_jul2026",
+                     # 11-Sep-2026: aligned with release_gate.EXCLUDE_PARTS. The atlas scanned
+                     # _to_delete/ (where spent scratch goes because the mount denies delete)
+                     # while the release gate did not, so parking a scratch file there moved it
+                     # out of one map and into the other - five scratch stubs held R15.4 RED.
+                     "_to_delete", "_candidate_evidence")
 ARTEFACT_SUFFIXES = (".json", ".csv", ".jsonl", ".parquet", ".md", ".xlsx")
 
 CAPITAL_CONST_HINTS = ("FLOOR", "MIN", "MAX", "CAP", "WEIGHT", "THRESHOLD", "BAR", "PCT",

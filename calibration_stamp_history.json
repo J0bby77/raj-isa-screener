@@ -1,0 +1,93 @@
+{
+  "2026-06-26|TEST": {
+    "fingerprint": "7e6fc8157576",
+    "group": "TEST",
+    "run_date": "2026-06-26",
+    "schema_version": "1.0",
+    "stamped_at": "2026-09-02"
+  },
+  "2026-08-08|F250-SPI": {
+    "fingerprint": "7e6fc8157576",
+    "group": "F250-SPI",
+    "run_date": "2026-08-08",
+    "schema_version": "1.0",
+    "stamped_at": "2026-09-02"
+  },
+  "2026-08-14|NASDAQ": {
+    "fingerprint": "7e6fc8157576",
+    "group": "NASDAQ",
+    "run_date": "2026-08-14",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-14"
+  },
+  "2026-08-15|SP500": {
+    "fingerprint": "7e6fc8157576",
+    "group": "SP500",
+    "run_date": "2026-08-15",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-15"
+  },
+  "2026-08-21|MIDCAP400": {
+    "fingerprint": "7e6fc8157576",
+    "group": "MIDCAP400",
+    "run_date": "2026-08-21",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-21"
+  },
+  "2026-08-22|STOXX600": {
+    "fingerprint": "7e6fc8157576",
+    "group": "STOXX600",
+    "run_date": "2026-08-22",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-22"
+  },
+  "2026-08-27|NASDAQ": {
+    "fingerprint": "7e6fc8157576",
+    "group": "NASDAQ",
+    "run_date": "2026-08-27",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-27"
+  },
+  "2026-08-27|STOXX600": {
+    "fingerprint": "7e6fc8157576",
+    "group": "STOXX600",
+    "run_date": "2026-08-27",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-27"
+  },
+  "2026-08-28|F250-SPI": {
+    "fingerprint": "7e6fc8157576",
+    "group": "F250-SPI",
+    "run_date": "2026-08-28",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-28"
+  },
+  "2026-08-28|NASDAQ": {
+    "fingerprint": "7e6fc8157576",
+    "group": "NASDAQ",
+    "run_date": "2026-08-28",
+    "schema_version": "1.0",
+    "stamped_at": "2026-08-28"
+  },
+  "2026-09-04|SP500": {
+    "fingerprint": "7e6fc8157576",
+    "group": "SP500",
+    "run_date": "2026-09-04",
+    "schema_version": "1.0",
+    "stamped_at": "2026-09-04"
+  },
+  "2026-09-05|WATCHLIST_RERANK": {
+    "fingerprint": "7e6fc8157576",
+    "group": "WATCHLIST_RERANK",
+    "run_date": "2026-09-05",
+    "schema_version": "1.0",
+    "stamped_at": "2026-09-05"
+  },
+  "_pool_exclusions": {
+    "2026-08-07|SP500": {
+      "approved_by": "raj",
+      "excluded_on": "2026-08-12",
+      "reason": "Scored on the RETIRED momentum bands (screener_local never called run_scheduled). Raj 12-Aug-2026: not re-running SP500 - exclude the 07-Aug frame from the September pool. Artefacts RETAINED as evidence and as the D-24 golden fixture; inadmissible for SELECTION only."
+    }
+  }
+}

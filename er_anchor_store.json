@@ -1,0 +1,1251 @@
+{
+  "tables": {
+    "NASDAQ:20260724": {
+      "as_of": "20260724",
+      "group": "NASDAQ",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 16.93,
+        "Communication Services": 13.3686,
+        "Consumer Cyclical": 15.9096,
+        "Consumer Defensive": 15.1717,
+        "Energy": 7.656,
+        "Financial Services": 15.3078,
+        "Healthcare": 18.3383,
+        "Industrials": 18.257,
+        "Technology": 21.4425,
+        "Utilities": 13.77
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 31,
+        "Consumer Cyclical": 50,
+        "Consumer Defensive": 24,
+        "Energy": 9,
+        "Financial Services": 21,
+        "Healthcare": 62,
+        "Industrials": 41,
+        "Technology": 138,
+        "UNKNOWN": 1,
+        "Utilities": 11
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.0695,
+        "fwd_pe": 19.0246,
+        "price_fcf": 22.102
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 423,
+      "sanity_filtered": {
+        "ev_ebitda": 4,
+        "fwd_pe": 13
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "STOXX600:20260725": {
+      "as_of": "20260725",
+      "group": "STOXX600",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 13.387,
+        "Communication Services": 14.3904,
+        "Consumer Cyclical": 15.1285,
+        "Consumer Defensive": 14.3138,
+        "Energy": 8.816,
+        "Financial Services": 15.7722,
+        "Healthcare": 15.7875,
+        "Industrials": 15.3465,
+        "Technology": 16.6617,
+        "Utilities": 12.932
+      },
+      "n_by_sector": {
+        "Basic Materials": 9,
+        "Communication Services": 12,
+        "Consumer Cyclical": 42,
+        "Consumer Defensive": 27,
+        "Energy": 7,
+        "Financial Services": 6,
+        "Healthcare": 36,
+        "Industrials": 96,
+        "Technology": 24,
+        "Utilities": 5
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 12.7825,
+        "fwd_pe": 15.9694,
+        "price_fcf": 19.9531
+      },
+      "excluded": {},
+      "rows_in": 271,
+      "sanity_filtered": {
+        "ev_ebitda": 5,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "SP500:20260807": {
+      "as_of": "20260807",
+      "group": "SP500",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 17.881,
+        "Communication Services": 14.0346,
+        "Consumer Cyclical": 17.5057,
+        "Consumer Defensive": 16.8799,
+        "Energy": 11.6135,
+        "Financial Services": 22.5968,
+        "Healthcare": 16.2441,
+        "Industrials": 18.7115,
+        "Technology": 19.4627,
+        "Utilities": 13.2505
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 17,
+        "Consumer Cyclical": 45,
+        "Consumer Defensive": 21,
+        "Energy": 8,
+        "Financial Services": 14,
+        "Healthcare": 50,
+        "Industrials": 54,
+        "Technology": 67,
+        "UNKNOWN": 1,
+        "Utilities": 24
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 15.925,
+        "fwd_pe": 18.6725,
+        "price_fcf": 25.3921
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 312,
+      "sanity_filtered": {
+        "ev_ebitda": 3,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "F250-SPI:20260808": {
+      "as_of": "20260808",
+      "group": "F250-SPI",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Communication Services": "fwd_pe",
+        "Technology": "fwd_pe",
+        "Basic Materials": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 19.584,
+        "Communication Services": 17.8985,
+        "Consumer Cyclical": 11.6076,
+        "Consumer Defensive": 11.5048,
+        "Healthcare": 21.7302,
+        "Industrials": 10.502,
+        "Technology": 16.7711
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 9,
+        "Consumer Cyclical": 27,
+        "Consumer Defensive": 15,
+        "Energy": 4,
+        "Financial Services": 3,
+        "Healthcare": 20,
+        "Industrials": 35,
+        "Technology": 14,
+        "Utilities": 2
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 10.6995,
+        "fwd_pe": 14.9676,
+        "price_fcf": 15.0075
+      },
+      "excluded": {
+        "Energy": "n=4 < ER_ANCHOR_MIN_SECTOR_N=5",
+        "Financial Services": "n=3 < ER_ANCHOR_MIN_SECTOR_N=5",
+        "Utilities": "n=2 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 140,
+      "sanity_filtered": {
+        "ev_ebitda": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "NASDAQ:20260814": {
+      "as_of": "20260814",
+      "group": "NASDAQ",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 16.8845,
+        "Communication Services": 12.7615,
+        "Consumer Cyclical": 17.3504,
+        "Consumer Defensive": 16.3871,
+        "Energy": 7.67,
+        "Financial Services": 14.8436,
+        "Healthcare": 19.3847,
+        "Industrials": 18.107,
+        "Technology": 20.8363,
+        "Utilities": 13.6765
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 30,
+        "Consumer Cyclical": 50,
+        "Consumer Defensive": 23,
+        "Energy": 9,
+        "Financial Services": 23,
+        "Healthcare": 69,
+        "Industrials": 46,
+        "Technology": 143,
+        "UNKNOWN": 1,
+        "Utilities": 12
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.439,
+        "fwd_pe": 19.1441,
+        "price_fcf": 24.5709
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 439,
+      "sanity_filtered": {
+        "fwd_pe": 14,
+        "ev_ebitda": 3
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "SP500:20260815": {
+      "as_of": "20260815",
+      "group": "SP500",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 17.7685,
+        "Communication Services": 14.3774,
+        "Consumer Cyclical": 17.8261,
+        "Consumer Defensive": 16.8232,
+        "Energy": 11.956,
+        "Financial Services": 22.5871,
+        "Healthcare": 16.2341,
+        "Industrials": 18.608,
+        "Technology": 20.3725,
+        "Utilities": 13.2945
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 17,
+        "Consumer Cyclical": 44,
+        "Consumer Defensive": 21,
+        "Energy": 8,
+        "Financial Services": 14,
+        "Healthcare": 50,
+        "Industrials": 58,
+        "Technology": 67,
+        "UNKNOWN": 1,
+        "Utilities": 26
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 15.99,
+        "fwd_pe": 18.8236,
+        "price_fcf": 26.0185
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 315,
+      "sanity_filtered": {
+        "ev_ebitda": 2,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "MIDCAP400:20260821": {
+      "as_of": "20260821",
+      "group": "MIDCAP400",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Energy": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Basic Materials": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 11.046,
+        "Consumer Cyclical": 12.0583,
+        "Consumer Defensive": 14.8474,
+        "Energy": 7.603,
+        "Healthcare": 17.8812,
+        "Industrials": 15.632,
+        "Technology": 20.4062,
+        "Utilities": 14.739
+      },
+      "n_by_sector": {
+        "Basic Materials": 7,
+        "Communication Services": 4,
+        "Consumer Cyclical": 38,
+        "Consumer Defensive": 13,
+        "Energy": 9,
+        "Financial Services": 4,
+        "Healthcare": 27,
+        "Industrials": 60,
+        "Technology": 43,
+        "Utilities": 7
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 14.1175,
+        "fwd_pe": 16.6501,
+        "price_fcf": 22.789
+      },
+      "excluded": {
+        "Communication Services": "n=4 < ER_ANCHOR_MIN_SECTOR_N=5",
+        "Financial Services": "n=4 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 213,
+      "sanity_filtered": {},
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 213,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 30.434,
+        "knee_pp": 30.434,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.33,
+        "share_above_hi_pct": 20.66,
+        "share_below_lo_pct": 11.74,
+        "median_pp": 14.72
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "STOXX600:20260822": {
+      "as_of": "20260822",
+      "group": "STOXX600",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 13.932,
+        "Communication Services": 13.9581,
+        "Consumer Cyclical": 14.8614,
+        "Consumer Defensive": 14.3632,
+        "Energy": 9.014,
+        "Financial Services": 15.3457,
+        "Healthcare": 16.5183,
+        "Industrials": 15.308,
+        "Technology": 18.7963,
+        "Utilities": 12.648
+      },
+      "n_by_sector": {
+        "Basic Materials": 9,
+        "Communication Services": 12,
+        "Consumer Cyclical": 41,
+        "Consumer Defensive": 27,
+        "Energy": 7,
+        "Financial Services": 6,
+        "Healthcare": 36,
+        "Industrials": 91,
+        "Technology": 22,
+        "Utilities": 6
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 12.84,
+        "fwd_pe": 16.2329,
+        "price_fcf": 20.7168
+      },
+      "excluded": {},
+      "rows_in": 263,
+      "sanity_filtered": {
+        "ev_ebitda": 5,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 263,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 18.667,
+        "knee_pp": 18.667,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.46,
+        "share_above_hi_pct": 12.17,
+        "share_below_lo_pct": 11.41,
+        "median_pp": 8.9
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "STOXX600:20260827": {
+      "as_of": "20260827",
+      "group": "STOXX600",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 14.182,
+        "Communication Services": 13.9348,
+        "Consumer Cyclical": 14.8614,
+        "Consumer Defensive": 15.5731,
+        "Energy": 9.01,
+        "Financial Services": 15.7557,
+        "Healthcare": 16.0073,
+        "Industrials": 15.326,
+        "Technology": 18.9306,
+        "Utilities": 12.69
+      },
+      "n_by_sector": {
+        "Basic Materials": 9,
+        "Communication Services": 12,
+        "Consumer Cyclical": 43,
+        "Consumer Defensive": 28,
+        "Energy": 7,
+        "Financial Services": 6,
+        "Healthcare": 36,
+        "Industrials": 95,
+        "Technology": 25,
+        "Utilities": 6
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 13.026,
+        "fwd_pe": 16.4645,
+        "price_fcf": 20.5057
+      },
+      "excluded": {},
+      "rows_in": 273,
+      "sanity_filtered": {
+        "ev_ebitda": 5,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 273,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 18.833,
+        "knee_pp": 18.833,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.33,
+        "share_above_hi_pct": 12.45,
+        "share_below_lo_pct": 11.72,
+        "median_pp": 8.9
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "NASDAQ:20260827": {
+      "as_of": "20260827",
+      "group": "NASDAQ",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 17.14,
+        "Communication Services": 12.8974,
+        "Consumer Cyclical": 16.5108,
+        "Consumer Defensive": 16.5551,
+        "Energy": 7.353,
+        "Financial Services": 15.3748,
+        "Healthcare": 19.0787,
+        "Industrials": 18.754,
+        "Technology": 20.9944,
+        "Utilities": 13.5275
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 30,
+        "Consumer Cyclical": 51,
+        "Consumer Defensive": 24,
+        "Energy": 9,
+        "Financial Services": 24,
+        "Healthcare": 70,
+        "Industrials": 46,
+        "Technology": 143,
+        "UNKNOWN": 1,
+        "Utilities": 12
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.303,
+        "fwd_pe": 18.7346,
+        "price_fcf": 24.5753
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 446,
+      "sanity_filtered": {
+        "fwd_pe": 15,
+        "ev_ebitda": 4
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 443,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 42.694,
+        "knee_pp": 40.0,
+        "knee_state": "CEIL_BOUND",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 34.31,
+        "share_above_hi_pct": 30.25,
+        "share_below_lo_pct": 11.51,
+        "median_pp": 21.28
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "NASDAQ:20260828": {
+      "as_of": "20260828",
+      "group": "NASDAQ",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 17.1785,
+        "Communication Services": 13.0916,
+        "Consumer Cyclical": 16.1097,
+        "Consumer Defensive": 16.1473,
+        "Energy": 7.66,
+        "Financial Services": 15.72,
+        "Healthcare": 18.7937,
+        "Industrials": 18.7265,
+        "Technology": 21.3362,
+        "Utilities": 13.4355
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 30,
+        "Consumer Cyclical": 49,
+        "Consumer Defensive": 24,
+        "Energy": 9,
+        "Financial Services": 24,
+        "Healthcare": 69,
+        "Industrials": 46,
+        "Technology": 144,
+        "UNKNOWN": 1,
+        "Utilities": 12
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.3525,
+        "fwd_pe": 18.778,
+        "price_fcf": 24.4164
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 444,
+      "sanity_filtered": {
+        "fwd_pe": 15,
+        "ev_ebitda": 4
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 441,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 41.841,
+        "knee_pp": 40.0,
+        "knee_state": "CEIL_BOUND",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 34.01,
+        "share_above_hi_pct": 29.71,
+        "share_below_lo_pct": 11.34,
+        "median_pp": 21.2
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "F250-SPI:20260828": {
+      "as_of": "20260828",
+      "group": "F250-SPI",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda"
+      },
+      "median_by_sector": {
+        "Basic Materials": 19.54,
+        "Communication Services": 17.7811,
+        "Consumer Cyclical": 11.2915,
+        "Consumer Defensive": 11.7202,
+        "Healthcare": 21.275,
+        "Industrials": 10.8725,
+        "Technology": 18.3979
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 9,
+        "Consumer Cyclical": 26,
+        "Consumer Defensive": 15,
+        "Energy": 4,
+        "Financial Services": 3,
+        "Healthcare": 20,
+        "Industrials": 36,
+        "Technology": 15,
+        "Utilities": 2
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 10.964,
+        "fwd_pe": 15.1867,
+        "price_fcf": 14.6887
+      },
+      "excluded": {
+        "Energy": "n=4 < ER_ANCHOR_MIN_SECTOR_N=5",
+        "Financial Services": "n=3 < ER_ANCHOR_MIN_SECTOR_N=5",
+        "Utilities": "n=2 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 139,
+      "sanity_filtered": {
+        "ev_ebitda": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 139,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 21.201,
+        "knee_pp": 21.201,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.09,
+        "share_above_hi_pct": 17.27,
+        "share_below_lo_pct": 12.23,
+        "median_pp": 8.2
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "SP500:20260904": {
+      "as_of": "20260904",
+      "group": "SP500",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Financial Services": "fwd_pe",
+        "Consumer Defensive": "fwd_pe",
+        "Industrials": "ev_ebitda",
+        "Basic Materials": "ev_ebitda",
+        "Utilities": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 17.1565,
+        "Communication Services": 15.0549,
+        "Consumer Cyclical": 16.9133,
+        "Consumer Defensive": 16.5969,
+        "Energy": 12.5245,
+        "Financial Services": 23.7661,
+        "Healthcare": 17.0292,
+        "Industrials": 18.1985,
+        "Technology": 18.9469,
+        "Utilities": 13.126
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 18,
+        "Consumer Cyclical": 44,
+        "Consumer Defensive": 21,
+        "Energy": 8,
+        "Financial Services": 14,
+        "Healthcare": 49,
+        "Industrials": 58,
+        "Technology": 67,
+        "UNKNOWN": 1,
+        "Utilities": 26
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.05,
+        "fwd_pe": 18.1326,
+        "price_fcf": 25.2598
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 315,
+      "sanity_filtered": {
+        "ev_ebitda": 2,
+        "fwd_pe": 1
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 315,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 29.068,
+        "knee_pp": 29.068,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.33,
+        "share_above_hi_pct": 21.59,
+        "share_below_lo_pct": 8.57,
+        "median_pp": 14.3
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
+    }
+  },
+  "latest": {
+    "NASDAQ": "NASDAQ:20260828",
+    "STOXX600": "STOXX600:20260827",
+    "SP500": "SP500:20260904",
+    "F250-SPI": "F250-SPI:20260828",
+    "MIDCAP400": "MIDCAP400:20260821"
+  },
+  "latest_any": "SP500:20260904"
+}

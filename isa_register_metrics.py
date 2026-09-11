@@ -271,6 +271,162 @@ def kr6() -> dict:
 
 
 # ── §17 rule-audit ratio ──────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# KR10 – KR19 — the warning lights the adopted standard added (ISA-0623, 09-Sep-2026)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ⚑ EACH ONE READS AN EXISTING INSTRUMENT RATHER THAN RE-DERIVING IT (R4.4, R4.5). KR10 asks
+#   release_gate, KR12 asks capability_registry, KR13 asks release_gate.item_currency, KR17
+#   asks release_gate.buildspec_gaps. A metric that re-implements the check it reports is the
+#   second home this file exists to avoid, and it would drift the day the check changed.
+
+def kr10() -> dict:
+    """KR10 — unsigned/untrusted live changes. Must be 0."""
+    try:
+        import release_gate as rg
+        v = rg.verify_live()
+    except Exception as e:                                              # noqa: BLE001
+        return _missing("release_gate unavailable (%s)" % e)
+    n = 0 if v.get("state") == "TRUSTED" else len(v.get("diffs") or []) or 1
+    return {"value": n, "trigger": "must be 0", "state": v.get("state"),
+            "why": v.get("why"), "blocks_capital_run": v.get("blocks_capital_run")}
+
+
+def kr11() -> dict:
+    """KR11 — candidate parity unknown or failed."""
+    try:
+        import release_gate as rg
+        fp = rg.live_fingerprints()
+    except Exception as e:                                              # noqa: BLE001
+        return _missing("release_gate unavailable (%s)" % e)
+    unknown = {k: v.get("why") for k, v in fp.items()
+               if v.get("state") in ("ENVIRONMENT_UNKNOWN", "UNKNOWN")}
+    return {"value": len(unknown), "trigger": "any", "surfaces": unknown,
+            "why": ("R5.12: a surface that cannot be fingerprinted is ENVIRONMENT_UNKNOWN and "
+                    "blocks; it is never evidence about framework correctness")}
+
+
+def kr12() -> dict:
+    """KR12 — claimed capital decision states lacking the R4.14 chain. Must be 0."""
+    try:
+        import capability_registry as cr
+        rec = cr.reconcile()
+        if rec.get("state") == "DISABLED":
+            return _missing(rec["why"])
+        gaps = cr.must_fire_gaps()
+    except Exception as e:                                              # noqa: BLE001
+        return _missing("capability_registry unavailable (%s)" % e)
+    return {"value": rec["n_not_live"], "trigger": "must be 0",
+            "d": rec["n_capabilities"],
+            "gbp_exposure_not_live": rec["gbp_exposure_not_live"],
+            "blocked_at": rec["blocked_at"],
+            "n_must_fire_gaps": len(gaps),
+            "why": ("R4.14: LIVE requires produced -> executed -> consumed -> "
+                    "decision-effective. Static reachability alone may never close FC-E "
+                    "(R15.5)")}
+
+
+def kr13() -> dict:
+    """KR13 — actionable items not validated against the current Trusted Build. Must be 0."""
+    try:
+        import release_gate as rg
+        prev = rg.load_receipt() or {}
+        ic = rg.item_currency(build_id=prev.get("build_id"))
+    except Exception as e:                                              # noqa: BLE001
+        return _missing("release_gate unavailable (%s)" % e)
+    if ic.get("state") == "ENVIRONMENT_UNKNOWN":
+        return _missing(ic["why"])
+    return {"value": ic["n_stale"], "d": ic["n_actionable"], "trigger": "must be 0",
+            "current_build_id": ic.get("current_build_id"),
+            "worst": [s["id"] for s in ic["stale"][:8]],
+            "why": ("R7.8: an item not validated against the current Trusted Build is "
+                    "REVALIDATION_REQUIRED, not BUILD_READY. ISA-0467 stood BUILD_READY for "
+                    "twelve days while six builds shipped most of its corrective action")}
+
+
+def kr14(items=None) -> dict:
+    """KR14 — shipped items with an undispositioned run surface. Must be 0."""
+    try:
+        import release_gate as rg
+        surfaces = rg.RUN_SURFACES
+    except Exception as e:                                              # noqa: BLE001
+        return _missing("release_gate unavailable (%s)" % e)
+    items = items if items is not None else load_items()
+    recent = [i for i in items
+              if i.get("state") == "CLOSED_FIXED" and i.get("trusted_build_id")]
+    bad = []
+    for i in recent:
+        d = i.get("run_surface_dispositions") or {}
+        missing = [s for s in surfaces if s not in d]
+        if missing:
+            bad.append({"id": i["id"], "undispositioned": missing})
+    return {"value": len(bad), "d": len(recent), "trigger": "must be 0", "worst": bad[:8],
+            "why": ("R4.15/R14.5: each affected surface is UPDATE_REQUIRED or "
+                    "VERIFIED_NO_CHANGE with evidence; omission is not a verdict")}
+
+
+def kr15(items=None) -> dict:
+    """KR15 — retained learning data with no feedback contract. Any is a trigger."""
+    items = items if items is not None else load_items()
+    learn = [i for i in items
+             if (i.get("learning") or {}).get("learnable")
+             and (i.get("learning") or {}).get("task_id")]
+    open_loops = [i["id"] for i in learn if not i.get("learning_feedback_contract")]
+    return {"value": len(open_loops), "d": len(learn), "trigger": "any",
+            "worst": open_loops[:8],
+            "why": ("R8.5: capture is not learning. A growing store with no analysis, no "
+                    "consumer and no Raj-facing insight path is an open FC-E loop")}
+
+
+def kr16(items=None) -> dict:
+    """KR16 — material decision outputs that cannot reconstruct the decision trace."""
+    items = items if items is not None else load_items()
+    capital = [i for i in items
+               if (i.get("capital_impact") or {}).get("has_impact")
+               and i.get("state") == "CLOSED_FIXED"]
+    opaque = [i["id"] for i in capital if not i.get("observability")]
+    return {"value": len(opaque), "d": len(capital), "trigger": "any", "worst": opaque[:8],
+            "why": ("R20.1: every material capital capability emits structured evidence "
+                    "sufficient to reconstruct INPUT -> CALCULATION -> CONSTRAINT -> DECISION "
+                    "-> CAPITAL CONSEQUENCE without reading Python")}
+
+
+def kr17(items=None) -> dict:
+    """KR17 — BuildSpec quality/currency failure. Must be 0."""
+    items = items if items is not None else load_items()
+    material = [i for i in items
+               if i.get("size_est") in ("M", "L", "XL") and i.get("state") == "CLOSED_FIXED"
+               and i.get("trusted_build_id")]
+    nospec = [i["id"] for i in material if not i.get("buildspec_ref")]
+    return {"value": len(nospec), "d": len(material), "trigger": "must be 0",
+            "worst": nospec[:8],
+            "why": ("R19.1: no material build starts from chat prose or an old corrective "
+                    "action alone; it starts from a BuildSpec validated against the current "
+                    "Trusted Build")}
+
+
+def kr18(items=None) -> dict:
+    """KR18 — items executed without a current model/reasoning route. Any is a trigger."""
+    items = items if items is not None else load_items()
+    worked = [i for i in items
+              if i.get("state") in ("IN_PROGRESS", "CLOSED_FIXED")
+              and i.get("trusted_build_id")]
+    unrouted = [i["id"] for i in worked if not i.get("model_route")]
+    return {"value": len(unrouted), "d": len(worked), "trigger": "any", "worst": unrouted[:8],
+            "why": ("R9.7: route on reasoning complexity, uncertainty, architectural breadth, "
+                    "novelty and capital consequence — not priority or size — and stamp the "
+                    "resolution `as_of` rather than hard-coding a model")}
+
+
+def kr19(items=None) -> dict:
+    """KR19 — avoidable second-generation redesign. Any triggers a class review."""
+    items = items if items is not None else load_items()
+    fcm = [i["id"] for i in items if i.get("failure_class") == "FC-M"]
+    return {"value": len(fcm), "trigger": "any; class review", "worst": fcm[:8],
+            "why": ("FC-M: a change directionally better but never tested against the absolute "
+                    "portfolio objective, risk budget or institutionally complete design. "
+                    "R16.5: relative improvement does not establish absolute acceptability")}
+
+
 def rule_audit_ratio() -> dict:
     if "s17" in _CACHE:
         return _CACHE["s17"]
@@ -319,6 +475,10 @@ def metrics(month: str | None = None, items=None) -> dict:
         "KR3": kr3(),
         "KR6": kr6(),
         "S17_rule_audit": rule_audit_ratio(),
+        # ── ISA-0623: the warning lights the adopted standard added ────────────────────
+        "KR10": kr10(), "KR11": kr11(), "KR12": kr12(), "KR13": kr13(),
+        "KR14": kr14(items), "KR15": kr15(items), "KR16": kr16(items),
+        "KR17": kr17(items), "KR18": kr18(items), "KR19": kr19(items),
         "unimplemented": UNIMPLEMENTED,
         "unimplemented_note": ("named, never omitted. An absent metric and a metric reading "
                                "zero are the same output and different facts (R2.10)"),

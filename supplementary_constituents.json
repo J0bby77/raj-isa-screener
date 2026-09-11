@@ -1,0 +1,99 @@
+{
+  "_doc": "WP-A2 (Path C absorption, 26-Jul-2026). Names that no index screen reaches but which the framework should still see. Appended to the constituent list of the named group by screener_core.fetch_constituents(); de-duplicated against index members automatically and still subject to STRUCTURAL_EXCLUSIONS and all Path A gates. EDIT THIS FILE, NOT THE CODE. Set _active=false to disable without deleting.",
+  "_active": true,
+  "_activation_note": "ACTIVATED 26-Jul-2026 by Raj. All 11 names pre-flighted live: resolvable, correct currencies (CAD/USD/GBp), all classify into the energy_utilities bucket. They are appended to the SP500 group's constituent list and are subject to the full Path A gate set and Source Score like any other name. Set back to false to disable without deleting.",
+  "_evidence": "ISA_PathC_Energy_Assessment_Jul2026.md section 4.3 (universe overlap) and ISA_PathC_Energy_Calibration_Study_Jul2026.md. The retired Path C universe was ~70% already covered by the weekly index screens; these are the genuinely uncovered residual.",
+  "_updated": "2026-07-26",
+  "groups": {
+    "SP500": [
+      {
+        "ticker": "BEP-UN.TO",
+        "company": "Brookfield Renewable Partners",
+        "sector": "Utilities",
+        "region": "CA",
+        "currency": "CAD",
+        "why": "Canada — no TSX renewables coverage in any weekly screen"
+      },
+      {
+        "ticker": "NPI.TO",
+        "company": "Northland Power",
+        "sector": "Utilities",
+        "region": "CA",
+        "currency": "CAD",
+        "why": "Canada — offshore wind developer, uncovered"
+      },
+      {
+        "ticker": "AQN.TO",
+        "company": "Algonquin Power & Utilities",
+        "sector": "Utilities",
+        "region": "CA",
+        "currency": "CAD",
+        "why": "Canada — uncovered"
+      },
+      {
+        "ticker": "CPX.TO",
+        "company": "Capital Power",
+        "sector": "Utilities",
+        "region": "CA",
+        "currency": "CAD",
+        "why": "Canada — passed all Path A gate proxies in the calibration panel"
+      },
+      {
+        "ticker": "IBDRY",
+        "company": "Iberdrola ADR",
+        "sector": "Utilities",
+        "region": "EU",
+        "currency": "USD",
+        "why": "ADR line — not an index member anywhere in scope"
+      },
+      {
+        "ticker": "EDPFY",
+        "company": "EDP ADR",
+        "sector": "Utilities",
+        "region": "EU",
+        "currency": "USD",
+        "why": "ADR line — uncovered"
+      },
+      {
+        "ticker": "SSE.L",
+        "company": "SSE plc",
+        "sector": "Utilities",
+        "region": "UK",
+        "currency": "GBp",
+        "why": "FTSE 100 — deliberately dropped from scope 21-Jun-26, so uncovered"
+      },
+      {
+        "ticker": "NG.L",
+        "company": "National Grid",
+        "sector": "Utilities",
+        "region": "UK",
+        "currency": "GBp",
+        "why": "FTSE 100 — uncovered grid infrastructure"
+      },
+      {
+        "ticker": "BWXT",
+        "company": "BWX Technologies",
+        "sector": "Industrials",
+        "region": "US",
+        "currency": "USD",
+        "why": "June-2026 audit Priority-1 addition, never actioned; passed all Path A gate proxies"
+      },
+      {
+        "ticker": "POWL",
+        "company": "Powell Industries",
+        "sector": "Industrials",
+        "region": "US",
+        "currency": "USD",
+        "why": "June-2026 audit Priority-1 addition; passed all Path A gate proxies"
+      },
+      {
+        "ticker": "AGX",
+        "company": "Argan Inc",
+        "sector": "Industrials",
+        "region": "US",
+        "currency": "USD",
+        "why": "June-2026 audit Priority-1 addition — power-plant EPC"
+      }
+    ]
+  }
+}

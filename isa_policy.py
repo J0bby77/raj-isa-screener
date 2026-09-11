@@ -106,6 +106,16 @@ V2_FLAGS: Dict[str, bool] = {
     # actually EXECUTED, DECLARED and EVIDENCED. Phase 0 exists because none of the twelve
     # defects found on 26/27-Aug required insight: every one was findable by a mechanical,
     # enumerable procedure that nothing was running when nobody was building (spec §2.3).
+    # --- ENFORCEMENT ARCHITECTURE (ISA-0623 / ISA-0467, 09-Sep-2026) --------------------
+    # ⚑ These three move NO capital. They are the §18/§19/§12.4 layer the adopted standard
+    # requires: a semantic capability map (R15.6), a release gate that will not let LIVE run
+    # unsigned (R18.5), and the conversation preflight that stops a material framework answer
+    # being given from recollection (R12.4/R12.5). Each False reproduces 06-Sep-2026 behaviour
+    # exactly: the module reports DISABLED, and DISABLED is read as UNKNOWN, never PASS (R4.3).
+    "capability_registry":        True,   # R15.6: the Decision/Capability Registry + R4.14 chain
+    "release_gate":               True,   # §18: Trusted Build receipt, candidate parity, KR10
+    "discussion_preflight":       True,   # R12.4: orientation receipt before a material answer
+
     # --- PHASE 1 (authority — MOVES CAPITAL) --------------------------------------------
     "single_sizing_authority":    True,   # P7: thesis_state replaces the /100 as the gate
 

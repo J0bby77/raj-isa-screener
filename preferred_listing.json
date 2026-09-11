@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "purpose": "One ranked line per issuer. pinned:true entries are Raj decisions and are NEVER overwritten by the computed preference.",
+    "pin_how": "set pinned:true and ticker:<line to rank>, with pinned_reason",
+    "state": "2026-08-05 - EMPTY BY DESIGN. Populated automatically from the first weekly screen carrying formation liquidity (07-Aug-2026 onward). It was briefly populated during the build from SIMULATED liquidity and has been cleared: a decision store seeded with test data is worse than an empty one, because nothing downstream can tell the difference.",
+    "open_decision": "ASML New York registry (ASML) vs Amsterdam (ASML.AS) is NOT a liquidity question - it turns on withholding treatment and AJ Bell European dealing terms. Confirm with AJ Bell, then pin it here."
+  },
+  "issuers": {
+    "asml": {
+      "ticker": "ASML.AS",
+      "pinned": true,
+      "lines": [
+        "ASML",
+        "ASML.AS"
+      ],
+      "basis": "pinned",
+      "decided_on": "2026-08-05",
+      "pinned_reason": "Raj, 05-Aug-2026: no AJ Bell platform-cost difference between the Nasdaq and Amsterdam lines, so the decision falls to the remaining differences. (1) WITHHOLDING IS THE SAME: ASML is Dutch-domiciled, so BOTH lines pay a Dutch dividend and suffer 15% Dutch withholding; the New York registry shares are NOT an ADR wrapper and W-8BEN does not apply, so there is nothing to reclaim on either line inside an ISA. Withholding therefore does not discriminate. (2) LIQUIDITY AND SPREAD: Amsterdam is the PRIMARY listing and carries the deeper book, so the dealing spread is tighter — the same reason the listing policy prefers the more liquid line everywhere else. (3) FX: both are non-GBP and both attract the 0.50% charge, so FX does not discriminate either. Amsterdam wins on the only axis that differs. REVERSIBLE: change `ticker` here and state why.",
+      "confirm_with_broker": "Not a blocker, but worth confirming once with AJ Bell: European dealing is available on the account and the EUR line settles normally. If Amsterdam turns out to be unavailable or more expensive to deal, flip this to ASML and record that as the reason."
+    }
+  }
+}

@@ -1823,6 +1823,26 @@ def pair_occurrence_guard_coverage(setup_text=None, mirrors=None, exists=os.path
     return errs
 
 
+def pair_fallback_inputs_classified(gaps_fn=None):
+    """ISA-0498 (built 11-Sep-2026; promised 02-Sep and never wired). Every data file the Composio
+    fallback's own code names must be classified in sync_repo_to_github.py — synced to git,
+    fetched privately from OneDrive at bootstrap, reconciled back after the run, or excluded
+    with a reason. An unclassified input is one the fallback silently starts without: on
+    11-Sep-2026 that was target_state.json (the anchor) plus three universe inputs."""
+    try:
+        if gaps_fn is None:
+            import sync_repo_to_github as _srg
+            gaps = _srg.fallback_input_gaps(HERE)
+        else:
+            gaps = gaps_fn()
+    except Exception as e:                                             # noqa: BLE001
+        return [f"A18/ISA-0498: fallback input classification could not run ({e}) - reported, "
+                f"never silently skipped (R4.9)"]
+    return [f"A18/ISA-0498: {name} is named by {', '.join(mods)} but is unclassified in "
+            f"sync_repo_to_github.py, so a Composio fallback run would start without it"
+            for name, mods in sorted(gaps.items())]
+
+
 def pair_referenced_scripts_exist(texts, exists=os.path.exists):
     """Every *.py referenced by an execution contract must be present on disk.
     THE pair that would have caught fetch_metrics_local.py: the pre-run recipe invoked it every
@@ -4427,6 +4447,375 @@ def pair_min_hold_is_position_level(root=None):
     return ["D24/ISA-0545: min_hold_ok not found in position_sizing.py"]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ISA-0623 / ISA-0467 ENFORCEMENT PAIRS (09-Sep-2026)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ⚑⚑ WHY THESE ARE HERE AND NOT IN A NEW MODULE. R4.4: extend `consistency_check.py`; do not
+#    invent a parallel mechanism. Every control below already EXISTS as a function somewhere in
+#    the tree — `framework_atlas.check`, `rule_audit.unclassified`, `release_gate.verify_live`,
+#    `capability_registry.reconcile`. The ISA-0467 finding was never that they were missing. It
+#    was that NOTHING CALLED THEM. These pairs are the call sites, in the one place a run, a
+#    build and a battery all already go through.
+
+def pair_atlas_current(root=None):
+    """R15.4 item 1 — the regenerated graph must match the declared manifest, or the build FAILS.
+
+    ⚑⚑ THIS IS THE CALL SITE ISA-0467 WAS ABOUT. R15.4 has said since 09-Aug-2026 that the Atlas
+    refreshes on every build and *"the build FAILS if the regenerated graph differs from the
+    declared manifests"*. `framework_atlas.check()` implements exactly that. On 09-Sep-2026 it
+    returned False against the delivered tree — declared `cfd81d2f72bb` / 150 modules / as_of
+    2026-08-12 against a current 209 modules — and a grep of the whole tree found ZERO call sites
+    for it outside its own `__main__` and its own test. Fifty-nine modules existed that the
+    Trusted map had never seen, including `framework_integrity` and `rule_audit`: the enforcement
+    layer built for ISA-0467 was itself invisible to the map ISA-0467 said must not go stale.
+    A control nobody invokes is not a control (FC-E)."""
+    root = root or HERE
+    try:
+        from pathlib import Path as _P
+        import framework_atlas as _fa
+        ok, msg = _fa.check(_P(root))
+    except Exception as e:                                        # noqa: BLE001
+        return [f"R15.4: framework_atlas.check could not run ({type(e).__name__}: {e}) - "
+                f"reported, never silently skipped (R4.9)"]
+    return [] if ok else [f"R15.4: {msg}"]
+
+
+def pair_rules_all_classified(standard_text=None):
+    """R15.4 item 3 — a rule shipping unclassified fails the build (ISA-0624).
+
+    ⚑ Until 09-Sep-2026 this sentence had nothing to fire on: `rule_audit` reported on §17's
+    table and could not report on what the table OMITTED, so a rule written into the body and
+    into no row was invisible to the only instrument that reads the standard. Seventeen of the
+    adopted file's 130 rules were in that state, including the whole of §18, §19 and §20."""
+    try:
+        import rule_audit as _ra
+        missing = _ra.unclassified(standard_text)
+    except Exception as e:                                        # noqa: BLE001
+        return [f"R15.4: rule_audit.unclassified could not run ({type(e).__name__}: {e})"]
+    if not missing:
+        return []
+    return [f"R15.4/ISA-0624: {len(missing)} rule(s) are DEFINED in ISA_Engineering_Rules.md and "
+            f"classified in no §17 row: {', '.join(missing)}. A rule outside §17 is outside the "
+            f"only mechanical measurement the standard has of itself."]
+
+
+def pair_no_false_asserted(standard_text=None):
+    """§17 / ISA-0627 — no rule may be CLAIMED ASSERTED without a check that FAILS when it breaks.
+
+    ⚑ The distinction is not pedantry. `_named_by_enforcement` counts any string literal inside a
+    function body, so a sentence a RENDERER prints scored as enforcement: R13.2's only appearance
+    in the whole tree was `isa_register_render` emitting "Under R13.2 analysis precedes design",
+    and R5.7's was `run_tests.py` printing that unregistered suites are "report-only" — the rule
+    NOT being enforced, written out loud."""
+    try:
+        import rule_audit as _ra
+        doc = _ra.audit(standard_text)
+        unt = doc["traceable"]["asserted_untraceable"]
+    except Exception as e:                                        # noqa: BLE001
+        return [f"§17: rule_audit.audit could not run ({type(e).__name__}: {e})"]
+    if not unt:
+        return []
+    return [f"§17/ISA-0627: {len(unt)} rule(s) are claimed ASSERTED with no check that FAILS when "
+            f"they are broken: {', '.join(unt)}. Each gains a check or is reclassified; a false "
+            f"ASSERTED is a JUDGEMENT rule wearing an ASSERTED label."]
+
+
+def pair_live_is_trusted(root=None):
+    """R18.5 / KR10 — LIVE must match the latest Trusted Build receipt.
+
+    ⚑⚑ THE ONLY CONTROL IN THIS FILE THAT FIRES WHEN NOBODY IS BUILDING. ISA-0467's systemic
+    cause was that every rule is an obligation on a participant at the moment of building, so the
+    checking apparatus maps where someone recently worked rather than the risk surface. A
+    signature is different: LIVE either matches a receipt or it does not, and that question has an
+    answer on a Tuesday when nobody has opened the repository."""
+    root = root or HERE
+    try:
+        import release_gate as _rg
+        v = _rg.verify_live(root)
+    except Exception as e:                                        # noqa: BLE001
+        return [f"R18.5: release_gate.verify_live could not run ({type(e).__name__}: {e})"]
+    if v.get("state") == "TRUSTED":
+        return []
+    if v.get("state") == "DISABLED":
+        return [warn("R18.5: release_gate is flagged OFF. DISABLED reads as UNKNOWN, never as "
+                     "PASS (R4.3) - LIVE is unverified against any receipt.")]
+    if v.get("state") == "NO_RECEIPT":
+        return [f"R18.5/KR10: {v['why']}"]
+    if v.get("state") == "ENVIRONMENT_UNKNOWN":
+        return [warn(f"R18.5: {v['why']}")]
+    changed = []
+    for d in (v.get("diffs") or []):
+        changed.append(d["surface"] + (f" ({d.get('n_changed')} file(s): "
+                                       f"{', '.join(d.get('changed_files', [])[:6])})"
+                                       if d.get("changed_files") else ""))
+    return [f"R18.5/KR10: UNTRUSTED_LIVE_STATE against Trusted Build {v.get('build_id')} - "
+            f"{'; '.join(changed)}. A capital-decision run is blocked until reconciled."]
+
+
+def pair_capability_chain(root=None):
+    """R4.14 / KR12 — every material capability proven PRODUCED→EXECUTED→CONSUMED→DECISION-EFFECTIVE.
+
+    ⚑ WARN, NOT ERROR, AND THE REASON IS DECLARED (R5.7's lesson inverted). On the day the
+    registry was seeded, 12 of 12 capabilities were not live and GBP 40,558.83 of declared
+    exposure had no proven consumer — because the semantic fields have never been recorded, not
+    because 12 things broke. An ERROR here on day one would be red from the first run and would be
+    suppressed within a week, which is exactly how `framework_integrity` was designed report-only.
+    The standing backlog is a WARN carrying its own GBP number; **a REGRESSION is an ERROR** —
+    a capability that was live in the last Trusted receipt and is not live now."""
+    root = root or HERE
+    try:
+        import capability_registry as _cr
+        rec = _cr.reconcile(root)
+    except Exception as e:                                        # noqa: BLE001
+        return [f"R4.14: capability_registry.reconcile could not run ({type(e).__name__}: {e})"]
+    if rec.get("state") == "DISABLED":
+        return [warn("R4.14: capability_registry is flagged OFF - the R4.14 chain is UNKNOWN, "
+                     "never PASS (R4.3)")]
+    out = []
+    prev_live = set()
+    try:
+        import release_gate as _rg
+        prev = _rg.load_receipt(root) or {}
+        prev_live = set(prev.get("capabilities_live") or [])
+    except Exception:                                             # noqa: BLE001
+        pass
+    now_live = {r["name"] for r in rec["rows"] if r["live"]["live"]}
+    regressed = sorted(prev_live - now_live)
+    if regressed:
+        out.append(f"R4.14/KR12: {len(regressed)} capability(ies) were LIVE in the last Trusted "
+                   f"Build and are not live now: {', '.join(regressed)}. A capability losing its "
+                   f"evidence chain is a regression, not a backlog item.")
+    if rec["n_not_live"]:
+        blocked = "; ".join(f"{k}: {', '.join(v[:4])}" for k, v in rec["blocked_at"].items())
+        out.append(warn(f"R4.14/KR12: {rec['n_not_live']} of {rec['n_capabilities']} capabilities "
+                        f"are not proven decision-effective, carrying GBP "
+                        f"{rec['gbp_exposure_not_live']:,.2f} of declared exposure. Blocked at - "
+                        f"{blocked}. Tracked as ISA-0628; the semantic fields are UNDECLARED "
+                        f"rather than broken."))
+    return out
+
+
+def pair_discussion_preflight_wired(surfaces=None, exists=os.path.exists):
+    """R12.4 — the Project Instructions must INVOKE the discussion preflight.
+
+    ⚑⚑ NEITHER LAYER ALONE IS SUFFICIENT, and R12.4 says so in those words. `discussion_preflight`
+    supplying evidence nobody asks for is FC-E; a Project Instruction telling Claude to orient
+    with nothing to orient FROM is the recollection §12 exists to replace. This pair asserts the
+    WIRE: the project-instruction surface on disk names the module by name. It is the same
+    construction as ISA-0027 (every run surface must reach the standard), applied to the one run
+    surface that is a conversation."""
+    root = HERE
+    mod = os.path.join(root, "discussion_preflight.py")
+    if not exists(mod):
+        return ["R12.4: discussion_preflight.py is not on disk - the Project Instructions would "
+                "call a preflight that does not exist"]
+    import glob as _g, datetime as _dt, re as _re
+    cands = _g.glob(os.path.join(root, "PROJECT_INSTRUCTIONS_*.md"))
+    if not cands:
+        return ["R12.4: no PROJECT_INSTRUCTIONS_*.md on disk - the conversation run surface has "
+                "no recorded contract, so the preflight cannot be shown to be invoked"]
+    # ⚑ LATEST BY THE DATE IN THE NAME, NEVER BY SORT ORDER. The first version took
+    #   `sorted(...)[-1]`, which picked PROJECT_INSTRUCTIONS_SCHEDULE_FIX_27Aug2026.md over
+    #   PROJECT_INSTRUCTIONS_REPLACEMENT_09Sep2026.md because S sorts after R — a check reading
+    #   the wrong document and reporting confidently about it, which is FC-B in the checker.
+    _MON = {m: i + 1 for i, m in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))}
+
+    def _stamp(path):
+        m = _re.search(r"_(\d{2})([A-Z][a-z]{2})(\d{4})\.md$", os.path.basename(path))
+        if not m or m.group(2) not in _MON:
+            return None
+        return _dt.date(int(m.group(3)), _MON[m.group(2)], int(m.group(1)))
+    dated = [(d, p2) for p2 in cands for d in [_stamp(p2)] if d]
+    if not dated:
+        return ["R12.4: no PROJECT_INSTRUCTIONS_*.md carries a readable ddMmmYYYY date, so the "
+                "current contract cannot be identified. Undated is not 'latest' (R4.2)"]
+    latest = max(dated)[1]
+    try:
+        with open(latest, encoding="utf-8") as fh:
+            txt = fh.read()
+    except OSError as e:
+        return [f"R12.4: {os.path.basename(latest)} unreadable ({e})"]
+    if "discussion_preflight" not in txt:
+        return [f"R12.4: {os.path.basename(latest)} does not name `discussion_preflight` - the "
+                f"Project Instructions do not invoke the preflight, so §12 still depends on "
+                f"Claude remembering to obey it (R14.1)"]
+    return []
+
+
+def pair_orientation_fields(ctx_text=None):
+    """R12.1 / R4.4 — the fourteen footprint fields live in ONE place and the standard agrees.
+
+    A table in the standard and a tuple in the code are two homes for one rule the moment they
+    can disagree (FC-D). The standard's §12 table is the authority; `discussion_preflight`
+    implements it; this pair fails when the counts diverge."""
+    try:
+        import discussion_preflight as _dp
+        n_code = len(_dp.FOOTPRINT_FIELDS)
+    except Exception as e:                                        # noqa: BLE001
+        return [f"R12.1: discussion_preflight unavailable ({type(e).__name__}: {e})"]
+    txt = ctx_text if ctx_text is not None else _read(STANDARD_FILE)
+    if not txt:
+        return [f"R12.1: {STANDARD_FILE} unreadable - the field count cannot be reconciled"]
+    import re as _re
+    m = _re.search(r"^## 12\..*?(?=^## \d+\.)", txt, _re.S | _re.M)
+    if not m:
+        return ["R12.1: §12 not found in the standard - BLIND, not clean"]
+    rows = [l for l in m.group(0).split("\n")
+            if _re.match(r"^\|\s*\d+\s*\|", l)]
+    if not rows:
+        return ["R12.1: §12's footprint table parsed to zero rows - the table shape changed and "
+                "this parser did not. BLIND, not clean (FC-H)."]
+    if len(rows) != n_code:
+        return [f"R12.1/R4.4: §12's Change Footprint table declares {len(rows)} field(s); "
+                f"discussion_preflight.FOOTPRINT_FIELDS implements {n_code}. One rule, two homes."]
+    return []
+
+
+def pair_one_register(root=None):
+    """R7.1 — `Dashboard/state/isa_items.jsonl` has exactly one writer.
+
+    ⚑⚑ THIS IS WHY R7.1 WAS A FALSE ASSERTED (ISA-0627). §17 claimed R7.1 enforced; its only
+    appearances in the tree were a banner `isa_register_render` prints into the view it generates
+    and a line in `isa_register_export`. Nothing FAILED if a second module started writing the
+    store. Measured by AST rather than by grep, because every mechanism here is also a string."""
+    import ast as _ast
+    root = root or HERE
+    writers = set()
+    for fn in sorted(os.listdir(root)):
+        if not fn.endswith(".py") or fn in ("isa_register.py",):
+            continue
+        try:
+            with open(os.path.join(root, fn), encoding="utf-8") as fh:
+                tree = _ast.parse(fh.read())
+        except Exception:                                         # noqa: BLE001
+            continue
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            f = node.func
+            name = (f.attr if isinstance(f, _ast.Attribute) else
+                    f.id if isinstance(f, _ast.Name) else None)
+            if name not in ("open", "write_text"):
+                continue
+            args = list(node.args) + [k.value for k in (node.keywords or [])]
+            mode_w = any(isinstance(a, _ast.Constant) and isinstance(a.value, str)
+                         and ("w" in a.value or "a" in a.value) for a in node.args[1:2])
+            if name == "open" and not mode_w:
+                continue
+            src = _ast.dump(node)
+            if "isa_items.jsonl" in src:
+                writers.add(fn)
+    if not writers:
+        return []
+    return [f"R7.1: {len(writers)} module(s) other than isa_register.py open "
+            f"Dashboard/state/isa_items.jsonl for writing: {', '.join(sorted(writers))}. One "
+            f"register, one writer - every markdown register and the dashboard are RENDERED "
+            f"views (P8)."]
+
+
+# Modules whose `_selftest()` is battery-grade: a red one is an incident, not a note.
+# ⚑ ONE HOME. `tests_jul2026/test_isa0450_integrity_capital.py` runs the same set by section;
+#    this tuple is what makes a red selftest fail the BATTERY as well, which is the half R5.7
+#    was missing when framework_integrity sat red for four days with nothing stopping.
+BATTERY_SELFTEST_MODULES = (
+    "framework_integrity", "rule_audit", "isa_register_metrics", "capability_registry",
+    "release_gate", "discussion_preflight", "defect_corpus_backtest",
+)
+
+
+SUITE_STATUS_REL = os.path.join("Dashboard", "state", "suite_status.json")
+SUITE_STATUS_MAX_AGE_DAYS = 8          # KR5: "red suites, or routine battery idle >8 days"
+
+
+def record_suite_status(modules=None, root=None) -> dict:
+    """Run the battery-grade selftests ONCE and record the result. The runner calls this.
+
+    ⚑ WHY RECORDED RATHER THAN RUN INSIDE THE PAIR (R9.2, and R5.7's own lesson). The first
+    version of `pair_red_suite_is_an_incident` imported and executed all seven selftests inline
+    and turned a two-minute battery into a ten-minute one. A control that costs half the run is a
+    control that gets switched off — which is precisely how `framework_integrity` came to be
+    report-only. So the expensive part runs once, in the runner, and writes an artefact; the
+    battery asserts that artefact is GREEN and FRESH. An absent or stale status is a FAILURE, not
+    a skip: "nobody ran the suites" and "the suites are green" must never render the same
+    (R2.10)."""
+    import importlib, io, contextlib, datetime as _dt
+    root = root or HERE
+    mods = modules if modules is not None else BATTERY_SELFTEST_MODULES
+    rows = []
+    for m in mods:
+        p = os.path.join(root, m + ".py")
+        if not os.path.exists(p):
+            rows.append({"module": m, "rc": None, "state": "ABSENT"})
+            continue
+        try:
+            mod = importlib.import_module(m)
+            st = getattr(mod, "_selftest", None) or getattr(mod, "selftest", None)
+            if st is None:
+                rows.append({"module": m, "rc": None, "state": "NO_SELFTEST"})
+                continue
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                names = getattr(getattr(st, "__code__", None), "co_varnames", ())
+                rc = st(verbose=False) if "verbose" in names else st()
+            rows.append({"module": m, "rc": int(rc or 0),
+                         "state": "GREEN" if not rc else "RED"})
+        except Exception as e:                                    # noqa: BLE001
+            rows.append({"module": m, "rc": 1, "state": "RAISED",
+                         "why": f"{type(e).__name__}: {e}"[:200]})
+    doc = {"as_of": _dt.date.today().isoformat(), "rows": rows,
+           "n_red": sum(1 for r in rows if r["state"] != "GREEN"),
+           "basis": ("R5.7 - a red suite is an incident. Recorded by the runner so the battery "
+                     "can assert it cheaply; an absent or stale record FAILS (R2.10).")}
+    out = os.path.join(root, SUITE_STATUS_REL)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1, sort_keys=True)
+    return doc
+
+
+def pair_red_suite_is_an_incident(status=None, root=None, today=None):
+    """R5.7 / KR5 — a red suite is an INCIDENT, and a battery nobody ran is not a green one.
+
+    ⚑⚑ R5.7's ONLY appearance in the tree before today was `run_tests.py` printing that
+    unregistered suites are *"report-only; register or explicitly de-scope each one"* — the rule
+    not being enforced, stated out loud, and counted by §17 as enforcement of itself (ISA-0627).
+    Meanwhile `framework_integrity._selftest()` returned 1 for four days (ISA-0625) and no build
+    stopped, and `test_isa0450_integrity_capital.py` — the suite that DOES assert it — is not in
+    `run_tests.py`'s list, so nothing ran the assertion that would have said so."""
+    import datetime as _dt
+    root = root or HERE
+    if status is None:
+        p = os.path.join(root, SUITE_STATUS_REL)
+        if not os.path.exists(p):
+            return [f"R5.7/KR5: no suite status at {SUITE_STATUS_REL}. The battery-grade "
+                    f"selftests have never been recorded, so 'green' is a claim about work "
+                    f"nobody did. Run: python3 -c \"import consistency_check as c; "
+                    f"c.record_suite_status()\""]
+        try:
+            with open(p, encoding="utf-8") as fh:
+                status = json.load(fh)
+        except Exception as e:                                    # noqa: BLE001
+            return [f"R5.7: suite status unreadable ({e}) - UNKNOWN, never PASS (R4.3)"]
+    errs = []
+    today = today or _dt.date.today()
+    try:
+        age = (today - _dt.date.fromisoformat(status["as_of"])).days
+    except Exception:                                             # noqa: BLE001
+        return ["R5.7: suite status carries no readable `as_of` - an undated status cannot be "
+                "distinguished from a stale one (R4.2)"]
+    if age > SUITE_STATUS_MAX_AGE_DAYS:
+        errs.append(f"R5.7/KR5: the battery-grade selftests were last recorded {age} days ago "
+                    f"(limit {SUITE_STATUS_MAX_AGE_DAYS}). A routine battery idle beyond the "
+                    f"limit is a warning light, not a pass.")
+    for r in status.get("rows", []):
+        if r.get("state") != "GREEN":
+            errs.append(f"R5.7: {r['module']}._selftest is {r.get('state')} "
+                        f"(rc={r.get('rc')}){(' - ' + r['why']) if r.get('why') else ''}. A red "
+                        f"suite is an INCIDENT.")
+    return errs
+
+
 def check_all(tagged: bool = False, since_ts=None):
     """`since_ts` (ISA-0590): the calling RUN's start time, so the register gate does not fire on
     the run's own outputs. Omitted outside a run, where full strictness is correct."""
@@ -4451,6 +4840,19 @@ def check_all(tagged: bool = False, since_ts=None):
     errs += pair_adoption_gate_refuses()                  # ISA-0409 (20-Aug-2026)
     errs += pair_return_basis_declared()                  # ISA-0402 / ISA-0401 (20-Aug-2026)
     errs += pair_occurrence_guard_coverage()              # ISA-0479/0480/0481/0482 (27-Aug-2026)
+    # ── ISA-0623 / ISA-0467 ENFORCEMENT (09-Sep-2026) ───────────────────────────────────
+    # ⚑⚑ THESE ARE THE CALL SITES. Every control below already existed; ISA-0467's finding was
+    #    that nothing invoked them. `framework_atlas.check()` returned False against the
+    #    delivered tree on 09-Sep-2026 with ZERO call sites anywhere in the repository.
+    errs += pair_atlas_current()                          # R15.4 item 1 - ISA-0467
+    errs += pair_rules_all_classified()                   # R15.4 item 3 - ISA-0624
+    errs += pair_no_false_asserted()                      # §17 - ISA-0627
+    errs += pair_live_is_trusted()                        # R18.5 / KR10 - ISA-0629
+    errs += pair_capability_chain()                       # R4.14 / KR12 - ISA-0628
+    errs += pair_discussion_preflight_wired()             # R12.4 - ISA-0630
+    errs += pair_orientation_fields()                     # R12.1 / R4.4 - ISA-0630
+    errs += pair_one_register()                           # R7.1 - ISA-0627
+    errs += pair_red_suite_is_an_incident()               # R5.7 - ISA-0627 / ISA-0625
     # ── V2.1-A, each behind its declared rollback flag (R4.13) ─────────────────────────
     try:
         import isa_policy as _pol
@@ -4525,6 +4927,7 @@ def check_all(tagged: bool = False, since_ts=None):
         errs += pair_monthly_two_regimes(mctx)
         errs += pair_monthly_lean_email(mctx, mbuild)
         errs += pair_screen_capture_coverage()
+        errs += pair_fallback_inputs_classified()          # ISA-0498 (11-Sep-2026)
         if cfg is not None:
             errs += pair_monthly_t1_mode(mctx, bool(getattr(cfg, "T1_QUALIFICATION_MODE", False)))
         # Contracts that name executables: a missing script is a silent monthly failure.
@@ -4913,6 +5316,10 @@ def _selftest():
         'for _u in (_fr.get("unmapped_refused") or []): pass\n', ''))
     # M6 — heading count vs the list it heads.
     assert pair_monthly_prerun_reads(good_m.replace("(2 reads", "(8 reads"))
+    # ISA-0498 — THE target_state.json class: a fallback input nobody classified.
+    assert pair_fallback_inputs_classified(lambda: {"target_state.json": ["scoring_config"]})
+    assert not pair_fallback_inputs_classified(lambda: {})
+    assert pair_fallback_inputs_classified(lambda: 1 / 0)              # a scan that cannot run is an error
     # M7 — THE fetch_metrics_local class: a contract naming a script that is not on disk.
     assert pair_referenced_scripts_exist({"ctx": "run fetch_metrics_local.py now"},
                                          exists=lambda p: False)
