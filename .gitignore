@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ISA-0637 (11-Sep-2026): private runtime inputs fetched from OneDrive at bootstrap (Run_Context Step A2).
+# The repo is public - these must never be committed. Source of truth: sync_repo_to_github.ONEDRIVE_BOOTSTRAP.
+target_state.json
+drawdown_state.json
+target_weights.json
+watchlist_tickers.json
+source_performance_log.json
