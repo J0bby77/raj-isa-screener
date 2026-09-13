@@ -570,10 +570,12 @@ def write_run_context(
     warnings:               list,
     status:                 str,
     error_message:          str = "",
+    dry_run:                bool = False,      # ISA-0681
 ) -> str:
     """Write the run_context_mmm_yyyy.json staging file."""
     ctx = {
         "_meta": {
+            "dry_run": bool(dry_run),   # ISA-0681 — the artefact states what produced it
             "description": (
                 "Pre-run staging file produced by monthly_isa_prerun.py. "
                 "Read by the Monthly ISA Portfolio Review task as its first pre-run read. "
@@ -645,7 +647,18 @@ def write_run_context(
         ),
     }
 
-    out_path = os.path.join(SCRIPT_DIR, f"run_context_{month_label}.json")
+    # ⚑ ISA-0681 — A DRY RUN MUST NOT DISPLACE THE LIVE STAGING ARTEFACT. On 12-Sep-2026 a
+    #   `--dry-run` rehearsal overwrote run_context_sep_2026.json, replacing a file whose
+    #   assurance state was COMPLETE with one reading status ERROR / assurance PARTIAL. A
+    #   reader following Run_Context's own instruction to check `summary.assurance.state`
+    #   BEFORE trusting the file would have concluded the scheduled run was cut off, when in
+    #   fact a rehearsal had displaced a complete one — a false signal about the framework's
+    #   own health. The watchlist write in step 6.5 was already guarded, so the flag's meaning
+    #   was understood and applied unevenly (R18.1: a rehearsal must be side-effect free).
+    #   ⚑ It writes to a SEPARATE path rather than not writing at all: a dry run whose output
+    #     cannot be read cannot be verified either.
+    _suffix = ".DRYRUN" if dry_run else ""
+    out_path = os.path.join(SCRIPT_DIR, f"run_context_{month_label}{_suffix}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(ctx, f, indent=2, ensure_ascii=False)
     return out_path
@@ -1169,6 +1182,33 @@ def main():
                                             "framework_state": None, "gates": None,
                                             "counterfactual": {"3m": None, "6m": None, "12m": None},
                                             "pnl_vs_framework_gbp": None})
+                    # ISA-0684. An entry the export cannot see is NOT an
+                    # override. It is a refusal, and it must be visible as one --
+                    # silence is the other half of the R2.10 failure, not the
+                    # cure for it. These are reported separately and never
+                    # counted as Raj having declined anything.
+                    _unconf = [{"ticker": _e5.get("ticker"),
+                                "decision": _e5.get("decision"),
+                                "date": _e5.get("date"),
+                                "reason": _e5.get("execution_unconfirmed_reason")}
+                               for _e5 in _led.get("entries", [])
+                               if _e5.get("execution_status") == "execution_unconfirmed"
+                               and _e5.get("execution_unconfirmed_reason")]
+                    if _unconf:
+                        summary["execution_unconfirmed"] = _unconf
+                        _cov = (_res or {}).get("txn_coverage") or {}
+                        summary["txn_coverage"] = _cov
+                        warnings.append(
+                            "A13/ISA-0684: %d recommendation(s) cannot be reconciled "
+                            "- the transaction export covers %s..%s but the run is "
+                            "dated %s: %s. This is UNMEASURED, not declined; export "
+                            "the missing transaction history to resolve."
+                            % (len(_unconf), _cov.get("from"), _cov.get("to"),
+                               _cov.get("reconciled_to"),
+                               ", ".join(f"{u['ticker']}:{u['decision']}" for u in _unconf)))
+                        print(f"  A13: {len(_unconf)} recommendation(s) UNCONFIRMED "
+                              f"(no export coverage) - reported, NOT counted as declined: "
+                              f"{[u['ticker'] for u in _unconf]}")
                     if _ov:
                         summary["override_log"] = _ov
                         print(f"  A13: {len(_ov)} override(s) logged: "
@@ -1847,24 +1887,129 @@ def main():
                     if e.get("acs") is None:
                         e["acs"] = e.get("acs_score")
                 # v2: portfolio value for E5 liquidity sizing (best-effort; None -> no cap)
-                _pv = None
+                # ⚑ ISA-0673 (12-Sep-2026). This used to probe three key names -
+                #   'total_value', 'portfolio_value', 'summary.total_value' - and
+                #   portfolio_data declares a FOURTH, 'summary.total_value_gbp'. All three
+                #   missed on every run since the block shipped, so portfolio_value was
+                #   always None and E5's liquidity cap has never been evaluable. Under the
+                #   D-24/V-1 repair an unevaluable liquidity control returns UNKNOWN and sets
+                #   require_manual_confirm, so every deploy-eligible VCI name has been forced
+                #   to manual confirmation for a reason nobody could see. A chain of `or`s
+                #   ending in None is indistinguishable from a deliberate absence (R4.1).
+                _pv, _pd = None, {}
                 try:
                     if os.path.exists(portfolio_path):
                         with open(portfolio_path, encoding="utf-8") as _pf:
                             _pd = json.load(_pf)
-                        _pv = _pd.get("total_value") or _pd.get("portfolio_value") \
-                              or (_pd.get("summary", {}) or {}).get("total_value")
-                except Exception:
+                        _pv = (_pd.get("summary", {}) or {}).get("total_value_gbp")
+                    if _pv is None:
+                        warnings.append(
+                            "Step 6.5 (ISA-0673): portfolio_data has no "
+                            "summary.total_value_gbp, so E5's liquidity cap cannot be "
+                            "evaluated and every eligible VCI name will be forced to manual "
+                            "confirmation. This is a REFUSAL, not an absent constraint.")
+                except Exception as _e:
                     _pv = None
+                    warnings.append("Step 6.5 (ISA-0673): could not read the portfolio value "
+                                    "(%s: %s); E5's liquidity cap is UNEVALUATED, not absent."
+                                    % (type(_e).__name__, _e))
                 _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv)
-                # v2 E4: sleeve binary risk-budget headroom over the deploy-eligible set
+                # ═══════════════════════════════════════════════════════════════════════
+                # E4 sleeve binary risk budget — ISA-0646 / 0653 / 0654 / 0668 / 0671
+                # ═══════════════════════════════════════════════════════════════════════
+                # ⚑ THE POPULATION WAS WRONG, NOT STALE. This block used to compute
+                #   committed risk over `[e for e in _ranked if e.get("deploy_eligible")]` —
+                #   deploy-eligible CANDIDATES. A held name is deleted from vci_watchlist the
+                #   moment it is bought (update_watchlist's purge), so the figure could only
+                #   ever describe positions that DO NOT EXIST. The budget is a statement
+                #   about what the portfolio OWNS.
+                # ⚑ It then read 0 for a SECOND, independent reason (ISA-0617 nulled the
+                #   candidate fields, so the eligible list was empty), and the whole thing sat
+                #   inside `except Exception: pass`. Three faults, one output of `0`, nothing
+                #   to tell them apart (R2.10).
+                _sleeve_budget = (getattr(_sc, "VCI_SLEEVE_BINARY_RISK_BUDGET", 1.5)
+                                  if _sc else 1.5)
+                _max_conc = (getattr(_sc, "VCI_BINARY_MAX_CONCURRENT", 2) if _sc else 2)
                 try:
-                    import vci_risk_budget as _vrb
-                    _open = [e for e in _ranked if e.get("deploy_eligible")]
-                    summary["vci_binary_risk_committed"] = _vrb.committed_risk(_open)
-                    summary["vci_binary_risk_budget"] = getattr(_sc, "VCI_SLEEVE_BINARY_RISK_BUDGET", None) if _sc else None
-                except Exception:
-                    pass
+                    import position_sizing as _ps
+                    # ⚑ R4.5 — ONE HOME. This calls position_sizing.binary_budget_report(),
+                    #   which is the SAME function the `--vci-budget-only` entry point calls.
+                    #   An earlier draft of this block assembled held_binary_rows() +
+                    #   budget_available_reported() inline here, which would have been a second
+                    #   hand-maintained copy of the orchestration — a defect on the day it is
+                    #   created, and the very thing R4.5 names. Two paths call one function, or
+                    #   they are one function.
+                    _bb = _ps.binary_budget_report(
+                        portfolio_path, budget_pct=_sleeve_budget, max_concurrent=_max_conc)
+                    # ⚑ EXPLICIT KEY WRITES, NOT summary.update(). ISA-0447's check is a
+                    #   STATIC scan for `summary[...]` assignments, so a dict update hides the
+                    #   keys from the very control that exists to make every summary key's
+                    #   disposition declared — the battery caught exactly that on the first
+                    #   run after this refactor ("email_prefill declares a disposition for
+                    #   summary['vci_binary_risk'] but the pre-run no longer writes it").
+                    #   Being legible to the checker is part of the contract (R14.2/R5.1).
+                    summary["vci_binary_risk_budget"] = _bb["summary"]["vci_binary_risk_budget"]
+                    summary["vci_binary_risk_committed"] = \
+                        _bb["summary"]["vci_binary_risk_committed"]
+                    if "vci_binary_risk" in _bb["summary"]:
+                        summary["vci_binary_risk"] = _bb["summary"]["vci_binary_risk"]
+                    # R4.9 — every refusal reaches the warning list BY NAME. A refusal that
+                    # only exists inside a nested dict is a refusal nobody reads.
+                    warnings.extend(_bb["warnings"])
+                except Exception as _e:
+                    # ⚑ ISA-0671 — R4.12 forbids a bare except around instrumentation. The key
+                    #   is left PRESENT and explicitly refused, because an absent key and a
+                    #   measured zero read identically downstream.
+                    summary["vci_binary_risk_budget"] = _sleeve_budget
+                    summary["vci_binary_risk_committed"] = None
+                    warnings.append(
+                        "Step 6.5 (ISA-0671): the VCI binary risk budget RAISED and was not "
+                        "computed — %s: %s. The committed figure is None, not 0; the 1.5%% "
+                        "expected-loss budget is UNENFORCED this run."
+                        % (type(_e).__name__, _e))
+
+                # ── ISA-0548 — THE HELD-POSITION REVIEW (the consumer, R4.14) ─────────
+                # Five controls built in this cluster each answer a question about a HELD
+                # position — the sleeve-risk ceiling (D27), the judgement ceiling (ISA-0466),
+                # the graduation disposition (D30), D17's fill obligations (ISA-0669) and the
+                # 182-day min-hold (ISA-0645). Every one of them would otherwise have shipped
+                # with ZERO CALLERS, which is this framework's single most frequent defect.
+                # `held_position_review` is their one consumer and this is its orchestrator.
+                try:
+                    import held_position_review as _hpr
+                    _hp = _hpr.review(portfolio_path, dry_run=bool(args.dry_run))
+                    summary["held_position_review"] = _hp["summary"]
+                    warnings.extend(_hp.get("warnings") or [])
+                    if _hp["state"] != "OK":
+                        warnings.append(
+                            "Step 6.5 (ISA-0548): the held-position review returned %s — the "
+                            "sleeve-risk ceiling, judgement ceiling, graduation disposition "
+                            "and fill obligations were NOT evaluated this run. UNKNOWN, not "
+                            "a finding that every position is fine (R4.3)." % _hp["state"])
+                except Exception as _e:
+                    summary["held_position_review"] = None
+                    warnings.append(
+                        "Step 6.5 (ISA-0548): the held-position review RAISED (%s: %s). No "
+                        "held position was reviewed; treat every holding as UNASSESSED."
+                        % (type(_e).__name__, _e))
+
+                # ── ISA-0617 / 0657 / 0667: the candidate refusals reach the warning list ──
+                # `eligibility_reasons` has been produced on every row since this module
+                # shipped and had ZERO production consumers (R4.14: produced ≠ live). That is
+                # why the Sep-2026 run published `vci_deploy_eligible: []` with no warning,
+                # and why four names that had never been SCORED read as considered-and-declined.
+                try:
+                    _rr = _vde.refusal_report(_ranked)
+                    summary["vci_refusals"] = {k: _rr[k] for k in
+                                               ("n_rows", "n_eligible", "n_unmeasured",
+                                                "n_measured_reject", "unmeasured_tickers")}
+                    for _w in _rr["warnings"]:
+                        warnings.append("Step 6.5: " + _w)
+                except Exception as _e:
+                    warnings.append("Step 6.5 (ISA-0617): the VCI refusal report RAISED "
+                                    "(%s: %s), so candidate refusals were NOT classified this "
+                                    "run — treat vci_deploy_eligible as UNVERIFIED."
+                                    % (type(_e).__name__, _e))
                 # write recomputed deployability fields back, preserve one canonical order
                 for i, e in enumerate(_ranked, 1):
                     e["vci_rank"] = i
@@ -3738,7 +3883,7 @@ def main():
         _prov_path = write_run_context(
             month_label, run_month, portfolio_path, xray_path, analytics_path,
             watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
-            summary, flags, warnings, "PARTIAL", "")
+            summary, flags, warnings, "PARTIAL", "", dry_run=bool(args.dry_run))
         print("\n[9c] Provisional run_context written at %.0fs -- %s"
               % (_elapsed_9c, os.path.basename(_prov_path)))
     except Exception as _pe:                                       # noqa: BLE001
@@ -4449,7 +4594,7 @@ def main():
         _ip = write_run_context(
             month_label, run_month, portfolio_path, xray_path, analytics_path,
             watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
-            summary, flags, warnings, status, "")
+            summary, flags, warnings, status, "", dry_run=bool(args.dry_run))
         print("\n[9e] Interim run_context written at %.0fs (9d + 6.99 captured) -- %s"
               % (round(time.time() - _RUN_STARTED_AT, 1), os.path.basename(_ip)))
     except Exception as _ie:                                       # noqa: BLE001
@@ -4512,6 +4657,7 @@ def main():
         month_label, run_month, portfolio_path, xray_path, analytics_path,
         watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,
         summary, flags, warnings, status, error_msg,
+        dry_run=bool(args.dry_run),
     )
     print("  Written: " + ctx_path)
 

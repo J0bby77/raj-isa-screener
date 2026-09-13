@@ -196,6 +196,111 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ISA-0617 / ISA-0657 / ISA-0667 — THE REFUSALS EXIST; NOTHING EVER READ THEM
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# `eligibility_reasons` has been produced on every row of every run since this module shipped
+# and, measured on the delivered tree 12-Sep-2026, had ZERO production consumers — one test
+# file and nothing else. R4.14: PRODUCED without CONSUMED is not live. So the September run
+# published `vci_deploy_eligible: []` with no warning anywhere, and four names read as
+# considered-and-declined when in truth they had never been scored.
+#
+# ⚑⚑ AND THE REASON STRINGS THEMSELVES CANNOT TELL THE TWO APART. The live rows carry
+#    `acs: 0` — a placeholder from a VCI run that never computed one (acs_breakdown is "",
+#    part_b_score is null) — and the refusal therefore reads **"acs 0.0 < 75 floor"**, which
+#    is the sentence a genuinely bad name would produce. R2.10: "I could not measure it" and
+#    "it is bad" must never produce the same output. A zero that fails a floor is the most
+#    dangerous shape available, because it is CONSERVATIVE — nothing deploys, nothing breaks,
+#    and nobody ever looks.
+#
+# This block adds one home (R4.4) for the distinction, consumed by the pre-run.
+
+UNMEASURED, MEASURED_REJECT, ELIGIBLE = "UNMEASURED", "MEASURED_REJECT", "ELIGIBLE"
+
+# control -> the entry fields that must be present for that control to have been EVALUATED.
+_CONTROL_INPUTS = {
+    "acs_quality_floor":   ("acs",),
+    "fv_asymmetry_floor":  ("fv_asymmetry",),
+    "catalyst_present":    ("catalyst_type",),
+    "catalyst_domain":     ("catalyst_domain",),
+    "expected_loss":       ("p_thesis", "L", "size_pct"),
+}
+
+
+def acs_is_scored(entry: dict) -> bool:
+    """ISA-0667. Was the ACS actually COMPUTED, or is the number a placeholder?
+
+    A VCI row that was never scored stores `acs_score: 0` with an empty `acs_breakdown` and a
+    null `part_b_score`. Zero is a legitimate ACS in principle, so the test is not `acs != 0`
+    — it is whether the score's own workings exist. R2.11: derive from primitives rather than
+    accepting a single field's value at face value."""
+    if entry.get("acs") is None and entry.get("acs_score") is None:
+        return False
+    breakdown = str(entry.get("acs_breakdown") or "").strip()
+    if breakdown:
+        return True
+    if entry.get("part_b_score") is not None:
+        return True
+    # no workings and no Part B: a bare 0 is a placeholder, a bare non-zero is a real score
+    return bool(entry.get("acs") or entry.get("acs_score"))
+
+
+def classify_refusal(entry: dict) -> dict:
+    """Split an ineligible row into UNMEASURED vs MEASURED_REJECT, naming the controls.
+
+    UNMEASURED is a FRAMEWORK defect and must reach a human; MEASURED_REJECT is the system
+    working. Publishing them as one list is what let four unscored names look declined."""
+    if entry.get("deploy_eligible"):
+        return {"state": ELIGIBLE, "ticker": entry.get("ticker"),
+                "unmeasured": [], "measured_rejects": [], "reasons": []}
+    unmeasured, measured = [], []
+    scored = acs_is_scored(entry)
+    floor = float(_c("VCI_ACS_FLOOR", 75))
+    for control, fields in _CONTROL_INPUTS.items():
+        if control == "acs_quality_floor":
+            if not scored:
+                unmeasured.append("acs_quality_floor(acs never computed)")
+            elif float(entry.get("acs") or 0) < floor:
+                measured.append("acs_quality_floor(%.1f < %.1f)" % (float(entry.get("acs") or 0), floor))
+            continue
+        missing = [f for f in fields if entry.get(f) is None]
+        if missing:
+            unmeasured.append("%s(missing:%s)" % (control, ",".join(missing)))
+    reasons = list(entry.get("eligibility_reasons") or [])
+    if not scored:
+        # R2.13 — the corrected reading REPLACES the original in place, marked.
+        reasons = [("acs UNSCORED (placeholder 0; no acs_breakdown, no part_b_score) — "
+                    "SUPERSEDES the stored reason %r, which stated a measured rejection"
+                    % r) if r.startswith("acs ") else r for r in reasons]
+    return {"state": UNMEASURED if unmeasured else MEASURED_REJECT,
+            "ticker": entry.get("ticker"),
+            "unmeasured": unmeasured, "measured_rejects": measured, "reasons": reasons}
+
+
+def refusal_report(entries) -> dict:
+    """The whole VCI set, classified. THIS is what the pre-run must put in summary.warnings.
+
+    R4.9 — a reader that cannot match a row COUNTS it. `n_unmeasured` is published even when
+    it is zero, so the absence of the figure and a figure of zero are distinguishable."""
+    rows = [classify_refusal(e) for e in (entries or [])]
+    unm = [r for r in rows if r["state"] == UNMEASURED]
+    return {
+        "n_rows": len(rows),
+        "n_eligible": sum(1 for r in rows if r["state"] == ELIGIBLE),
+        "n_unmeasured": len(unm),
+        "n_measured_reject": sum(1 for r in rows if r["state"] == MEASURED_REJECT),
+        "unmeasured_tickers": [r["ticker"] for r in unm],
+        "rows": rows,
+        "warnings": [
+            ("VCI %s: REFUSED, NOT REJECTED — the framework could not evaluate %s. "
+             "An empty deploy-eligible list on this row is a measurement gap, not a verdict "
+             "(R2.10/R4.3, ISA-0617/0657/0667)."
+             % (r["ticker"], "; ".join(r["unmeasured"])))
+            for r in unm
+        ],
+    }
+
+
 def rank_eligible(entries):
     """(eligible_sorted_desc_by_vci_source_score, ineligible). §11 deployment order."""
     eligible = [e for e in entries if e.get("deploy_eligible")]
@@ -234,6 +339,110 @@ def refresh_at_live_price(entries, price_lookup, weights=None, portfolio_value=N
     return elig + inelig
 
 
+def selftest_refusals(verbose: bool = True) -> int:
+    """ISA-0617 / 0657 / 0667 liveness reference.
+
+    liveness_ref: vci_deploy_eval.selftest_refusals
+    Consumed by monthly_isa_prerun step 6.5 (summary.vci_refusals + summary.warnings)."""
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    unscored = {"ticker": "UNS", "acs": 0, "acs_score": 0, "acs_breakdown": "",
+                "part_b_score": None, "deploy_eligible": False, "fv_asymmetry": None,
+                "catalyst_type": None, "catalyst_domain": None, "p_thesis": 0.35, "L": 0.6,
+                "size_pct": 0.0, "eligibility_reasons": ["acs 0.0 < 75 floor"]}
+    r = classify_refusal(unscored)
+    ok(r["state"] == UNMEASURED,
+       "a row whose ACS was never computed must classify UNMEASURED, not MEASURED_REJECT — "
+       "the live Sep-2026 rows carried acs 0 with an empty breakdown and read as declined")
+    ok(any("never computed" in u for u in r["unmeasured"]), r["unmeasured"])
+    ok(any("SUPERSEDES" in x for x in r["reasons"]),
+       "R2.13: the corrected reading replaces the stored 'acs 0.0 < 75 floor' in place, marked")
+
+    # ⚑ NEGATIVE CONTROL (R5.5): a genuinely measured, genuinely bad name must still be
+    #   REJECTED, or the fix has simply stopped the framework ever rejecting anything.
+    scored_bad = dict(unscored, ticker="BAD", acs=41, acs_score=41,
+                      acs_breakdown="A1 8 A2 7 A3 6 ...", part_b_score=17,
+                      fv_asymmetry=1.2, catalyst_type="phase2_biotech",
+                      catalyst_domain="biotech_readout",
+                      eligibility_reasons=["acs 41.0 < 75 floor"])
+    r2 = classify_refusal(scored_bad)
+    ok(r2["state"] == MEASURED_REJECT,
+       "a scored name below the quality floor is a MEASURED_REJECT — the system working, not "
+       "a warning (R5.8: test the test, or this check only ever says UNMEASURED)")
+    ok(not r2["unmeasured"] and r2["measured_rejects"], r2)
+    ok(not any("SUPERSEDES" in x for x in r2["reasons"]),
+       "a real score's reason string is left alone")
+
+    ok(acs_is_scored(scored_bad) and not acs_is_scored(unscored),
+       "acs_is_scored discriminates on the WORKINGS (acs_breakdown / part_b_score), not on "
+       "acs != 0 — zero is a legitimate score in principle (R2.11)")
+
+    rep = refusal_report([unscored, scored_bad, dict(unscored, ticker="OK", deploy_eligible=True)])
+    ok(rep["n_rows"] == 3 and rep["n_unmeasured"] == 1 and rep["n_measured_reject"] == 1
+       and rep["n_eligible"] == 1, rep)
+    ok(len(rep["warnings"]) == 1 and "UNS" in rep["warnings"][0],
+       "exactly one warning, naming the unmeasured row — a measured rejection is not a warning")
+    ok("n_unmeasured" in rep,
+       "R4.9: the count is published even when zero, so an absent figure and a zero differ")
+
+    if verbose:
+        print("vci_deploy_eval.selftest_refusals: %d assertions, 0 failed" % n)
+    return n
+
+
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 — the module's named selftest. Delegates to selftest_refusals and adds the
+    eligibility controls, so a refactor that empties either FAILS the census rather than
+    passing with zero assertions (the vacuous pass of ISA-0348 / ISA-0513)."""
+    n = selftest_refusals(verbose=False)
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    ABCL = dict(latent_tam_usd_bn=20.0, capture_share=0.12, steady_margin=0.35,
+                exit_multiple=7.0, fully_diluted_shares=300e6, fx_to_local=1.0,
+                asset_structure="platform")
+    v = evaluate_candidate(ticker="ABCL", acs=78, acs_ex_acs8=74, price=8.11, fv_inputs=ABCL,
+                           asset_structure="platform", has_catalyst=True, days_to_catalyst=80,
+                           signal_count=6, catalyst_type="phase2_biotech",
+                           catalyst_domain="biotech_readout", revision_velocity=0.6)
+    ok(v["fv_asymmetry_p25"] < v["fv_asymmetry"],
+       "the P25 asymmetry must be CONSERVATIVE relative to the P50 (E2)")
+    ok(v["eligibility_reasons"] is not None,
+       "every verdict carries its reasons — the field this build's consumer reads")
+
+    # ⚑ NEGATIVE CONTROL (R5.5): a thin, illiquid name MUST NOT auto-deploy.
+    v2 = evaluate_candidate(ticker="THIN", acs=82, price=10, bottleneck_fv_per_share=30,
+                            asset_structure="platform", has_catalyst=True,
+                            days_to_catalyst=120, signal_count=5, adv_usd=10_000,
+                            portfolio_value=150_000)
+    ok(v2["require_manual_confirm"],
+       "⚑ NEGATIVE CONTROL: ADV 10k against a 150k book is below VCI_MIN_ADV_USD and MUST "
+       "force manual confirmation — a liquidity control that never blocks is not a control")
+    # ⚑ NEGATIVE CONTROL: a countdown to an UNNAMED catalyst must not move a size (ISA-0171).
+    v3 = evaluate_candidate(ticker="NONAME", acs=80, price=10, bottleneck_fv_per_share=30,
+                            asset_structure="platform", has_catalyst=True,
+                            days_to_catalyst=90, signal_count=5, catalyst_type=None)
+    ok(v3["catalyst_coherence"]["state"] == "INCOHERENT_DAYS_WITHOUT_TYPE",
+       "⚑ NEGATIVE CONTROL: days_to_catalyst with catalyst_type None must be INCOHERENT — "
+       "the days shrink the size while the type sets p and L, so using one and defaulting the "
+       "other lets an unnamed event move capital (ISA-0171)")
+    ok(v3["days_to_catalyst_used_for_sizing"] is None,
+       "...and the days must be REFUSED as a sizing input, not merely flagged")
+    if verbose:
+        print("vci_deploy_eval._selftest: %d assertions, 0 failed" % n)
+    return n
+
+
 if __name__ == "__main__":
     ABCL = dict(latent_tam_usd_bn=20.0, capture_share=0.12, steady_margin=0.35,
                 exit_multiple=7.0, fully_diluted_shares=300e6, fx_to_local=1.0, asset_structure="platform")
@@ -253,3 +462,4 @@ if __name__ == "__main__":
           v2["size_liquidity_capped"], "manual", v2["require_manual_confirm"])
     assert v2["require_manual_confirm"]   # ADV 10k < VCI_MIN_ADV_USD 1e6 -> illiquid manual
     print("vci_deploy_eval v2 self-test PASSED")
+    selftest_refusals()

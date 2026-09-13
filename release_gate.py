@@ -478,10 +478,24 @@ def negative_control_census(modules: List[str], root: str = HERE) -> dict:
         lits = [n.value for n in ast.walk(st)
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)]
         n_neg = sum(1 for l in lits if any(k in l.lower() for k in _NEG_MARKERS))
+        # ⚑ ISA-0682 — THE VOCABULARY IS DERIVED, NOT HAND-LISTED. This counted only
+        #   ("ok", "check", "assert_") and FIVE modules define and use `ck(name, cond)`
+        #   instead — capital_destination, forward_record, fund_expected_return,
+        #   fund_exposure_vectors, fund_returns — so the R5.5 gate reported RED with
+        #   n_assertions = 0 on selftests that assert throughout. That is Q4's own failure
+        #   class inverted: a filter keyed on three values while the producers emit a fourth.
+        #   The docstring's claim that it counts "by AST, never from a claim" was true and
+        #   still wrong, because it counted the wrong tokens. A gate that cries wolf is the
+        #   one that gets waived.
+        #   ⚑ Any single-argument-or-more helper DEFINED INSIDE the selftest is now treated
+        #     as an assertion helper, so a SIXTH idiom is counted rather than silently missed.
+        _inner = {f.name for f in ast.walk(st)
+                  if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and f is not st}
+        _vocab = {"ok", "check", "assert_", "ck"} | _inner
         n_ass = sum(1 for n in ast.walk(st)
                     if isinstance(n, ast.Assert)
                     or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                        and n.func.id in ("ok", "check", "assert_")))
+                        and n.func.id in _vocab))
         rows.append({"module": m, "state": GREEN if (n_neg and n_ass) else RED,
                      "n_assertions": n_ass, "n_negative": n_neg,
                      "why": None if (n_neg and n_ass) else

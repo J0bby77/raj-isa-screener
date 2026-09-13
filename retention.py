@@ -131,6 +131,120 @@ def underwrite(lot: dict, *, er_entry, er_confidence_entry, price_entry, fv_entr
     return lot
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0418 — THE PERSISTED ENTRY RECORD. `underwrite()` existed; nothing stored its output.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# `underwrite()` has enforced REQUIRED_ENTRY_FIELDS and immutability since it shipped, and no
+# `er_entry` appeared in ANY artefact on disk — so `realised_fraction` was unreachable for
+# every holding and `re_underwrite_outcome`'s TRIM_TO_RISK_TARGET branch, which the code
+# itself calls "banks the excess without exiting a working thesis", had never been runnable.
+# The missing half was a STORE and a CALLER, not the design.
+#
+# ⚑⚑ EXISTING POSITIONS ARE NOT BACK-FILLED, AND THAT IS THE POINT. R7.5 forbids back-filling
+#    a judgement that was never made. MU, AVGO, ABCL, ONT, COCO, QBTS and NTAP were opened
+#    with no recorded expected return, and inventing one now would make `realised_fraction`
+#    report a number derived from a figure nobody ever committed to — the H3 conviction
+#    backfill was refused as fabrication for exactly this reason. They are recorded as
+#    NOT_UNDERWRITTEN, which is the truth, and `realised_fraction` REFUSES for them.
+#    Positions opened from here on are underwritten AT ENTRY, and the instrument becomes
+#    real as the book turns over. A gap that closes honestly beats a number that is wrong now.
+#
+# ⚑ er_horizon_months is READ from scoring_config.ER_HORIZON_MONTHS (Raj D26/D6 = 12). No
+#   caller passes its own: a 12-month and a 24-month reading of the same E[r] give different
+#   realised_fraction answers for the same position, and the difference would be invisible.
+
+UNDERWRITE_STORE = "position_underwriting.json"
+NOT_UNDERWRITTEN = "NOT_UNDERWRITTEN"
+
+
+def _underwrite_path(root=None):
+    import os as _os
+    return _os.path.join(root or _os.path.dirname(_os.path.abspath(__file__)),
+                         UNDERWRITE_STORE)
+
+
+def load_underwriting(root=None) -> dict:
+    import json as _json
+    import os as _os
+    p = _underwrite_path(root)
+    if not _os.path.exists(p):
+        return {"schema_version": "1.0.0", "lots": {}}
+    with open(p, encoding="utf-8") as fh:
+        return _json.load(fh)
+
+
+def save_underwriting(doc: dict, root=None) -> str:
+    import json as _json
+    import os as _os
+    p = _underwrite_path(root)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        _json.dump(doc, fh, indent=1, ensure_ascii=False)
+    _os.replace(tmp, p)
+    return p
+
+
+def _declared_horizon() -> int:
+    try:
+        import scoring_config as _sc
+        return int(getattr(_sc, "ER_HORIZON_MONTHS"))
+    except Exception as exc:                                         # noqa: BLE001
+        raise RetentionRefused(
+            "scoring_config.ER_HORIZON_MONTHS is not declared (%s). er_entry has no meaning "
+            "without the period it is expressed over (R2.6, ISA-0675/ISA-0168)." % exc)
+
+
+def record_entry(ticker: str, *, er_entry, er_confidence_entry, price_entry,
+                 position_first_entry_date, fv_entry=None, underwrite_date=None,
+                 root=None) -> dict:
+    """Persist the IMMUTABLE entry record for a newly opened position."""
+    # ⚑ UNITS. `er_entry` is a PERCENT, not a fraction — realised_fraction divides a
+    #   price_return in PERCENT by it. Passing 0.19 for "19%" yields a realised_fraction of
+    #   105x instead of 1.05x, which would trip the >= 1.0 MANDATORY RE-UNDERWRITE on a
+    #   position that had barely moved. Caught in this build's own first test. A plausible
+    #   wrong number is worse than a refusal (R4.1), so anything under 1.0 is REFUSED rather
+    #   than silently rescaled — rescaling would guess which unit the caller meant.
+    if er_entry is not None and 0 < float(er_entry) < 1.0:
+        raise RetentionRefused(
+            "%s: er_entry=%r looks like a FRACTION. It must be a PERCENT (19.0, not 0.19) — "
+            "realised_fraction divides a percent price return by it, so a fraction inflates "
+            "the result ~100x and would fire the mandatory re-underwrite on a flat position. "
+            "Refused rather than rescaled: guessing the caller's unit is how the /100 "
+            "inversion of ISA-0429 ran for five months." % (ticker, er_entry))
+    doc = load_underwriting(root)
+    tk = str(ticker).upper()
+    lot = (doc.get("lots") or {}).get(tk) or {"ticker": tk}
+    lot["position_first_entry_date"] = position_first_entry_date
+    lot = underwrite(lot, er_entry=er_entry, er_confidence_entry=er_confidence_entry,
+                     price_entry=price_entry, fv_entry=fv_entry,
+                     er_horizon_months=_declared_horizon(),
+                     underwrite_date=underwrite_date)
+    doc.setdefault("lots", {})[tk] = lot
+    save_underwriting(doc, root)
+    return lot
+
+
+def underwriting_state(held_tickers, root=None) -> dict:
+    """Which held positions carry an entry record, and which do not. No back-fill (R7.5)."""
+    doc = load_underwriting(root)
+    lots = doc.get("lots") or {}
+    have, missing = [], []
+    for t in held_tickers:
+        tk = str(t).upper()
+        (have if (lots.get(tk) or {}).get("underwrite") else missing).append(tk)
+    return {
+        "underwritten": sorted(have), "not_underwritten": sorted(missing),
+        "store": UNDERWRITE_STORE, "horizon_months": _declared_horizon(),
+        "warnings": ([("Step 6.5 (ISA-0418): %d held position(s) carry NO entry underwriting "
+                       "(%s), so realised_fraction and the re-underwrite outcome are "
+                       "UNREACHABLE for them. ⚑ They are NOT back-filled: inventing an "
+                       "er_entry nobody committed to would make the instrument report a "
+                       "number derived from a fabricated figure (R7.5). Positions opened from "
+                       "here are underwritten at entry."
+                       % (len(missing), ", ".join(sorted(missing))))] if missing else []),
+    }
+
+
 def re_underwrite(lot: dict, *, er_entry, price_now, reason, on=None) -> dict:
     """APPEND a new underwrite, retaining the original. Never an in-place edit."""
     u = lot.get("underwrite")
@@ -201,6 +315,591 @@ def re_underwrite_outcome(*, clears_underwriting: bool, above_risk_target: bool,
 
 
 # ─────────────────────────────────────────────────────── s3 step-down ratchet
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0658 — REALISATION: mandate_years_banked and the realisation t-statistic
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Raj, 12-Sep-2026: "is the stock's return above the hurdle + transaction costs". Taken
+# literally that compares a 64-day realised return to an ANNUAL rate — the same dimensional
+# error as the "13.7% + 2% = 15.7%" hurdle, where a one-off round trip was added to a
+# compound annual rate (a 2.00pp/yr drag implies a 9.1-month hold, shorter than the 182-day
+# min-hold's own intent). Two quantities fix it, and neither is a threshold:
+#
+#   mandate_years_banked = ln(1+r) / ln(1+required_return)
+#       "how many years of REQUIRED return has this position already delivered?"
+#       ABCL: +53% in 64 days = 3.31 mandate-years. It has banked over three years of the
+#       return the plan needs, in nine weeks.
+#
+#   realisation t = r / (sigma_ann * sqrt(days/365))
+#       the same gain expressed in units of the position's OWN noise. R3.11: before declaring
+#       ANY threshold, divide it by the SD of the thing it tests and publish the t.
+#
+# ⚑ WHY THE t AND NOT A PERCENTAGE. ONT peaked at +24.0% and ABCL sits at +53%, on sigmas of
+#   63.6% and 90.8% — a raw-percentage rule ranks them by how volatile they are, not by how
+#   much has been achieved. The t is SCALE-FREE and measured to be so: simulated false-fire
+#   rates are 20.9% / 21.3% / 21.4% at sigma 50% / 91% / 158%. That invariance is the whole
+#   advance here.
+#
+# ⚑⚑ AND IT IS NOT A SIGNIFICANCE TEST. R3.4 forbids using one as an estimator. t >= k does
+#   not mean the return is real; it means enough of this position's own noise-scale has been
+#   banked to justify RE-UNDERWRITING it. The discrimination in the D5 rule comes from the
+#   conjunction — catalyst RESOLVED and in profit and an UNPRICEABLE_BY_NATURE refusal — not
+#   from k. Measured: at k = 1.0 monthly x2, a driftless position fires 21.3% per 182-day
+#   window and one earning exactly the 13.7% hurdle fires 23.6%. The leg has almost no power
+#   to separate those two states ALONE, and saying so is part of shipping it honestly.
+
+REALISATION_K = 1.0                 # Raj, 12-Sep-2026. See REALISATION_K_RATIONALE.
+REALISATION_OBS_CADENCE = "monthly"
+REALISATION_CONSECUTIVE_REQUIRED = 2
+
+REALISATION_K_RATIONALE = {
+    "constant": "REALISATION_K", "home": "retention.py",
+    "who_set_it": "Raj", "set_on": "2026-09-12", "evidence_basis": "DECLARED",
+    "bounded_below_by": ("0.82 — ONT's peak realisation t. Below this the realisation leg "
+                         "pre-empts the give-back leg and the two-route structure collapses "
+                         "into one, which is the opposite of what Addendum 3 established. "
+                         "On the framework's OWN weekly-close basis ONT's peak t is 0.77 "
+                         "(+24.03% over 88 days at sigma 63.6%); 0.82 comes from an intraday "
+                         "high the framework does not hold (ISA-0670). The CONSERVATIVE "
+                         "(higher) bound governs."),
+    "bounded_above_by": ("1.39 — ABCL's realisation t at the 12-Sep price. Above this the "
+                         "rule does not fire on the only realisation episode the framework "
+                         "has ever had and ships INERT, which is the never-fires half of "
+                         "M1's failure pair. On the latest STORED price (04-Sep) it is 1.61; "
+                         "the conservative (lower) bound governs."),
+    "why_1_0": ("the interior point of (0.82, 1.39] that survives BOTH measurement choices "
+                "on BOTH bounds — 0.18 sigma of headroom above ONT, 0.39 below ABCL. k = 1.28 "
+                "also survives but sits 0.11 sigma under ABCL's conservative figure: one bad "
+                "week and the rule is inert. k = 1.5 fails outright, and k = 2.0 (the "
+                "significance-flavoured choice) is inert on arrival — R3.4."),
+    "why_not_calibrated": ("REFUSED_FOR_POWER. resolved_count = 1 of 12 and "
+                           "calibration_gate_passed = FALSE. A k fitted to one observation is "
+                           "a number wearing a decimal point (R3.2, R3.5)."),
+    "cadence_reason": ("evaluated MONTHLY and required at TWO CONSECUTIVE observations. "
+                       "Checking weekly gives a 43.1% driftless false-fire rate per 182-day "
+                       "window — a running-maximum artefact, not the 15.9% single-observation "
+                       "tail the threshold suggests. Monthly x2 halves it to 21.3%. This "
+                       "mirrors T4's existing sustained-observation doctrine (ISA-0165)."),
+    "what_would_falsify_it": ("realisation exits that systematically underperform continued "
+                              "holding over the following 12 months, or a measured fire rate "
+                              "outside the declared 10-35% band"),
+    "revalidate_by": "2027-03-31",
+    "expected_fire_rate_band_pct": [10.0, 35.0],     # R15.2
+}
+
+
+def mandate_years_banked(realised_return: float, required_return: float = None) -> dict:
+    """How many YEARS of required return this position has already delivered.
+
+    Refuses rather than returning a number on a loss or a non-positive hurdle: ln of a
+    non-positive quantity is not a small number, it is undefined, and R4.3 forbids a control
+    returning PASS on an input it could not evaluate."""
+    import math as _m
+    if required_return is None:
+        required_return = _required_return_operative()
+    if required_return is None:
+        return {"value": None, "state": "UNKNOWN",
+                "why": "the required-return anchor could not be read from target_state.json; "
+                       "R16.1 forbids guessing it"}
+    if realised_return is None:
+        return {"value": None, "state": "UNKNOWN", "why": "no realised return supplied"}
+    if 1.0 + realised_return <= 0 or 1.0 + required_return <= 0:
+        return {"value": None, "state": "UNDEFINED",
+                "why": "a total loss has no expression in mandate-years"}
+    if realised_return < 0:
+        return {"value": round(_m.log(1.0 + realised_return) / _m.log(1.0 + required_return), 4),
+                "state": "NEGATIVE",
+                "why": "the position has given back mandate-years; the realisation leg cannot "
+                       "fire on it (C5 requires profit)"}
+    return {"value": round(_m.log(1.0 + realised_return) / _m.log(1.0 + required_return), 4),
+            "state": "MEASURED", "required_return_used": required_return}
+
+
+def realisation_t(realised_return: float, sigma_ann: float, days_held: int) -> dict:
+    """The realised gain in units of the position's OWN annualised volatility.
+
+    REFUSES on a missing sigma — a null sigma is not a zero, and dividing by a substituted
+    one would manufacture an arbitrarily large t on the names with no price history, which
+    are exactly the names least entitled to a harvest decision (V-1 / R4.3)."""
+    import math as _m
+    if sigma_ann is None or not sigma_ann or sigma_ann <= 0:
+        return {"t": None, "state": "UNKNOWN",
+                "why": "sigma_ann is absent or non-positive, so the gain cannot be expressed "
+                       "in units of the position's own noise. A null sigma is not a zero "
+                       "(V-1): substituting one would manufacture an unbounded t on precisely "
+                       "the names with no measured price history."}
+    if realised_return is None or not days_held or days_held <= 0:
+        return {"t": None, "state": "UNKNOWN",
+                "why": "realised return or holding period absent"}
+    period_sigma = float(sigma_ann) * _m.sqrt(float(days_held) / 365.0)
+    return {"t": round(float(realised_return) / period_sigma, 4), "state": "MEASURED",
+            "period_sigma": round(period_sigma, 4), "sigma_ann": sigma_ann,
+            "days_held": days_held}
+
+
+# ── D31 (Raj, 12-Sep-2026) — the consecutive requirement depends on the leg's ROLE ──────
+# The x2 requirement exists to stop the realisation leg firing on NOISE: measured false-fire
+# rates per 182-day window are 43.1% weekly, 36.2% monthly x1, 21.3% monthly x2. That
+# rationale holds when realisation is the REASON a position is sold.
+#
+# ⚑ IT DOES NOT HOLD WHEN REALISATION IS ONLY THE PERMISSION. Where the disposition is
+#   already SELL because the forward case is UNPRICEABLE_BY_NATURE, the realisation leg is
+#   not deciding anything — it is unlocking the 182-day min-hold. And the min-hold's own
+#   purpose (C-1, which closed a realised -GBP 1,097 churn pattern) is to stop round-tripping
+#   ON NOISE. A sale driven by "the binary resolved and the successor cannot be priced" is a
+#   THESIS event, not a noise event, so applying a noise-control device to it is a category
+#   error whose only effect is a further month of exposure. Measured on ABCL: waiting one
+#   month at sigma 90.8% risks +/- GBP 462, which is 68% of the entire GBP 680 realised gain;
+#   a 1-sigma fall retains 40% of it and a 2-sigma fall puts the position at a loss.
+#
+#   C1 (resolved) AND C5 (in profit) AND by-nature are already three independent gates. The
+#   second observation adds a month of exposure and no information.
+REALISATION_CONSECUTIVE_AS_REASON = 2
+REALISATION_CONSECUTIVE_AS_PERMISSION = 1
+REALISATION_ROLE_REASON = "REASON"
+REALISATION_ROLE_PERMISSION = "PERMISSION"
+
+
+def realisation_consecutive_required(role: str) -> int:
+    """D31 — how many consecutive monthly observations this role needs.
+
+    REFUSES an undeclared role rather than defaulting to the looser number: defaulting to
+    PERMISSION would silently relax the noise control everywhere, which is the direction the
+    error must never run (R4.3/R4.8)."""
+    if role == REALISATION_ROLE_REASON:
+        return REALISATION_CONSECUTIVE_AS_REASON
+    if role == REALISATION_ROLE_PERMISSION:
+        return REALISATION_CONSECUTIVE_AS_PERMISSION
+    raise RetentionRefused(
+        "realisation role %r is not declared. D31 requires the caller to state whether the "
+        "realisation leg is the REASON for the sale (x%d, the noise control) or the "
+        "PERMISSION for one already decided on UNPRICEABLE_BY_NATURE grounds (x%d). An "
+        "undeclared role must not default to the looser number."
+        % (role, REALISATION_CONSECUTIVE_AS_REASON, REALISATION_CONSECUTIVE_AS_PERMISSION))
+
+
+def realisation_trigger(history, k: float = None, consecutive: int = None,
+                        role: str = None) -> dict:
+    """Has the realisation t held at or above k for CONSECUTIVE monthly observations?
+
+    `history`: monthly observations oldest-first, each {as_of, t}. The consecutive
+    requirement is the control, not k — see REALISATION_K_RATIONALE['cadence_reason'] — and
+    under D31 it depends on `role`: REASON (x2) or PERMISSION (x1).
+
+    ⚑ An observation whose t is None BREAKS the run rather than being skipped. Skipping it
+    would let two readings a year apart count as consecutive, and an unmeasured month is not
+    a month that passed (R4.3)."""
+    k = REALISATION_K if k is None else k
+    if consecutive is None and role is not None:
+        consecutive = realisation_consecutive_required(role)
+    need = REALISATION_CONSECUTIVE_REQUIRED if consecutive is None else consecutive
+    obs = list(history or [])
+    run, best = 0, 0
+    for o in obs:
+        t = o.get("t")
+        run = run + 1 if (t is not None and t >= k) else 0
+        best = max(best, run)
+    fired = run >= need
+    n_unmeasured = sum(1 for o in obs if o.get("t") is None)
+    return {
+        "fired": fired, "k": k, "consecutive_required": need,
+        "current_run": run, "longest_run": best,
+        "n_observations": len(obs), "n_unmeasured": n_unmeasured,
+        "cadence": REALISATION_OBS_CADENCE,
+        "latest_t": (obs[-1].get("t") if obs else None),
+        "why": ("realisation t >= %.2f at %d consecutive %s observations"
+                % (k, run, REALISATION_OBS_CADENCE) if fired else
+                "realisation t has held above %.2f for %d of the %d consecutive %s "
+                "observations required%s"
+                % (k, run, need, REALISATION_OBS_CADENCE,
+                   ("; %d observation(s) were UNMEASURED and broke the run rather than being "
+                    "skipped" % n_unmeasured) if n_unmeasured else "")),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0651 — THE GRADUATION DISPOSITION. "HOLD" IS NOT AN AVAILABLE ANSWER.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Raj, 12-Sep-2026: *"the framework should either be saying keep because we believe there is
+# still a lot of upside in this stock or sell because the original binary has been realised
+# and the framework is unable to calculate its future upside. It should not simply say hold
+# at this juncture as I do not want its returns eroded before I get to capitalise the
+# position."*
+#
+# ⚑ THE TWO QUESTIONS WERE CONFLATED, AND THAT IS WHY "HOLD" KEPT WINNING.
+#   (a) DISPOSITION — keep or sell? Decided by whether the FORWARD case can be priced and
+#       clears the hurdle. There are exactly two answers.
+#   (b) EXECUTABILITY — may the sale happen inside the 182-day min-hold? Decided by D5:
+#       C1 (catalyst resolved) AND C5 (in profit) AND (REALISATION OR GIVEBACK) AND the
+#       refusal being UNPRICEABLE_BY_NATURE rather than UNMEASURED_BY_DEFECT.
+#
+#   Answering (a) with (b)'s machinery produces "hold": the exemption is unavailable, so
+#   nothing happens, and nothing-happening gets published as a decision. A position whose
+#   disposition is SELL but whose exemption has not yet matured is **SELL_PENDING_MIN_HOLD**
+#   — a decided sale awaiting permission, with a named date — not a hold.
+#
+# ⚑ AND HOLDING AN UNPRICEABLE POSITION IS AN ACTIVE BET, NOT INACTION. The realised gain is
+#   certain; the forward return is unknown. Requiring evidence to SELL while requiring none to
+#   KEEP puts the burden on the wrong side. `evidence_state`'s DEGRADED_UNMEASURED ->
+#   HOLD_AT_CURRENT encodes exactly that error, which is why this function refuses to emit it.
+
+KEEP_AND_TOP_UP = "KEEP_AND_TOP_UP"
+KEEP_AT_SIZE = "KEEP_AT_SIZE"      # only when the rung is already reached
+SELL = "SELL"
+SELL_PENDING_MIN_HOLD = "SELL_PENDING_MIN_HOLD"
+BLOCKED_AT_A_LOSS = "BLOCKED_AT_A_LOSS"
+DEFERRED_ON_NAMED_DEFECT = "DEFERRED_ON_NAMED_DEFECT"
+NOT_IN_SCOPE = "NOT_IN_SCOPE"
+
+UNPRICEABLE_BY_NATURE = "UNPRICEABLE_BY_NATURE"
+UNMEASURED_BY_DEFECT = "UNMEASURED_BY_DEFECT"
+
+
+def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
+                           realisation=None, giveback=None, size_gbp=None,
+                           min_entry_gbp=None, risk_ceiling_gbp=None, rung_gbp=None,
+                           min_hold_until=None, today=None) -> dict:
+    """KEEP or SELL for a position whose binary has resolved. Never HOLD.
+
+    `forward_case`: {"priceable": bool, "refusal_kind": ..., "er_pct": float|None,
+                     "hurdle_pct": float|None}
+    `realisation` / `giveback`: the trigger dicts, each carrying `fired`.
+
+    Returns a disposition plus the D5 exemption verdict, kept separate so a decided sale that
+    cannot yet execute is visible AS a decided sale."""
+    import datetime as _dt
+    today = today or _dt.date.today().isoformat()
+    out = {"ticker": ticker, "as_of": today, "catalyst_status": catalyst_status}
+
+    # ⚑ ISA-0655's successor state is IN SCOPE and is the whole point. A name whose first
+    #   binary resolved and whose successor cannot be priced is EXACTLY the population this
+    #   rule exists for — it was omitted here when the state was added, and running the
+    #   orchestrated review caught it returning NOT_IN_SCOPE for ABCL, the case it was built
+    #   to decide. A new enum value that silently falls out of a downstream membership test is
+    #   the R4.7 shape: a contract change must fail an un-updated caller, not skip it.
+    RESOLVED = ("RESOLVED_POSITIVE", "RESOLVED_NEGATIVE",
+                "RESOLVED_POSITIVE_SUCCESSOR_PENDING")
+    if catalyst_status not in RESOLVED:
+        out.update(state=NOT_IN_SCOPE,
+                   why=("the binary has not resolved; this rule governs post-resolution names "
+                        "only. In scope: %s" % ", ".join(RESOLVED)))
+        return out
+
+    fc = forward_case or {}
+    priceable = bool(fc.get("priceable"))
+    er, hurdle = fc.get("er_pct"), fc.get("hurdle_pct")
+
+    # ── (a) DISPOSITION ────────────────────────────────────────────────────────────────
+    if priceable and er is not None and hurdle is not None:
+        if er >= hurdle:
+            # KEEP. D16 then decides at what SIZE, and a risk ceiling below the capital
+            # floor turns KEEP into SELL — there is no size worth owning (D27/ISA-0652).
+            # ⚑ Raj, 12-Sep-2026: *"if it mechanically decides to keep I should have said
+            #   keep AND TOP UP."* So KEEP is never a licence to leave a position where it
+            #   happens to be. The target is the LADDER RUNG that evidence_state earns and
+            #   thesis_state caps — not MIN_ENTRY, which is only the floor below which a
+            #   holding may not exist at all. Filling to the floor would satisfy D16 and still
+            #   leave capital idle in a position the framework has just said it believes in,
+            #   which is R16.2: every pound must count.
+            target = min([x for x in (rung_gbp, risk_ceiling_gbp) if x is not None]
+                         or [min_entry_gbp])
+            if (risk_ceiling_gbp is not None and min_entry_gbp is not None
+                    and risk_ceiling_gbp < min_entry_gbp):
+                out.update(disposition=SELL,
+                           why=("forward case clears the hurdle (E[r] %.2f%% vs %.2f%%) but no "
+                                "size of this name is both material and risk-acceptable: the "
+                                "risk ceiling GBP %.0f is below MIN_ENTRY GBP %.0f (D27). KEEP "
+                                "is unavailable because there is nothing to keep it AT."
+                                % (er, hurdle, risk_ceiling_gbp, min_entry_gbp)))
+            elif target is not None and size_gbp is not None and size_gbp < target:
+                capped = (risk_ceiling_gbp is not None and rung_gbp is not None
+                          and risk_ceiling_gbp < rung_gbp)
+                out.update(disposition=KEEP_AND_TOP_UP,
+                           top_up_to_gbp=round(target, 2),
+                           top_up_amount_gbp=round(target - size_gbp, 2),
+                           target_basis=("risk ceiling (below the earned ladder rung)" if capped
+                                         else "earned ladder rung"),
+                           why=("forward case clears the hurdle (E[r] %.2f%% vs %.2f%%). KEEP "
+                                "means TOP UP to GBP %.0f (%s) — an addition of GBP %.0f. A "
+                                "position the framework has just backed is not left at GBP %.0f "
+                                "(R16.2)." % (er, hurdle, target,
+                                              "risk ceiling, below the earned rung" if capped
+                                              else "earned ladder rung",
+                                              target - size_gbp, size_gbp)))
+            else:
+                out.update(disposition=KEEP_AT_SIZE,
+                           why=("forward case clears the hurdle (E[r] %.2f%% vs %.2f%%) and the "
+                                "position is already at or above its earned rung, so there is "
+                                "nothing to top up." % (er, hurdle)))
+            out["state"] = out["disposition"]
+            return out
+        out.update(disposition=SELL,
+                   why=("forward case is PRICEABLE and does NOT clear the hurdle "
+                        "(E[r] %.2f%% vs %.2f%%)." % (er, hurdle)))
+    else:
+        kind = fc.get("refusal_kind")
+        if kind == UNMEASURED_BY_DEFECT:
+            # ⚑ A named open defect must NOT become a standing licence to do nothing. The
+            #   position is deferred WITH the item id and an expiry; C3's by-nature/by-defect
+            #   split exists so a data outage is not a liquidation signal (C-1 inverted).
+            out.update(state=DEFERRED_ON_NAMED_DEFECT, disposition=None,
+                       blocking_items=fc.get("blocking_items") or [],
+                       why=("the forward case is UNMEASURED_BY_DEFECT (%s), so neither KEEP nor "
+                            "SELL is evidenced. This is NOT a hold: it is a deferral with a "
+                            "named cause, and the cause is escalated rather than tolerated."
+                            % ", ".join(fc.get("blocking_items") or ["unnamed"])))
+            return out
+        out.update(disposition=SELL,
+                   why=("the binary has resolved and the forward case is %s. KEEP would be an "
+                        "active bet that an unknown forward return exceeds the hurdle, placed "
+                        "with no evidence; the realised gain is certain and the forward return "
+                        "is not." % (kind or "UNPRICEABLE")))
+
+    # ── (b) EXECUTABILITY — D5's min-hold exemption, kept separate ─────────────────────
+    if not in_profit:
+        out.update(state=BLOCKED_AT_A_LOSS,
+                   why=out["why"] + " ⚑ C-1 blocks a full exit at a loss inside the min-hold "
+                                    "window; a trim is not available below MIN_ENTRY either.",
+                   min_hold_until=min_hold_until)
+        return out
+    # D31 — inside graduation_disposition the realisation leg is by construction PERMISSION:
+    # the disposition above was already decided by the forward case, not by the t.
+    r_fired = bool((realisation or {}).get("fired"))
+    r_role = (realisation or {}).get("role")
+    g_fired = bool((giveback or {}).get("fired"))
+    by_nature = (fc.get("refusal_kind") == UNPRICEABLE_BY_NATURE) or bool(priceable)
+    inside = bool(min_hold_until and today < min_hold_until)
+    exemption = {
+        "available": bool(r_fired or g_fired) and by_nature,
+        "C1_catalyst_resolved": True,
+        "C5_in_profit": True,
+        "realisation_fired": r_fired,
+        "realisation_role": r_role or REALISATION_ROLE_PERMISSION,
+        "realisation_consecutive_required": realisation_consecutive_required(
+            r_role or REALISATION_ROLE_PERMISSION),
+        "giveback_fired": g_fired,
+        "refusal_by_nature": by_nature,
+        "inside_min_hold": inside,
+        "min_hold_until": min_hold_until,
+    }
+    out["min_hold_exemption"] = exemption
+    if not inside or exemption["available"]:
+        out["state"] = SELL
+    else:
+        out["state"] = SELL_PENDING_MIN_HOLD
+        out["why"] += (" ⚑ The DISPOSITION is SELL. Execution is pending the `thesis_realised` "
+                       "min-hold exemption, which needs the realisation or give-back leg: "
+                       "realisation fired=%s, give-back fired=%s, min-hold to %s. This is a "
+                       "decided sale awaiting permission, NOT a hold."
+                       % (r_fired, g_fired, min_hold_until))
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0620 — GIVE-BACK. THE MEASUREMENT SHIPS; THE THRESHOLD REFUSES UNTIL DECLARED.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Addendum 3 called this "the single highest-value build in this thread" because nothing in
+# the framework could say "sell at +20%": ONT ran to +24.03% and returned most of it, and not
+# one trigger was within reach at any point — 1.15x entry against a 2x milestone schedule,
+# 57% below modelled FV against a 15-20%-of-FV trigger, fv_asymmetry 2.33x against a 2.00
+# floor and therefore reading as HEALTHY.
+#
+# ⚑⚑ BUT R3.11 CHANGES THE CONCLUSION, AND IT IS WORTH STATING PLAINLY. Divide the threshold
+#    by the SD of the thing it tests before declaring it. Measured on the framework's own
+#    weekly Friday closes (the only series it holds — an intraday high is not admissible,
+#    ISA-0670):
+#
+#      ONT.L  entry 141.977p  peak 176.100p on 28-Aug-2026  = +24.03%
+#             sigma_ann 63.6%  ->  monthly sigma 18.3%
+#             ⚑ THE ENTIRE PEAK GAIN WAS 1.31 MONTHLY SIGMA.
+#             give-back t, measured since the peak: 0.948 at 7 days, 0.877 at 15 days.
+#
+#      ABCL   entry $7.094  peak $11.430 on 04-Sep-2026  = +61.12%
+#             sigma_ann 90.8%  ->  monthly sigma 26.2%   peak gain = 2.33 monthly sigma
+#
+#    So a FIXED give-back percentage is not one rule. A give-back of 50% of the peak gain is
+#    **0.65 sigma for ONT and 1.17 sigma for ABCL** — the same declared number, nearly twice
+#    the move required of one name as the other. That is exactly the error R3.11 exists to
+#    prevent, and the same class as the 15-20%-of-FV trigger that never fired.
+#
+#    And ONT's give-back t never exceeds ~0.95. **Both of ONT's legs are sub-1-sigma**: its
+#    realisation t peaked at 0.77 and its give-back t at 0.95. On the framework's own numbers
+#    ONT is NOT cleanly a give-back case either — its drawdown is not an unusual move for a
+#    63.6%-sigma stock. What actually went wrong is upstream: a 63.6%-sigma position was held
+#    on a thesis whose peak gain was 1.3 monthly sigma. **There was never a gain that noise
+#    would not take.** That is the risk-correct-sizing architecture (D27 / ISA-0419), not a
+#    harvest trigger — and D27 already says ONT.L at GBP 1,549.68 is below the capital floor
+#    and must be filled or exited.
+#
+# ⚑ THEREFORE: this block ships the MEASUREMENT, which is unambiguously worth having, and
+#   REFUSES to declare a threshold. GIVEBACK_K is None and `giveback_trigger` returns
+#   state UNDECLARED rather than a verdict. A control fed an undeclared threshold must not
+#   return PASS or FAIL (R4.3), and inventing a number here would be the third home for a
+#   guess (R12.3: NO_RECORDED_RATIONALE auto-raises an item).
+
+PEAK_BASIS = "weekly_friday_close"      # ISA-0670. An intraday high is NOT admissible.
+# ── Raj D32 (12-Sep-2026), on ISA-0678 ──────────────────────────────────────────────────
+# The GATE is the decision that matters, and Raj took it: a give-back is only harvestable
+# where there WAS a securely banked gain. Measured, the peak gain in units of the position's
+# own monthly sigma: ONT.L 1.31, ABCL 2.33. At a minimum of 2.0 the trigger returns
+# GAIN_NOT_WORTH_PROTECTING on ONT — correctly reclassifying it as a POSITION-SIZE problem
+# (D27 / ISA-0419) rather than a harvest one — and admits ABCL.
+#
+# ⚑ WITH THE GATE AT 2.0, k NO LONGER HAS TO REACH DOWN TO ONT. That is the whole point of
+#   accepting the gate: ONT's give-back t maxes at 0.948, so any k capable of catching it
+#   would have been BELOW 1 sigma and would have fired inside the noise on every name. k is
+#   therefore set at 1.0, consistent with REALISATION_K, and the two legs of
+#   (REALISATION or GIVEBACK) now share one noise scale instead of two.
+#
+# ⚑ RAJ ASKED FOR THIS TO BE MONITORED CLOSELY, WITH A FORMAL REVIEW. Both constants carry
+#   `revisit_by` and an R15.2 fire-rate band; `giveback_trigger` publishes the measurement
+#   on every evaluation whether it fires or not, so the review has a series to read rather
+#   than a recollection. The gate is the FIRST thing to re-examine: it is declared on two
+#   observations (n=2), which is not a calibration, and it is capable of silencing the leg
+#   entirely if real harvest cases cluster below 2.0 monthly sigma.
+GIVEBACK_K = 1.0
+GIVEBACK_MIN_PEAK_GAIN_MONTHLY_SIGMA = 2.0
+
+GIVEBACK_RATIONALE = {
+    "constant": "GIVEBACK_MIN_PEAK_GAIN_MONTHLY_SIGMA", "home": "retention.py",
+    "who_set_it": "Raj", "set_on": "2026-09-12", "evidence_basis": "DECLARED",
+    "measured_basis": ("peak gain / (sigma_ann / sqrt(12)) on the framework's own weekly "
+                       "Friday closes: ONT.L +24.03% on sigma 63.6% = 1.31; ABCL +61.12% on "
+                       "sigma 90.8% = 2.33. n = 2 — this is a DECLARED judgement, not a "
+                       "calibration (R3.2, R13.1)."),
+    "what_would_falsify_it": ("real harvest cases clustering BELOW 2.0 monthly sigma of peak "
+                              "gain, which would mean the gate silences the give-back leg "
+                              "rather than focusing it; or ONT-shaped positions recurring "
+                              "after D27's floor/ceiling refusal is live, which would mean the "
+                              "sizing architecture is not actually catching them"),
+    "revisit_by": "2027-03-31",
+    "review_trigger": ("Raj, 12-Sep-2026: 'we should monitor this closely and perhaps schedule "
+                       "a formal review at some point when relevant.' Relevant = the earlier "
+                       "of 2027-03-31, the third resolved VCI outcome, or the first give-back "
+                       "episode that the gate BLOCKS — the last of which is the one worth "
+                       "reading, because a blocked episode is the gate's own falsification "
+                       "test presenting itself."),
+    "expected_fire_rate_band_pct": [5.0, 30.0],     # R15.2
+    "k": {"constant": "GIVEBACK_K", "value": 1.0,
+          "why": ("consistent with REALISATION_K so both legs of (REALISATION or GIVEBACK) "
+                  "share one noise scale. Freed to sit at 1.0 by the gate above: without it, "
+                  "any k able to catch ONT (give-back t max 0.948) would have been sub-1-sigma."),
+          "revisit_by": "2027-03-31"},
+}
+
+
+def peak_since_entry(observations, entry_date, *, basis: str = PEAK_BASIS) -> dict:
+    """The highest observed level since entry, with its date and its declared BASIS.
+
+    `observations`: {date: level} or {date: {level: ...}} — the weekly store's own shape.
+    ⚑ The basis is carried on the RESULT, not assumed by the reader (R4.2/R2.6): a give-back
+    measured against a high the framework never observed, and could never have dealt at,
+    overstates the give-back, and this figure is about to gate capital."""
+    rows = []
+    for k in sorted(observations or {}):
+        if k < entry_date:
+            continue
+        v = observations[k]
+        rows.append((k, float(v["level"] if isinstance(v, dict) else v)))
+    if not rows:
+        return {"peak": None, "peak_date": None, "n_observations": 0, "basis": basis,
+                "state": "UNKNOWN",
+                "why": "no observations at or after the entry date; a peak cannot be "
+                       "manufactured from an empty series (R4.3)"}
+    d, p = max(rows, key=lambda x: x[1])
+    return {"peak": p, "peak_date": d, "n_observations": len(rows), "basis": basis,
+            "state": "MEASURED",
+            "latest": rows[-1][1], "latest_date": rows[-1][0]}
+
+
+def giveback(peak: float, current: float, entry: float, *, sigma_ann: float = None,
+             days_since_peak: int = None) -> dict:
+    """How much of the peak gain has been returned — as a fraction AND in sigma units.
+
+    BOTH are published. The fraction is what a person reads; the t is what makes the
+    threshold honest, and R6.2 says a disagreement between two readings is published rather
+    than blended. Here they do not disagree so much as measure different things, and the
+    second one is the reason the first cannot be thresholded directly."""
+    import math as _m
+    out = {"basis": PEAK_BASIS}
+    if None in (peak, current, entry) or peak <= entry:
+        out.update(state="UNKNOWN", giveback_pct=None, t=None,
+                   why=("give-back is undefined without a peak ABOVE the entry: there is no "
+                        "gain to give back. This is not a give-back of zero (R4.3)."))
+        return out
+    frac = (peak - current) / (peak - entry)
+    drawdown = (peak - current) / peak
+    peak_gain = peak / entry - 1.0
+    out.update(state="MEASURED", giveback_pct=round(frac * 100.0, 2),
+               drawdown_from_peak_pct=round(drawdown * 100.0, 2),
+               peak_gain_pct=round(peak_gain * 100.0, 2))
+    if not sigma_ann or sigma_ann <= 0:
+        out.update(t=None, peak_gain_monthly_sigma=None,
+                   why=("sigma_ann absent, so the give-back cannot be expressed in units of "
+                        "the position's own noise. R3.11 binds: a give-back percentage "
+                        "declared without its t is 0.65 sigma on one name and 1.17 on another."))
+        return out
+    monthly_sigma = sigma_ann / _m.sqrt(12.0)
+    out["peak_gain_monthly_sigma"] = round(peak_gain / monthly_sigma, 3)
+    if days_since_peak and days_since_peak > 0:
+        out["t"] = round(drawdown / (sigma_ann * _m.sqrt(days_since_peak / 365.0)), 4)
+        out["days_since_peak"] = days_since_peak
+    else:
+        out.update(t=None, why="days_since_peak absent")
+    out["giveback_in_monthly_sigma"] = round(frac * peak_gain / monthly_sigma, 3)
+    return out
+
+
+def giveback_trigger(gb: dict, k: float = None,
+                     min_peak_gain_monthly_sigma: float = None) -> dict:
+    """REFUSES until GIVEBACK_K is declared. It never guesses a threshold.
+
+    The recommended shape, recorded on ISA-0678 for Raj: fire on the sigma-normalised t
+    AND only where the peak gain was worth protecting in the first place
+    (`peak_gain_monthly_sigma` >= a declared minimum). ONT's peak gain was 1.31 monthly
+    sigma; a minimum of 2.0 would correctly say ONT was never a harvest case but a sizing
+    one, and route it to D27's floor/ceiling refusal instead of to a harvest it cannot pass."""
+    k = GIVEBACK_K if k is None else k
+    floor_ = (GIVEBACK_MIN_PEAK_GAIN_MONTHLY_SIGMA if min_peak_gain_monthly_sigma is None
+              else min_peak_gain_monthly_sigma)
+    if k is None:
+        return {"fired": False, "state": "UNDECLARED", "k": None,
+                "measurement": gb,
+                "why": ("GIVEBACK_K is not declared. R3.11 requires the threshold to be "
+                        "divided by the SD of what it tests before it is declared at all, and "
+                        "the measurement shows a fixed give-back percentage is 0.65 sigma on "
+                        "ONT and 1.17 sigma on ABCL — it is not one rule. UNDECLARED returns "
+                        "neither a fire nor a pass (R4.3); it blocks and says so. See "
+                        "ISA-0678.")}
+    if gb.get("state") != "MEASURED" or gb.get("t") is None:
+        return {"fired": False, "state": "UNKNOWN", "k": k, "measurement": gb,
+                "why": "the give-back could not be measured; an unmeasured leg does not fire "
+                       "and does not pass"}
+    if floor_ is not None and (gb.get("peak_gain_monthly_sigma") or 0) < floor_:
+        return {"fired": False, "state": "GAIN_NOT_WORTH_PROTECTING", "k": k,
+                "measurement": gb,
+                "why": ("the peak gain was %.2f monthly sigma against a declared minimum of "
+                        "%.2f — there was no securely banked gain to harvest. This is a "
+                        "POSITION-SIZE finding (D27 / ISA-0419), not a harvest one, and "
+                        "routing it to a harvest trigger would fire inside the noise."
+                        % (gb.get("peak_gain_monthly_sigma") or 0, floor_))}
+    return {"fired": bool(gb["t"] >= k), "state": "MEASURED", "k": k, "measurement": gb,
+            "why": "give-back t %.3f vs k %.3f" % (gb["t"], k)}
+
+
+def _required_return_operative(root: str = None) -> float:
+    """The A19 anchor, READ not re-derived (R16.1 forbids a local re-derivation)."""
+    import json as _json
+    import os as _os
+    root = root or _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        with open(_os.path.join(root, "target_state.json"), encoding="utf-8") as fh:
+            ts = _json.load(fh)
+    except Exception:                                                # noqa: BLE001
+        return None
+    v = ts.get("required_return_operative_pct")
+    return None if v is None else float(v) / 100.0
+
+
 def step_down(current_sleeve_weight_pct: float) -> dict:
     """new_ceiling = floor(w / 5) * 5, with a hard floor of 10%."""
     w = float(current_sleeve_weight_pct)

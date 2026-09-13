@@ -128,22 +128,79 @@ def _f_trusted_baseline(root: str) -> dict:
         return _field(UNKNOWN, None, "release_gate unavailable (%s) — R2.9" % exc, None)
 
 
+def _resolve(subject: str, root: str):
+    """ISA-0663 — module, DECLARED area, or UNKNOWN. Never inferred from the name."""
+    try:
+        import framework_atlas as fa
+        import capability_registry as cr
+        from pathlib import Path as _P
+        mods = set(fa.build(_P(root))["modules"])
+        return cr.resolve_subject(subject, root, modules=mods)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"kind": "ENVIRONMENT_UNKNOWN", "subject": subject, "modules": [],
+                "why": "subject resolution unavailable (%s) - R2.9" % exc}
+
+
 def _f_atlas_footprint(subject: str, root: str) -> Dict[str, dict]:
-    """R12.1 fields 2, 4, 5, 6 — the mechanical half, from the Atlas (R15.3: cited with as_of)."""
+    """R12.1 fields 2, 4, 5, 6 - the mechanical half, from the Atlas (R15.3: cited with as_of).
+
+    (ISA-0663, 12-Sep-2026) This used to call `framework_atlas.footprint(subject)`, which
+    resolves exactly one MODULE NAME, so every cross-module subject came back RED as "not in
+    the Atlas" - and `how_it_links_together` is MANDATORY, so the verdict was UNVERIFIED.
+    R12.1 field 5 asks how a subject links together END TO END, which is inherently
+    cross-module; the resolver could therefore only orient on the subjects that least needed
+    it, and the RED read as a fact about the framework rather than about the resolver. A
+    subject is now resolved to a module (on disk) or to a DECLARED area
+    (`Dashboard/state/subject_areas.json`). A name that is neither stays RED.
+    """
     out = {}
+    res = _resolve(subject, root)
+    fields = ("what_is_already_there", "how_it_links_together",
+              "dependencies_in_out_lateral", "what_is_not_there")
+    if res["kind"] == "UNKNOWN":
+        for f in fields:
+            out[f] = _field("RED", None, res["why"], None)
+        return out
+    if res["kind"] == "ENVIRONMENT_UNKNOWN":
+        for f in fields:
+            out[f] = _field(UNKNOWN, None, res["why"], None)
+        return out
     try:
         import framework_atlas as fa
         from pathlib import Path as _P
-        # ⚑ framework_atlas takes a pathlib.Path, not a str. Passing a str raised
-        #   AttributeError('str' object has no attribute 'rglob'), which this
-        #   module then classified as ENVIRONMENT_UNKNOWN — a type error wearing an
-        #   environment label, which is the FC-A shape (a failure yielding a
-        #   plausible status instead of an error). Caught by the negative control
-        #   below, which expected RED and got UNKNOWN.
+        if res["kind"] == "area":
+            fp = fa.area_footprint(subject, res["modules"], _P(root))
+            out["what_is_already_there"] = _field(
+                "GREEN", {"resolution": "area", "members": fp["members"],
+                          "declared_by": res.get("declared_by"),
+                          "members_declared_but_absent_from_disk":
+                              fp["members_declared_but_absent_from_disk"],
+                          "excluded_with_reason": res.get("excluded_with_reason"),
+                          **fp["what_is_there"]},
+                None, "capability_registry.resolve_subject + framework_atlas.area_footprint")
+            out["how_it_links_together"] = _field(
+                "GREEN", {"decision_path": res.get("decision_path"),
+                          "internal_edges": fp["integration_path"]["internal_edges"],
+                          "n_internal_edges": fp["integration_path"]["n_internal_edges"],
+                          "reads": fp["integration_path"]["reads"],
+                          "writes": fp["integration_path"]["writes"]},
+                None, "framework_atlas.area_footprint")
+            out["dependencies_in_out_lateral"] = _field(
+                "GREEN", fp["dependencies_in_out"], None, "framework_atlas.area_footprint")
+            out["what_is_not_there"] = _field(
+                "GREEN", {"duplicate_constant_homes":
+                              fp["degradation_duplication"]["duplicate_constant_homes"],
+                          "zero_caller_functions":
+                              fp["refactor_candidates"]["zero_caller_functions"]},
+                ("R15.5: zero-caller here is STATIC. A function called only by its own "
+                 "selftest HAS a caller and is not listed - liveness is answered by "
+                 "what_executes_and_consumes, never by this field."),
+                "framework_atlas.area_footprint")
+            return out
         fp = fa.footprint(subject, _P(root))
         out["what_is_already_there"] = _field(
-            "GREEN", {"functions": fp.get("functions"), "module": subject},
-            None, "framework_atlas.footprint")
+            "GREEN", {"resolution": "module", "functions": fp.get("functions"),
+                      "module": subject}, None, "framework_atlas.footprint")
         out["how_it_links_together"] = _field(
             "GREEN", {"inbound_importers": fp.get("inbound"),
                       "outbound_imports": fp.get("outbound")},
@@ -154,15 +211,13 @@ def _f_atlas_footprint(subject: str, root: str) -> Dict[str, dict]:
             "GREEN", {"duplicate_homes": fp.get("duplicate_constant_homes")
                       or fp.get("duplicates")}, None, "framework_atlas.footprint")
     except KeyError as exc:
-        for f in ("what_is_already_there", "how_it_links_together",
-                  "dependencies_in_out_lateral", "what_is_not_there"):
+        for f in fields:
             out[f] = _field("RED", None,
-                            "subject %r is not a module in the Atlas (%s). R2.8: read the "
-                            "source, never the pointer — a subject the map does not contain "
-                            "cannot be discussed from the map." % (subject, exc), None)
+                            "subject %r could not be resolved in the Atlas (%s). R2.8: read "
+                            "the source, never the pointer - a subject the map does not "
+                            "contain cannot be discussed from the map." % (subject, exc), None)
     except Exception as exc:                                            # noqa: BLE001
-        for f in ("what_is_already_there", "how_it_links_together",
-                  "dependencies_in_out_lateral", "what_is_not_there"):
+        for f in fields:
             out[f] = _field(UNKNOWN, None, "framework_atlas unavailable (%s)" % exc, None)
     return out
 
@@ -174,22 +229,44 @@ def _f_executes_and_consumes(subject: str, root: str) -> dict:
         rec = cr.reconcile(root)
         if rec.get("state") == "DISABLED":
             return _field(UNKNOWN, None, rec["why"], None)
+        # (ISA-0664, 12-Sep-2026) This used to fall back to `rec["rows"]` - EVERY row in the
+        #   registry - whenever the subject matched none, and reported the widened count in a
+        #   `why` string that said "in scope" without saying WHAT scope. `why` is what
+        #   summarise() prints, so OR-2026-09-12-vci published "12 capabilities are not live"
+        #   about a subject with ZERO declared capabilities; the twelve were unrelated. An
+        #   empty result is a FINDING, not a licence to answer about a different population
+        #   (R4.3/V-1), and the widened verdict was framework-wide, so no unmatched subject
+        #   could ever be ORIENTED while anything anywhere was not live.
+        members = set(_resolve(subject, root).get("modules") or [])
         rows = [r for r in rec["rows"]
-                if subject in (r.get("producer") or "") or subject in r["name"]]
-        scope = rows if rows else rec["rows"]
+                if subject in (r.get("producer") or "") or subject in r["name"]
+                or (r.get("producer") or "").split(".")[0] in members]
+        if not rows:
+            return _field(
+                UNKNOWN,
+                {"scope": "subject", "n_capabilities": 0,
+                 "resolved_members": sorted(members),
+                 "registry_rows_total": len(rec["rows"])},
+                ("R15.6 GAP: no capability is DECLARED for subject %r (its %d resolved "
+                 "module(s) produce none of the registry's %d rows), so R4.14's chain cannot "
+                 "be evaluated for it at all. UNKNOWN, not PASS and not the framework-wide "
+                 "count: a control fed nothing returns UNKNOWN and blocks (R4.3)."
+                 % (subject, len(members), len(rec["rows"]))),
+                "capability_registry.reconcile")
         not_live = [{"name": r["name"], "blocked_at": r["live"]["blocked_at"],
                      "why": r["live"]["why"], "gbp_exposure": r["gbp_exposure"]}
-                    for r in scope if not r["live"]["live"]]
+                    for r in rows if not r["live"]["live"]]
         return _field(
             "GREEN" if not not_live else "RED",
-            {"scope": "subject" if rows else "whole registry",
-             "n_capabilities": len(scope), "n_live": len(scope) - len(not_live),
+            {"scope": "subject", "subject": subject,
+             "n_capabilities": len(rows), "n_live": len(rows) - len(not_live),
              "not_live": not_live[:10]},
             None if not not_live else
-            ("R4.14: %d capability(ies) in scope are not proven PRODUCED -> EXECUTED -> "
-             "CONSUMED -> DECISION-EFFECTIVE. The Atlas answers only the first (R15.5), and "
-             "that is exactly how GBP 10,702.06 routed on a function no live caller reached "
-             "(ISA-0454)." % len(not_live)),
+            ("R4.14: %d of %d capability(ies) DECLARED FOR SUBJECT %r are not proven "
+             "PRODUCED -> EXECUTED -> CONSUMED -> DECISION-EFFECTIVE. The Atlas answers only "
+             "the first (R15.5), and that is exactly how GBP 10,702.06 routed on a function "
+             "no live caller reached (ISA-0454)."
+             % (len(not_live), len(rows), subject)),
             "capability_registry.reconcile")
     except Exception as exc:                                            # noqa: BLE001
         return _field(UNKNOWN, None, "capability_registry unavailable (%s)" % exc, None)

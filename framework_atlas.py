@@ -462,8 +462,48 @@ def scan_run_surfaces(root: Path, known_modules: set) -> dict:
     return surfaces
 
 
-def build(root: Path = None) -> dict:
+_BUILD_CACHE = {}
+
+
+def _tree_stamp(root: Path) -> tuple:
+    """A cheap, CORRECT cache key: file count + newest mtime + total size.
+
+    ⚑ The cache exists because `discussion_preflight` legitimately needs the graph three
+    times in one process (resolve the subject, footprint it, scope the capability rows) and
+    an 8.2s rebuild each time turned a preflight into a 25s wait — which is how a mandatory
+    control becomes one people skip (R9: usage economy is a correctness concern here, not a
+    comfort one).
+
+    ⚑⚑ IT IS KEYED ON THE TREE, NOT ON THE PROCESS. `release_gate.certify()` calls `build()`
+    AFTER a build has edited files in the same process; a lifetime memo would certify the
+    pre-edit graph while reporting the post-edit one — a stale Atlas is FC-B and R15.3 makes
+    a footprint built from one inadmissible. Any edit moves the mtime or the size, so the
+    key changes and the graph is rebuilt.
+    """
+    n = 0
+    newest = 0.0
+    total = 0
+    for f in _iter_py(root):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        n += 1
+        total += st.st_size
+        if st.st_mtime > newest:
+            newest = st.st_mtime
+    return (str(Path(root).resolve()), n, round(newest, 6), total)
+
+
+def build(root: Path = None, *, refresh: bool = False) -> dict:
     root = root or repo_root()
+    _key = _tree_stamp(root)
+    if not refresh and _key in _BUILD_CACHE:
+        return _BUILD_CACHE[_key]
+    return _build_uncached(root, _key)
+
+
+def _build_uncached(root: Path, _key=None) -> dict:
     mods, unparseable = {}, []
     for p in _iter_py(root):
         try:
@@ -730,6 +770,8 @@ def build(root: Path = None) -> dict:
     atlas["findings"] = apply_triage(atlas["findings"])
     atlas["fingerprint"] = fingerprint(atlas)
     atlas["run_id"] = f"atlas-{atlas['as_of']}-{atlas['fingerprint'][:8]}"
+    if _key is not None:
+        _BUILD_CACHE[_key] = atlas
     return atlas
 
 
@@ -817,6 +859,75 @@ def footprint(subject: str, root: Path = None) -> dict:
                                 "call_sites_by_function": {k: v for k, v in call_sites.items() if v}},
         "test_surface": {"asserts_in_module": m["assert_count"], "raises_in_module": m["raise_count"],
                          "tested_by_import": subject not in atlas["findings"]["modules_no_test_imports_them"]},
+        "degradation_duplication": {"duplicate_constant_homes": dup,
+                                    "duplicate_orchestration_candidates": orch},
+        "refactor_candidates": {"zero_caller_functions": dead},
+        "what_is_not_there": "UNKNOWN - requires the Rationale Ledger and register (R12.3); not derivable from the AST",
+        "why_it_is_there": "UNKNOWN - Rationale Ledger (R12.3)",
+    }
+
+
+
+def area_footprint(subject: str, modules, root: Path = None) -> dict:
+    """ISA-0663 — the mechanical half of a Change Footprint for a set of modules.
+
+    `footprint()` answers R12.1 for ONE module. This answers it for a DECLARED AREA, and
+    the extra thing it must supply is field 5 proper: not the union of sixteen local
+    pictures, but **which members call which**. An area whose members never reference each
+    other is a naming convention, not a decision path, and the caller should be able to see
+    that from the receipt.
+
+    ⚑ MEMBERSHIP IS AN INPUT, NOT A DERIVATION. This function never decides what belongs to
+    an area — `capability_registry.resolve_subject` reads that from the declared map. A
+    structural analyser may not infer semantics (R15.5).
+
+    A member named in the declaration but absent from disk is REPORTED, never dropped
+    (R4.9: a reader that cannot match a row counts it and fails)."""
+    atlas = build(root)
+    known = [m for m in modules if m in atlas["modules"]]
+    missing = [m for m in modules if m not in atlas["modules"]]
+    if not known:
+        raise KeyError(
+            f"none of the {len(modules)} declared members of area {subject!r} is in the "
+            f"Atlas. Modules: {len(atlas['modules'])}")
+    member = set(known)
+    internal, inbound, outbound = [], {}, {}
+    fns, dup, orch, dead = [], [], [], []
+    reads, writes = set(), set()
+    for m in known:
+        mod = atlas["modules"][m]
+        fns += atlas["functions_by_module"].get(m, [])
+        reads |= set(mod["reads"])
+        writes |= set(mod["writes"])
+        for imp in mod["imports"]:
+            if imp in member and imp != m:
+                internal.append({"from": m, "imports": imp})
+            elif imp in atlas["modules"]:
+                outbound.setdefault(m, []).append(imp)
+        ext_in = [i for i in atlas["importers"].get(m, []) if i not in member]
+        if ext_in:
+            inbound[m] = ext_in
+        dup += [d for d in atlas["findings"]["duplicate_constant_homes"]
+                if any(h["module"] == m for h in d["homes"])]
+        orch += [d for d in atlas["findings"]["duplicate_orchestration_candidates"]
+                 if m in d["modules"]]
+        dead += [z for z in atlas["findings"]["zero_caller_functions"] if m in z["defined_in"]]
+    call_sites = {fn: atlas["callers_of"].get(fn.split(".")[-1], []) for fn in fns}
+    return {
+        "subject": subject,
+        "resolution": "area",
+        "atlas_run_id": atlas["run_id"],
+        "atlas_as_of": atlas["as_of"],
+        "members": known,
+        "members_declared_but_absent_from_disk": missing,
+        "what_is_there": {"modules": len(known), "functions": len(fns),
+                          "lines": sum(atlas["modules"][m]["lines"] for m in known)},
+        "integration_path": {"reads": sorted(reads), "writes": sorted(writes),
+                             "internal_edges": internal,
+                             "n_internal_edges": len(internal)},
+        "dependencies_in_out": {"inbound_importers_external": inbound,
+                                "outbound_local_imports_external": outbound,
+                                "call_sites_by_function": {k: v for k, v in call_sites.items() if v}},
         "degradation_duplication": {"duplicate_constant_homes": dup,
                                     "duplicate_orchestration_candidates": orch},
         "refactor_candidates": {"zero_caller_functions": dead},

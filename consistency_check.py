@@ -114,6 +114,62 @@ def pair_retired_constants(py_texts):
 
 
 
+def pair_min_hold_exempt(root=None, py_files=None):
+    """ISA-0647 (R4.4) — MIN_HOLD_EXEMPT must be DEFINED in exactly one place.
+
+    ⚑ WHY A COUNT AND NOT A COMPARISON. The obvious check is "do the two tuples agree", and
+    that check would have PASSED on 26-Aug-2026, the day `evidence_reversal` was added to one
+    of them — because on that day they still agreed, and the divergence appeared later. The
+    defect is not that two copies disagree; it is that two copies EXIST, so they are free to
+    disagree at any moment with nothing watching. The count is the invariant (R5.2: prefer an
+    invariant to a rule — a rule tells you what should happen, an invariant tells you when it
+    didn't).
+
+    It also catches the PROSE home: `t1_gates.min_hold_until`'s docstring listed three of the
+    grounds while the published set carried four, and no comparison of code constants could
+    ever have seen that."""
+    import re as _re
+    root = root or HERE
+    if py_files is None:
+        # ⚑ A12/R10 — AN OBSERVER MAY NOT MEASURE ITSELF. This module's own docstring quotes
+        #   the prose it is looking for, so scanning itself reports a defect that consists
+        #   entirely of the check describing the defect. capability_registry excludes itself
+        #   from its own consumer scan for the same reason.
+        py_files = [f for f in sorted(os.listdir(root))
+                    if f.endswith(".py") and not f.startswith(("test_", "_"))
+                    and f != os.path.basename(__file__)]
+    define = _re.compile(r"^MIN_HOLD_EXEMPT\s*=", _re.M)
+    homes = []
+    prose = []
+    for fn in py_files:
+        try:
+            txt = _read(fn) if root == HERE else open(os.path.join(root, fn),
+                                                      encoding="utf-8").read()
+        except Exception:                                        # noqa: BLE001
+            continue
+        if define.search(txt):
+            homes.append(fn)
+        # a prose restatement of the grounds is a home nothing can diff
+        if ("hard_thesis_break/drawdown_mandate" in txt
+                or "hard_thesis_break, drawdown_mandate" in txt.replace('"', "")) \
+                and not define.search(txt):
+            prose.append(fn)
+    errs = []
+    if len(homes) != 1:
+        errs.append("ISA-0647/R4.4: MIN_HOLD_EXEMPT is DEFINED in %d place(s) %s — exactly one "
+                    "is permitted. Two homes carried DIFFERENT contents for 17 days and the "
+                    "published set was the one scoring_config did not have."
+                    % (len(homes), homes or "[none]"))
+    elif homes[0] != "scoring_config.py":
+        errs.append("ISA-0647/R4.4: MIN_HOLD_EXEMPT is defined in %s; the declared single home "
+                    "is scoring_config.py (compliance.py R1 forbids callers testing regime "
+                    "constants directly)." % homes[0])
+    for fn in prose:
+        errs.append("ISA-0647: %s restates the MIN_HOLD_EXEMPT grounds in prose — a third home "
+                    "that no constant comparison can diff. Reference the constant instead." % fn)
+    return errs
+
+
 # ── ISA-0321 (Raj, 12-Aug-2026): THE END-OF-BUILD REGISTER GATE ─────────────────────────────
 # Raj: "I need this project to remember without me asking to update the register without fail at
 # the end of each build every single time."
@@ -4888,6 +4944,10 @@ def check_all(tagged: bool = False, since_ts=None):
                                     ("build_excel.py", "build_email.py", "update_watchlist.py",
                                      "screener_core.py", "rerank_watchlist.py", "scoring_config.py")})
     try:
+        errs += pair_min_hold_exempt()                          # ISA-0647
+    except Exception as _e:                                     # noqa: BLE001
+        errs.append(f"ISA-0647 pair could not run: {type(_e).__name__}: {_e}")
+    try:
         with open(os.path.join(HERE, "target_state.json"), encoding="utf-8") as f:
             state = json.load(f)
         sys.path.insert(0, HERE)
@@ -5025,6 +5085,29 @@ def _selftest():
     assert pair_top10_columns(good_ctx.replace("13", "12"), good_bem)
     assert pair_email_sections(good_ctx.replace("7 Mandatory", "8 Mandatory"), good_bem)
     assert pair_retired_constants({"x.py": "n = SUMMARY_TARGET_COUNT"})
+    # ── ISA-0647 — liveness_ref: consistency_check.pair_min_hold_exempt ──────────────
+    import tempfile as _tf
+    _d = _tf.mkdtemp()
+    open(os.path.join(_d, "scoring_config.py"), "w").write('MIN_HOLD_EXEMPT = ("a",)\n')
+    assert not pair_min_hold_exempt(root=_d, py_files=["scoring_config.py"]), \
+        "one home in scoring_config.py must PASS"
+    open(os.path.join(_d, "position_sizing.py"), "w").write('MIN_HOLD_EXEMPT = ("a", "b")\n')
+    _e2 = pair_min_hold_exempt(root=_d, py_files=["scoring_config.py", "position_sizing.py"])
+    assert _e2 and "2 place(s)" in _e2[0], \
+        "⚑ ISA-0647 NEGATIVE CONTROL: a SECOND definition must FAIL even though nothing has " \
+        "disagreed yet — two copies are the defect, not their current disagreement"
+    open(os.path.join(_d, "t1_gates.py"), "w").write(
+        '"""exit only on hard_thesis_break/drawdown_mandate grounds."""\n')
+    _e3 = pair_min_hold_exempt(root=_d, py_files=["scoring_config.py", "t1_gates.py"])
+    assert _e3 and "prose" in _e3[0], \
+        "a PROSE restatement is a third home and must fail — no constant comparison sees it"
+    # ⚑ and the self-exclusion is LOAD-BEARING, not cosmetic: this file's own docstring
+    #   contains the prose pattern, so without the exclusion the live tree reports a defect
+    #   that is only the checker quoting itself (A12/R10).
+    assert not [e for e in (pair_min_hold_exempt() or []) if "consistency_check" in e], \
+        "the checker must not report itself"
+    import shutil as _sh
+    _sh.rmtree(_d, ignore_errors=True)
     ok_state = {"derived_at": "2026-07-12", "schedule_updated_at": "2026-07-12",
                 "guardrail_state": "OK", "required_return_operative_pct": 13.9}
     assert not pair_anchor(ok_state, 13.9)

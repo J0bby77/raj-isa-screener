@@ -132,10 +132,100 @@ def _consecutive_down(ser, key):
     return n
 
 
-def load_min_hold(trades_log_path):
-    """-> {TICKER: 'YYYY-MM-DD'} from the trades log `min_hold_until` fields. Absent file is fine."""
+def min_hold_from_ledger(ledger_path=None, *, min_hold_days=None, root=None):
+    """ISA-0645 — derive min_hold_until from the TRANSACTION LEDGER, which exists.
+
+    ⚑⚑ WHY THIS FUNCTION EXISTS. `load_min_hold()` reads `project_isa_trades_log.md`, and that
+    file DOES NOT EXIST anywhere under the ISA folder — verified 12-Sep-2026. Its docstring
+    says "absent file is fine" and it returns `{}`, so `position_alerts.json` publishes
+    `min_hold_until: None` and `in_min_hold_window: False` for EVERY held name, and the branch
+    headed "Raj rule (29-Jul-2026) — TRIMS ALLOWED ON WINNERS, BLOCKED ON LOSERS" has never
+    once executed: `gain` is always None and `in_window` always False.
+    `position_sizing.min_hold_ok`, which carries the profit/loss asymmetry, has zero
+    production call sites. **The 182-day framework min-hold — the C-1 anti-churn fix that
+    closed a realised -GBP 1,097 churn pattern — has had no live enforcement path at all.**
+    "Absent file is fine" was true of the READER and false of the CONTROL (R2.10).
+
+    ⚑ THE ENTRY DATES WERE ALWAYS THERE. `transaction_ledger.json` carries every dealt row
+    with its date, and the first BUY of a ticker is the entry. Measured: ONT 2026-06-01,
+    ABCL 2026-07-10, QBTS 2026-08-10 -> min-hold to 2026-11-30, 2027-01-08, 2027-02-08. The
+    control was not blocked on data; it was blocked on reading a file nobody wrote (FC-E).
+
+    ⚑ FIRST BUY, NOT LAST (D24, ISA-0545). `position_first_entry_date` is the FIRST entry:
+    a top-up must not restart a position's min-hold clock, or the anti-churn control could be
+    reset indefinitely by adding to a position.
+
+    Returns {TICKER: {min_hold_until, position_first_entry_date, source}}. A ticker with no
+    BUY row is OMITTED rather than given today's date — a manufactured entry date would make
+    a position look freshly bought and permanently unexitable (R4.3)."""
+    import datetime as _dt
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    if min_hold_days is None:
+        try:
+            import scoring_config as _sc
+            min_hold_days = int(getattr(_sc, "MIN_HOLD_DAYS", 182))
+        except Exception:                                            # noqa: BLE001
+            min_hold_days = 182
+    ledger_path = ledger_path or os.path.join(root, "transaction_ledger.json")
+    out = {}
+    if not os.path.exists(ledger_path):
+        return out
+    try:
+        with open(ledger_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except Exception:                                                # noqa: BLE001
+        return out
+    # ⚑ THE MMF IS NOT A STOCK POSITION, AND THIS MATTERS. The ledger classifies CSH2
+    #   (Amundi Smart Overnight, the B2 cash sweep destination) as asset_class "stock"
+    #   because it is dealt like one. If it inherited a 182-day min-hold, the B2 recall leg —
+    #   'when the next opportunity arises, trim funds and move capital into stocks' — would be
+    #   BLOCKED by an anti-churn rule that exists to stop stock churn, and the waiting room
+    #   would have no exit. `waiting_room.py` already states the min-hold 'binds the STOCK leg
+    #   only'; this is that sentence made mechanical rather than documented (R14.2).
+    #   Excluded by DECLARED ticker, not by guessing at ETF-shaped names (R4.8).
+    try:
+        import scoring_config as _sc2
+        _mmf = {str(t).upper() for t in getattr(_sc2, "MMF_TICKERS", ("CSH2", "CSH2.L"))}
+    except Exception:                                                # noqa: BLE001
+        _mmf = {"CSH2", "CSH2.L"}
+    first = {}
+    for e in (doc.get("entries") or []):
+        if str(e.get("type") or "").lower() != "buy":
+            continue
+        if str(e.get("asset_class") or "").lower() not in ("stock", "equity", ""):
+            continue
+        if str(e.get("ticker") or "").upper() in _mmf:
+            continue
+        tk = str(e.get("ticker") or "").upper()
+        d = str(e.get("date") or "")[:10]
+        if not tk or not d:
+            continue
+        if tk not in first or d < first[tk]:
+            first[tk] = d
+    for tk, d in first.items():
+        try:
+            until = (_dt.date.fromisoformat(d)
+                     + _dt.timedelta(days=min_hold_days)).isoformat()
+        except Exception:                                            # noqa: BLE001
+            continue
+        out[tk] = {"min_hold_until": until, "position_first_entry_date": d,
+                   "min_hold_days": min_hold_days,
+                   "source": "transaction_ledger.json first BUY row (D24: FIRST entry, not "
+                             "last — a top-up must not restart the anti-churn clock)"}
+    return out
+
+
+def load_min_hold(trades_log_path, *, ledger_fallback=True, root=None):
+    """-> {TICKER: 'YYYY-MM-DD'} from the trades log `min_hold_until` fields.
+
+    ⚑ ISA-0645: an absent trades log is NO LONGER 'fine'. It falls back to the transaction
+    ledger, which is broker-dealt truth and actually exists. If BOTH are unavailable the
+    caller must treat the min-hold as UNENFORCED and say so — see `min_hold_state()`."""
     out = {}
     if not trades_log_path or not os.path.exists(trades_log_path):
+        if ledger_fallback:
+            return {k: v["min_hold_until"]
+                    for k, v in min_hold_from_ledger(root=root).items()}
         return out
     try:
         txt = open(trades_log_path, encoding="utf-8", errors="ignore").read()
@@ -155,6 +245,41 @@ def load_min_hold(trades_log_path):
             if tk:
                 out[tk.upper()] = m2.group(1)
     return out
+
+
+_LEDGER_ENTRY_CACHE = {}
+
+
+def _entry_from_ledger(ticker, root=None):
+    """First-BUY date for one ticker, from the ledger. None if absent — never today's date."""
+    if not _LEDGER_ENTRY_CACHE:
+        _LEDGER_ENTRY_CACHE.update(min_hold_from_ledger(root=root) or {"__empty__": {}})
+    row = _LEDGER_ENTRY_CACHE.get(str(ticker or "").upper())
+    return (row or {}).get("position_first_entry_date")
+
+
+def min_hold_state(trades_log_path=None, ledger_path=None, root=None) -> dict:
+    """ISA-0645 — is the 182-day min-hold ENFORCED right now, and from what source?
+
+    R2.10: 'the control could not run' and 'no position is inside its window' must not
+    produce the same output, and for seven weeks they did — `position_alerts.json` published
+    `in_min_hold_window: False` for every name because the source file did not exist."""
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    have_log = bool(trades_log_path and os.path.exists(trades_log_path))
+    led = min_hold_from_ledger(ledger_path, root=root)
+    if have_log:
+        src, rows = "trades_log", load_min_hold(trades_log_path, ledger_fallback=False, root=root)
+        rows = {k: {"min_hold_until": v} for k, v in rows.items()}
+    elif led:
+        src, rows = "transaction_ledger", led
+    else:
+        return {"enforced": False, "source": None, "n_positions": 0, "positions": {},
+                "why": ("NEITHER project_isa_trades_log.md NOR transaction_ledger.json yielded "
+                        "an entry date, so the 182-day min-hold is UNENFORCED this run. This "
+                        "is a REFUSAL, not a finding that no position is inside its window "
+                        "(R2.10/R4.3).")}
+    return {"enforced": True, "source": src, "n_positions": len(rows), "positions": rows,
+            "why": "min-hold derived from %s for %d position(s)" % (src, len(rows))}
 
 
 def scope_tickers(watchlist_path):
@@ -227,7 +352,7 @@ def _last_close(ticker, price_csv=None, asof=None):
         return None
 
 
-def _actionability(in_window, is_held, gain):
+def _actionability(in_window, is_held, gain, *, position_first_entry_date=None, today=None):
     """Raj rule (29-Jul-2026) — TRIMS ALLOWED ON WINNERS, BLOCKED ON LOSERS.
 
     Audit finding C-1 is about CAPITULATING ON LOSSES: three 3-5yr theses killed in 21-56 days for
@@ -242,16 +367,46 @@ def _actionability(in_window, is_held, gain):
         return "REVIEW_AT_NEXT_SCHEDULED_RUN — detection only; this is not a sell signal"
     if not in_window:
         return "REVIEW_AT_NEXT_SCHEDULED_RUN — outside min-hold; Step 8 discipline applies at the next scheduled review"
-    if gain is not None and gain > 0:
-        return ("PROFIT_TAKING_REVIEW_PERMITTED — inside min-hold BUT the position is in profit "
-                "(+%.1f%%). Raj rule 29-Jul-26: min-hold blocks loss capitulation (C-1), not profit "
-                "taking. Any reduction is a REVIEW OUTCOME, never this module's instruction; a full exit "
-                "still requires thesis-break. Run the intra-month stock review." % gain)
-    if gain is not None:
-        return ("NOT_ACTIONABLE — inside min-hold and the position is at a LOSS (%.1f%%). This is "
-                "exactly the C-1 failure mode; exit requires a genuine thesis-break." % gain)
-    return ("NOT_ACTIONABLE — inside framework min-hold window and cost basis unresolved; carry to "
-            "the next scheduled review as context only (C-1 / MIN-HOLD escalation)")
+
+    # ⚑⚑ ISA-0645 / R4.5 — THE VERDICT IS NOT DECIDED HERE. It is READ from
+    #    `position_sizing.min_hold_ok`, which is where the profit/loss asymmetry is
+    #    implemented. Until 12-Sep-2026 this function reimplemented that rule in prose while
+    #    `min_hold_ok` sat with ZERO production call sites: two paths for one rule, which R4.5
+    #    calls a defect on the day it is created. Worse, neither path ran — `min_hold` was
+    #    read from a trades log that does not exist, so `gain` was always None and `in_window`
+    #    always False, and the branch below has never once executed since 29-Jul-2026.
+    #    Now: one home decides, this function renders.
+    if position_first_entry_date:
+        try:
+            import position_sizing as _ps
+            v = _ps.min_hold_ok(position_first_entry_date=position_first_entry_date,
+                                today=today, at_a_loss=bool(gain is not None and gain <= 0))
+            if v.get("ok") and v.get("trim_only"):
+                return ("PROFIT_TAKING_REVIEW_PERMITTED — %s (gain %s). Raj rule 29-Jul-26: "
+                        "min-hold blocks loss capitulation (C-1), not profit taking. Any "
+                        "reduction is a REVIEW OUTCOME, never this module's instruction; a "
+                        "full exit still requires thesis-break or a declared MIN_HOLD_EXEMPT "
+                        "ground. [verdict: position_sizing.min_hold_ok]"
+                        % (v["basis"], ("%+.1f%%" % gain) if gain is not None else "unresolved"))
+            if v.get("ok"):
+                return ("REVIEW_AT_NEXT_SCHEDULED_RUN — %s [verdict: "
+                        "position_sizing.min_hold_ok]" % v["basis"])
+            return ("NOT_ACTIONABLE — %s. This is exactly the C-1 failure mode; exit requires "
+                    "a genuine thesis-break or a declared MIN_HOLD_EXEMPT ground. [verdict: "
+                    "position_sizing.min_hold_ok]" % v["basis"])
+        except Exception as _e:                                      # noqa: BLE001
+            # R4.3 — the control could not run, and that must not read as "not actionable
+            # because it is at a loss". Name the failure.
+            return ("MIN_HOLD_UNEVALUATED — position_sizing.min_hold_ok could not be evaluated "
+                    "(%s: %s), so the 182-day verdict for this name is UNKNOWN, not a refusal. "
+                    "Treat as unenforced and escalate (ISA-0645)."
+                    % (type(_e).__name__, _e))
+
+    # No entry date at all — the pre-ISA-0645 state, kept as an explicit REFUSAL rather than
+    # a verdict, because "no entry date" and "at a loss" must not produce the same output.
+    return ("MIN_HOLD_UNEVALUATED — no `position_first_entry_date` for this name, so the "
+            "182-day window cannot be evaluated. Published as UNEVALUATED, never as "
+            "NOT_ACTIONABLE (R2.10/R4.3, ISA-0645).")
 
 
 def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, asof=None, gain_pct=None):
@@ -340,7 +495,13 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
             # C-1 protection: an alert is never a sell instruction, and inside the framework
             # min-hold window it is explicitly not actionable at all.
             "position_gain_pct": (gain_pct or {}).get(tk.upper()),
-            "actionability": _actionability(in_window, is_held, (gain_pct or {}).get(tk.upper())),
+            "actionability": _actionability(
+                in_window, is_held, (gain_pct or {}).get(tk.upper()),
+                position_first_entry_date=((min_hold or {}).get(tk.upper()) or {}).get(
+                    "position_first_entry_date")
+                if isinstance((min_hold or {}).get(tk.upper()), dict) else
+                _entry_from_ledger(tk),
+                today=today),
         })
     return alerts, skipped
 
@@ -398,3 +559,66 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 — ISA-0645's min-hold derivation, with the controls that must fail.
+
+    liveness_ref: position_alerts._selftest"""
+    import json as _json
+    import os as _os
+    import tempfile as _tf
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    st = min_hold_state(root=here)
+    ok(st["enforced"] is True and st["source"] == "transaction_ledger",
+       "⚑ MUST-FIRE (R5.10): the 182-day min-hold must be ENFORCED from the transaction "
+       "ledger. It had NO live enforcement path from 29-Jul-2026 because load_min_hold read "
+       "project_isa_trades_log.md, which has never existed: %r" % st)
+    ok(st["positions"].get("ABCL", {}).get("min_hold_until") == "2027-01-08",
+       "ABCL's entry 2026-07-10 + 182d must give 2027-01-08: %r"
+       % st["positions"].get("ABCL"))
+
+    # ⚑ NEGATIVE CONTROL — the MMF must be EXCLUDED, or B2's recall leg self-blocks.
+    ok("CSH2" not in st["positions"],
+       "⚑ NEGATIVE CONTROL: CSH2 is the B2 cash-sweep destination and the ledger classifies it "
+       "as asset_class 'stock'. If it inherited a 182-day STOCK hold, the recall leg — 'when "
+       "the next opportunity arises, trim funds and move capital into stocks' — would be "
+       "blocked by an anti-churn rule that exists to stop stock churn: %r"
+       % sorted(st["positions"]))
+
+    # ⚑ NEGATIVE CONTROL — no entry date must yield UNEVALUATED, never NOT_ACTIONABLE.
+    a = _actionability(True, True, 5.0, position_first_entry_date=None)
+    ok(a.startswith("MIN_HOLD_UNEVALUATED"),
+       "⚑ NEGATIVE CONTROL: 'the control could not run' and 'the position is at a loss' must "
+       "not produce the same output. For seven weeks they did (R2.10): %r" % a[:90])
+
+    # positive controls: the asymmetry that had never once executed since 29-Jul-2026
+    win = _actionability(True, True, 62.0, position_first_entry_date="2026-07-10",
+                         today="2026-09-12")
+    los = _actionability(True, True, -17.7, position_first_entry_date="2026-08-10",
+                         today="2026-09-12")
+    ok(win.startswith("PROFIT_TAKING_REVIEW_PERMITTED"),
+       "inside min-hold and IN PROFIT -> a trim is permitted: %r" % win[:70])
+    ok(los.startswith("NOT_ACTIONABLE"),
+       "inside min-hold and AT A LOSS -> not actionable, the C-1 failure mode: %r" % los[:70])
+    ok("min_hold_ok" in win and "min_hold_ok" in los,
+       "and BOTH verdicts must cite position_sizing.min_hold_ok — the verdict is READ from the "
+       "one home, not reimplemented here (R4.5)")
+
+    # ⚑ NEGATIVE CONTROL — an absent ledger must report UNENFORCED, never 'nothing in window'.
+    d = _tf.mkdtemp()
+    st2 = min_hold_state(root=d)
+    ok(st2["enforced"] is False and st2["positions"] == {} and st2["why"],
+       "⚑ NEGATIVE CONTROL: with no ledger the control must report UNENFORCED with a reason, "
+       "not an empty-and-therefore-clean result: %r" % st2)
+    if verbose:
+        print("position_alerts._selftest: %d assertions, 0 failed" % n)
+    return n

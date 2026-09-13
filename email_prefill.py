@@ -1992,6 +1992,26 @@ SUMMARY_ESCALATED = {
     # content IS the exception. The individual mismatches already reach Raj through errors[]
     # and warnings[]; this key exists so the SPLIT between the two is visible, because a run
     # reporting "0 errors" while quietly carrying warnings is the thing being fixed.
+    # ⚑ ISA-0548 build (12-Sep-2026). Both ESCALATE rather than render, and for the reason
+    #   SUMMARY_ESCALATED exists: their decision content IS the exception. A rendered table of
+    #   refusals would read as a status panel; a refusal has to arrive as a warning or it is
+    #   wallpaper. Every row in both already reaches warnings[] BY NAME from step 6.5.
+    #   `vci_binary_risk` is the detail behind `vci_binary_risk_committed` (which IS rendered):
+    #   the population basis, the live PENDING binaries, what was released this run, the
+    #   registry refusals, the unpriceable successors and WHY the committed figure was
+    #   withheld. It is withheld as None rather than computed over the priceable remainder, so
+    #   the rendered figure's absence needs an explanation and this key is it.
+    #   `held_position_review` ESCALATES: its content is a list of positions that need
+    #   attention — a REFUSE, an IN_BREACH, a SELL disposition, a voided obligation, a stale
+    #   sleeve. Rendered as a table it reads as a status panel; these have to arrive as
+    #   warnings or they are wallpaper. Every row already reaches warnings[] by name.
+    "held_position_review":       "Step 6.5",
+    "vci_binary_risk":            "Step 6.5",
+    #   `vci_refusals` splits an ineligible VCI candidate into UNMEASURED vs MEASURED_REJECT.
+    #   The first is a framework defect and must reach a human; the second is the system
+    #   working. Publishing them as one list is what let four never-scored names read as
+    #   considered-and-declined in the Sep-2026 run (ISA-0617/0657/0667).
+    "vci_refusals":               "Step 6.5",
     "a18_consistency":            "Step 9d",
     "fund_exposure_vectors":      "Step 6.10a",   # age/provenance of a capture, not a finding
     "calibration_files":          "Calibration",  # stale/unstamped file list
@@ -2001,6 +2021,16 @@ SUMMARY_ESCALATED = {
     "ledger_reconcile_source":    "Step 1.5",
     "ledger_reconcile_confirmed": "Step 1.5",
     "off_framework_trades":       "Step 1.5",     # trades with no framework decision behind them
+    # ⚑ ISA-0684 (12-Sep-2026). Both ESCALATE. `execution_unconfirmed` is the list of
+    #   recommendations the transaction export cannot see, and `txn_coverage` is the window
+    #   that makes the claim checkable. They exist because the September NTAP buy was
+    #   rendered as "NTAP:declined_buy" when the newest export ended 2026-08-28 — absence of
+    #   evidence published as evidence of refusal (R2.10). The cure for that is not silence:
+    #   a refusal that reaches nobody is the same defect wearing a quieter coat. Rendered as
+    #   a table it would read as a status panel; it has to arrive as a warning, because the
+    #   action it asks for is Raj exporting the missing transaction history.
+    "execution_unconfirmed":      "Step 1.5",
+    "txn_coverage":               "Step 1.5",
     "anchor_rederived":           "A19",          # the anchor moved this run
     "anchor_operative_moved":     "A19",
     # ⚑ ADMISSIBLE HERE, and the distinction is deliberate. The preflight's decision content

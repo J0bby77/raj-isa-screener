@@ -127,6 +127,71 @@ def _order(policy=None) -> List[str]:
     return [r for r in LADDER_ORDER if r in lad]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0466 — THE PRODUCER. `apply()` had zero call sites and nothing populated the field.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# The clean spec relocated judgement OUT of the /100 conviction score and INTO thesis_state.
+# The module shipped 28-Aug-2026 — the item's TITLE still says it "was never built", which is
+# stale; its corrective action was narrowed on 02-Sep and records the build. What remained is
+# that `stock_candidates.build()` accepts a `thesis_states` argument and NO CALLER SUPPLIES
+# ONE, so the cap-never-raise layer was inert: judgement was evicted from the /100 and given
+# nowhere to go, so it never left.
+#
+# ⚑ ABSENCE REFUSES. A held name with no declared state does NOT default to INTACT. Defaulting
+#   would recreate the exact defect this module replaced — a gate on a field nobody fills,
+#   which is how the /100 hard-gated the §7.6.2 email on a value populated for 2 of 53 names.
+
+STORE_FILE = "thesis_states.json"
+
+
+def load_states(root: Optional[str] = None) -> dict:
+    """{TICKER: {state, rationale}} from the declared store. Missing file -> {} (and every
+    lookup then REFUSES, which is the correct degradation)."""
+    import json as _json
+    import os as _os
+    root = root or _os.path.dirname(_os.path.abspath(__file__))
+    path = _os.path.join(root, STORE_FILE)
+    if not _os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        doc = _json.load(fh) or {}
+    out = {}
+    for tk, row in (doc.get("states") or {}).items():
+        out[str(tk).upper()] = row
+        for a in (row.get("aliases") or []):
+            out[str(a).upper()] = row
+    return out
+
+
+def state_for(ticker: str, states: Optional[dict] = None, root: Optional[str] = None) -> dict:
+    """The declared state for one held name, or a REFUSAL naming what is missing."""
+    states = load_states(root) if states is None else states
+    row = states.get(str(ticker or "").upper())
+    if not row:
+        raise ThesisStateRefused(
+            "%s is held and has no declared thesis_state in %s. Absence is REFUSED, not read "
+            "as INTACT: a judgement layer that defaults is a judgement layer that never fires "
+            "(ISA-0466, R4.3)." % (ticker, STORE_FILE))
+    if not str(row.get("rationale") or "").strip():
+        raise ThesisStateRefused(
+            "%s declares thesis_state %r with no rationale. A state without a reason is the "
+            "conviction score's failure repeated under a new name (P7.3)."
+            % (ticker, row.get("state")))
+    validate(row.get("state"))
+    return row
+
+
+def cap_rung(ticker: str, rung: str, *, states: Optional[dict] = None, root: Optional[str] = None,
+             policy=None) -> dict:
+    """Evidence sets the rung; judgement may only lower it. The one live entry point."""
+    row = state_for(ticker, states, root)
+    out = apply(rung, row["state"], policy=policy)
+    out["ticker"] = ticker
+    out["rationale"] = row.get("rationale")
+    out["declared_by"] = row.get("declared_by")
+    return out
+
+
 def validate(state: Optional[str]) -> str:
     if state not in STATES:
         raise ThesisStateRefused(

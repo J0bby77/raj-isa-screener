@@ -69,9 +69,48 @@ def position_risk_detail(size_pct: Optional[float], L: Optional[float],
 
 
 def committed_risk(open_positions) -> float:
-    """Σ expected-loss across currently open binary starters. Each: {size_pct, L, p_thesis}."""
-    return round(sum(position_risk(e.get("size_pct"), e.get("L"), e.get("p_thesis"))
-                     for e in (open_positions or [])), 4)
+    """Σ expected-loss across currently open binary starters. Each: {size_pct, L, p_thesis}.
+
+    ⚑ Returns a BARE FLOAT for backward compatibility only. Prefer committed_risk_detail():
+    this form cannot tell a measured 0.55 from a 0.55 assembled out of substituted nulls, and
+    that is exactly the distinction ISA-0668 was raised on. See that function."""
+    return committed_risk_detail(open_positions)["risk"]
+
+
+def committed_risk_detail(open_positions) -> dict:
+    """ISA-0668 — the same sum, plus the inputs that had to be SUBSTITUTED to compute it.
+
+    position_risk_detail() has always returned {risk, unknown[]} so a substituted input could
+    be named — that mechanism was added on 09-Aug-2026 after a caller-key typo (`p` where the
+    entry stores `p_thesis`) flipped a DENY into an ADMIT on QBTS, the first deploy-eligible
+    new VCI name in the sleeve's history, on a figure of 1.55 that was entirely plausible.
+    `admit()` consumes `unknown` and blocks on it. **`committed_risk()` kept only the number**
+    — and committed_risk() is the one that reaches `summary.vci_binary_risk_committed` and the
+    monthly email. So the mitigation was wired into the gate and not into the report, and the
+    figure a human reads is the only one in the chain stripped of its caveat.
+
+    Measured 12-Sep-2026: position_risk(0.553, None, None) returns 0.5526 by substituting
+    L = 1.0 and p = 0.0 — indistinguishable from a measured number (R4.1: never a bare float
+    across a module boundary; R2.10: absent and bad must not look alike)."""
+    rows, total, unknown = [], 0.0, []
+    for i, e in enumerate(open_positions or []):
+        d = position_risk_detail(e.get("size_pct"), e.get("L"), e.get("p_thesis"),
+                                 label="open[%s]." % (e.get("ticker") or i))
+        rows.append({"ticker": e.get("ticker"), "risk": d["risk"], "unknown": d["unknown"]})
+        total += d["risk"]
+        unknown += d["unknown"]
+    return {
+        "risk": round(total, 4),
+        "unknown": unknown,
+        "n_substituted": len(unknown),
+        "n_positions": len(rows),
+        "by_position": rows,
+        "measured": not unknown,
+        "why": (None if not unknown else
+                ("%d input(s) were SUBSTITUTED (missing L -> 1.0, missing p_thesis -> 0.0), so "
+                 "this figure is an upper bound assembled from absences, not a measurement: %s"
+                 % (len(unknown), ", ".join(unknown)))),
+    }
 
 
 def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
@@ -83,15 +122,22 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
     rider = float(corr_rider if corr_rider is not None else _c("VCI_BINARY_CORR_RIDER", 1.5))
     max_concurrent = int(max_concurrent if max_concurrent is not None else _c("VCI_BINARY_MAX_CONCURRENT", 3))
 
-    committed = committed_risk(open_positions)
+    # ⚑ ISA-0668 — READ THE DETAIL FORM, not the bare float. committed_risk() returns a
+    #   number assembled, where inputs are absent, out of substitutions (missing L -> 1.0,
+    #   missing p_thesis -> 0.0) that are indistinguishable from measurements. admit() already
+    #   collected `unknown` for the open starters by re-deriving it in the loop below; the
+    #   aggregate now carries it directly, so the substitution count travels WITH the figure
+    #   rather than being reconstructed by whoever remembers to (R4.1: never a bare float
+    #   across a module boundary).
+    _cd = committed_risk_detail(open_positions)
+    committed = _cd["risk"]
+    committed_measured = _cd["measured"]
+    committed_substituted = _cd["n_substituted"]
     _pd = position_risk_detail(proposed.get("size_pct"), proposed.get("L"),
                               proposed.get("p_thesis"), label="proposed.")
     p_risk = _pd["risk"]
     # V-1: every control that could not be evaluated, across the proposed AND open starters.
-    unknown = list(_pd["unknown"])
-    for _i, _e in enumerate(open_positions):
-        unknown += position_risk_detail(_e.get("size_pct"), _e.get("L"), _e.get("p_thesis"),
-                                        label=f"open[{_e.get('ticker') or _i}].")["unknown"]
+    unknown = list(_pd["unknown"]) + list(_cd["unknown"])
 
     # correlation rider: shared catalyst domain with any open starter inflates the proposed risk
     dom = proposed.get("catalyst_domain")
@@ -103,6 +149,8 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
         # A control fed a null returns UNKNOWN and BLOCKS. It never quietly becomes p = 0.
         return {"ok": False, "committed": committed, "proposed_risk": p_risk_eff,
                 "headroom": None, "correlated": correlated, "unknown_controls": unknown,
+                "committed_measured": committed_measured,
+                "committed_n_substituted": committed_substituted,
                 "reason": "DENY: UNKNOWN control(s) " + ", ".join(unknown)
                           + " — a missing input is not a measured zero (V-1)"}
 
@@ -110,6 +158,8 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
         ok = len(open_positions) < max_concurrent
         return {"ok": ok, "committed": committed, "proposed_risk": p_risk_eff,
                 "headroom": None, "correlated": correlated, "unknown_controls": [],
+                "committed_measured": committed_measured,
+                "committed_n_substituted": committed_substituted,
                 "reason": "budget disabled; count cap " + ("ok" if ok else "breached")}
 
     headroom = round(budget - committed, 4)
@@ -125,7 +175,76 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
         reason = f"DENY: count cap {max_concurrent} reached"
     return {"ok": ok, "committed": committed, "proposed_risk": p_risk_eff,
             "headroom": headroom, "correlated": correlated, "unknown_controls": [],
+            # ⚑ ISA-0668 — the figure travels WITH its measurement status. A `committed` of
+            #   0.55 assembled from substituted nulls and a measured 0.0968 are different
+            #   facts and must not share a field (R4.1/R2.10).
+            "committed_measured": committed_measured,
+            "committed_n_substituted": committed_substituted,
             "reason": reason}
+
+
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 — the expected-loss budget, with the controls that must FAIL on a null.
+
+    liveness_ref: vci_risk_budget._selftest"""
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    # ⚑ NEGATIVE CONTROL — a missing p_thesis MUST NOT be read as p = 0. That exact null
+    #   flipped a DENY into an ADMIT on QBTS on 09-Aug-2026, on a figure of 1.55 that was
+    #   entirely plausible, and the substitution is conservative FOR THE ARITHMETIC and
+    #   catastrophic for the DECISION.
+    d = position_risk_detail(1.0, None, None, label="x.")
+    ok(d["unknown"] == ["x.L", "x.p_thesis"],
+       "⚑ NEGATIVE CONTROL: the substituted inputs MUST be named, not silently absorbed: %r" % d)
+    ok(d["risk"] == 1.0,
+       "the substitution is L=1.0, p=0.0 — conservative arithmetically, which is exactly why "
+       "the naming matters: %r" % d["risk"])
+
+    # ⚑ ISA-0668 — the AGGREGATE must carry the same caveat, because it is the figure a human
+    #   reads. committed_risk() used to return a bare float and drop `unknown` entirely.
+    cd = committed_risk_detail([{"ticker": "X", "size_pct": 0.553}])
+    ok(cd["measured"] is False and cd["n_substituted"] == 2 and cd["why"],
+       "⚑ NEGATIVE CONTROL: an aggregate assembled from absences MUST declare it: %r" % cd)
+    cd2 = committed_risk_detail([{"ticker": "X", "size_pct": 0.553, "L": 0.35,
+                                  "p_thesis": 0.50}])
+    ok(cd2["measured"] is True and cd2["n_substituted"] == 0,
+       "positive control: fully specified inputs report measured=True (R5.8 — test the test)")
+    ok(abs(cd["risk"] - 0.553) < 1e-6 and abs(cd2["risk"] - 0.0968) < 1e-3,
+       "and the two differ by 5.7x — previously indistinguishable in one field: %r vs %r"
+       % (cd["risk"], cd2["risk"]))
+
+    # ⚑ NEGATIVE CONTROL — admit() must DENY on an unevaluable control, never pass.
+    a = admit({"ticker": "NEW", "size_pct": 1.0, "L": 0.35, "p_thesis": 0.5},
+              open_positions=[{"ticker": "X", "size_pct": 0.5}])
+    ok(a["ok"] is False and a["unknown_controls"],
+       "⚑ NEGATIVE CONTROL: an UNKNOWN control must BLOCK the admission (R4.3): %r" % a)
+    ok(a["committed_measured"] is False and a["committed_n_substituted"] == 2,
+       "...and the verdict must carry the committed figure's measurement status (ISA-0668)")
+
+    # ⚑ NEGATIVE CONTROL — a shared catalyst_domain must INFLATE the proposed risk.
+    openp = [dict(ticker="A", size_pct=3.5, L=0.35, p_thesis=0.50,
+                  catalyst_domain="biotech_readout")]
+    same = admit(dict(ticker="B", size_pct=3.5, L=0.35, p_thesis=0.50,
+                      catalyst_domain="biotech_readout"), open_positions=openp)
+    diff = admit(dict(ticker="C", size_pct=3.5, L=0.35, p_thesis=0.50,
+                      catalyst_domain="ai_optical"), open_positions=openp)
+    ok(same["correlated"] is True and diff["correlated"] is False,
+       "the rider must key on the SHARED domain")
+    ok(same["proposed_risk"] > diff["proposed_risk"],
+       "⚑ NEGATIVE CONTROL: two binaries in the SAME catalyst domain must cost MORE than two "
+       "in different ones — the rider exists to stop two names failing on one event")
+    ok(same["ok"] is False,
+       "⚑ and at a STARTER rung two same-domain platform binaries must BREACH the 1.5% budget "
+       "— that breach IS the theme cap, expressed in the units that matter (D6)")
+    if verbose:
+        print("vci_risk_budget._selftest: %d assertions, 0 failed" % n)
+    return n
 
 
 if __name__ == "__main__":

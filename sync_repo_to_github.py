@@ -102,6 +102,40 @@ FALLBACK_WRITTEN = {
 # Referenced by fallback code but not needed on the fallback path, each with its reason.
 FALLBACK_EXCLUDED = {
     "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
+    # ISA-0548 build (12-Sep-2026). Named by position_sizing.load_declared_binaries, which is
+    # on the MONTHLY PRE-RUN path (step 6.5's held-binary risk budget), not on the weekly
+    # screen's fallback path — the fallback entrypoints are screener_core / screener_local /
+    # build_excel / build_email and none of them reaches sizing.
+    # ⚑ IT IS ALSO PERSONAL: it enumerates Raj's held positions and their catalyst state, and
+    #   the repo is PUBLIC. It is safe because RUNTIME_JSON is an ALLOW-LIST — a data file is
+    #   pushed only if it is ON that list — and this file is not. (Corrected in place, R2.13:
+    #   an earlier version of this comment claimed the file was "in NEVER". It is not; NEVER
+    #   holds only .env* plus ONEDRIVE_BOOTSTRAP. A comment that cites a protection the code
+    #   does not provide is exactly the ISA-0675 class — a named home that is empty — so it is
+    #   replaced rather than left standing.)
+    # ⚑ If this file is ever needed on the fallback path it goes to ONEDRIVE_BOOTSTRAP, which
+    #   fetches it straight from OneDrive AND adds it to NEVER. It must not go to RUNTIME_JSON.
+    # Excluded WITH a reason rather than left unclassified, because the check's whole point is
+    # that silence is not a classification (R14.5).
+    # ISA-0548 build. Both are on the MONTHLY PRE-RUN path (step 6.5), not the weekly screen
+    # fallback, and both are PERSONAL — they name Raj's held positions and his judgement on
+    # them. Safe because RUNTIME_JSON is an ALLOW-LIST and neither is on it; if either is ever
+    # needed by the fallback it goes to ONEDRIVE_BOOTSTRAP (which also adds it to NEVER), and
+    # never to RUNTIME_JSON.
+    "position_underwriting.json": ("ISA-0418 immutable entry-underwriting store, WRITTEN on "
+                                   "the monthly path; the fallback neither reads nor writes "
+                                   "it. PERSONAL — not on the allow-list, not pushed"),
+    "thesis_states.json": ("declared judgement overlay per held position (ISA-0466); read by "
+                           "the monthly pre-run and the capital router, not by the weekly "
+                           "screen fallback. PERSONAL — not on the allow-list, not pushed"),
+    "underfilled_positions.json": ("D17 fill-obligation store, WRITTEN by "
+                                   "position_sizing.allocate/refresh_obligations on the "
+                                   "monthly pre-run path (ISA-0669). The fallback neither "
+                                   "reads nor writes it. PERSONAL — not pushed"),
+    "vci_binary_positions.json": ("declared held-binary registry; read by the monthly pre-run "
+                                  "(step 6.5), not by the weekly screen fallback. PERSONAL: "
+                                  "not on the RUNTIME_JSON allow-list, so not pushed; if ever "
+                                  "needed by the fallback it goes to ONEDRIVE_BOOTSTRAP"),
 }
 
 # Public, non-personal inputs the fallback reads that were missing from RUNTIME_JSON on

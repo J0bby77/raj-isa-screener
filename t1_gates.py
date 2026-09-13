@@ -272,7 +272,9 @@ def _panel_start_date(panel_path):
 
 def min_hold_until(entry_date):
     """WP-3 rule B (26-Jul-26) - Path A minimum-hold stamp: entry + MIN_HOLD_DAYS. Early
-    exit only on MIN_HOLD_EXEMPT grounds (hard_thesis_break/drawdown_mandate/preclearance)."""
+    exit only on `scoring_config.MIN_HOLD_EXEMPT` grounds. ⚑ The grounds are NOT restated
+    here (ISA-0647): this docstring listed three of them while the published set carried four,
+    and a prose copy of a capital-gating constant is a third home that nothing can diff."""
     from datetime import timedelta
     if isinstance(entry_date, str):
         entry_date = datetime.strptime(entry_date[:10], "%Y-%m-%d").date()

@@ -158,6 +158,51 @@ def _type_ok(value, spec) -> bool:
     return False
 
 
+def _declares(spec: dict, t: str) -> bool:
+    """True if the schema spec admits JSON type `t`."""
+    types = spec.get("type")
+    if isinstance(types, str):
+        return types == t
+    return isinstance(types, list) and t in types
+
+
+def _object_breaches(prefix: str, value: dict, spec: dict) -> list:
+    """`required` + `additionalProperties: false` for one object against its sub-schema."""
+    errs = []
+    for r in spec.get("required", []):
+        if r not in value or value[r] is None:
+            errs.append(f"{prefix}.{r} required")
+    allowed = spec.get("properties")
+    if allowed is not None and spec.get("additionalProperties") is False:
+        for k2 in value:
+            if k2 not in allowed:
+                errs.append(f"{prefix}.{k2}: unknown field")
+    if allowed:
+        for k2, v2 in value.items():
+            sub = allowed.get(k2)
+            if sub is not None and v2 is not None and not _type_ok(v2, sub):
+                errs.append(f"{prefix}.{k2}: wrong type {type(v2).__name__}")
+    return errs
+
+
+def _array_item_breaches(key: str, value: list, items_spec: dict) -> list:
+    """ISA-0662 — enforce a declared `items` sub-schema element by element.
+
+    R4.9: a reader that cannot match a row COUNTS it and fails. Every bad element is
+    named with its index rather than the first one aborting the check, so a repair sees
+    the whole problem in one pass."""
+    errs = []
+    for ix, el in enumerate(value):
+        tag = f"{key}[{ix}]"
+        if not _type_ok(el, items_spec):
+            want = items_spec.get("type")
+            errs.append(f"{tag}: wrong type {type(el).__name__}, schema declares {want!r}")
+            continue
+        if isinstance(el, dict):
+            errs.extend(_object_breaches(tag, el, items_spec))
+    return errs
+
+
 def validate(item: dict) -> list:
     """Return a list of contract breaches. Empty list means the record is admissible.
 
@@ -187,17 +232,18 @@ def validate(item: dict) -> list:
         if not _type_ok(value, spec):
             errs.append(f"{key}: wrong type {type(value).__name__}")
             continue
-        if spec.get("type") == "object" or (isinstance(spec.get("type"), list) and "object" in spec["type"]):
-            if isinstance(value, dict):
-                sub_req = spec.get("required", [])
-                for r in sub_req:
-                    if r not in value or value[r] is None:
-                        errs.append(f"{key}.{r} required")
-                allowed = spec.get("properties")
-                if allowed is not None and spec.get("additionalProperties") is False:
-                    for k2 in value:
-                        if k2 not in allowed:
-                            errs.append(f"{key}.{k2}: unknown field")
+        if _declares(spec, "object") and isinstance(value, dict):
+            errs.extend(_object_breaches(key, value, spec))
+        # ⚑ ISA-0662 (12-Sep-2026): descend into a declared `items` sub-schema. Until today
+        #   this loop checked only the TOP-LEVEL type, so `studies` — declared
+        #   items.required = [doc, on_disk], additionalProperties false — accepted a list of
+        #   bare strings. Twelve rows were written that way and `isa_register_render.py:196`
+        #   raised on `d["doc"]`: the FIRST enforcement of the contract was the CONSUMER,
+        #   one step too late, which is the FC-C interface shape (R5.1 — each artefact
+        #   asserts its shape as it is written). Every other array field in the schema
+        #   carried the same unenforced clause.
+        if _declares(spec, "array") and isinstance(value, list) and spec.get("items"):
+            errs.extend(_array_item_breaches(key, value, spec["items"]))
 
     if "id" in item and isinstance(item["id"], str) and not ID_PATTERN.match(item["id"]):
         errs.append(f"id malformed: {item['id']} (R7.6)")
@@ -528,9 +574,8 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def next_id() -> str:
-    """Monotonic, never reused (R7.6). High-water mark persists even if items are removed."""
-    store_dir().mkdir(parents=True, exist_ok=True)
+def _highwater() -> int:
+    """The highest id ever ALLOCATED, from the mark and the stored items (R7.6)."""
     hw_path = _p(HIGHWATER_FILE)
     highest = 0
     if hw_path.exists():
@@ -539,9 +584,46 @@ def next_id() -> str:
         m = ID_PATTERN.match(it.get("id", ""))
         if m:
             highest = max(highest, int(m.group(1)))
-    nxt = highest + 1
-    hw_path.write_text(json.dumps({"highest": nxt, "updated_on": _today()}, indent=2), encoding="utf-8")
-    return f"ISA-{nxt:04d}"
+    return highest
+
+
+def _commit_highwater(item_id: str) -> None:
+    """ISA-0661. Advance the mark ONLY for an item that has actually been persisted.
+
+    Called from write() after validate() passes and the row is on disk, never from
+    next_id(). Monotonic: an update to an older id cannot move the mark backwards."""
+    m = ID_PATTERN.match(item_id or "")
+    if not m:
+        return
+    n = int(m.group(1))
+    hw_path = _p(HIGHWATER_FILE)
+    current = 0
+    if hw_path.exists():
+        current = int(json.loads(hw_path.read_text(encoding="utf-8"))["highest"])
+    if n > current:
+        store_dir().mkdir(parents=True, exist_ok=True)
+        hw_path.write_text(json.dumps({"highest": n, "updated_on": _today()}, indent=2),
+                           encoding="utf-8")
+
+
+def next_id() -> str:
+    """Monotonic, never reused (R7.6). PURE: allocating an id persists nothing.
+
+    ⚑ ISA-0661 (12-Sep-2026). This function used to write the high-water mark before
+    returning, so the id was committed before `intake()` had built the record and before
+    `write()` had validated it. Five contract refusals on 12-Sep-2026 therefore burned
+    ISA-0648, ISA-0649, ISA-0656 and ISA-0659 — four permanent holes in a sequence R7.6
+    requires to be unique and never reused, and holes are indistinguishable from deleted
+    items, so a completeness audit of the register cannot tell the two apart. That is
+    ISA-0607's duplicate/gap class recurring inside the register tool itself.
+
+    The mark is an artefact of a SUCCESSFUL WRITE, so it is committed in `write()`
+    (R14.2: move the control as far left as it will go — here, onto the act that actually
+    creates the thing being counted). R7.6's guarantee is unchanged: the mark still
+    survives item removal, because `_highwater()` reads the mark AND the stored ids and
+    takes the maximum. What changes is that a refusal now costs nothing.
+    """
+    return f"ISA-{_highwater() + 1:04d}"
 
 
 def _derive(item: dict) -> dict:
@@ -616,6 +698,7 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
         store_dir().mkdir(parents=True, exist_ok=True)
         with _p(ITEMS_FILE).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+    _commit_highwater(item["id"])          # ISA-0661: the mark follows the row, not the name
     return item
 
 
@@ -1276,6 +1359,48 @@ def selftest(verbose: bool = True) -> int:
     except ValueError:
         raised = True
     ok(raised, "an unknown field is refused, never silently stored (R4.9)")
+
+    # ── ISA-0661 — a refused write must burn no id ────────────────────────────────────
+    # liveness_ref: isa_register.selftest :: isa0661_refused_write_burns_no_id
+    _before = next_id()
+    _burned = False
+    try:
+        write({"id": _before, "title": "deliberately invalid", "record_type": "DEFECT",
+               "state": "OPEN", "criticality": "LOW", "created_on": _today(),
+               "provenance": "captured_live", "learning": lrn, "not_a_field": 1})
+    except ValueError:
+        _burned = True
+    ok(_burned, "the deliberately invalid write was refused (negative control, R5.5)")
+    ok(next_id() == _before,
+       "⚑ ISA-0661: a REFUSED write burns no id — next_id() is pure and the high-water mark "
+       "is committed by write(), not by allocation. Four ids (0648/0649/0656/0659) were lost "
+       "this way on 12-Sep-2026, and a gap is indistinguishable from a deleted item (R7.6)")
+    _ok_id = next_id()
+    write({"id": _ok_id, "title": "valid record for the watermark check",
+           "record_type": "DEFECT", "state": "OPEN", "criticality": "LOW",
+           "created_on": _today(), "provenance": "captured_live", "learning": lrn, **CS})
+    ok(next_id() != _ok_id,
+       "...and a SUCCESSFUL write does advance the mark, so the fix did not simply stop "
+       "counting (R5.8: test the test)")
+
+    # ── ISA-0662 — a declared `items` sub-schema is enforced at the front door ─────────
+    # liveness_ref: isa_register.selftest :: isa0662_array_items_enforced
+    _base = {"id": "ISA-9998", "title": "studies shape", "record_type": "DEFECT",
+             "state": "OPEN", "criticality": "LOW", "created_on": _today(),
+             "provenance": "captured_live", "schema_version": SCHEMA_VERSION,
+             "learning": lrn, **CS}
+    _bad = dict(_base, studies=["a_study_x.md"])
+    ok(any("studies[0]" in e for e in validate(_bad)),
+       "⚑ ISA-0662: a `studies` list of STRINGS is refused by validate(), not by the renderer "
+       "one step later — the contract is enforced where the artefact is written (R5.1)")
+    _good = dict(_base, studies=[{"doc": "a_study_x.md", "on_disk": True}])
+    ok(not [e for e in validate(_good) if "studies" in e],
+       "...and a well-formed studies entry still passes, so the check discriminates rather "
+       "than rejecting the field outright (R5.5 negative control)")
+    ok(any("studies[0].doc required" in e
+           for e in validate(dict(_base, studies=[{"on_disk": True}]))),
+       "...and a missing REQUIRED key inside an element is named with its index (R4.9: a "
+       "reader that cannot match a row counts it and fails)")
 
     shutil.rmtree(tmp, ignore_errors=True)
     os.environ.pop("ISA_REGISTER_STORE", None)

@@ -69,10 +69,88 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PENDING = "PENDING"
 RESOLVED_POSITIVE = "RESOLVED_POSITIVE"
 RESOLVED_NEGATIVE = "RESOLVED_NEGATIVE"
-CATALYST_STATUSES = (PENDING, RESOLVED_POSITIVE, RESOLVED_NEGATIVE)
 
-MIN_HOLD_EXEMPT = ("hard_thesis_break", "drawdown_mandate", "preclearance",
-                   "evidence_reversal")     # D14, Raj 26-Aug-2026
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0655 — THE SUCCESSOR STATE. Resolution was modelled as TERMINAL and it is not.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Raj, 12-Sep-2026: *"if this is still considered a binary event based on expected phase 3
+# results then does it not remain a VCI stock."* Yes — and the framework could not represent
+# it. `binary_commitment` on a RESOLVED name returned "commitment RELEASED on this run; it now
+# sizes as an ordinary platform holding", which is false in all three of its parts for a
+# multi-stage thesis. A positive Phase 2 does not END a binary sequence, it PROMOTES it.
+#
+# ⚑ AND THE MISSING SUCCESSOR IS NOT AN ABSENCE OF RISK. Releasing the commitment because the
+#   next event cannot be priced reads a null as a zero — the V-1 defect that flipped
+#   DENY -> ADMIT on QBTS on 09-Aug-2026 — and it understates the budget, so the error runs
+#   TOWARD the risk. The framework's own precedent for an unmeasurable input is A2.3's adverse
+#   correlation default (rho = max(rho_bar, 0.70)): a refusal expressed as a number that
+#   cannot flatter. This applies the same doctrine.
+RESOLVED_POSITIVE_SUCCESSOR_PENDING = "RESOLVED_POSITIVE_SUCCESSOR_PENDING"
+CATALYST_STATUSES = (PENDING, RESOLVED_POSITIVE, RESOLVED_NEGATIVE,
+                     RESOLVED_POSITIVE_SUCCESSOR_PENDING)
+
+# A successor whose (p, L) cannot be sourced is UNPRICED. It is neither released nor priced:
+# it re-arms at the MOST ADVERSE declared prior for its asset_structure.
+SUCCESSOR_UNPRICED = "UNPRICED"
+SUCCESSOR_PRICED = "PRICED"
+UNPRICEABLE_BY_NATURE = "UNPRICEABLE_BY_NATURE"
+UNMEASURED_BY_DEFECT = "UNMEASURED_BY_DEFECT"
+
+
+def adverse_prior(asset_structure: Optional[str]) -> dict:
+    """The most adverse declared (p, L) for a structure class — the re-arm price of an
+    UNPRICED successor.
+
+    ⚑ MOST ADVERSE ACROSS THE DECLARED ROWS, not a new number. It reads
+    `vci_base_rates.json` and takes min(p) over that structure's rows and its declared L, so
+    the framework never invents a prior it has not sourced (R12.3: a constant with no recorded
+    rationale auto-raises an item). If the structure itself is undeclared it REFUSES — an
+    unpriceable successor on an unknown structure has no adverse case to fall back to either."""
+    import json as _json
+    path = os.path.join(HERE, "vci_base_rates.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            br = _json.load(fh)
+    except Exception as exc:                                         # noqa: BLE001
+        raise SizingRefused(
+            "vci_base_rates.json is unreadable (%s), so an UNPRICED successor cannot even be "
+            "re-armed adversely. A missing prior is not a zero (V-1)." % exc)
+    if not asset_structure:
+        raise SizingRefused(
+            "an UNPRICED successor with no declared asset_structure cannot be re-armed: there "
+            "is no structure class whose adverse prior would apply. Declare the structure or "
+            "the position cannot be priced at all (R4.3).")
+    rows = {k: v for k, v in (br.get("p_thesis") or {}).items()
+            if k.split("/")[0] == asset_structure}
+    if not rows:
+        raise SizingRefused(
+            "vci_base_rates.json declares no p_thesis row for asset_structure %r, so there is "
+            "no adverse prior to re-arm at." % asset_structure)
+    worst_key = min(rows, key=lambda k: float(rows[k]["p"]))
+    p = float(rows[worst_key]["p"])
+    L_rows = br.get("L_by_structure") or {}
+    if asset_structure not in L_rows:
+        raise SizingRefused(
+            "vci_base_rates.json declares no L for asset_structure %r." % asset_structure)
+    L = float(L_rows[asset_structure]["L"])
+    return {"p_thesis": p, "L": L, "basis": worst_key,
+             "why": ("most adverse DECLARED prior for %s: p = %.2f from %r, L = %.2f. This is "
+                     "a refusal expressed as a number that cannot flatter — the same doctrine "
+                     "as A2.3's adverse rho = 0.70 for an unmeasured correlation (ISA-0655)."
+                     % (asset_structure, p, worst_key, L))}
+
+# ISA-0647 — ONE HOME (R4.4). This tuple used to be DEFINED here with four entries while
+# scoring_config defined its own with three, and the prerun published THIS one. Read, never
+# redeclared: a second definition of a capital-gating constant is a defect on the day it is
+# created, and the divergence is invisible until someone diffs two files.
+try:
+    from scoring_config import MIN_HOLD_EXEMPT
+except Exception:                                                    # noqa: BLE001
+    # R4.7 — an un-importable contract RAISES rather than silently keeping a local copy.
+    raise ImportError(
+        "position_sizing requires scoring_config.MIN_HOLD_EXEMPT — the single declared home "
+        "for the min-hold exemption grounds (ISA-0647). A local fallback tuple here is what "
+        "produced two homes with different contents in the first place.")
 
 
 class SizingRefused(RuntimeError):
@@ -258,6 +336,59 @@ def apply_correlation(target: dict, corr_rec: Optional[dict], policy=None) -> di
 
 
 # ────────────────────────────────────────────────────────────── VCI (s5)
+def class_prior(asset_structure, catalyst_type, path=None):
+    """ISA-0687 — select p_thesis and L from THE CATALYST'S OWN CLASS.
+
+    The ISA-0653 refusal message already told the reader this is what a declared
+    catalyst_type buys: "p_thesis and L cannot be selected from the catalyst's own
+    class and would fall back to `platform` structure defaults". Nothing implemented
+    it, so a declared type bought nothing and the position stayed UNPRICEABLE.
+
+    REFUSES rather than defaulting, in both directions (R4.3/V-1):
+      * an undeclared structure or type -> refuse; there is no class to price from
+      * a declared type with NO row in vci_base_rates.json -> refuse, and say which
+        key is missing. Falling back to `<structure>/_default` here would be the
+        exact defect this function exists to close: the caller declared a class and
+        would silently be priced on another one.
+    """
+    import json as _json
+    path = path or os.path.join(HERE, "vci_base_rates.json")
+    if not asset_structure or asset_structure in (None, UNDECLARED):
+        raise SizingRefused(
+            "class_prior needs a declared asset_structure; got %r (R4.3)." % (asset_structure,))
+    if not catalyst_type or catalyst_type in (None, UNDECLARED):
+        raise SizingRefused(
+            "class_prior needs a declared catalyst_type; got %r. An undeclared catalyst has no "
+            "class, and pricing it on the structure default would present a guess as a "
+            "measurement (R2.10)." % (catalyst_type,))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            br = _json.load(fh)
+    except Exception as exc:                                         # noqa: BLE001
+        raise SizingRefused("vci_base_rates.json is unreadable (%s); a missing prior is not a "
+                            "zero (V-1)." % exc)
+    key = "%s/%s" % (asset_structure, catalyst_type)
+    row = (br.get("p_thesis") or {}).get(key)
+    if row is None:
+        raise SizingRefused(
+            "vci_base_rates.json declares no p_thesis row for %r. The catalyst class was "
+            "DECLARED and the base rates do not carry it, so the position cannot be priced "
+            "from its own class - and it must NOT be silently priced from "
+            "%r/_default instead (R4.3, ISA-0687). Add the row or change the declared type."
+            % (key, asset_structure))
+    L_rows = br.get("L_by_structure") or {}
+    if asset_structure not in L_rows:
+        raise SizingRefused(
+            "vci_base_rates.json declares no L for asset_structure %r." % asset_structure)
+    return {"p_thesis": float(row["p"]), "L": float(L_rows[asset_structure]["L"]),
+            "basis": key, "confidence": row.get("confidence"),
+            "why": ("priced from the catalyst's own class %r: p = %.2f, L = %.2f (%s). "
+                    "Declared, not defaulted - an undeclared type REFUSES here rather than "
+                    "falling through to the structure default."
+                    % (key, float(row["p"]), float(L_rows[asset_structure]["L"]),
+                       row.get("note", "no note")))}
+
+
 def vci_size_pct(*, p_thesis, L, budget_available_pct, evidence_state,
                  correlation_rider=1.0, policy=None) -> dict:
     """w_vci = min( B_available / ((1-p)*L*rider), ladder[state], hard caps ).
@@ -306,23 +437,161 @@ def binary_commitment(position: dict) -> dict:
             f"{position.get('ticker')}: is_binary is true but catalyst_status is {st!r}. "
             f"Declared: {list(CATALYST_STATUSES)}. A binary with no catalyst state cannot have "
             f"its commitment released and would reserve budget forever (ISA-0424).")
+    # ── ISA-0655 — a SUCCESSOR re-arms; it is never released ────────────────────────────
+    if position.get("is_binary") and st == RESOLVED_POSITIVE_SUCCESSOR_PENDING:
+        succ = position.get("successor") or {}
+        w = float(position.get("size_pct") or 0.0)
+        if succ.get("priceable") and succ.get("p_thesis") is not None and succ.get("L") is not None:
+            p_, l_ = float(succ["p_thesis"]), float(succ["L"])
+            c = w * (1.0 - p_) * l_
+            return {"ticker": position.get("ticker"), "commits_budget": True,
+                    "commitment_pct": round(c, 6), "successor_state": SUCCESSOR_PRICED,
+                    "catalyst_date": succ.get("date"),
+                    "reason": (f"successor binary PRICED (p={p_}, L={l_}); commits "
+                               f"w x (1-p) x L = {c:.4f}% of the ISA")}
+        # UNPRICED: re-arm at the most adverse DECLARED prior rather than release. Reading an
+        # unpriceable successor as "no binary" is a measured zero and understates the budget.
+        adv = adverse_prior(position.get("asset_structure"))
+        c = w * (1.0 - adv["p_thesis"]) * adv["L"]
+        return {"ticker": position.get("ticker"), "commits_budget": True,
+                "commitment_pct": round(c, 6), "successor_state": SUCCESSOR_UNPRICED,
+                "refusal_kind": succ.get("refusal_kind") or UNPRICEABLE_BY_NATURE,
+                "adverse_prior": adv,
+                "reason": (f"successor binary UNPRICED — RE-ARMED at the most adverse declared "
+                           f"prior ({adv['basis']}: p={adv['p_thesis']}, L={adv['L']}), "
+                           f"committing {c:.4f}% of the ISA. NOT released: a successor that "
+                           f"cannot be priced is not an absence of one (V-1/R4.3, ISA-0655). "
+                           f"It also counts toward VCI_BINARY_MAX_CONCURRENT and bars further "
+                           f"VCI deployment into this name.")}
     if not position.get("is_binary") or st != PENDING:
         return {"ticker": position.get("ticker"), "commits_budget": False, "commitment_pct": 0.0,
                 "reason": ("not a binary" if not position.get("is_binary") else
                            f"catalyst {st} — commitment RELEASED on this run; it now sizes as an "
                            f"ordinary platform holding")}
     p, l_ = position.get("p_thesis"), position.get("L")
+    basis = "declared on the position"
     if p is None or l_ is None:
-        raise SizingRefused(f"{position.get('ticker')}: a PENDING binary with no p_thesis/L "
-                            f"cannot be priced; a null is not a zero (V-1)")
+        # ISA-0687. An explicit p/L on the record still wins. Failing that, a DECLARED
+        # catalyst_type prices the position from its own class - which is what the
+        # ISA-0653 refusal told the reader a declared type would buy. An undeclared
+        # type still refuses, inside class_prior, naming what is missing.
+        ct = position.get("catalyst_type")
+        if ct and ct != UNDECLARED:
+            cp = class_prior(position.get("asset_structure"), ct)
+            p, l_, basis = cp["p_thesis"], cp["L"], cp["basis"]
+        else:
+            raise SizingRefused(f"{position.get('ticker')}: a PENDING binary with no p_thesis/L "
+                                f"and no declared catalyst_type cannot be priced; a null is not "
+                                f"a zero (V-1)")
     c = float(position.get("size_pct") or 0.0) * (1.0 - float(p)) * float(l_)
     return {"ticker": position.get("ticker"), "commits_budget": True,
             "commitment_pct": round(c, 6), "catalyst_date": position.get("catalyst_date"),
-            "reason": f"PENDING binary commits w x (1-p) x L = {c:.4f}% of the ISA"}
+            "prior_basis": basis, "p_thesis": float(p), "L": float(l_),
+            "reason": (f"PENDING binary commits w x (1-p) x L = {c:.4f}% of the ISA "
+                       f"(p={float(p):.2f}, L={float(l_):.2f}, basis: {basis})")}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0646 / ISA-0653 / ISA-0654 — THE BUDGET IS ABOUT WHAT IS HELD, AND NOTHING READ THAT
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# `summary.vci_binary_risk_committed` was computed as
+#     [e for e in _ranked if e.get("deploy_eligible")]
+# i.e. over deploy-eligible CANDIDATES from vci_watchlist. A held name is deleted from that
+# watchlist the moment it is bought (update_watchlist's purge), so the figure could only ever
+# describe positions that DO NOT EXIST. It was not stale; the population was wrong. It then
+# read 0 for a second, independent reason — ISA-0617 nulled the candidate fields, so the
+# eligible list was empty — and the whole block sat inside `except Exception: pass`. Three
+# faults, one output of `0`, and nothing to distinguish them (R2.10).
+#
+# ⚑ ABSENCE IS NOT `is_binary: false`. binary_commitment() reads a missing `is_binary` as
+#   "not a binary" and returns a commitment of 0.0. For a CANDIDATE dict that is fine. For a
+#   HELD position it is the V-1 defect: `false` is a declaration somebody made, absence means
+#   nobody has, and those are different facts that must not produce the same number.
+
+BINARY_POSITIONS_FILE = "vci_binary_positions.json"
+UNDECLARED = "UNDECLARED"
+
+
+def load_declared_binaries(root: Optional[str] = None) -> dict:
+    import json as _json
+    import os as _os
+    root = root or _os.path.dirname(_os.path.abspath(__file__))
+    path = _os.path.join(root, BINARY_POSITIONS_FILE)
+    if not _os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return (_json.load(fh) or {}).get("positions") or {}
+
+
+def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
+    """Join broker-truth holdings to the DECLARED binary registry.
+
+    `held`: [{ticker, size_pct}] from portfolio_data — broker truth, never the watchlist.
+    Returns {rows, refusals, unpriceable} where `rows` is safe to hand to
+    budget_available() and every name that could NOT be resolved is named in `refusals`.
+
+    R4.9 — a reader that cannot match a row COUNTS it and fails; it never drops it."""
+    declared = declared if declared is not None else load_declared_binaries(root)
+    rows, refusals, unpriceable = [], [], []
+    for h in (held or []):
+        t = str(h.get("ticker") or "").upper()
+        d = declared.get(t)
+        if d is None:                       # DECLARED aliases only — never suffix-stripping
+            for _k, _v in declared.items():
+                if t in [str(a).upper() for a in (_v.get("aliases") or [])]:
+                    d = _v
+                    break
+        if d is None:
+            refusals.append({
+                "ticker": t, "control": "is_binary",
+                "why": ("%s is HELD and absent from %s. Absence is REFUSED, not read as "
+                        "not-a-binary: `false` is a declaration, absence means nobody has "
+                        "decided, and a null is not a zero (V-1/R4.3). Declare it."
+                        % (t, BINARY_POSITIONS_FILE))})
+            continue
+        if not d.get("is_binary"):
+            continue
+        row = {"ticker": t, "size_pct": h.get("size_pct"), "is_binary": True,
+               "catalyst_status": d.get("catalyst_status"),
+               "catalyst_date": d.get("catalyst_date"),
+               "catalyst_type": (None if d.get("catalyst_type") == UNDECLARED
+                                 else d.get("catalyst_type")),
+               "catalyst_domain": (None if d.get("catalyst_domain") == UNDECLARED
+                                   else d.get("catalyst_domain")),
+               "asset_structure": d.get("asset_structure")}
+        # ⚑ D6 (Raj, 12-Sep-2026): an absent catalyst_domain REFUSES and never defaults to
+        #   "not correlated". The x1.5 rider exists to stop two names failing on one event;
+        #   reading absence as "no shared domain" is how a correlated pair gets admitted.
+        if d.get("catalyst_domain") == UNDECLARED and d.get("catalyst_status") == PENDING:
+            refusals.append({
+                "ticker": t, "control": "catalyst_domain",
+                "why": ("%s is a live PENDING binary with catalyst_domain UNDECLARED, so the "
+                        "x1.5 shared-domain rider CANNOT be evaluated. Under D6 an absent "
+                        "domain refuses; it never reads as not-correlated (ISA-0653)." % t)})
+        if d.get("catalyst_type") == UNDECLARED and d.get("catalyst_status") == PENDING:
+            refusals.append({
+                "ticker": t, "control": "catalyst_type",
+                "why": ("%s is a live PENDING binary with catalyst_type UNDECLARED, so "
+                        "p_thesis and L cannot be selected from the catalyst's own class and "
+                        "would fall back to `%s` structure defaults — a countdown to an "
+                        "unnamed event pricing real capital (ISA-0171/ISA-0653)."
+                        % (t, d.get("asset_structure")))})
+        succ = d.get("successor") or {}
+        if d.get("catalyst_status") in (RESOLVED_POSITIVE, RESOLVED_NEGATIVE) and succ:
+            unpriceable.append({"ticker": t, "successor": succ})
+        rows.append(row)
+    return {"rows": rows, "refusals": refusals, "unpriceable_successors": unpriceable,
+            "n_held": len(held or []), "n_binary": len(rows)}
 
 
 def budget_available(positions: List[dict], budget_pct: float, max_concurrent: int = 1) -> dict:
     """B_available after live PENDING binaries. N is declared, not inferred."""
+    # ⚑ ISA-0650 — L2 COUNTS OPEN BINARIES, NOT NAMES. `live` is every position still
+    #   committing budget, which now includes a RESOLVED_POSITIVE_SUCCESSOR_PENDING name
+    #   re-armed under ISA-0655. That is the whole point of D1/D3: a resolved name releases
+    #   its slot the same run, and a name with a live successor does not. Counting NAMES plus
+    #   C-1's loss block would leave only the two winners removable and mechanically sell the
+    #   winner while protecting the worst risk-adjusted position — ISA-0167 inverted.
     recs = [binary_commitment(p) for p in positions]
     live = [r for r in recs if r["commits_budget"]]
     committed = round(sum(r["commitment_pct"] for r in live), 6)
@@ -334,6 +603,122 @@ def budget_available(positions: List[dict], budget_pct: float, max_concurrent: i
             "max_concurrent": max_concurrent,
             "count_cap_breached": len(live) > max_concurrent,
             "commitments": recs}
+
+
+def budget_available_reported(positions, budget_pct: float, max_concurrent: int = 1) -> dict:
+    """budget_available() that REPORTS a refusal instead of raising it.
+
+    ⚑ WHY BOTH FORMS EXIST. `budget_available()` RAISES on an unpriceable PENDING binary, and
+    that is right for any caller about to move capital — it must not proceed. But the monthly
+    pre-run is not moving capital; it is producing the artefact a human reads, and a control
+    that aborts the whole pre-run on first sight of a problem is a control that gets switched
+    off (R5.7, and the reason `framework_integrity` is REPORT-ONLY on purpose).
+
+    So this form keeps the refusal and drops the exception: the unpriceable names are NAMED,
+    the committed figure is returned as None rather than a number, and `blocks_capital` is
+    True. R4.3 — the control returns UNKNOWN and BLOCKS; it never returns PASS, and it never
+    returns the 0 that a silent skip would have produced (ISA-0654)."""
+    priced, refused = [], []
+    for pos in (positions or []):
+        try:
+            binary_commitment(pos)
+            priced.append(pos)
+        except SizingRefused as exc:
+            refused.append({"ticker": pos.get("ticker"), "why": str(exc)})
+    out = budget_available(priced, budget_pct, max_concurrent)
+    out["refused_unpriceable"] = refused
+    out["n_refused"] = len(refused)
+    out["blocks_capital"] = bool(refused)
+    if refused:
+        # ⚑ The figure is WITHHELD, not reduced. A committed_pct computed over the priceable
+        #   subset would be a smaller number that looks like a measurement of the whole book,
+        #   and headroom derived from it would license a deployment the refused names might
+        #   forbid. "We could not price this" must not read as "this costs less".
+        out["committed_pct_measured_over"] = [p.get("ticker") for p in priced]
+        out["committed_pct"] = None
+        out["available_pct"] = None
+        out["why"] = ("%d live PENDING binary(ies) cannot be priced, so the committed figure "
+                      "is WITHHELD rather than computed over the remainder: %s"
+                      % (len(refused), "; ".join(r["ticker"] for r in refused)))
+    return out
+
+
+def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
+                         max_concurrent: int = 2, root: Optional[str] = None) -> dict:
+    """THE one home for the E4 held-binary budget (R4.4/R4.5).
+
+    Called by monthly_isa_prerun step 6.5 AND by its `--vci-budget-only` entry point, so the
+    orchestrated path and the operable path are the SAME function rather than two copies that
+    drift (R4.5: two paths call one function, or they are one function).
+
+    Returns {summary, warnings, ok}. Every refusal is named in `warnings`; the committed
+    figure is None — never 0 — whenever it could not be measured (R4.3/V-1)."""
+    import json as _json
+    import os as _os
+    warn = []
+    if not _os.path.exists(portfolio_path):
+        return {"ok": False, "warnings": ["Step 6.5: portfolio_data not found at %s; the VCI "
+                                          "binary budget is UNCOMPUTED, not zero."
+                                          % portfolio_path],
+                "summary": {"vci_binary_risk_committed": None,
+                            "vci_binary_risk_budget": budget_pct}}
+    with open(portfolio_path, encoding="utf-8") as fh:
+        pd = _json.load(fh)
+    nav = (pd.get("summary", {}) or {}).get("total_value_gbp")          # ISA-0673
+    stocks = pd.get("stocks") or []
+    if not nav or not stocks:
+        warn.append("Step 6.5: the VCI binary risk budget could not be computed — %s. "
+                    "Published as None, never as 0 (R4.3/V-1)."
+                    % ("portfolio_data has no summary.total_value_gbp (ISA-0673)" if not nav
+                       else "no stock positions in portfolio_data"))
+        return {"ok": False, "warnings": warn,
+                "summary": {"vci_binary_risk_committed": None,
+                            "vci_binary_risk_budget": budget_pct}}
+    held = [{"ticker": x.get("ticker"),
+             "size_pct": 100.0 * float(x.get("value_gbp") or 0.0) / float(nav)}
+            for x in stocks]
+    hb = held_binary_rows(held, root=root)
+    bud = budget_available_reported(hb["rows"], budget_pct=budget_pct,
+                                    max_concurrent=max_concurrent)
+    for r in hb["refusals"]:
+        warn.append("Step 6.5 VCI budget REFUSAL [%s/%s]: %s" % (r["ticker"], r["control"], r["why"]))
+    for r in bud["refused_unpriceable"]:
+        warn.append("Step 6.5 VCI budget UNPRICEABLE [%s]: %s" % (r["ticker"], r["why"]))
+    if bud["blocks_capital"]:
+        warn.append("Step 6.5: summary.vci_binary_risk_committed is WITHHELD (None), not 0 — "
+                    "%s. A committed figure computed over the priceable remainder would "
+                    "understate the book and license a deployment the refused names may "
+                    "forbid." % bud.get("why"))
+    for u in hb["unpriceable_successors"]:
+        warn.append("Step 6.5 (ISA-0655): %s resolved its catalyst but carries a successor in "
+                    "state %s (%s). CATALYST_STATUSES has no successor state, so its "
+                    "commitment is currently RELEASED as though the binary sequence had ended."
+                    % (u["ticker"], u["successor"].get("state"),
+                       u["successor"].get("refusal_kind")))
+    return {
+        "ok": not bud["blocks_capital"],
+        "warnings": warn,
+        "summary": {
+            "vci_binary_risk_budget": budget_pct,
+            "vci_binary_risk_committed": bud["committed_pct"],
+            "vci_binary_risk": {
+                "basis": "HELD positions (broker truth), not watchlist candidates",
+                "nav_gbp": nav,
+                "n_held": hb["n_held"], "n_binary_declared": hb["n_binary"],
+                "live_pending_binaries": bud["live_binaries"],
+                "released_this_run": bud["released_this_run"],
+                "committed_pct": bud["committed_pct"],
+                "available_pct": bud["available_pct"],
+                "count_cap": max_concurrent,
+                "count_cap_breached": bud["count_cap_breached"],
+                "blocks_capital": bud["blocks_capital"],
+                "refused_unpriceable": bud["refused_unpriceable"],
+                "registry_refusals": hb["refusals"],
+                "unpriceable_successors": hb["unpriceable_successors"],
+                "why": bud.get("why"),
+            },
+        },
+    }
 
 
 # ────────────────────────────────────────────────────────────── s2 demand-pull
@@ -532,6 +917,50 @@ def void_obligations(doc: dict, states: Dict[str, dict], *, today=None) -> dict:
     return doc
 
 
+def refresh_obligations(states: Optional[Dict[str, dict]] = None, *, today=None,
+                        path=None, root: Optional[str] = None,
+                        dry_run: bool = False) -> dict:
+    """ISA-0669 — the obligation LIFECYCLE, run every pre-run.
+
+    Loads the store, VOIDS what D17 says must void (evidence_state DEGRADED_* or thesis_state
+    BROKEN), persists, and reports what is open. This is `void_obligations`' first caller:
+    it too had zero call sites, so an obligation could never have been retired either — the
+    store would have accumulated claims that D17 had already cancelled.
+
+    ⚑ VOIDED ENTRIES ARE RETAINED, NEVER DELETED (R2.13/R6.5). That an obligation was created
+    and then abandoned IS the learning; a store showing only obligations that worked out
+    measures nothing."""
+    doc = load_fill_obligations(path)
+    if states is None:
+        states = {}
+        try:
+            import thesis_state as _ts
+            for tk, row in (_ts.load_states(root) or {}).items():
+                states.setdefault(tk, {})["thesis_state"] = row.get("state")
+        except Exception:                                            # noqa: BLE001
+            pass
+    before = [o["ticker"] for o in doc.get("obligations", []) if not o.get("voided")]
+    doc = void_obligations(doc, states, today=today)
+    after = [o["ticker"] for o in doc.get("obligations", []) if not o.get("voided")]
+    # ⚑ A DRY RUN MUST NOT WRITE A STORE. Caught by running the real pre-run with --dry-run
+    #   and finding underfilled_positions.json had a fresh mtime: the first version of this
+    #   function persisted unconditionally, so a rehearsal mutated live state. R18.1's point
+    #   exactly — development belongs in a CANDIDATE, and a function that cannot be rehearsed
+    #   without side effects makes that impossible.
+    written = None if dry_run else save_fill_obligations(doc, path)
+    voided = sorted(set(before) - set(after))
+    return {"store": written, "dry_run": bool(dry_run),
+            "n_total": len(doc.get("obligations", [])),
+            "open": after, "voided_this_run": voided,
+            "warnings": (["Step 6.5 (ISA-0669): fill obligation VOIDED for %s — D17 voids on "
+                          "evidence_state DEGRADED_* or thesis_state BROKEN. The claim on the "
+                          "next tranche is cancelled and the row is RETAINED, not deleted." % t
+                          for t in voided]
+                         + (["Step 6.5 (ISA-0669): %d open fill obligation(s) have FIRST CLAIM "
+                             "on the next tranche, ahead of any new position: %s"
+                             % (len(after), ", ".join(after))] if after else []))}
+
+
 def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
              ranking_basis: str, policy=None, obligations=None,
              sequencer_order: Optional[List[str]] = None, today=None) -> dict:
@@ -550,6 +979,17 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
             "an order by accident, and §2 could not state what produced it.")
     me = min_entry_gbp(nav_gbp, policy)
     floor = me["min_entry_gbp"]
+    # ⚑ ISA-0669 — WHO OWNS PERSISTENCE. `allocate()` has always BUILT obligation rows into
+    #   `doc` and never SAVED it, which is why `save_fill_obligations` carried zero call sites
+    #   and no obligation has ever been recorded. D17 says a sub-STARTER entry carries a FIRST
+    #   CLAIM on the next tranche; an obligation that is never written has no claim on
+    #   anything. R4.11: capture is a property of PRODUCING the artefact, not a prose step —
+    #   so the save happens here, inside the function that creates the rows, where it cannot
+    #   be dropped by a caller.
+    #   Ownership rule: if the caller SUPPLIED the doc it owns persistence; if `allocate`
+    #   loaded it, `allocate` saves it. That keeps tests and dry runs able to pass a doc in
+    #   and get no side effect.
+    _owns_doc = obligations is None
     doc = obligations if obligations is not None else load_fill_obligations()
 
     uses = list(qualifying_uses)
@@ -704,6 +1144,9 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
         "order_basis": order_basis, "ranking_basis": ranking_basis,
         "order": [u["ticker"] for u in uses],
         "obligations_at_head": sorted(live_obl),
+        "obligations_persisted_to": (save_fill_obligations(doc) if _owns_doc else None),
+        "obligations_open": [o["ticker"] for o in doc.get("obligations", [])
+                             if not o.get("voided")],
         "stopped_reason": stopped_reason,
         # ⚑ SKIPPED IS NOT STOPPED (ISA-0563). A name the queue passed over is a different
         # fact from the queue ending, and collapsing them is how "we could not afford HRMY"
@@ -767,6 +1210,127 @@ def min_hold_ok(*, position_first_entry_date: Optional[str] = None, today: Optio
     return {"ok": True, "trim_only": True, "days_held": held, "min_hold_until": until,
             "basis": (f"inside min-hold ({held}/{min_hold_days}d) but IN PROFIT — a trim is "
                       f"permitted, a full exit is not")}
+
+
+def _selftest_isa0548(verbose: bool = True) -> int:
+    """ISA-0548 build — negative controls for the held-binary budget, the successor re-arm and
+    the obligation lifecycle. liveness_ref: position_sizing._selftest_isa0548"""
+    import json as _json
+    import tempfile as _tf
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    # ⚑ NEGATIVE CONTROL — absence is REFUSED, not read as not-a-binary (V-1/ISA-0646).
+    r = held_binary_rows([{"ticker": "NOT_DECLARED_ANYWHERE", "size_pct": 1.0}], declared={})
+    ok(r["refusals"] and r["refusals"][0]["control"] == "is_binary",
+       "⚑ NEGATIVE CONTROL: a HELD stock absent from the registry MUST be refused by name. "
+       "`false` is a declaration someone made; absence means nobody has, and they must not "
+       "produce the same commitment of 0.0")
+    ok(not r["rows"], "...and it must NOT appear as a priced binary row")
+
+    # ⚑ NEGATIVE CONTROL — a PENDING binary with no p/L must WITHHOLD, never compute over the
+    #   priceable remainder (ISA-0654).
+    b = budget_available_reported(
+        [{"ticker": "A", "size_pct": 1.0, "is_binary": True, "catalyst_status": PENDING,
+          "p_thesis": 0.5, "L": 0.35},
+         {"ticker": "B", "size_pct": 1.0, "is_binary": True, "catalyst_status": PENDING}],
+        budget_pct=1.5, max_concurrent=2)
+    ok(b["committed_pct"] is None and b["blocks_capital"] is True,
+       "⚑ NEGATIVE CONTROL: one unpriceable binary MUST withhold the whole figure. A sum over "
+       "the priceable remainder understates the book and would license a deployment the "
+       "refused name may forbid: %r" % b["committed_pct"])
+    ok(any(x["ticker"] == "B" for x in b["refused_unpriceable"]),
+       "...and the unpriceable name must be NAMED, not counted")
+
+    # positive control: fully specified, the figure is measured (R5.8 — test the test)
+    b2 = budget_available_reported(
+        [{"ticker": "A", "size_pct": 1.0, "is_binary": True, "catalyst_status": PENDING,
+          "p_thesis": 0.5, "L": 0.35}], budget_pct=1.5, max_concurrent=2)
+    ok(b2["committed_pct"] is not None and b2["blocks_capital"] is False,
+       "positive control: a fully specified binary yields a measured committed figure")
+
+    # ⚑ NEGATIVE CONTROL — an UNPRICED successor must RE-ARM, never release (ISA-0655).
+    c = binary_commitment({"ticker": "S", "size_pct": 1.0, "is_binary": True,
+                           "asset_structure": "platform",
+                           "catalyst_status": RESOLVED_POSITIVE_SUCCESSOR_PENDING,
+                           "successor": {"priceable": False}})
+    ok(c["commits_budget"] is True and c["commitment_pct"] > 0,
+       "⚑ NEGATIVE CONTROL: an unpriceable successor MUST still commit budget. Releasing it "
+       "reads a null as a zero — the V-1 defect that flipped DENY to ADMIT on QBTS — and the "
+       "error would run TOWARD the risk: %r" % c)
+    ok(c["successor_state"] == SUCCESSOR_UNPRICED, c)
+    # and a genuinely resolved, successor-free name MUST release (or the release never happens)
+    c2 = binary_commitment({"ticker": "R", "size_pct": 1.0, "is_binary": True,
+                            "catalyst_status": RESOLVED_POSITIVE})
+    ok(c2["commits_budget"] is False,
+       "positive control: a resolved binary with no successor releases its commitment the "
+       "same run (ISA-0424), or the budget would be reserved against nothing forever")
+
+    # ⚑ NEGATIVE CONTROL — an undeclared asset_structure must RAISE, not fall back.
+    try:
+        adverse_prior(None)
+        ok(False, "⚑ adverse_prior(None) must RAISE — an unpriceable successor on an unknown "
+                  "structure has no adverse case to fall back to either")
+    except SizingRefused:
+        ok(True, "")
+
+    # ⚑ NEGATIVE CONTROL — a dry run must not write the obligation store.
+    d = _tf.mkdtemp()
+    import os as _os
+    st = _os.path.join(d, "ob.json")
+    save_fill_obligations({"obligations": []}, st)
+    m0 = _os.path.getmtime(st)
+    refresh_obligations({}, path=st, dry_run=True)
+    ok(_os.path.getmtime(st) == m0,
+       "⚑ NEGATIVE CONTROL: dry_run=True must NOT persist the obligation store — a rehearsal "
+       "that mutates the thing it rehearses cannot be used (R18.1)")
+    # ── ISA-0687 — a DECLARED catalyst_type prices the position from its own class,
+    #    and an undeclared or unknown one REFUSES rather than falling through to the
+    #    structure default. The refusal text for ISA-0653 promised this behaviour for a
+    #    day before anything implemented it, so the controls below are what make the
+    #    promise checkable.
+    _q = {"ticker": "QBTS_T", "is_binary": True, "catalyst_status": PENDING,
+          "asset_structure": "platform", "catalyst_type": "revenue_ramp",
+          "catalyst_domain": "sovereign_capital", "size_pct": 0.75}
+    _r = binary_commitment(_q)
+    ok(_r["prior_basis"] == "platform/revenue_ramp",
+       "ISA-0687: a declared catalyst_type prices from the catalyst's own class")
+    ok(abs(_r["commitment_pct"] - 0.75 * (1 - 0.55) * 0.35) < 1e-9,
+       "ISA-0687: the class prior is APPLIED, not merely reported")
+    ok(_r["p_thesis"] == 0.55 and _r["L"] == 0.35,
+       "ISA-0687: p and L travel with the verdict so the basis is checkable (R2.6)")
+
+    # NEGATIVE CONTROL — an explicit p/L on the record still wins. Without this the
+    # change could have silently overridden hand-declared priors everywhere.
+    _q2 = dict(_q); _q2["p_thesis"], _q2["L"] = 0.28, 0.60
+    ok(binary_commitment(_q2)["prior_basis"] == "declared on the position",
+       "NEGATIVE CONTROL ISA-0687: an explicit p/L on the record is NOT overridden by the class")
+
+    # MUST FIRE — three ways the lookup must refuse rather than default.
+    for _mut, _lbl in ((("catalyst_type", UNDECLARED), "undeclared catalyst_type"),
+                       (("catalyst_type", "no_such_class"), "declared type with no base-rate row"),
+                       (("asset_structure", None), "undeclared asset_structure")):
+        _t = dict(_q); _t[_mut[0]] = _mut[1]
+        _raised = False
+        try:
+            binary_commitment(_t)
+        except SizingRefused:
+            _raised = True
+        ok(_raised, "MUST-FIRE ISA-0687: %s REFUSES rather than defaulting" % _lbl)
+
+    # NEGATIVE CONTROL — the refusal is not a blanket ban: the valid case above still
+    # prices. Asserted again here so deleting the must-fires cannot leave a silent pass.
+    ok(binary_commitment(dict(_q))["commits_budget"] is True,
+       "NEGATIVE CONTROL ISA-0687: the valid class still prices - the refusal discriminates")
+
+    if verbose:
+        print("position_sizing._selftest_isa0548: %d assertions, 0 failed" % n)
+    return n
 
 
 def _selftest():
@@ -896,7 +1460,29 @@ def _selftest():
 
     _n = sum(1 for _nd in ast.walk(ast.parse(inspect.getsource(_selftest)))
              if isinstance(_nd, (ast.Assert,)))
-    print("position_sizing selftest OK (%d assertions)" % _n)
+    # ── ISA-0548 negative controls, INSIDE _selftest so the R5.5 census sees them ──────
+    # The census counts labelled markers in THIS function's body by AST; a delegated call
+    # would run the controls and count as none, which is the vacuous pass it exists to catch.
+    _n0548 = _selftest_isa0548(verbose=False)
+    assert _n0548 >= 10, "the ISA-0548 control block must not be emptied by a refactor"
+    # ⚑ NEGATIVE CONTROL: a HELD stock absent from the binary registry must be REFUSED, never
+    #   read as not-a-binary — `false` is a declaration, absence means nobody has decided.
+    assert held_binary_rows([{"ticker": "NOPE", "size_pct": 1.0}],
+                            declared={})["refusals"], "absence must refuse"
+    # ⚑ NEGATIVE CONTROL: one unpriceable PENDING binary must WITHHOLD the whole committed
+    #   figure — a sum over the priceable remainder understates the book and would license a
+    #   deployment the refused name may forbid.
+    assert budget_available_reported(
+        [{"ticker": "B", "size_pct": 1.0, "is_binary": True, "catalyst_status": PENDING}],
+        budget_pct=1.5, max_concurrent=2)["committed_pct"] is None, "must withhold, not compute"
+    # ⚑ NEGATIVE CONTROL: an UNPRICED successor must RE-ARM, not release. Releasing it reads a
+    #   null as a zero and the error would then run TOWARD the risk (V-1, ISA-0655).
+    assert binary_commitment({"ticker": "S", "size_pct": 1.0, "is_binary": True,
+                              "asset_structure": "platform",
+                              "catalyst_status": RESOLVED_POSITIVE_SUCCESSOR_PENDING,
+                              "successor": {"priceable": False}})["commits_budget"] is True, \
+        "an unpriceable successor must still commit budget"
+    print("position_sizing selftest OK (%d + %d ISA-0548 negative controls)" % (_n, _n0548))
 
 
 if __name__ == "__main__":

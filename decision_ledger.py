@@ -317,6 +317,14 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     ledger = load_ledger(path)
     txns = list(transactions or [])
     have_txns = bool(txns)
+    # ISA-0684 (R4.3/V-1, R2.10). `have_txns` says an export EXISTS; it does not
+    # say the export COVERS the recommendation. The September NTAP buy was
+    # labelled "declined" because the newest export ended in August -- absence of
+    # evidence was rendered as evidence of refusal. The coverage window makes the
+    # difference visible so the two can never again produce the same output.
+    _txn_dates = sorted(str(x.get("date") or "") for x in txns if x.get("date"))
+    txn_from = _txn_dates[0] if _txn_dates else None
+    txn_to = _txn_dates[-1] if _txn_dates else None
 
     counts = {"confirmed_executed": 0, "not_executed": 0,
               "execution_unconfirmed": 0, "no_action_expected": 0}
@@ -365,11 +373,28 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             continue
 
         if have_txns:
-            # Transactions exist for this period and none matches -> the
-            # recommendation was genuinely not acted on. This is a REAL signal
-            # (Raj declined the framework), not missing data.
-            e["execution_status"] = "not_executed"
-            counts["not_executed"] += 1
+            # ISA-0684. No matching trade. That means "declined" ONLY if the
+            # export actually covers the window in which the trade could have
+            # happened -- [rec_date, run date]. Three cases, three outputs:
+            #   export reaches the run date  -> evidence complete  -> not_executed
+            #   export ends after rec_date   -> blind tail         -> unconfirmed
+            #   export ends before rec_date  -> no evidence at all -> unconfirmed
+            if txn_to is not None and txn_to >= str(date):
+                e["execution_status"] = "not_executed"
+                e.pop("execution_unconfirmed_reason", None)
+                counts["not_executed"] += 1
+                continue
+            if txn_to is None or txn_to < rec_date:
+                _why = ("no transaction evidence covers this recommendation: "
+                        "export covers %s..%s, recommended %s"
+                        % (txn_from, txn_to, rec_date))
+            else:
+                _why = ("transaction evidence is blind after %s: recommended %s, "
+                        "reconciled to %s, export covers %s..%s"
+                        % (txn_to, rec_date, date, txn_from, txn_to))
+            e["execution_status"] = "execution_unconfirmed"
+            e["execution_unconfirmed_reason"] = _why
+            counts["execution_unconfirmed"] += 1
             continue
 
         # No transaction data at all: legacy holdings-delta inference.
@@ -414,6 +439,12 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     return {"counts": counts, "confirmed": confirmed,
             "off_framework": off_framework,
             "fallback_used": sorted(set(fallback_used)),
+            # ISA-0684: the coverage window travels with the verdict, so every
+            # downstream reader can tell a refusal from a rejection (R2.10).
+            "txn_coverage": {"from": txn_from, "to": txn_to,
+                             "reconciled_to": str(date),
+                             "complete": bool(txn_to is not None
+                                              and txn_to >= str(date))},
             "source": "transactions" if have_txns else "holdings_delta"}
 
 
@@ -427,3 +458,105 @@ def load_transactions(transactions_json_path):
             return json.load(fh).get("executed_trades", []) or []
     except Exception:
         return []
+
+
+def _selftest():
+    """ISA-0684 — the execution verdict is CONDITIONED on evidence, not merely produced.
+
+    R5.5: every test ships a negative control. The control here is load-bearing and
+    labelled: without it this suite would pass just as well against a module that had
+    simply BANNED the not_executed verdict, which would replace a false accusation with
+    a blind spot. The negative control is what proves the verdict still fires when the
+    export genuinely covers the window.
+    """
+    import tempfile as _tf
+    ok = [0]
+
+    def ck(label, cond):
+        assert cond, "decision_ledger._selftest FAIL: " + label
+        ok[0] += 1
+
+    _d = _tf.mkdtemp()
+    _n = [0]
+
+    def _mk(entries):
+        _n[0] += 1
+        p = os.path.join(_d, "l%d.json" % _n[0])
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"entries": entries}, fh)
+        return p
+
+    def _e(t, dec, date):
+        return {"_id": "%s::%s::%s" % (date, t, dec), "date": date, "ticker": t,
+                "route": "growth", "decision": dec,
+                "execution_status": "recommended", "executed_confirmed_date": None}
+
+    _txn = [{"date": "2026-08-10", "ticker": "QBTS", "type": "buy", "quantity": 68.0,
+             "price": 15.24, "amount_gbp": 1049.56, "reference": "R1"},
+            {"date": "2026-07-02", "ticker": "MU", "type": "buy", "quantity": 10.0,
+             "price": 100.0, "amount_gbp": 800.0, "reference": "R2"}]
+
+    # MUST FIRE — the live NTAP shape: recommended 06-Sep, export ends 10-Aug.
+    p = _mk([_e("NTAP", "buy", "2026-09-06")])
+    r = reconcile_executions_from_transactions(
+        p, _txn, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0}, date="2026-09-12")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("MUST-FIRE: a recommendation the export cannot see is execution_unconfirmed",
+       got["execution_status"] == "execution_unconfirmed")
+    ck("MUST-FIRE: a reason is published, not merely a status",
+       "no transaction evidence covers" in (got.get("execution_unconfirmed_reason") or ""))
+    ck("MUST-FIRE: the reason names both the coverage window and the recommendation date",
+       "2026-08-10" in got["execution_unconfirmed_reason"]
+       and "2026-09-06" in got["execution_unconfirmed_reason"])
+    ck("MUST-FIRE: nothing is counted as declined", r["counts"]["not_executed"] == 0)
+    ck("MUST-FIRE: coverage is published as incomplete",
+       r["txn_coverage"]["complete"] is False)
+
+    # NEGATIVE CONTROL (labelled, load-bearing) — full coverage, no matching trade.
+    # The verdict MUST still fire. Delete this and the module could ban not_executed
+    # outright and still go green, which is the failure this control exists to catch.
+    p = _mk([_e("AVGO", "buy", "2026-07-01")])
+    r = reconcile_executions_from_transactions(
+        p, _txn, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0}, date="2026-08-10")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("NEGATIVE CONTROL: export reaches the run date -> not_executed STILL fires",
+       got["execution_status"] == "not_executed")
+    ck("NEGATIVE CONTROL: no stale unconfirmed reason is left on the entry",
+       got.get("execution_unconfirmed_reason") is None)
+    ck("NEGATIVE CONTROL: coverage reported complete",
+       r["txn_coverage"]["complete"] is True)
+
+    # Blind tail — recommended inside coverage, reconciled beyond it.
+    p = _mk([_e("COCO", "buy", "2026-08-01")])
+    reconcile_executions_from_transactions(
+        p, _txn, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0}, date="2026-09-12")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("BLIND TAIL: unconfirmed, with the blind window named",
+       got["execution_status"] == "execution_unconfirmed"
+       and "blind after 2026-08-10" in got["execution_unconfirmed_reason"])
+
+    # A real execution still confirms — the fix breaks nothing.
+    p = _mk([_e("QBTS", "buy", "2026-08-05")])
+    reconcile_executions_from_transactions(
+        p, _txn, {"QBTS": 68.0}, prior_holdings={}, date="2026-08-10")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("a matching trade still confirms", got["execution_status"] == "confirmed_executed")
+
+    # NEGATIVE CONTROL — no export at all: the legacy holdings-delta path is untouched
+    # and reports no coverage rather than an empty window that reads as complete.
+    p = _mk([_e("MU", "buy", "2026-08-05")])
+    r = reconcile_executions_from_transactions(
+        p, [], {"MU": 10.0}, prior_holdings={}, date="2026-08-10")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("NEGATIVE CONTROL: no export -> holdings-delta path unchanged",
+       got["execution_status"] == "confirmed_executed" and r["source"] == "holdings_delta")
+    ck("NEGATIVE CONTROL: no export -> coverage reports no evidence, not a clean window",
+       r["txn_coverage"]["to"] is None and r["txn_coverage"]["complete"] is False)
+
+    print("decision_ledger._selftest: %d assertion(s) passed (ISA-0684)" % ok[0])
+    return ok[0]

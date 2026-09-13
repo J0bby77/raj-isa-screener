@@ -844,8 +844,90 @@ ENTRY_STABILITY_LOOKBACK_DAYS = 182
 ENTRY_STABILITY_FLOOR = 50.0     # reuse exit-floor level: check mirrors the rule policing the position
 ENTRY_STABILITY_MIN_SIGHTINGS = 2
 ENTRY_STABILITY_MIN_SPAN_DAYS = 60
+# ⚑ The MMF / cash-sweep tickers. Declared so the 182-day STOCK min-hold cannot attach to the
+#   B2 waiting room: CSH2 is dealt like a stock and the ledger classifies it as asset_class
+#   "stock", so without this it would inherit an anti-churn hold and BLOCK ITS OWN RECALL LEG —
+#   'when the next opportunity arises, trim funds and move capital into stocks' would be
+#   forbidden by a rule that exists to stop stock churn. `waiting_room.py` already states the
+#   min-hold 'binds the STOCK leg only'; this makes that sentence mechanical (R14.2). Excluded
+#   by DECLARED ticker, never by guessing at ETF-shaped names (R4.8). ISA-0645.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# SLEEVE_RISK_CEILING_PCT — Raj D27 (12-Sep-2026), ISA-0652 / ISA-0674 / ISA-0419
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# The maximum share of TOTAL SLEEVE RISK one direct-stock name may carry. This is the risk
+# denominator the ladder never had: position_sizing.ladder() is denominated in CAPITAL
+# (STARTER 3.5% of NAV) while the binding quantity for a high-sigma name is RISK.
+#
+# ⚑ WHAT IT DOES, AND IT IS NOT A TRIM RULE. Where the largest size inside this ceiling is
+#   BELOW MIN_ENTRY (0.80 x STARTER), there is NO size of that name that is both economically
+#   material and risk-acceptable, and the framework REFUSES the position: a candidate is not
+#   entered, a holding routes to exit review. Before this, the only reachable state was
+#   "hold at whatever it happens to be" — which is how ABCL sat GBP 2,602 below its own entry
+#   floor from 10-Jul-2026 with no fill obligation ever recorded (ISA-0669).
+#
+# ⚑ WHY 35 AND NOT 30 OR 40. Measured on the 12-Sep-2026 book (7 names incl. NTAP at cost,
+#   NAV GBP 156,321.05): equal risk across 7 names is 14.3%, so 35% is ~2.45x an equal share.
+#     30% would additionally refuse MU — a +144% Path A holding at 34.3% of sleeve risk.
+#          Refusing a working position is ISA-0167's error.
+#     35% refuses QBTS ONLY, and leaves MU GBP 112 under its cap — so the control is LIVE and
+#          binds on MU next, which is where the concentration actually is.
+#     40% refuses QBTS only and binds on nothing, i.e. decorative today; a control that has
+#          never come close to firing cannot be trusted the first time it does (M1).
+#   ⚑ QBTS is refused at EVERY level from 20% to 40%, so this number does NOT decide the QBTS
+#     conclusion — it decides only how tightly everything else is held.
+#
+# Rationale Ledger (R12.3): who_set_it Raj · set_on 2026-09-12 · evidence_basis MEASURED on
+# the live book · revalidate_by 2027-03-31 or when the sleeve reaches 8-10 names, at which
+# point a tighter number starts to mean something · falsified_by a working Path A position
+# being refused, or one name exceeding 50% of sleeve risk without the ceiling binding first.
+SLEEVE_RISK_CEILING_PCT = 35.0
+
+MMF_TICKERS = ("CSH2", "CSH2.L")
+
 MIN_HOLD_DAYS = 182   # C-1 anti-churn fix, WP-3 26-Jul-26 - see block at 730-731; compliance.py R2 (NOT paused)
-MIN_HOLD_EXEMPT = ("hard_thesis_break", "drawdown_mandate", "preclearance")
+# ⚑ THE SINGLE HOME for the min-hold exemption grounds (ISA-0647, R4.4).
+#   Until 12-Sep-2026 this tuple existed TWICE with DIFFERENT CONTENTS: position_sizing.py:74
+#   carried four entries including `evidence_reversal` (D14, Raj 26-Aug-2026) and this one
+#   carried three and omitted it. monthly_isa_prerun read the four-entry set into summary.v21
+#   and email_prefill rendered it, so the PUBLISHED exemption set and the one `scoring_config`
+#   declared disagreed for seventeen days — and `compliance.py` R1 forbids callers testing
+#   regime constants directly precisely so this cannot happen. `t1_gates.min_hold_until`'s
+#   docstring restated the three-entry set as prose, a third home.
+#   `position_sizing` now IMPORTS this tuple; `consistency_check.pair_min_hold_exempt`
+#   asserts there is exactly one definition in the tree.
+#
+# ⚑ `thesis_realised` (D5, Raj 12-Sep-2026) — declared HERE and only here, and declared
+#   AFTER the two homes were collapsed, so it does not inherit two homes on arrival.
+#   It is available only on the full conjunction, every leg of which is measured elsewhere:
+#     C1  catalyst_status in (RESOLVED_POSITIVE, RESOLVED_NEGATIVE)   position_sizing
+#     C5  the position is in profit                                   broker truth
+#     (REALISATION or GIVEBACK)   retention.realisation_trigger / giveback_trigger
+#     the refusal is UNPRICEABLE_BY_NATURE, not UNMEASURED_BY_DEFECT  retention
+#   The by-nature/by-defect split is the guardrail: without it "cannot price -> sell" gives
+#   the framework a standing incentive to stay broken and turns every data outage into a
+#   liquidation signal, which is C-1 inverted. A named open defect ESCALATES the item; it
+#   never unlocks an exit.
+#   ⚑ It routes to a Step 10 EXIT REVIEW. It never sells anything by itself.
+MIN_HOLD_EXEMPT = ("hard_thesis_break", "drawdown_mandate", "preclearance",
+                   "evidence_reversal",     # D14, Raj 26-Aug-2026
+                   "thesis_realised")       # D5,  Raj 12-Sep-2026 (ISA-0548)
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# ER_HORIZON_MONTHS — ISA-0675 / Raj D26 (12-Sep-2026), confirming D6 (22-Aug-2026)
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# ⚑ THIS CONSTANT'S HOME WAS NAMED IN PROSE FOR THREE WEEKS AND WAS EMPTY. retention.py:33
+#   states verbatim "ER_HORIZON_MONTHS = 12, declared in scoring_config as the single home
+#   (Raj, D6, 22-Aug-2026)" — and nothing in the tree defined it. A pointer that names its
+#   target reads as a citation and is therefore trusted rather than checked, which is why
+#   ISA-0168 stood as a CRITICAL blocker on a question Raj had already answered, and why he
+#   had to answer it a second time on 12-Sep-2026. The two answers agree at 12 months, so
+#   nothing was mis-sized — but that is luck, not control (R4.4, R14.4, FC-D).
+#
+# It is the period over which er_entry is expressed, and therefore the denominator of
+# retention.realised_fraction. Every consumer READS it; no caller passes its own horizon,
+# because a 12-month and a 24-month reading of the same E[r] give different answers for the
+# same position and the difference would be invisible.
+ER_HORIZON_MONTHS = 12
 
 # --- H-6 (audit item #7, 26-Jul-26): known-store manifest - one authoritative list,
 #     versioned with the code that creates stores; consumed by vci_learning.orphan_check ---

@@ -71,6 +71,59 @@ class CapabilityRefused(RuntimeError):
     """Raised rather than returning an empty registry. A missing store is not a clean map."""
 
 
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# ISA-0663 — SUBJECT AREAS. A subject that is not a module, declared and never inferred.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# R12.1 field 5 asks how a subject links together END TO END, which is inherently a
+# cross-module question, while the only mechanical resolver — framework_atlas.footprint —
+# takes a single module NAME. Every material subject in this framework spans modules, so
+# until today the preflight could only orient on the subjects that least needed it, and a
+# cross-module subject came back RED as "not in the Atlas" — a fact about the resolver
+# wearing the appearance of a fact about the framework.
+#
+# ⚑ MEMBERSHIP IS DECLARED, NEVER DERIVED FROM THE NAME. A `vci*` prefix rule would have
+#   silently dropped `position_sizing`, which holds vci_size_pct, budget_available,
+#   binary_commitment, min_hold_ok and CATALYST_STATUSES — i.e. the entire sizing half of
+#   the subject. R2.7 forbids joining records on inferred similarity and R4.8 refuses an
+#   uninformed choice; an area whose membership is guessed is worse than no area, because
+#   the omission is invisible in the receipt.
+
+SUBJECT_AREAS_REL = os.path.join("Dashboard", "state", "subject_areas.json")
+
+
+def subject_areas(root: str = HERE) -> dict:
+    """The declared area map. Absent file = no areas, never an inferred one (R4.3)."""
+    doc = _read_json(os.path.join(root, SUBJECT_AREAS_REL))
+    return (doc or {}).get("areas") or {}
+
+
+def resolve_subject(subject: str, root: str = HERE, modules=None) -> dict:
+    """Resolve a preflight subject to a module set.
+
+    Returns kind `module` (the subject IS a module), `area` (a DECLARED set), or
+    `UNKNOWN`. UNKNOWN is the honest answer for a name nobody has declared and must stay
+    that way: a subject the map does not contain cannot be discussed from the map (R2.8),
+    and inventing a membership here would make an unoriented answer look oriented."""
+    if modules is not None and subject in modules:
+        return {"kind": "module", "subject": subject, "modules": [subject],
+                "declared_by": "framework_atlas (module inventory on disk)"}
+    areas = subject_areas(root)
+    a = areas.get(subject)
+    if a:
+        known = [m for m in a.get("modules", []) if modules is None or m in modules]
+        missing = [m for m in a.get("modules", []) if modules is not None and m not in modules]
+        return {"kind": "area", "subject": subject, "modules": known,
+                "declared_missing_from_disk": missing,
+                "label": a.get("label"), "decision_path": a.get("decision_path"),
+                "declared_by": a.get("declared_by"),
+                "excluded_with_reason": a.get("excluded_with_reason") or {}}
+    return {"kind": "UNKNOWN", "subject": subject, "modules": [],
+            "why": ("%r is neither a module on disk nor a declared subject area. R4.8: an "
+                    "uninformed resolution is REFUSED, not guessed — a name-prefix match "
+                    "would have dropped position_sizing from the `vci` area, which is where "
+                    "half that subject's capital logic lives." % subject)}
+
+
 def store_path(root: str = HERE) -> str:
     return os.path.join(root, STORE_REL)
 

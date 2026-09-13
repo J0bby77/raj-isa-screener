@@ -302,6 +302,148 @@ def gate_add(store: dict, portfolio: dict, ticker: str) -> dict:
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0652 / ISA-0419 — THE RISK DENOMINATOR THE LADDER NEVER HAD (Raj D27, ceiling 35%)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# `position_sizing.ladder()` is denominated in CAPITAL — STARTER 3.5% of NAV — and the binding
+# quantity for a high-sigma name is RISK. Measured on the 12-Sep-2026 book, sigma-parity sizes
+# put FOUR of seven holdings below the 2.80% MIN_ENTRY, INCLUDING MU, a Path A name at 34.3%
+# of sleeve risk. So the collision is not a high-sigma VCI problem, which is how ISA-0652 was
+# framed; it is a whole-sleeve problem, and it is ISA-0419.
+#
+# ⚑ THE ANSWER IS A REFUSAL, NOT AN EXEMPTION (D27). Two alternatives were measured and
+#   rejected on the data, not on taste:
+#     sigma-scaling MIN_ENTRY would apply to MU too, licensing a sub-GBP-3,500 position in the
+#       sleeve's largest risk contributor, and would drop QBTS's floor to ~0.88% — making a
+#       158%-sigma name FILLABLE and entrenching it. It also destroys D16's actual rationale,
+#       which is materiality: a GBP 1,382 position paying a measured 1.52% round trip does not
+#       earn its dealing cost.
+#     a D16 exemption for RECLASSIFIED names fixes ABCL and leaves MU, ONT.L and QBTS, because
+#       the collision is not caused by reclassification — MU was never a VCI name.
+#
+# ⚑ AND THE REFUSAL IS THE INFORMATION. "There is no size of this name that is both
+#   economically material and risk-acceptable" is a finding, and it is the one thing the count
+#   cap could never produce: on the live book it says QBTS should not be held at ANY size, and
+#   says so at every ceiling from 20% to 40%, so the conclusion does not rest on the constant.
+
+
+def risk_shares(store: dict, portfolio: dict, dates=None) -> dict:
+    """Each name's share of TOTAL SLEEVE RISK (Euler decomposition; shares sum to 1).
+
+    REFUSES rather than returning shares over a subset: a concentration statistic quoted over
+    part of a sleeve and read as covering it is how a concentration goes unnoticed (the 77.5%
+    coverage lesson from 6.07). Every excluded name is NAMED with its weight."""
+    w = sleeve_weights(portfolio)
+    names = [t for t, x in w.items() if x]
+    if not names:
+        raise RiskRefused("no weighted names in the sleeve")
+    missing = [t for t in names if not _levels(store, t)]
+    if missing:
+        raise RiskRefused(
+            "no return series for %s, so a sleeve-risk SHARE cannot be computed for any name: "
+            "the denominator would silently exclude %.2f%% of the sleeve and every share would "
+            "be overstated (R4.9)."
+            % (", ".join(sorted(missing)), 100.0 * sum(w[t] for t in missing)))
+    dates = dates or common_dates(store, names)
+    if len(dates) - 1 < MIN_OVERLAP_WEEKS:
+        raise RiskRefused("only %d overlapping weeks, %d required"
+                          % (max(len(dates) - 1, 0), MIN_OVERLAP_WEEKS))
+    R = {t: returns_on(store, t, dates) for t in names}
+    S = sigma(store, w, dates)
+    out = {}
+    for a in names:
+        mctr = sum(w[b] * _cov(R[a], R[b]) for b in names) * WEEKS_PER_YEAR / S
+        out[a] = w[a] * mctr / S
+    return {"shares": out, "sleeve_sigma_ann": S, "weights": dict(w),
+            "n_names": len(names), "n_weeks": len(dates) - 1,
+            "coverage_pct": 100.0}
+
+
+def weight_at_ceiling(store: dict, portfolio: dict, ticker: str, ceiling_pct: float,
+                      dates=None, hi: float = 0.30) -> float:
+    """The portfolio weight at which `ticker` reaches exactly `ceiling_pct` of sleeve risk.
+
+    Solved numerically because a name's risk share is not linear in its own weight — adding to
+    it raises the sleeve variance it is measured against, so a closed form would be wrong in
+    the direction that matters (it would over-state the permitted size)."""
+    tgt = float(ceiling_pct) / 100.0
+    w0 = sleeve_weights(portfolio)
+    lo = 0.0
+    for _ in range(70):
+        mid = (lo + hi) / 2.0
+        w = dict(w0)
+        w[ticker] = mid
+        names = [t for t, x in w.items() if x]
+        d = dates or common_dates(store, names)
+        R = {t: returns_on(store, t, d) for t in names}
+        S = sigma(store, w, d)
+        mctr = sum(w[b] * _cov(R[ticker], R[b]) for b in names) * WEEKS_PER_YEAR / S
+        if (w[ticker] * mctr / S) < tgt:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def ceiling_verdict(store: dict, portfolio: dict, ticker: str, *, sleeve_gbp: float,
+                    min_entry_gbp: float, ceiling_pct: float = None, dates=None) -> dict:
+    """D27 — REFUSE / IN_BREACH / BELOW_CAPITAL_FLOOR / OK for one name.
+
+    ⚑ REFUSE is returned when the ceiling sits BELOW MIN_ENTRY: no size satisfies both, so the
+    position is not entered (candidate) or routes to exit review (holding). It is NOT resolved
+    by picking whichever of the two wrong sizes is closer.
+
+    ⚑ UNITS. `sleeve_weights()` normalises WITHIN THE SLEEVE (its outputs sum to 1), not
+    against NAV, so pounds are recovered with the SLEEVE total and `sleeve_gbp` is required
+    rather than NAV. An earlier draft of this function took nav_gbp and multiplied a
+    sleeve-relative weight by it, which overstated every ceiling by NAV/sleeve — 7.8x on the
+    12-Sep book. Caught before use; the parameter is named `sleeve_gbp` so the mistake cannot
+    be made silently by a caller (R4.7: a contract change must fail an un-updated caller)."""
+    if ceiling_pct is None:
+        try:
+            import scoring_config as _sc
+            ceiling_pct = float(getattr(_sc, "SLEEVE_RISK_CEILING_PCT"))
+        except Exception as exc:                                     # noqa: BLE001
+            raise RiskRefused(
+                "scoring_config.SLEEVE_RISK_CEILING_PCT is not declared (%s). A risk ceiling "
+                "invented here would be a second home for a capital-gating constant with "
+                "NO_RECORDED_RATIONALE (R4.4/R12.3)." % exc)
+    w = sleeve_weights(portfolio)
+    if ticker not in w:
+        raise RiskRefused("%s is not in the sleeve" % ticker)
+    cap_w = weight_at_ceiling(store, portfolio, ticker, ceiling_pct, dates)
+    cap_gbp = cap_w * float(sleeve_gbp)
+    cur_gbp = w[ticker] * float(sleeve_gbp)
+    share = risk_shares(store, portfolio, dates)["shares"].get(ticker)
+    out = {"ticker": ticker, "ceiling_pct": ceiling_pct,
+           "risk_share_pct": round((share or 0) * 100.0, 2),
+           "current_gbp": round(cur_gbp, 2), "ceiling_gbp": round(cap_gbp, 2),
+           "min_entry_gbp": round(float(min_entry_gbp), 2)}
+    if cap_gbp < float(min_entry_gbp):
+        out.update(verdict="REFUSE",
+                   why=("no size of %s is both economically material and risk-acceptable: the "
+                        "%.0f%% sleeve-risk ceiling permits GBP %.0f, below the GBP %.0f "
+                        "MIN_ENTRY. A candidate is not entered; a holding routes to exit "
+                        "review (D27). This is not resolved by choosing one of the two wrong "
+                        "sizes." % (ticker, ceiling_pct, cap_gbp, min_entry_gbp)))
+    elif cur_gbp > cap_gbp:
+        out.update(verdict="IN_BREACH", trim_gbp=round(cur_gbp - cap_gbp, 2),
+                   why=("%s carries %.1f%% of sleeve risk against a %.0f%% ceiling; trim "
+                        "GBP %.0f to reach it." % (ticker, (share or 0) * 100, ceiling_pct,
+                                                   cur_gbp - cap_gbp)))
+    elif cur_gbp < float(min_entry_gbp):
+        out.update(verdict="BELOW_CAPITAL_FLOOR",
+                   fill_to_gbp=round(float(min_entry_gbp), 2),
+                   why=("%s is GBP %.0f below MIN_ENTRY and the risk ceiling permits up to "
+                        "GBP %.0f, so a size exists: D16 admits no sub-scale holding, so this "
+                        "is FILL or EXIT — never hold at the current size."
+                        % (ticker, float(min_entry_gbp) - cur_gbp, cap_gbp)))
+    else:
+        out.update(verdict="OK", headroom_gbp=round(cap_gbp - cur_gbp, 2),
+                   why="inside both the capital floor and the risk ceiling")
+    return out
+
+
 def rank_by_marginal_risk(store: dict, portfolio: dict, tickers: Sequence[str],
                           size_gbp: float) -> List[dict]:
     """Order ADMITTED names by the risk they add per pound, cheapest first.
@@ -325,3 +467,70 @@ def rank_by_marginal_risk(store: dict, portfolio: dict, tickers: Sequence[str],
     # unmeasured names sort LAST and are named; they never silently take the top of the stack
     return sorted(rows, key=lambda r: (r["delta_sigma"] is None,
                                        r["delta_sigma"] if r["delta_sigma"] is not None else 0.0))
+
+
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 — sleeve risk shares and the D27 ceiling verdict, with negative controls.
+
+    liveness_ref: sleeve_risk._selftest"""
+    import json as _json
+    import os as _os
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    with open(_os.path.join(here, "stock_weekly_returns.json"), encoding="utf-8") as fh:
+        store = _json.load(fh)
+    val = {"MU": 4952.14, "AVGO": 4657.66, "ABCL": 1775.39,
+           "ONT.L": 1549.68, "COCO": 1214.60, "QBTS": 863.82}
+    pf = {"stocks": [{"ticker": k, "value_gbp": v} for k, v in val.items()]}
+    sleeve = sum(val.values())
+
+    rs = risk_shares(store, pf)
+    ok(abs(sum(rs["shares"].values()) - 1.0) < 1e-6,
+       "Euler shares must sum to 1 — a decomposition that does not is not a decomposition: %r"
+       % sum(rs["shares"].values()))
+    ok(rs["shares"]["QBTS"] / (val["QBTS"] / sleeve) > rs["shares"]["COCO"] / (val["COCO"] / sleeve),
+       "risk PER POUND must be higher for the 158%-sigma name than for the 51%-sigma one")
+
+    v = ceiling_verdict(store, pf, "QBTS", sleeve_gbp=sleeve, min_entry_gbp=4376.99)
+    ok(v["verdict"] == "REFUSE",
+       "⚑ MUST-FIRE (R5.10): QBTS's risk ceiling sits below MIN_ENTRY, so no size is both "
+       "material and risk-acceptable and the verdict must be REFUSE, not a smaller size: %r" % v)
+    ok(v["ceiling_gbp"] < v["min_entry_gbp"], "the REFUSE reason must be the crossing itself")
+
+    # ⚑ NEGATIVE CONTROL (R5.5): a comfortable name must NOT refuse, or the gate says REFUSE
+    #   to everything and means nothing (R5.8: test the test).
+    v2 = ceiling_verdict(store, pf, "COCO", sleeve_gbp=sleeve, min_entry_gbp=1000.0)
+    ok(v2["verdict"] != "REFUSE",
+       "⚑ NEGATIVE CONTROL: a low-sigma, low-share name against a low floor must not REFUSE: %r"
+       % v2)
+
+    # ⚑ NEGATIVE CONTROL: an undeclared ceiling must RAISE, never default to a guess.
+    try:
+        weight_at_ceiling(store, pf, "NOT_HELD", 35.0)
+        _raised = False
+    except Exception:
+        _raised = True
+    ok(_raised, "a name absent from the sleeve must RAISE rather than be sized")
+
+    # ⚑ NEGATIVE CONTROL: risk_shares must REFUSE rather than compute over a subset — a
+    #   concentration statistic quoted over part of a sleeve and read as covering it is how a
+    #   concentration goes unnoticed (the 77.5% coverage lesson from step 6.07).
+    pf_bad = {"stocks": list(pf["stocks"]) + [{"ticker": "ZZZZ_NO_SERIES", "value_gbp": 500.0}]}
+    try:
+        risk_shares(store, pf_bad)
+        _ref = False
+    except RiskRefused:
+        _ref = True
+    ok(_ref, "⚑ NEGATIVE CONTROL: a name with no return series must make risk_shares REFUSE, "
+             "not silently shrink the denominator")
+
+    if verbose:
+        print("sleeve_risk._selftest: %d assertions, 0 failed" % n)
+    return n

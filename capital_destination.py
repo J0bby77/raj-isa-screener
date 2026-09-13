@@ -1797,10 +1797,46 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
                         "for a top-up this run." % (type(_ase).__name__, _ase))
         if _hs_note:
             notes.append(_hs_note)
+
+        # ── ISA-0466 — THE JUDGEMENT OVERLAY GETS A PRODUCER ────────────────────────────
+        # `build()` has accepted a `thesis_states` argument since it shipped and NO CALLER
+        # SUPPLIED ONE, so the cap-never-raise layer was inert: D21 evicted judgement from the
+        # /100 conviction score and gave it `thesis_state` to live in, and nothing populated
+        # that field. A gate on a field nobody fills is not a gate.
+        # ⚑ An ABSENT store is a NAMED GAP, never an empty dict passed through as though every
+        #   name were unjudged-and-therefore-fine: thesis_state.state_for() REFUSES an
+        #   undeclared held name rather than defaulting to INTACT.
+        _th_states = None
+        try:
+            import thesis_state as _ts
+            _th_raw = _ts.load_states()
+            if _th_raw:
+                _th_states = {t: {"state": r.get("state"), "rationale": r.get("rationale")}
+                              for t, r in _th_raw.items()}
+                _held_tk = [str(x.get("ticker") or "").upper()
+                            for x in (portfolio.get("stocks") or []) if x.get("ticker")]
+                _undeclared = [t for t in _held_tk if t not in _th_raw]
+                if _undeclared:
+                    notes.append(
+                        "ISA-0466: %d held name(s) have NO declared thesis_state (%s), so the "
+                        "judgement ceiling cannot be applied to them. They are REFUSED by "
+                        "thesis_state.state_for(), not defaulted to INTACT."
+                        % (len(_undeclared), ", ".join(sorted(_undeclared))))
+            else:
+                notes.append(
+                    "ISA-0466: thesis_states.json is ABSENT, so the judgement ceiling is "
+                    "UNAPPLIED this run. That is a coverage gap, not a finding that every "
+                    "thesis is intact (R2.10).")
+        except Exception as _tse:                                       # noqa: BLE001
+            notes.append("ISA-0466: thesis_state unavailable (%s: %s) — the judgement ceiling "
+                         "is UNAPPLIED, not satisfied."
+                         % (type(_tse).__name__, _tse))
+
         cands = _sc.build(portfolio_data=portfolio, step9_pre=s9, watchlist_scored=scored,
                           vci_deploy=vci, correlation_assessment=corr,
                           weekly_returns=weekly, policy=policy, held_topups=_held_topups,
-                          evidence_states=ev_states, deploy_floor_pct=floor, today=as_of)
+                          evidence_states=ev_states, thesis_states=_th_states,
+                          deploy_floor_pct=floor, today=as_of)
     except Exception as exc:                                            # noqa: BLE001
         return {"state": "REFUSED", "candidates": None, "sequence": None,
                 "step9_pre_source": s9_name, "notes": notes,
