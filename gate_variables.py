@@ -408,7 +408,11 @@ def _selftest():
         if not cond:
             fails.append(label)
 
+    # ⚑ ISA-0704: plausibility captures raised by these fixtures go to a temp store, not the live log.
+    import plausibility_watch as _pw0704
+    _pw_saved = _pw0704.STORE
     with tempfile.TemporaryDirectory() as td:
+        _pw0704.STORE = __import__("pathlib").Path(td) / "plausibility_warns.jsonl"
         st = os.path.join(td, "gv.csv")
         rich = [{"ticker": "AAA", "sector": "Technology", "mkt_cap": 5e9, "gross_margin": 0.62,
                  "rev_cagr_3yr": 0.14, "fcf_pos_years": 4, "op_margin": 0.21, "passed": True,
@@ -485,6 +489,7 @@ def _selftest():
         ok("U-GV9 revisions crosstab builds", ct["rows"] >= 2 and "table" in ct)
 
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)})")
+    _pw0704.STORE = _pw_saved
     return 0 if not fails else 1
 
 

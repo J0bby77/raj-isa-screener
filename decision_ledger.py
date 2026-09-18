@@ -279,6 +279,7 @@ def _stamp_execution(entry, txn):
     entry["executed_quantity"] = txn.get("quantity")
     entry["executed_price"] = txn.get("price")
     entry["executed_amount_gbp"] = txn.get("amount_gbp")
+    entry["executed_reference"] = txn.get("reference")      # ISA-0701: execution identity (idempotency)
     entry["dealing_cost_gbp"] = txn.get("cost_gbp")
     entry["dealing_cost_pct"] = txn.get("cost_pct")
     entry["execution_source"] = "transaction_record"
@@ -292,7 +293,7 @@ def _stamp_execution(entry, txn):
 
 
 def reconcile_executions_from_transactions(path, transactions, current_holdings,
-                                           prior_holdings=None, date=None):
+                                           prior_holdings=None, date=None, persist=True):
     """Confirm recommendations against the ACTUAL dealing record (broker truth).
 
     `transactions`: list of dicts as produced by
@@ -435,8 +436,10 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             "note": "executed with no matching ledger recommendation",
         })
 
-    save_ledger(ledger, path)
-    return {"counts": counts, "confirmed": confirmed,
+    # ISA-0704: explicit persistence contract - a rehearsal computes the same reconciliation, saves nothing.
+    if persist:
+        save_ledger(ledger, path)
+    return {"counts": counts, "confirmed": confirmed, "persisted": bool(persist),
             "off_framework": off_framework,
             "fallback_used": sorted(set(fallback_used)),
             # ISA-0684: the coverage window travels with the verdict, so every

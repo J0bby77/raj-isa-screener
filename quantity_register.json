@@ -31,7 +31,7 @@
   },
   {
    "name": "min_entry_gbp",
-   "computer": "position_sizing.allocate",
+   "computer": "position_sizing.min_entry_gbp",
    "units": "GBP",
    "surface": [
     "email.s2.capital_router",
@@ -40,7 +40,22 @@
    "assertion": "pair_entry_and_review_fractions_distinct",
    "vocabulary": null,
    "gbp_exposure": 4377.0,
-   "note": "D16: MIN_ENTRY_FRACTION_OF_STARTER 0.80 x STARTER, derived from the ladder every run and never typed. Distinct from risk_contribution's 0.75 review fraction — two rules, guarded by an assertion because a future session WILL unify them."
+   "note": "D16: MIN_ENTRY_FRACTION_OF_STARTER 0.80 x STARTER, derived from the ladder every run and never typed. Distinct from risk_contribution's 0.75 review fraction — two rules, guarded by an assertion because a future session WILL unify them.",
+   "computer_superseded": {
+    "was": "position_sizing.allocate",
+    "on": "2026-09-17",
+    "item": "ISA-0695",
+    "why": "ISA-0695 site semantics: allocate RELAYS the floor (floor = me['min_entry_gbp'] where me = min_entry_gbp(nav)); position_sizing.min_entry_gbp (L866-870) is the only function that builds it: round(MIN_ENTRY_FRACTION_OF_STARTER * STARTER% / 100 * NAV, 2)."
+   },
+   "finding_dispositions": {
+    "FI-Q3-min_entry_gbp": {
+     "disposition": "EXPECTED_NONLIVE",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): position_sizing.min_entry_gbp gains its _fi_mark/manifest row in ISA-0695; it runs inside allocate (live_run 23 in execution_ledger_sep_2026) but no run-bound AUTHORISED observation can exist before the 03-Oct-2026 pre-run.",
+     "owner": "ISA-0699",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "target_pct",
@@ -56,7 +71,23 @@
    "note": "GBP 1,563 per position — the NORMAL/STARTER rung difference at NAV 156,321.05. FIVE live authorities disagree on it today (spec F8), three of them in prose that Steps 8-10 EXECUTE.",
    "key_scope": [
     "position_sizing"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q1OOS-target_pct-portfolio_analytics.run_analytics": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): portfolio_analytics.py L451/L485: target_pct = fw['target_pct'] is a FUND's target weight from target_weights.json rendered x100 - not the stock ladder rung.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-target_pct-position_alerts.evaluate": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): position_alerts.py L435-437: target_pct = tc = _pct(target_mean change) is the consensus PRICE-TARGET change % in a divergence alert - not the ladder rung.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "rho_sleeve",
@@ -78,7 +109,30 @@
    "gbp_exposure": 1563.21,
    "key_scope": [
     "correlation_engine"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q3-rho_sleeve": {
+     "disposition": "EXPECTED_NONLIVE",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): its only caller correlation_engine.assess has 38 live_run calls in execution_ledger_sep_2026 (last flush 2026-09-12T19:57); candidate_correlation's _mark was added by ISA-0699(a) in TB-2026-09-16-05 (16-Sep), after the last real pre-run, so no live call could be recorded yet. First observation: 03-Oct-2026 pre-run.",
+     "owner": "ISA-0699",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-rho_sleeve-deployment_sequencer.rho_to_set": {
+     "disposition": "SECOND_HOME",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): deployment_sequencer.rho_to_set (L235-259) computes rho against the sleeve AS IT WILL THEN STAND (P6.4) and that value decides REPLACEMENT_ONLY admission, while correlation_engine.candidate_correlation's rho_sleeve decides the sizing cap. Two computations of candidate-to-sleeve correlation feed two capital decisions; unification belongs to the Wave 2 final capital-authorisation work.",
+     "owner": "ISA-0705",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-rho_sleeve-stock_price_fetch.window_stability": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): stock_price_fetch.py L781: gates={'rho_pairwise': ..., 'rho_sleeve': rho_sleeve_gate} publishes the GATE THRESHOLD value in a window-stability diagnostic, not a measured correlation.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "mctr",
@@ -99,7 +153,30 @@
    "note": "The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3).",
    "key_scope": [
     "risk_contribution"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q1OOS-mctr-concentration_clusters.build": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): concentration_clusters.py L335-343: whole-PORTFOLIO (funds + stocks by SEDOL) contribution to portfolio risk - a different population from the direct-stock sleeve MCTR.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-mctr-sleeve_risk.risk_shares": {
+     "disposition": "SECOND_HOME",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): sleeve_risk.risk_shares L331-357 computes each held name's Euler share of stock-sleeve risk from weekly covariance and drives the D27 ceiling; risk_contribution.contributions computes the same share for the review flag. No declared authority between them.",
+     "owner": "ISA-0708",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-mctr-sleeve_risk.weight_at_ceiling": {
+     "disposition": "SECOND_HOME",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): sleeve_risk.weight_at_ceiling L363-382 re-derives the same Euler risk share while solving for the ceiling weight (capital consumer: ceiling_verdict REFUSE/IN_BREACH).",
+     "owner": "ISA-0708",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "evidence_state",
@@ -123,7 +200,58 @@
    "gbp_exposure": 1563.21,
    "key_scope": [
     "evidence_state"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q1OOS-evidence_state-capital_destination._shadow_failure_cannot_alter_plan": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): capital_destination._shadow_failure_cannot_alter_plan is a selftest CONTROL called only from capital_destination._selftest (L3649/L3790-3795); its 'evidence_state': 'THIN' is a fixture candidate, not an authority. The selftest span covers only functions named *selftest*.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-capital_destination._live_refused_while_not_ready": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): capital_destination._live_refused_while_not_ready is a selftest CONTROL called only from capital_destination._selftest (L3649/L3790-3795); its 'evidence_state': 'THIN' is a fixture candidate, not an authority. The selftest span covers only functions named *selftest*.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-capital_destination._reporting_run_leaves_obligation_store_identical": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): capital_destination._reporting_run_leaves_obligation_store_identical is a selftest CONTROL called only from capital_destination._selftest (L3649/L3790-3795); its 'evidence_state': 'THIN' is a fixture candidate, not an authority. The selftest span covers only functions named *selftest*.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-capital_destination._undeclared_demand_pull_basis_refuses": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): capital_destination._undeclared_demand_pull_basis_refuses is a selftest CONTROL called only from capital_destination._selftest (L3649/L3790-3795); its 'evidence_state': 'THIN' is a fixture candidate, not an authority. The selftest span covers only functions named *selftest*.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-capability_checks._use": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): capability_checks._use (L114) builds fixture candidates for the ISA-0699 capability checks (25 call sites, all checks/selftest); capability_checks is an evidence module, not a capital producer.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-consistency_check.pair_projection_carries_consumer_fields": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): consistency_check.py L1712: the dict value is a human-readable message string ('consumer prefers its evidence_states argument...'), not an evidence state.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-evidence_state-held_position_review.review": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): held_position_review.py L138/L342: ev_states[tk] = evidence_state.classify(...)['state'] and _ev = ev_states.get(tk) - a RELAY of classify's output keyed by ticker, which the key-name relay rule cannot see.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "thesis_state",
@@ -146,7 +274,30 @@
    "note": "⚑ DOES NOT EXIST TODAY (spec F9). The clean spec relocates judgement into it and no module defines, writes or reads it — judgement was evicted from the /100 and given nowhere to go, so it never left. P7.2 builds it.",
    "key_scope": [
     "thesis_state"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q1OOS-thesis_state-held_position_review.review": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): held_position_review.py L180: {'thesis_state': r.get('state')} for rows of thesis_state.load_states() - a RELAY of the declared thesis_states.json field.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-thesis_state-position_sizing.refresh_obligations": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): position_sizing.py L940-943: states[tk]['thesis_state'] = row.get('state') over thesis_state.load_states(root) - a RELAY of the declared store.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-thesis_state-stock_candidates.build": {
+     "disposition": "FALSE_POSITIVE_ANALYZER",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): stock_candidates.py L201-206: ts = thesis_states.get(tk); 'thesis_state': ts.get('state') - a RELAY of the thesis_states argument built from thesis_state.load_states.",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "ratchet_route",
@@ -204,7 +355,58 @@
    "note": "⚑ The store has never been written to and `stamp_basis` certifies backfill as point-in-time (spec F2/F10). record_level() is a capture instrument that has never captured.",
    "key_scope": [
     "stock_return_store"
-   ]
+   ],
+   "finding_dispositions": {
+    "FI-Q3-gbp": {
+     "disposition": "EXPECTED_NONLIVE",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): run_context_sep_2026 summary.fetch_report (12-Sep pre-run): state ALL_DONE, skipped_already_current 178 of n_universe 178, fetched [] - record_level is called only for a new settled Friday, so the Sep run had nothing to record. First observation expected 03-Oct-2026 pre-run (new Fridays since 11-Sep).",
+     "owner": "ISA-0699",
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-capital_destination._p1_above_band_high_gbp": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L742 GBP amount above a fund band high (trim size): a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-concentration_control.gate": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L255 GBP proposed trade amount: a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-email_prefill.build_capital_router_block": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L1817 GBP allocation amount rendered in email: a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-fund_expected_return.ordering_diagnostic": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L414 GBP value in a fund-ordering diagnostic: a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-position_sizing.stock_max": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L790 GBP demand gap of a qualifying use: a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    },
+    "FI-Q1OOS-gbp-waiting_room.recall": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): L384 GBP recall amount: a GBP amount keyed 'gbp' - not stock_return_store's weekly GBP close level (the registered quantity).",
+     "owner": null,
+     "on": "2026-09-17",
+     "by": "CLAUDE_BUILD ISA-0695"
+    }
+   }
   },
   {
    "name": "underfilled_obligation_gbp",
@@ -216,9 +418,16 @@
    "assertion": "pair_fill_obligation_store",
    "vocabulary": null,
    "gbp_exposure": 942.48,
-   "register_item": "ISA-0470",
-   "note": "UNADJUDICATED by design until P4.6 ships the store. Declared here so the gap costs a live register item rather than being invisible."
+   "register_item": "ISA-0701",
+   "note": "UNADJUDICATED by design until P4.6 ships the store. Declared here so the gap costs a live register item rather than being invisible.",
+   "register_item_superseded": {
+    "was": "ISA-0470",
+    "on": "2026-09-17",
+    "by": "ISA-0695",
+    "why": "ISA-0470 is CLOSED_FIXED (13-Sep); an UNADJUDICATED quantity must cost a LIVE item (ISA-0448). The computer adjudication belongs to the execution-owned fill-obligation store (ISA-0701, IN_PROGRESS), which names FI-QU-underfilled_obligation_gbp."
+   }
   }
  ],
- "_rule_scope": "key_scope declares which modules legitimately own a GENERIC key name. `target_pct` is the stock ladder rung in position_sizing and a fund's band target in fund_returns — two quantities, one key. A computer OUTSIDE the scope is reported as OUT_OF_SCOPE, never dropped: scope narrows the GATE, it never narrows the ENUMERATION. A quantity with no key_scope is scoped to the whole tree, which is the strict default."
+ "_rule_scope": "key_scope declares which modules legitimately own a GENERIC key name. `target_pct` is the stock ladder rung in position_sizing and a fund's band target in fund_returns — two quantities, one key. A computer OUTSIDE the scope is reported as OUT_OF_SCOPE, never dropped: scope narrows the GATE, it never narrows the ENUMERATION. A quantity with no key_scope is scoped to the whole tree, which is the strict default.",
+ "_rule_dispositions": "ISA-0695 (17-Sep-2026): finding_dispositions[<stable finding id>] = {disposition in FALSE_POSITIVE_ANALYZER|NOT_THIS_QUANTITY|SUPERSEDED (published as INFO) or TRUE_DEFECT|EXPECTED_NONLIVE|OWNED_BY|SECOND_HOME|UNRESOLVED (RED; owner ISA id required), evidence (source lines), owner, on, by}. A disposition never deletes a finding."
 }

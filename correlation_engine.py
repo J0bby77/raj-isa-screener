@@ -123,6 +123,7 @@ def candidate_correlation(candidate: str, returns_by_name: Dict[str, Dict[str, f
 
     Returns a record that always states its BASIS. `measured` False is a first-class outcome —
     it is not an error and it is not a zero."""
+    _fi_mark("correlation_engine", "candidate_correlation")   # ISA-0699: execution-ledger observation
     holdings = [n for n in returns_by_name if n != candidate]
     cand_rets = returns_by_name.get(candidate) or {}
     m = matrix if matrix is not None else pairwise_matrix(returns_by_name)

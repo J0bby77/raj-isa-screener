@@ -1,6 +1,6 @@
 {
  "_what": "P0.3 threshold register (= R15.2, specified since adoption and declared for ZERO gates until 28-Aug-2026). Every capital-gating threshold publishes the dispersion of the quantity it tests, itself expressed in standard deviations, and its realised fire rate.",
- "_rule": "R3.11, adopted by this build — BEFORE DECLARING ANY THRESHOLD, DIVIDE IT BY THE STANDARD DEVIATION OF THE THING IT TESTS.",
+ "_rule": "Noise-normalisation discipline (binding basis R13.1/R12.3/R15.2; proposed as 'R3.11' on 27-Aug-2026 but never adopted - corrected ISA-0695) — BEFORE DECLARING ANY THRESHOLD, DIVIDE IT BY THE STANDARD DEVIATION OF THE THING IT TESTS.",
  "_verdicts": {
   "DISCRIMINATING": "|t| >= 1.0",
   "WEAK": "0.5 <= |t| < 1.0",
@@ -23,7 +23,9 @@
    ],
    "gbp_exposure": 0.0,
    "register_item": "ISA-0458",
-   "note": "⚑ The spec measured 35.2%/yr TE on 27-Aug, which puts -5pp at 0.14 SD and a 44% false-fire rate on ZERO true alpha — at 6, 12 AND 24 months. The window was never the lever. Seeded null here on purpose: P1 re-measures it rather than this build copying a number across (R4.4)."
+   "note": "⚑ The spec measured 35.2%/yr TE on 27-Aug, which puts -5pp at 0.14 SD and a 44% false-fire rate on ZERO true alpha — at 6, 12 AND 24 months. The window was never the lever. Seeded null here on purpose: P1 re-measures it rather than this build copying a number across (R4.4).",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "clean spec V2.1 D19 leg (a) (-5pp trail vs VUAG); measured diagnostic owned by ISA-0458 (BLOCKED_ON_RAJ)"
   },
   {
    "name": "RHO_MAX_PAIRWISE_GATE",
@@ -37,7 +39,9 @@
     "correlation_engine.admission"
    ],
    "gbp_exposure": 1563.21,
-   "register_item": "ISA-0464"
+   "register_item": "ISA-0709",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "ISA_V2_1_BUILD_SPEC_CLEAN_23Aug2026.md A2.1 (rho_max_pairwise > 0.70 -> REPLACEMENT_ONLY)"
   },
   {
    "name": "RHO_SLEEVE_GATE",
@@ -51,7 +55,9 @@
     "correlation_engine.admission"
    ],
    "gbp_exposure": 1563.21,
-   "register_item": "ISA-0464"
+   "register_item": "ISA-0709",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "ISA_V2_1_BUILD_SPEC_CLEAN_23Aug2026.md A2.1 (rho_sleeve > 0.60 -> REPLACEMENT_ONLY)"
   },
   {
    "name": "RHO_REORDER_SE_MULTIPLE",
@@ -65,8 +71,10 @@
     "deployment_sequencer.sequence"
    ],
    "gbp_exposure": 5471.24,
-   "register_item": "ISA-0464",
-   "note": "⚑ P6.3, the self-critique of the 26-Aug design: it applied 'divide by the SD' to Raj's ratchet and not to its own sequencer. A sequencer that reorders on any rho difference resolves noise."
+   "register_item": "ISA-0709",
+   "note": "⚑ P6.3, the self-critique of the 26-Aug design: it applied 'divide by the SD' to Raj's ratchet and not to its own sequencer. A sequencer that reorders on any rho difference resolves noise.",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "P6.3 noise gate (ISA-0601), deployment_sequencer.py 'DECLARED'"
   },
   {
    "name": "FLAG_FRACTION_OF_STARTER",
@@ -80,7 +88,10 @@
     "risk_contribution.flag"
    ],
    "gbp_exposure": 5471.24,
-   "note": "REVIEW fraction — 'below this a held position is not carrying its risk share'. DELIBERATELY DISTINCT from MIN_ENTRY_FRACTION_OF_STARTER 0.80 (P4.4)."
+   "note": "REVIEW fraction — 'below this a held position is not carrying its risk share'. DELIBERATELY DISTINCT from MIN_ENTRY_FRACTION_OF_STARTER 0.80 (P4.4).",
+   "basis_class": "DECLARED_POLICY",
+   "register_item": "ISA-0709",
+   "authority_trace": "ISA_V2_1_BUILD_SPEC_CLEAN_23Aug2026.md §8: FLAG when risk_weight < 0.75 x 3.5% for 2 consecutive runs"
   },
   {
    "name": "MIN_ENTRY_FRACTION_OF_STARTER",
@@ -94,8 +105,10 @@
     "position_sizing.allocate"
    ],
    "gbp_exposure": 4377.0,
-   "register_item": "ISA-0470",
-   "note": "ENTRY floor — 'below this, do not open a position at all'. ⚑ A future session will read 0.75 and 0.80 as a duplicate and unify them, silently moving the entry floor."
+   "register_item": "ISA-0709",
+   "note": "ENTRY floor — 'below this, do not open a position at all'. ⚑ A future session will read 0.75 and 0.80 as a duplicate and unify them, silently moving the entry floor.",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "Raj D16, 26/27-Aug-2026 (ISA-0470): MIN_ENTRY = 0.80 x STARTER"
   },
   {
    "name": "ER_DEPLOY_FLOOR",
@@ -111,7 +124,13 @@
    ],
    "gbp_exposure": 11250.0,
    "register_item": "ISA-0466",
-   "note": "⚑ Excluded 0 of 13 names in August. A21's +5 conviction floor was in practice the ONLY live tightening on this gate, and D21 retires A21 — so the residual is a MEASURED recalibration of this hurdle, never a reinstated +5 on a retired score. Value is DERIVED every run (isa_policy) and is deliberately not typed here."
+   "note": "⚑ Excluded 0 of 13 names in August. A21's +5 conviction floor was in practice the ONLY live tightening on this gate, and D21 retires A21 — so the residual is a MEASURED recalibration of this hurdle, never a reinstated +5 on a retired score. Value is DERIVED every run (isa_policy) and is deliberately not typed here.",
+   "basis_class": "DERIVED",
+   "derivation": {
+    "formula": "scoring_config.ER_DEPLOY_FLOOR = REQUIRED_RETURN_MID + ER_FRICTION_BUFFER (2.0pp) - isa_policy.DERIVED_THRESHOLDS['ER_DEPLOY_FLOOR']",
+    "upstream_authority": "REQUIRED_RETURN_MID - the A19 required-return anchor (derive_required_return; 13.7% as at 2026-09-05)",
+    "boundary_test": "consistency_check.pair_no_literal_fallback_for_derived_thresholds"
+   }
   },
   {
    "name": "FUND_GATE_PCT",
@@ -125,50 +144,47 @@
     "fund_returns.gate"
    ],
    "gbp_exposure": 10702.06,
-   "note": "The fund sleeve this build routes GBP 10,702 to was measured at 6.24% forward E[r] against a required 13.8-13.9%. Registered so that number is a published t-ratio rather than a fact somebody has to remember."
+   "note": "The fund sleeve this build routes GBP 10,702 to was measured at 6.24% forward E[r] against a required 13.8-13.9%. Registered so that number is a published t-ratio rather than a fact somebody has to remember.",
+   "basis_class": "DERIVED",
+   "derivation": {
+    "formula": "scoring_config.FUND_GATE_PCT = round(REQUIRED_RETURN_MID - 1.9, 1) - isa_policy.DERIVED_THRESHOLDS['FUND_GATE_PCT']",
+    "upstream_authority": "REQUIRED_RETURN_MID - the A19 required-return anchor; the 1.9pp stock-sleeve margin per ISA-0432/0433",
+    "boundary_test": "consistency_check.pair_no_derived_threshold_in_json"
+   }
   },
   {
-   "name": "SLEEVE_SECTOR_CAP_ISA",
+   "name": "SECTOR_CAP_NAV",
    "value": 0.12,
-   "units": "fraction_of_isa",
-   "quantity_tested": "ISA weight of one GICS sector inside the direct-stock sleeve",
+   "units": "fraction_of_total_isa_nav",
+   "quantity_tested": "post-trade direct-stock exposure to one canonical sector (YF/Morningstar sector taxonomy, NOT GICS) as a share of total ISA NAV",
    "sd_of_quantity": null,
    "sd_basis": "PENDING",
    "fire_rate_history": [],
    "gates": [
-    "rerank_watchlist._apply_diversification"
+    "concentration_control.gate"
    ],
    "gbp_exposure": 5471.24,
    "register_item": "ISA-0465",
-   "note": "⚑ HAS NEVER FIRED. `action_stack_ctx.json` does not exist and no module writes it, so `_apply_diversification` runs with an empty sector map and no cap can bind. fire_rate_history is empty because there has never been a fire to record — which is exactly what NON_INFORMATIVE is for."
+   "note": "RAJ 16-Sep-2026 (ISA-0465): DECLARED fixed backstop, not calibrated; revalidate_by 2026-12-31. SHADOW until Raj reviews; fire-rate band to be set from shadow evidence (R15.2).",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "Raj 16-Sep-2026 (ISA-0465); rationale ledger declaration complete"
   },
   {
-   "name": "SLEEVE_THEME_CAP",
+   "name": "THEME_CAP_SLEEVE",
    "value": 0.5,
-   "units": "fraction_of_sleeve",
-   "quantity_tested": "sleeve weight of one theme",
+   "units": "fraction_of_post_trade_direct_stock_sleeve",
+   "quantity_tested": "post-trade exposure to one canonical theme as a share of the post-trade direct-stock sleeve",
    "sd_of_quantity": null,
    "sd_basis": "PENDING",
    "fire_rate_history": [],
    "gates": [
-    "rerank_watchlist._apply_diversification"
+    "concentration_control.gate"
    ],
    "gbp_exposure": 5471.24,
-   "register_item": "ISA-0465"
-  },
-  {
-   "name": "DIVERSIFY_OVERRIDE_DELTA",
-   "value": 10,
-   "units": "source_score_points",
-   "quantity_tested": "source_score gap required to override a diversification cap",
-   "sd_of_quantity": null,
-   "sd_basis": "PENDING P6 — measured SE of source_score",
-   "fire_rate_history": [],
-   "gates": [
-    "rerank_watchlist._apply_diversification"
-   ],
-   "gbp_exposure": 5471.24,
-   "register_item": "ISA-0465"
+   "register_item": "ISA-0465",
+   "note": "RAJ 16-Sep-2026 (ISA-0465): DECLARED fixed backstop; theme taxonomy for main-route names does not yet exist (UNKNOWN refuses). revalidate_by 2026-12-31.",
+   "basis_class": "DECLARED_POLICY",
+   "authority_trace": "Raj 16-Sep-2026 (ISA-0465/0700); rationale ledger declaration complete"
   },
   {
    "name": "max_single_fund_pct",
@@ -181,7 +197,11 @@
    "gates": [
     "capital_destination.allocate_funds"
    ],
-   "gbp_exposure": 10702.06
+   "gbp_exposure": 10702.06,
+   "basis_class": "DECLARED_POLICY",
+   "register_item": "ISA-0709",
+   "authority_trace": "target_weights.json thresholds.max_single_fund_pct = 0.125 (who/when not recorded)"
   }
- ]
+ ],
+ "_rule_basis_class": "ISA-0695 (17-Sep-2026): basis_class DECLARED_POLICY (provenance from Dashboard/state/isa_rationale_declarations.json: who_set_it, source, what_would_falsify_it, revalidate_by - R12.3/R13.1) | EMPIRICAL (calibration {population, window, as_of, effective_n} + sd - R13.1 MEASURED/BACKTESTED) | DERIVED (derivation {formula, upstream_authority, boundary_test}). expected_fire_rate_band {low, high} per R15.2. The SD/t ratio is a diagnostic; 'R3.11' was never adopted."
 }

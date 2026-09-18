@@ -38,6 +38,13 @@ import json
 import os
 from typing import Dict, List, Optional
 
+try:                                                    # pragma: no cover - wiring only (ISA-0699)
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -60,6 +67,7 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
     Returns {rows, warnings, summary}. A control that could not be evaluated for a name is
     recorded on that name as UNEVALUATED with its reason — never omitted, because an omitted
     name and a clean name read identically downstream (R2.10)."""
+    _fi_mark("held_position_review", "review")   # ISA-0699: execution-ledger observation
     root = root or HERE
     today = today or _today()
     if not _flag():
@@ -392,7 +400,7 @@ def _selftest(verbose: bool = True) -> int:
         if not cond:
             raise AssertionError(msg)
 
-    r = review(os.path.join(HERE, "portfolio_data_sep_2026.json"))
+    r = review(os.path.join(HERE, "portfolio_data_sep_2026.json"), dry_run=True)   # ISA-0704: no store write
     ok(r["state"] == "OK", r.get("warnings"))
     ok(r["summary"]["n_held"] >= 6, r["summary"])
     ok(isinstance(r["warnings"], list) and r["warnings"], "a live book must produce findings")

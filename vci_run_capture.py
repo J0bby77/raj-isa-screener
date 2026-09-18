@@ -58,12 +58,30 @@ OVERRIDE_TYPES = (
 
 # ── skeleton ─────────────────────────────────────────────────────────────────────────────
 
-def new_run(month_label, run_date=None):
-    """Empty vci_run_[mmm]_[yyyy].json skeleton."""
+def _vci_capital_authority():
+    """R18.5 / ISA-0629 — the VCI run's capital authority, checked when the run starts. An
+    unavailable release gate is REFUSED, never AUTHORISED (R4.3)."""
+    try:
+        import release_gate as _rg
+        return _rg.capital_run_authority("vci_run")
+    except Exception as e:                                            # noqa: BLE001
+        return {"surface": "vci_run", "authority": "REFUSED", "live_state": "UNKNOWN",
+                "build_id": None, "why": "release_gate unavailable — %s: %s" % (type(e).__name__, e)}
+
+
+def new_run(month_label, run_date=None, trusted_build=None):
+    """Empty vci_run_[mmm]_[yyyy].json skeleton, stamped with the run's capital authority.
+
+    ⚑ ISA-0629 (16-Sep-2026): the VCI run is a capital-decision run and no VCI surface asked
+    whether LIVE matched a signed Trusted Build. `trusted_build` is recorded at init (the
+    Run_Context's §7.6B.2 capture init is the first executed step), and `validate()` refuses to
+    persist a deploy-eligible candidate whose decision is not an explicit refusal while the
+    authority is not AUTHORISED. `trusted_build=` lets a fixture pass a record explicitly."""
     return {
         "schema_version": SCHEMA_VERSION,
         "month_label": month_label,
         "run_date": run_date or datetime.now().strftime("%Y-%m-%d"),
+        "trusted_build": trusted_build if trusted_build is not None else _vci_capital_authority(),
         "candidates": [],
         "overrides": [],
         "discards": [],
@@ -222,6 +240,19 @@ def validate(run):
     for i, o in enumerate(run.get("overrides", [])):
         if o.get("override_type") not in OVERRIDE_TYPES:
             errs.append(f"override[{i}] unknown override_type: {o.get('override_type')}")
+    # ⚑ R18.5 / ISA-0629 — no capital decision on an untrusted tree. The authority is read
+    #   through release_gate's one reader shape; absence is REFUSED (R4.3). A deploy-eligible
+    #   candidate must carry a decision that STARTS with "REFUSED" while it is not AUTHORISED.
+    _auth = (run.get("trusted_build") or {}).get("authority")
+    if _auth not in ("AUTHORISED", "NOT_ENFORCED"):
+        for i, c in enumerate(run.get("candidates", [])):
+            if c.get("deploy_eligible") and not str(c.get("decision") or "").upper().startswith("REFUSED"):
+                errs.append(
+                    f"candidate[{i}] ({c.get('ticker', '?')}) is deploy-eligible with decision "
+                    f"{str(c.get('decision'))[:60]!r} but the run's capital authority is {_auth!r} "
+                    f"(R18.5: LIVE does not match a signed Trusted Build, or ISA-0696: its suite census "
+                    f"is not FRESH_GREEN). Record the decision as 'REFUSED — UNTRUSTED_LIVE_STATE' / "
+                    f"'REFUSED — SUITE_CENSUS_<state>' or reconcile LIVE first.")
     return (not errs), errs
 
 
@@ -245,6 +276,10 @@ def write(run, here=None, month_label=None):
 
 
 # ── selftest ─────────────────────────────────────────────────────────────────────────────
+
+CANDIDATE_REQUIRED_FIXTURE = {k: None for k in CANDIDATE_REQUIRED}
+CANDIDATE_REQUIRED_FIXTURE.update({"ticker": "ABS"})
+
 
 def _selftest():
     fails = []
@@ -341,6 +376,31 @@ def _selftest():
             ok("VRC16 write() REFUSES an invalid document", False)
         except ValueError:
             ok("VRC16 write() REFUSES an invalid document", True)
+
+    # ── ISA-0629 / R18.5 — a capital decision on an untrusted tree is refused at capture ───────
+    ok("VRC17 new_run stamps a capital authority from the release gate (never absent)",
+       (new_run("aug_2026").get("trusted_build") or {}).get("authority")
+       in ("AUTHORISED", "REFUSED", "NOT_ENFORCED"))
+    v_dep = dict(verdict, deploy_eligible=True, size_pct=0.75)
+    def _run_with(auth, decision):
+        r = new_run("aug_2026", run_date="2026-08-09",
+                    trusted_build={"authority": auth, "live_state": "FIXTURE"})
+        add_candidate(r, ticker="DEP", theme="T", layer="L1", market_cap=1e9, part_a_score=15,
+                      part_a_threshold_verdict="PASS", acs_dimensions={}, acs_total=80,
+                      acs_ex_acs8=76, fv_inputs={}, verdict=v_dep, signals=[], catalyst=None,
+                      decision=decision)
+        return validate(r)
+    ok("VRC18 NEGATIVE CONTROL: REFUSED authority + deploy-eligible DEPLOY decision FAILS validation",
+       not _run_with("REFUSED", "DEPLOY 0.75% starter")[0])
+    ok("VRC18b NEGATIVE CONTROL: an ABSENT authority is treated as REFUSED",
+       any("capital authority" in e for e in
+           validate(dict(new_run("aug_2026", trusted_build={}),
+                         candidates=[dict(CANDIDATE_REQUIRED_FIXTURE, deploy_eligible=True,
+                                          decision="DEPLOY")]))[1]))
+    ok("VRC19 POSITIVE CONTROL: AUTHORISED + the same DEPLOY decision validates",
+       _run_with("AUTHORISED", "DEPLOY 0.75% starter")[0])
+    ok("VRC20 POSITIVE CONTROL: REFUSED + an explicit 'REFUSED — UNTRUSTED_LIVE_STATE' decision validates",
+       _run_with("REFUSED", "REFUSED — UNTRUSTED_LIVE_STATE")[0])
 
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)}) {fails}")
     return 0 if not fails else 1

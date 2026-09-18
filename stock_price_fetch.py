@@ -428,15 +428,27 @@ def build_universe(*, store: Optional[dict] = None, portfolio_data: Optional[dic
                  else _vci_deploy_names()),
                 ("candidate_pool", _pick(candidate_pool, "candidate_pool"))]
     order, origin, unmapped = [], {}, []
+    collapsed = []
     for label, names in sources:
         for t in names:
             if not t:
                 continue
             t = str(t).strip()
-            if t in origin:
+            # ⚑ ISA-0549: the universe emits CANONICAL identities only. A label declared as an alias
+            #   of a symbol already in the universe is collapsed and named, never fetched twice.
+            try:
+                ct = srs.canonical_name(t, smap) if t in smap else t
+            except srs.CanonicalIdentityConflict:
+                ct = t
+                unmapped.append(t)
+            if ct in origin:
+                if ct != t:
+                    collapsed.append({"label": t, "canonical": ct, "source": label})
                 continue
-            origin[t] = label
-            order.append(t)
+            if ct != t:
+                collapsed.append({"label": t, "canonical": ct, "source": label})
+            origin[ct] = label
+            order.append(ct)
     for t in order:
         if t not in smap:
             unmapped.append(t)
@@ -451,6 +463,7 @@ def build_universe(*, store: Optional[dict] = None, portfolio_data: Optional[dic
             "997.92. Add each to stock_price_fetch.SYMBOL_MAP deliberately."
             % (len(unmapped), unmapped[:20]))
     return {"tickers": order, "n": len(order), "origin": origin,
+            "aliases_collapsed": collapsed,
             "unmapped": sorted(unmapped), "n_unmapped": len(unmapped),
             "symbols": {t: smap[t] for t in order},
             "basis": ("union in declared order: store (STICKY) -> portfolio_data (BROKER "
@@ -497,7 +510,7 @@ def is_current(store: dict, ticker: str, today: Optional[datetime.date] = None) 
         observation (a young listing, a holiday, a delisting) and would otherwise be refetched
         on every pass forever.
     """
-    rec = ((store.get("names") or {}).get(ticker) or {})
+    rec = srs.record_of(store, ticker)                     # ISA-0549
     d = today or datetime.date.today()
     if rec.get("last_fetched_on") == d.isoformat():
         return True
@@ -537,6 +550,15 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
     rec_on = today or datetime.date.today()
     store = srs.load()
     smap = symbol_map if symbol_map is not None else load_symbol_map()
+    # ⚑ ISA-0549: the writer canonicalises BEFORE any union/fetch. A conflict REFUSES the fetch with
+    #   the store untouched (never a silent merge of two different series).
+    try:
+        _ident = srs.canonicalise(store, smap, today=rec_on.isoformat())
+    except srs.CanonicalIdentityConflict as exc:
+        return {"state": "IDENTITY_CONFLICT", "store_unchanged": True, "reason": str(exc)[:600],
+                "detail": "ISA-0549: two store keys resolve to one security with different series"}
+    if _ident["changed"]:
+        srs.save(store)
     unmapped = []
     if universe is None:
         try:
@@ -556,6 +578,13 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
         for t in tickers:
             if t not in smap:
                 raise FetchRefused("%s has no declared Yahoo symbol (SYMBOL_MAP)" % t)
+        # ISA-0549: an explicit universe is canonicalised too (one fetch, one key per security)
+        _c = []
+        for t in tickers:
+            ct = srs.canonical_name(t, smap)
+            if ct not in _c:
+                _c.append(ct)
+        tickers = _c
 
     part = _load_partial()
     done = set(part.get("done") or [])
@@ -594,12 +623,12 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
             failed.append({"ticker": t, "symbol": smap[t],
                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
             continue
-        store.setdefault("names", {}).setdefault(t, {})["last_fetched_on"] = rec_on.isoformat()
+        store.setdefault("names", {}).setdefault(srs.canonical_name(t, smap), {})["last_fetched_on"] = rec_on.isoformat()
         cur = d["currency"] or "GBP"
         wk = to_friday(d["daily"])
         # `GBp` is PENCE. It is not a foreign currency and it needs no FX pair — it needs a
         # fixed, declared factor of exactly 0.01 (P1-A4).
-        n_before = len(((store.get("names") or {}).get(t) or {}).get("observations") or {})
+        n_before = len(srs.record_of(store, t, smap).get("observations") or {})
         for f, level in sorted(wk.items()):
             if cur == "GBP":
                 fxr = None
@@ -621,7 +650,7 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
                                  total_return=d["total_return"], recorded_on=rec_on)
             except ValueError:
                 skipped_obs += 1
-        n_after = len(((store.get("names") or {}).get(t) or {}).get("observations") or {})
+        n_after = len(srs.record_of(store, t, smap).get("observations") or {})
         ok.append({"ticker": t, "symbol": smap[t], "currency": cur,
                    "total_return": d["total_return"],
                    "observations_before": n_before, "observations_after": n_after})
@@ -713,6 +742,11 @@ def matrix(store: Optional[dict] = None, tickers: Optional[Sequence[str]] = None
             "n_pairs_measured": len(pairs), "n_pairs_total": len(rho),
             "sigma_ann": {t: round(v, 4) for t, v in sig.items()},
             "stale_excluded": cov["stale_excluded"],
+            "aliases_collapsed": cov.get("aliases_collapsed") or [],
+            # ISA-0549: rho ~ 1 between two DISTINCT canonical identities is a REVIEW diagnostic, not a
+            # failure - two securities can share a sampled series; identity is decided by the map.
+            "identity_review_pairs": sorted("%s|%s" % k for k, v in rho.items()
+                                            if v is not None and v >= 1.0 - 1e-9),
             "se_rho": (round(1.0 / ((max(n_used, 5) - 3) ** 0.5), 4) if n_used >= 8 else None),
             "coverage": {"n_measured": cov["n_measured"], "n_names": cov["n_names"],
                          "pit_share": cov["pit_share"]}}
@@ -766,7 +800,7 @@ def e4_relative_momentum(ticker: str, *, store: Optional[dict] = None,
     store = store if store is not None else srs.load()
     obs = {}
     for t in (ticker, benchmark):
-        rec = ((store.get("names") or {}).get(t) or {}).get("observations") or {}
+        rec = srs.record_of(store, t).get("observations") or {}   # ISA-0549
         if not rec:
             return None
         obs[t] = {k: v["gbp"] for k, v in rec.items()}
@@ -1623,6 +1657,55 @@ def _selftest() -> dict:
         assert _leak == {"NOK"}, _leak
     finally:
         CURRENCY_TO_PAIR["NOK"] = _saved
+    n += 5
+
+    # ── ISA-0549 — canonical identity through the REAL readers (BuildSpec §15 fixtures 5, 6) ──
+    _sm = {"ONT": "ONT.L", "ONT.L": "ONT.L", "AAA": "AAA", "BBB": "BBB"}
+    _b0 = srs.friday_of(datetime.date.today()) - datetime.timedelta(weeks=69)   # recent: not STALE
+    _st = srs._empty()
+    import random as _rnd
+    _rg = _rnd.Random(7)
+    for _k in ("ONT", "ONT.L", "AAA", "BBB"):
+        _st["names"][_k] = {"currency": "GBP", "observations": {}}
+    _lv = {"ONT": 100.0, "AAA": 50.0, "BBB": 20.0}
+    for _i in range(70):
+        _f = (_b0 + datetime.timedelta(weeks=_i)).isoformat()
+        for _k in ("ONT", "AAA", "BBB"):
+            _lv[_k] *= 1.0 + _rg.uniform(-0.05, 0.05)
+        _st["names"]["ONT"]["observations"][_f] = {"gbp": _lv["ONT"]}
+        _st["names"]["ONT.L"]["observations"][_f] = {"gbp": _lv["ONT"]}
+        _st["names"]["AAA"]["observations"][_f] = {"gbp": _lv["AAA"]}
+        _st["names"]["BBB"]["observations"][_f] = {"gbp": _lv["BBB"]}
+    _cache = dict(srs._SMAP_CACHE)
+    srs._SMAP_CACHE.update(key=("selftest", None), map=_sm)
+    _orig_sm = srs.symbol_map
+    srs.symbol_map = lambda: _sm                                        # noqa: E731
+    try:
+        _legacy_union = matrix(_st, None, weeks=52)
+        assert _legacy_union["n_names"] == 3 and not ({"ONT", "ONT.L"} <= set(_legacy_union["names"])), \
+            "ISA-0549 MUST-FIRE fixture 5: matrix(tickers=None) on a LEGACY store never carries one security twice"
+        _ex = matrix(_st, ["ONT", "ONT.L", "AAA"], weeks=52)
+        assert _ex["names"] == ["AAA", "ONT"] and _ex["aliases_collapsed"][0]["label"] == "ONT.L", \
+            "ISA-0549 fixture 6: an explicit request for both labels deduplicates to the FIRST label (never double weight)"
+        _u = build_universe(store=_st, portfolio_data={"stocks": [{"ticker": "ONT"}]}, watchlist=[],
+                            vci_watchlist=[], vci_deploy=[], candidate_pool=[], symbol_map=_sm)
+        assert _u["tickers"].count("ONT.L") == 1 and "ONT" not in _u["tickers"] and _u["n"] == 3, \
+            "ISA-0549: build_universe emits canonical identities only"
+        srs.canonicalise(_st, _sm)
+        _after = matrix(_st, ["ONT", "AAA", "BBB"], weeks=52)
+        _before = matrix(_legacy_st := json.loads(json.dumps(_st)), ["ONT", "AAA", "BBB"], weeks=52)
+        assert _after["rho"] == _before["rho"] and _after["sigma_ann"] == _before["sigma_ann"], \
+            "ISA-0549: the broker-label request reads the same series after migration"
+        _st2 = srs._empty()
+        _st2["names"] = {k: json.loads(json.dumps(v)) for k, v in _st["names"].items()}
+        _st2["names"]["TWIN"] = json.loads(json.dumps(_st["names"]["AAA"]))
+        _sm["TWIN"] = "TWIN"
+        _tw = matrix(_st2, ["AAA", "TWIN"], weeks=52)
+        assert _tw["names"] == ["AAA", "TWIN"] and _tw["identity_review_pairs"] == ["AAA|TWIN"], \
+            "ISA-0549 NEGATIVE CONTROL: two DISTINCT ids with identical series stay distinct (rho=1 is a review diagnostic only)"
+    finally:
+        srs.symbol_map = _orig_sm
+        srs._SMAP_CACHE.clear(); srs._SMAP_CACHE.update(_cache)
     n += 5
 
     return {"ok": True, "assertions": n, "network": False,

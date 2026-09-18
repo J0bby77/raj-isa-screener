@@ -102,6 +102,17 @@ FALLBACK_WRITTEN = {
 # Referenced by fallback code but not needed on the fallback path, each with its reason.
 FALLBACK_EXCLUDED = {
     "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
+    # ISA-0465/ISA-0700 (16-Sep-2026): the declared multi-label theme taxonomy is read only by
+    # concentration_control on the MONTHLY router path (capital_destination), never by the weekly
+    # screen fallback. Not on the RUNTIME_JSON allow-list, so not published (the repo is public and
+    # the file lists the monthly candidate population); versioning lives in the file's own
+    # version/changelog/sha256, published in every concentration record.
+    "concentration_theme_taxonomy.json": ("ISA-0700 declared theme taxonomy; monthly router only "
+                                          "(concentration_control), not the weekly screen fallback"),
+    "concentration_taxonomy_exception_review.json": ("ISA-0700 GENERATED exception-review list "
+                                                     "(concentration_control --exception-review) for Raj's "
+                                                     "adjudication; monthly/interactive only, never read by "
+                                                     "the weekly screen fallback"),
     # ISA-0548 build (12-Sep-2026). Named by position_sizing.load_declared_binaries, which is
     # on the MONTHLY PRE-RUN path (step 6.5's held-binary risk budget), not on the weekly
     # screen's fallback path — the fallback entrypoints are screener_core / screener_local /
@@ -129,8 +140,9 @@ FALLBACK_EXCLUDED = {
                            "the monthly pre-run and the capital router, not by the weekly "
                            "screen fallback. PERSONAL — not on the allow-list, not pushed"),
     "underfilled_positions.json": ("D17 fill-obligation store, WRITTEN by "
-                                   "position_sizing.allocate/refresh_obligations on the "
-                                   "monthly pre-run path (ISA-0669). The fallback neither "
+                                   "position_sizing.activate_from_executions/refresh_obligations "
+                                   "on the monthly pre-run path (ISA-0669, ISA-0701: never by "
+                                   "allocate). The fallback neither "
                                    "reads nor writes it. PERSONAL — not pushed"),
     "vci_binary_positions.json": ("declared held-binary registry; read by the monthly pre-run "
                                   "(step 6.5), not by the weekly screen fallback. PERSONAL: "

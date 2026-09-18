@@ -1753,9 +1753,9 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
         obs = [r for r in (al.get("rows") or []) if r.get("obligation_gbp")]
         if obs:
             out["fill_obligation_line"] = (
-                "FILL OBLIGATION created: %s. Under D17 a sub-target entry carries a FIRST "
-                "CLAIM on the next tranche, ahead of any new position — and it is VOIDED if "
-                "the name degrades before then."
+                "FILL OBLIGATION PROPOSED (not yet a claim): %s. Under D17 a sub-target entry "
+                "carries a FIRST CLAIM on the next tranche ONLY once the entry is EXECUTED and "
+                "confirmed from the broker record (ISA-0701); it is VOIDED if the name degrades."
                 % "; ".join("%s %s to reach its %s target"
                             % (r["ticker"], _gbp(r["obligation_gbp"]), r.get("rung", "?"))
                             for r in obs))
@@ -1873,6 +1873,36 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
     else:
         out["idle_line"] = ("Residual: %s - every pound offered reached a destination."
                             % cd.get("residual_state", "NONE"))
+
+    # ── 7a. RAJ A1.4 — where the residual went (MMF sweep) or why it could not go ───────────
+    rr = cd.get("residual_routing") or {}
+    if rr.get("state") and rr.get("state") != "NOT_REQUIRED":
+        out["residual_routing_line"] = ("Residual routing %s: %s" % (rr.get("state"), rr.get("reason", "")))
+        if rr.get("state") == "PRICED_IDLE_DEGRADED":
+            warns.append("RESIDUAL NOT ROUTED: " + str(rr.get("reason")))
+    # ── 7b. ISA-0465 concentration backstops — rendered from the router's record, never computed
+    cc = cd.get("concentration") or {}
+    im = cc.get("impact") or {}
+    if cc.get("mode"):
+        if im.get("blocked_stock_gbp") is not None:
+            eff = (im.get("concentration_effect") or {})
+            out["concentration_line"] = (
+                "Concentration backstops (%s; sector <=%.0f%% NAV, theme <=%.0f%% of stock sleeve; "
+                "taxonomy %s): gate fires %s; blocked %s (%.2f%% NAV); gated residual %s; "
+                "opportunity cost %s; max theme pre/post %s -> %s."
+                % (cc.get("mode"), cc.get("sector_cap_pct_nav") or 0, cc.get("theme_cap_pct_sleeve") or 0,
+                   ((im.get("taxonomy") or {}).get("declared_file") or {}).get("version", "?"),
+                   im.get("fire_counts"), _gbp(im.get("blocked_stock_gbp")), im.get("blocked_pct_nav") or 0.0,
+                   ((im.get("residual_routing") or {}).get("gated") or {}).get("state", "?"),
+                   ((im.get("opportunity_cost") or {}).get("annual_expected_return_forgone_gbp")
+                    if (im.get("opportunity_cost") or {}).get("state") == "MEASURED" else "UNMEASURED"),
+                   (eff.get("pre") or {}).get("max_theme"), (eff.get("post_gated") or {}).get("max_theme")))
+        else:
+            out["concentration_line"] = ("Concentration backstops (%s): impact %s - %s"
+                                         % (cc.get("mode"), im.get("state", "ABSENT"), im.get("reason", "")))
+            warns.append(out["concentration_line"])
+        if cc.get("mode") == "SHADOW":
+            out["concentration_line"] += " SHADOW moves no capital; Raj decides LIVE after the evidence."
 
     # ── 8. the waiting room / recall leg ────────────────────────────────────────────────────
     if wr:
@@ -2037,6 +2067,13 @@ SUMMARY_ESCALATED = {
     # IS the exception list: when every declaration check is clean it has nothing to tell the
     # reader that the §11 integrity queue does not already say. The pre-run emits each failure
     # with the "PREFLIGHT " prefix into the warning list the review reads before writing.
+    "trusted_build": "R18.5 CAPITAL AUTHORITY",     # Step 0a — ISA-0629 signed-LIVE refusal
+    # ISA-0696 A2 — the run-time census self-heal ESCALATES only when it could not leave a FRESH_GREEN census:
+    #   a clean no-op/publication has nothing to tell the reader that summary.trusted_build does not.
+    "census_ensure": "ISA-0696 CENSUS",
+    # ISA-0701 — activation outcomes ESCALATE: an activated/fulfilled first claim, or an execution
+    #   that could NOT create one (deviation, blocked VCI, non-contemporaneous plan), is an exception.
+    "obligation_activation": "Step 1.5 (ISA-0701)",
     "framework_integrity_preflight": "PREFLIGHT",   # Step 0 — declaration checks
     # ⛑ ADMISSIBLE FOR THE SAME REASON, and the reason is the point (ISA-0594). When every
     # assurance stage has run, `assurance` tells the reader nothing §11 does not already say.

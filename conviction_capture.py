@@ -49,6 +49,12 @@ TIERS = {"T1", "T2", "T3", "T1-A", "T2-A", "T3-A"}
 ROUTES = {"main", "vci"}
 
 
+def _evidence_states():
+    """The declared evidence-state vocabulary, read from its one home (evidence_state.STATE_TO_RUNG)."""
+    import evidence_state as _es
+    return set(_es.STATE_TO_RUNG)
+
+
 def _single_authority() -> bool:
     """Is D21's single sizing authority live? Defaults TRUE when the flag is undeclared —
     the post-D21 world is the intended one, and a rollback must be a DELIBERATE act."""
@@ -221,8 +227,74 @@ def apply_judgements(doc, judgements, compliance_mod=None):
     return {"applied": applied, "not_supplied": skipped}
 
 
+def _judgement_errors(doc, n):
+    """The D21 judgement errors for ONE name: strict minus structural validation of a one-name
+    document. Derived from validate() itself, so the rule has one home (R4.4)."""
+    one = dict(doc, names=[n], not_progressed=doc.get("not_progressed") or [])
+    structural = set(validate(one, strict_judgement=False))
+    return [e for e in validate(one, strict_judgement=True) if e not in structural]
+
+
+def gate_by_name(doc, scope):
+    """ISA-0698 (Raj, 16-Sep-2026, Option B) — the §7.6.2 gate, per name, on the mechanically
+    derived capital-precondition population (`capital_destination.judgement_scope`).
+
+    Returns {blocking, scope_state, required, complete, refused_capital, non_blocking_missing,
+    not_applicable, counts}. Only `blocking` (a structurally invalid record) stops the email.
+    A REQUIRED name with missing/invalid judgement is REFUSED NEW CAPITAL by name; a name outside
+    the population that lacks judgement is NON_BLOCKING_RECORD_MISSING; held names are judged in
+    thesis_state / held review and are NOT_APPLICABLE here. An UNKNOWN scope refuses positive
+    stock capital for every main/VCI candidate — never a run-wide pass and never a silent block.
+    The scope is read, never computed here: nothing in the record can move a name into or out
+    of it."""
+    doc = doc if isinstance(doc, dict) else {}
+    blocking = validate(doc, strict_judgement=False) if doc else ["conviction: record absent"]
+    names = {n.get("ticker"): n for n in (doc.get("names") or []) if isinstance(n, dict)}
+    out = {"blocking": blocking, "required": [], "complete": [], "refused_capital": {},
+           "non_blocking_missing": [], "not_applicable": [],
+           "basis": "ISA-0698 Option B — judgement mandatory only for the capital-precondition population"}
+    if not isinstance(scope, dict) or scope.get("state") != "OK":
+        out["scope_state"] = "UNKNOWN"
+        out["refused_capital"] = "ALL_REQUIRED_UNKNOWN_SCOPE"
+        out["why"] = ((scope or {}).get("why") if isinstance(scope, dict) else None) or \
+            "no pre-judgement judgement_scope is available"
+    else:
+        out["scope_state"] = "OK"
+        sn = scope.get("names") or {}
+        for tk in sorted(sn):
+            sc = sn[tk].get("scope")
+            if sc == "REQUIRED_FOR_CAPITAL_DECISION":
+                out["required"].append(tk)
+                n = names.get(tk)
+                if n is None:
+                    out["refused_capital"][tk] = ["REQUIRED_FOR_CAPITAL_DECISION but absent from "
+                                                  "the Step 9 record"]
+                    continue
+                errs = _judgement_errors(doc, n)
+                if errs:
+                    out["refused_capital"][tk] = errs
+                else:
+                    out["complete"].append(tk)
+            elif sc == "NOT_APPLICABLE":
+                out["not_applicable"].append(tk)
+        for tk, n in names.items():
+            if tk in sn and sn[tk].get("scope") != "NON_BLOCKING_RECORD":
+                continue
+            if required_dims(n.get("tier")) and _judgement_errors(doc, n):
+                out["non_blocking_missing"].append(tk)
+    out["counts"] = {"required": len(out["required"]), "complete": len(out["complete"]),
+                     "refused_capital": (len(out["refused_capital"])
+                                         if isinstance(out["refused_capital"], dict) else "ALL"),
+                     "non_blocking_missing": len(out["non_blocking_missing"]),
+                     "not_applicable": len(out["not_applicable"]), "blocking": len(blocking)}
+    return out
+
+
 def gate(doc):
-    """Hard gate for the run: returns [] when the month may send, else the blocking errors.
+    """LEGACY whole-record strict validation (every T1/T2 name). ⚑ ISA-0698: the email path no
+    longer uses this as its gate — it uses gate_by_name() on the capital-precondition scope. Kept
+    for the CLI's completeness report and the rollback path.
+    Hard gate for the run: returns [] when the month may send, else the blocking errors.
     Wire this immediately before the email build so a month cannot be reported with its
     judgements unrecorded — the failure §7.6.2 exists to close."""
     return validate(doc, strict_judgement=True)
@@ -475,10 +547,29 @@ def validate(doc, strict_judgement=True):
         if "d1_7_prerun_total" not in dims:
             errs.append(f"{tag}: dimensions.d1_7_prerun_total missing")
         _need = required_dims(n.get("tier"))
+        # ⚑ ISA-0466 (16-Sep-2026) — THE RETIRED /100 NO LONGER GATES THE EMAIL. D21 retired the
+        #   conviction score as a decision input (P7.1) and P7.3 made the gate read thesis_state +
+        #   evidence_state — but this loop still DEMANDED a D8/D9/D10 score and rationale per T1/T2
+        #   name, and the block below still demanded a /100 `classification`. Measured on
+        #   step9_conviction_sep_2026.json: 797 blocking errors over 107 T1/T2 names, most of them
+        #   for inputs to a number that decides nothing — so every Sunday either hand-filled a
+        #   display score or ran with --allow-unrecorded-conviction and the gate OFF.
+        #   Under the single sizing authority a dimension is OPTIONAL; if a session DOES record a
+        #   score it must still carry its rationale (an unexplained number is never admissible).
+        #   The rollback path (V2_FLAGS["single_sizing_authority"] = False) keeps the old demand.
+        _dims_gate = not _single_authority()
         for dk in JUDGEMENT_DIMS:
             d = dims.get(dk)
             if not isinstance(d, dict):
                 errs.append(f"{tag}: dimensions.{dk} missing or malformed")
+                continue
+            if strict_judgement and dk in _need and not _dims_gate:
+                if d.get("score") is not None and not str(d.get("rationale") or "").strip():
+                    errs.append(f"{tag}: {dk}.rationale is empty while a score is recorded — an "
+                                f"optional judgement, once made, must be auditable")
+                elif d.get("score") is not None and len(str(d.get("rationale")).strip()) < 15:
+                    errs.append(f"{tag}: {dk}.rationale is too short to be the one-sentence "
+                                f"rationale Step 9B requires of a recorded score")
                 continue
             if not strict_judgement or dk not in _need:
                 # Not asked for at this tier (Step 9C gives T2 Portfolio Fit only, and T3
@@ -499,7 +590,10 @@ def validate(doc, strict_judgement=True):
 
         if strict_judgement and required_dims(n.get("tier")):
             # Only tiers that are actually scored must carry a total and a classification.
-            if n.get("classification") not in CLASSIFICATIONS:
+            # ⚑ ISA-0466: `classification` is the /100 band — required only on the rollback path;
+            #   under the single authority it is display, and if present it must still be valid.
+            if (not _single_authority() or n.get("classification") is not None) and \
+                    n.get("classification") not in CLASSIFICATIONS:
                 errs.append(f"{tag}: classification {n.get('classification')!r} not in "
                             f"{sorted(CLASSIFICATIONS)}")
             # ══════════════════════════════════════════════════════════════════════════════
@@ -541,6 +635,11 @@ def validate(doc, strict_judgement=True):
                                 f"thesis_state AND evidence_state, both non-null with "
                                 f"rationales. Evidence sets the rung; thesis_state may only "
                                 f"cap it.")
+                elif n.get("evidence_state") not in _evidence_states():
+                    # ⚑ ISA-0466: non-null was the whole test, so a typo passed the gate and would
+                    #   have been read as a rung key downstream (R4.8 — never a guessed state).
+                    errs.append(f"{tag}: evidence_state {n.get('evidence_state')!r} is not declared. "
+                                f"Declared: {sorted(_evidence_states())}.")
             else:
                 # ROLLBACK PATH (V2_FLAGS["single_sizing_authority"] = False): the pre-D21
                 # gate, unchanged, so the flag restores the old behaviour exactly.
@@ -640,7 +739,7 @@ def _selftest():
 
     ok("U-CC9 prefill passes STRUCTURAL validation", not validate(doc, strict_judgement=False),
        str(validate(doc, strict_judgement=False))[:120])
-    ok("U-CC10 prefill FAILS strict validation (judgement not yet made)",
+    ok("U-CC10 NEGATIVE CONTROL: prefill FAILS strict validation (judgement not yet made)",
        bool(validate(doc)))
 
     # complete it as a review session would
@@ -652,16 +751,93 @@ def _selftest():
         n["conviction_scale_max"] = 100
         n["classification"] = "Medium"
         n["thesis_direction"] = "Unchanged"
+        # ⚑ ISA-0694 (16-Sep-2026): D21/P7.3 (ISA-0466 leg, 12-Sep-2026) made the strict gate read
+        #   thesis_state + evidence_state; this "completed as a review session would" fixture
+        #   was not moved with it, so U-CC11/U-CC15/U-CC21 went red on a correct gate. The
+        #   fixture now completes the judgement the gate actually requires.
+        n["thesis_state"] = "INTACT"
+        n["thesis_state_rationale"] = "Thesis unchanged after the latest quarterly results."
+        n["evidence_state"] = "THIN"
         if n["route"] == "vci":
             n["vci_hurdle"].update({k: True for k in VCI_HURDLE_KEYS
                                     if k != "nvidia_class_exception"})
+    # ── ISA-0466 · the retired /100 inputs no longer gate under the single authority ──────
+    _nodims = json.loads(json.dumps(doc))
+    for n in _nodims["names"]:
+        for d in JUDGEMENT_DIMS:
+            n["dimensions"][d] = {"score": None, "rationale": ""}
+        n["conviction_total"] = None
+        n["classification"] = None
+    ok("U-CC30 MUST-FIRE: thesis_state + evidence_state recorded, NO D8/D9/D10 and no /100 "
+       "classification -> passes the strict gate under the single sizing authority",
+       not validate(_nodims), str(validate(_nodims))[:160])
+    import isa_policy as _pol_cc
+    _had_sa = "single_sizing_authority" in _pol_cc.V2_FLAGS
+    _old_sa = _pol_cc.V2_FLAGS.get("single_sizing_authority")
+    _pol_cc.V2_FLAGS["single_sizing_authority"] = False
+    try:
+        ok("U-CC31 ROLLBACK NEGATIVE CONTROL: the same document FAILS with the single authority "
+           "switched off (the old /100 demand is restored exactly)",
+           any("d8_macro_resilience" in e or "classification" in e for e in validate(_nodims)))
+    finally:
+        if _had_sa:
+            _pol_cc.V2_FLAGS["single_sizing_authority"] = _old_sa
+        else:
+            _pol_cc.V2_FLAGS.pop("single_sizing_authority", None)
+    _bogus = json.loads(json.dumps(doc))
+    _bogus["names"][0]["evidence_state"] = "CONFIRMD"
+    ok("U-CC32 NEGATIVE CONTROL: an undeclared evidence_state (typo) FAILS rather than passing "
+       "as non-null", any("evidence_state 'CONFIRMD' is not declared" in e for e in validate(_bogus)))
+    _noth = json.loads(json.dumps(_nodims))
+    _noth["names"][0]["thesis_state"] = None
+    ok("U-CC33 NEGATIVE CONTROL: dropping the dims does NOT drop the D21 judgement - a null "
+       "thesis_state still FAILS", any("thesis_state is null" in e for e in validate(_noth)))
+
+    # ── ISA-0698 · per-name gate on the mechanical capital-precondition scope ─────────────
+    _names = [n["ticker"] for n in doc["names"]]
+    _req, _other = _names[0], _names[1:]
+    _scope = {"state": "OK", "names": dict(
+        {_req: {"scope": "REQUIRED_FOR_CAPITAL_DECISION"}},
+        **{t: {"scope": "NON_BLOCKING_RECORD"} for t in _other},
+        HELDX={"scope": "NOT_APPLICABLE"})}
+    _g_ok = gate_by_name(doc, _scope)
+    ok("U-CC40 POSITIVE CONTROL: required name with valid judgement -> complete, nothing refused, "
+       "no run block", _g_ok["complete"] == [_req] and not _g_ok["refused_capital"]
+       and not _g_ok["blocking"], str(_g_ok)[:200])
+    _miss = json.loads(json.dumps(doc))
+    for n in _miss["names"]:
+        n["thesis_state"] = None
+    _g = gate_by_name(_miss, _scope)
+    ok("U-CC41 MUST-FIRE: required name with missing judgement -> REFUSED NEW CAPITAL for that "
+       "name only", list(_g["refused_capital"]) == [_req] and not _g["blocking"], str(_g)[:200])
+    ok("U-CC42 NON-BLOCKING: names outside the scope lacking judgement are recorded as "
+       "non_blocking_missing and do not block the run",
+       set(_g["non_blocking_missing"]) >= {t for t in _other
+                                           if required_dims(next(n for n in _miss["names"] if n["ticker"] == t)["tier"])}
+       and not _g["blocking"])
+    ok("U-CC43 SCOPE INTEGRITY NC: changing judgement does not change who is required",
+       _g["required"] == _g_ok["required"] == [_req])
+    _gu = gate_by_name(doc, None)
+    ok("U-CC44 NEGATIVE CONTROL: an UNKNOWN scope refuses positive capital for all required "
+       "candidates (never a pass, never a run block)",
+       _gu["scope_state"] == "UNKNOWN" and _gu["refused_capital"] == "ALL_REQUIRED_UNKNOWN_SCOPE"
+       and not _gu["blocking"])
+    _abs = gate_by_name(dict(doc, names=[n for n in doc["names"] if n["ticker"] != _req]), _scope)
+    ok("U-CC45 NEGATIVE CONTROL: a REQUIRED name absent from the record is refused, not skipped",
+       _req in _abs["refused_capital"])
+    ok("U-CC46 HELD NAME is NOT_APPLICABLE here — its judgement home is thesis_state / held review",
+       _g_ok["not_applicable"] == ["HELDX"] and "HELDX" not in _g_ok["refused_capital"])
+    _bad_struct = json.loads(json.dumps(doc)); _bad_struct.pop("not_progressed")
+    ok("U-CC47 NEGATIVE CONTROL: a STRUCTURALLY invalid record still blocks",
+       bool(gate_by_name(_bad_struct, _scope)["blocking"]))
+
     ok("U-CC11 completed document passes strict validation", not validate(doc),
        str(validate(doc))[:160])
 
     # THE failure the spec names #1: a null rationale.
     bad = json.loads(json.dumps(doc))
     bad["names"][0]["dimensions"]["d8_macro_resilience"]["rationale"] = ""
-    ok("U-CC12 null rationale FAILS validation",
+    ok("U-CC12 NEGATIVE CONTROL: null rationale FAILS validation",
        any("rationale is empty" in e for e in validate(bad)))
     bad2 = json.loads(json.dumps(doc))
     bad2["names"][0]["dimensions"]["d9_portfolio_fit"]["rationale"] = "ok"
@@ -759,12 +935,29 @@ def main():
     if a.gate:
         with open(a.gate, encoding="utf-8") as f:
             doc = json.load(f)
-        errs = gate(doc)
-        for e in errs:
+        # ISA-0698: per-name gate on capital_destination's PRE-JUDGEMENT scope (same file month)
+        import re as _re
+        _m = _re.search(r"step9_conviction_([a-z]{3}_\d{4})", os.path.basename(a.gate))
+        _scope = None
+        if _m:
+            # one source for the router's scope: the run context (ISA-0447)
+            _rcp = os.path.join(os.path.dirname(os.path.abspath(a.gate)),
+                                "run_context_%s.json" % _m.group(1))
+            if os.path.exists(_rcp):
+                with open(_rcp, encoding="utf-8") as f:
+                    _scope = (((json.load(f) or {}).get("summary") or {})
+                              .get("capital_destination") or {}).get("judgement_scope")
+        res = gate_by_name(doc, _scope)
+        for e in res["blocking"]:
             print("BLOCK: " + e)
-        print("CONVICTION GATE PASS — month may send" if not errs
-              else f"CONVICTION GATE FAIL — {len(errs)} blocking issue(s); DO NOT SEND")
-        return 1 if errs else 0
+        _ref = res["refused_capital"]
+        for tk in (sorted(_ref) if isinstance(_ref, dict) else []):
+            print("REFUSED NEW CAPITAL: %s — %s" % (tk, _ref[tk][0][:160]))
+        print("scope %s · counts %s" % (res["scope_state"], res["counts"]))
+        print("CONVICTION RECORD VALID — the email may build; refused names receive no new capital"
+              if not res["blocking"] else
+              f"CONVICTION RECORD INVALID — {len(res['blocking'])} blocking issue(s); DO NOT SEND")
+        return 1 if res["blocking"] else 0
     if a.apply:
         if not a.month:
             ap.error("--month required with --apply")

@@ -48,7 +48,9 @@ IN THE CODE — removing them is what makes the ledger droppable.
 from __future__ import annotations
 
 import ast
+import copy
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -377,6 +379,7 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
      "because its only caller is the synthetic _PROBE — spec §1.1 F1, assertion L3"),
     ("position_sizing", "allocate", "live_run",
      "floor-then-priority fill (D15-D17). Absent pre-P4"),
+    ("position_sizing", "min_entry_gbp", "live_run", "D16 entry floor = 0.80 x STARTER of NAV (min_entry_gbp computer, ISA-0695)"),
     ("position_sizing", "target_pct", "live_run", "the fixed ladder rung for one position"),
     ("position_sizing", "apply_correlation", "live_run",
      "A2.3 unmeasured-correlation STARTER cap"),
@@ -391,9 +394,23 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     # --- selection / lifecycle -----------------------------------------------------------
     ("retention", "ratchet_eligible", "live_run",
      "the step-down ratchet population. Pre-P5 the filter can never be true (spec §1.1 F4)"),
-    ("rerank_watchlist", "_apply_diversification", "live_run",
-     "sector/theme caps. Pre-P6 `ctx` carries no sector map, so no cap has ever fired "
-     "(spec §1.1 F7)"),
+    # ⚑ ISA-0465 (16-Sep-2026): rerank_watchlist._apply_diversification is RETIRED as a capital rule
+    #   (ranking surface, no capital consumer). The sector/theme backstops have ONE home, consulted by
+    #   position_sizing.allocate via capital_destination (SHADOW until Raj's LIVE decision).
+    # --- ISA-0699 (16-Sep-2026): the capability-registry producers that carried NO observation ---
+    ("correlation_engine", "candidate_correlation", "live_run", "CAP-rho_sleeve producer (A2.1 rho vs sleeve)"),
+    ("position_sizing", "vci_size_pct", "live_run", "CAP-vci_size_pct producer (VCI binary sizing)"),
+    ("position_sizing", "binary_budget_report", "live_run", "CAP-vci_binary_risk_committed producer"),
+    ("position_sizing", "min_hold_ok", "live_run", "CAP-min_hold_verdict producer (D24 position clock)"),
+    ("position_sizing", "activate_from_executions", "live_run",
+     "CAP-underfilled_obligation_gbp producer: the ONLY creator of an ACTIVE D17 obligation (ISA-0701)"),
+    ("retention", "graduation_disposition", "live_run", "CAP-graduation_disposition producer"),
+    ("retention", "route_attribution", "live_run", "CAP-ratchet_route producer (marked, was undeclared)"),
+    ("held_position_review", "review", "live_run", "CAP-held_position_review producer (Step 6.5)"),
+    ("thesis_state", "apply", "live_run", "CAP-thesis_state producer (marked, was undeclared)"),
+    ("concentration_control", "gate", "live_run",
+     "direct-stock sector 12% NAV / theme 50% sleeve backstop (ISA-0465/0700); SHADOW executes it on "
+     "the pre-run without moving capital, so EXECUTED here never implies DECISION-EFFECTIVE"),
 ]
 
 
@@ -454,17 +471,60 @@ def _mark(module: str, fn: str, caller: Optional[str] = None) -> None:
         pass
 
 
+_RUN_BINDING: Dict[str, object] = {}
+
+
+def bind_run(**binding) -> dict:
+    """ISA-0699 (b/c), 17-Sep-2026 — bind THIS process's live_run marks to the run that made them.
+
+    ⚑ WHY. The ledger counted `live_run` calls per function per MONTH with no run identity, so a
+    rehearsal, a pre-ISA-0704 dry run and the real scheduled pre-run were indistinguishable, and a
+    capability could read EXECUTED from a run nobody would act on. The pre-run calls this right after
+    Step 0a with the capital-authority record; `flush_ledger` stamps it onto a `runs[]` entry together
+    with the per-function live_run counts of THIS process. Unbound flushes are recorded UNBOUND."""
+    _RUN_BINDING.clear()
+    _RUN_BINDING.update({k: v for k, v in binding.items()
+                         if k in ("surface", "authority", "build_id", "live_state", "checked_at",
+                                  "dry_run", "run_label")})
+    _RUN_BINDING["bound_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    return dict(_RUN_BINDING)
+
+
+def bound_live_calls(ledger: Optional[dict] = None) -> Dict[str, dict]:
+    """`module.function` -> {"calls": n, "runs": [labels]} counted ONLY from runs[] entries bound to an
+    AUTHORISED, non-dry-run capital run. The EXECUTED evidence R4.14 may rely on (ISA-0699 leg d)."""
+    led = ledger if ledger is not None else load_ledger()
+    out: Dict[str, dict] = {}
+    for run in (led.get("runs") or []):
+        b = run.get("binding") or {}
+        if b.get("authority") != "AUTHORISED" or b.get("dry_run") is not False:
+            continue
+        label = "%s@%s" % (b.get("build_id"), b.get("checked_at") or run.get("flushed_at"))
+        for q, n in (run.get("live_run") or {}).items():
+            if n:
+                r = out.setdefault(q, {"calls": 0, "runs": []})
+                r["calls"] += int(n)
+                if label not in r["runs"]:
+                    r["runs"].append(label)
+    return out
+
+
 def flush_ledger(path: Optional[str] = None) -> str:
     """Persist the in-memory ledger. RAISES if it cannot be written (spec P0.1 Refusals)."""
     p = path or ledger_path()
+    _this_run = {k: int((v.get("kinds") or {}).get("live_run", 0)) for k, v in _LEDGER_MEM.items()}
+    _run = {"flushed_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "binding": (dict(_RUN_BINDING) if _RUN_BINDING else {"state": "UNBOUND"}),
+            "live_run": {k: n for k, n in _this_run.items() if n}}
     doc = {"_what": "P0.1 live-path execution ledger — which capital-path functions actually "
                     "ran this month, and under what kind of caller.",
            "as_of": datetime.datetime.now().isoformat(timespec="seconds"),
-           "records": _LEDGER_MEM}
+           "records": copy.deepcopy(_LEDGER_MEM), "runs": []}
     if os.path.exists(p):
         try:
             with open(p, encoding="utf-8") as fh:
                 prev = json.load(fh)
+            doc["runs"] = list(prev.get("runs") or [])
             for k, v in (prev.get("records") or {}).items():
                 if k not in doc["records"]:
                     doc["records"][k] = v
@@ -478,6 +538,7 @@ def flush_ledger(path: Optional[str] = None) -> str:
                             cur["callers"].append(c)
         except Exception:                                               # noqa: BLE001
             pass
+    doc["runs"].append(_run)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=1, ensure_ascii=False)
@@ -706,6 +767,97 @@ def _is_relay_value(node: ast.AST, qname: str) -> bool:
 
 
 
+# ── ISA-0695 (BS-0695 §5A) — SITE SEMANTICS: COMPUTE / RELAY / SENTINEL ──────────────────
+# ⚑ MEASURED 17-Sep-2026: Q1 counted `capital_destination.sleeve_split` as a second stock_max computer
+#   because it assigns `out["stock_max_gbp"] = stock_max` where `stock_max = sm["stock_max_gbp"]` - a
+#   read of position_sizing's number through a local alias - and `= 0.0` in the P4.7 refusal branch.
+#   It likewise counted `sleeve_risk.ceiling_verdict` (echoes its `min_entry_gbp` PARAMETER) and
+#   `held_position_review.review` (`min_entry = _ps.min_entry_gbp(nav)["min_entry_gbp"]`). A relay through
+#   a variable is still a relay; a literal 0/None is a refusal/absence SENTINEL, not a second formula.
+#   Anything else - arithmetic, a call returning a new value, an alias of a computed local - stays COMPUTE.
+_TRANSPARENT_CALLS = ("round", "float", "int", "abs")
+
+
+def _fn_params(fn) -> set:
+    a = fn.args
+    return {x.arg for x in list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)}
+
+
+_BINDS_CACHE: Dict[int, dict] = {}
+
+
+def _fn_binds(fn) -> dict:
+    """name -> [value nodes] for every simple-name binding in `fn` (cached per function node)."""
+    got = _BINDS_CACHE.get(id(fn))
+    if got is not None and got.get("__fn__") is fn:
+        return got["binds"]
+    binds: Dict[str, list] = {}
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Assign):
+            for t in sub.targets:
+                if isinstance(t, ast.Name):
+                    binds.setdefault(t.id, []).append(sub.value)
+        elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+            binds.setdefault(sub.target.id, []).append(sub.value)
+        elif isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name):
+            binds.setdefault(sub.target.id, []).append(None)          # x += ... computes
+        elif isinstance(sub, (ast.For, ast.comprehension)) and isinstance(getattr(sub, "target", None), ast.Name):
+            binds.setdefault(sub.target.id, []).append(None)          # loop variable: not a relay
+    _BINDS_CACHE[id(fn)] = {"__fn__": fn, "binds": binds}
+    return binds
+
+
+def _relay_aliases(fn, qname: str) -> set:
+    """Local names in `fn` bound ONLY to relay (or 0/None sentinel) values of `qname`, with at least one
+    relay, closed over alias chains; an unrebound parameter named `qname` is a relay of the caller's value.
+    A name ever bound to a computed value is excluded - one computed binding makes it a computer."""
+    binds = _fn_binds(fn)
+    aliases = {p for p in _fn_params(fn) if p == qname and p not in binds}
+    changed = True
+    while changed:
+        changed = False
+        for name, vals in binds.items():
+            if name in aliases or not vals or any(v is None for v in vals):
+                continue
+            cls = [_value_class(v, qname, aliases) for v in vals]
+            if all(c in ("RELAY", "SENTINEL") for c in cls) and "RELAY" in cls:
+                aliases.add(name)
+                changed = True
+    return aliases
+
+
+def _needs_aliases(val: ast.AST) -> bool:
+    if isinstance(val, ast.Name):
+        return True
+    return (isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id in _TRANSPARENT_CALLS
+            and bool(val.args) and _needs_aliases(val.args[0]))
+
+
+def _value_class(val: ast.AST, qname: str, aliases=frozenset()) -> str:
+    """RELAY | SENTINEL | COMPUTE for one assigned value. `aliases` may be a set or a zero-arg callable
+    (resolved lazily - alias analysis is only paid for when the value is a bare name)."""
+    if isinstance(val, ast.Constant) and (val.value is None or (isinstance(val.value, (int, float))
+                                                                 and not isinstance(val.value, bool)
+                                                                 and float(val.value) == 0.0)):
+        return "SENTINEL"
+    if _is_relay_value(val, qname):
+        return "RELAY"
+    if not _needs_aliases(val):
+        return "COMPUTE"
+    al = aliases() if callable(aliases) else aliases
+    if isinstance(val, ast.Name) and val.id in al:
+        return "RELAY"
+    if (isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id in _TRANSPARENT_CALLS
+            and len(val.args) >= 1 and _value_class(val.args[0], qname, al) == "RELAY"
+            and all(isinstance(a, ast.Constant) for a in val.args[1:])):
+        return "RELAY"
+    return "COMPUTE"
+
+
+def site_class(fn, val: ast.AST, qname: str) -> str:
+    return _value_class(val, qname, lambda: _relay_aliases(fn, qname))
+
+
 def _excluded_line_ranges(tree: ast.Module, module: str) -> List[Tuple[int, int]]:
     """Line spans of every SELFTEST and every DECLARED PROBE function in a file.
 
@@ -729,7 +881,9 @@ def _excluded_line_ranges(tree: ast.Module, module: str) -> List[Tuple[int, int]
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        is_selftest = node.name.endswith("_selftest") or node.name in ("_selftest", "selftest")
+        # ISA-0695: `_selftest_isa0701`, `_selftest_isa0465` are selftests too - a prefix, not only a suffix
+        is_selftest = (node.name.endswith("_selftest") or node.name in ("_selftest", "selftest")
+                       or node.name.startswith("_selftest_"))
         is_probe = (module, node.name) in PROBE_CALLERS
         if is_selftest or is_probe:
             end = getattr(node, "end_lineno", None) or node.lineno
@@ -777,7 +931,7 @@ def _computers_of_scan(qname: str, root: str = HERE) -> List[dict]:
                             val, where = v, "dict_literal"
                 if val is None:
                     continue
-                if _is_relay_value(val, qname):
+                if site_class(node, val, qname) != "COMPUTE":
                     continue
                 hits.append({"module": m, "function": node.name, "line": sub.lineno,
                              "form": where, "path": os.path.relpath(path, root)})
@@ -955,6 +1109,12 @@ def _build_computer_index(root: str) -> dict:
             if _in_spans(node.lineno, spans):
                 continue
             taken = set()                     # quantities already recorded for THIS function
+            _alias_cache: Dict[str, set] = {}
+
+            def _aliases_for(q, _fn=node, _c=_alias_cache):
+                if q not in _c:
+                    _c[q] = _relay_aliases(_fn, q)
+                return _c[q]
             for sub in ast.walk(node):
                 cands = {}                    # qname -> (value_node, form)
                 if isinstance(sub, ast.Assign):
@@ -970,7 +1130,7 @@ def _build_computer_index(root: str) -> dict:
                         if isinstance(k, ast.Constant) and isinstance(k.value, str):
                             cands[k.value] = (v, "dict_literal")
                 for qname, (val, where) in cands.items():
-                    if qname in taken or _is_relay_value(val, qname):
+                    if qname in taken or _value_class(val, qname, (lambda _q=qname: _aliases_for(_q))) != "COMPUTE":
                         continue
                     taken.add(qname)
                     idx.setdefault(qname, []).append(
@@ -998,6 +1158,28 @@ def _computers_of(qname: str, root: str = HERE) -> List[dict]:
     return out
 
 
+DISPOSITIONS_NON_RED = ("FALSE_POSITIVE_ANALYZER", "NOT_THIS_QUANTITY", "SUPERSEDED")
+DISPOSITIONS_RED = ("TRUE_DEFECT", "EXPECTED_NONLIVE", "OWNED_BY", "SECOND_HOME", "UNRESOLVED")
+DISPOSITIONS = DISPOSITIONS_NON_RED + DISPOSITIONS_RED
+
+
+def finding_id(*parts) -> str:
+    """ISA-0695 — a STABLE finding id: built from the finding's subject, never from a line number,
+    a count or a timestamp, so the same defect keeps its id across runs and builds (BS-0695 §7)."""
+    return "FI-" + "-".join(re.sub(r"[^A-Za-z0-9_.]+", "_", str(p)).strip("_") for p in parts if p not in (None, ""))
+
+
+def _disposition(entry: dict, fid: str) -> Optional[dict]:
+    """The declared disposition for `fid` on a register entry, validated. -> None when undeclared."""
+    d = ((entry or {}).get("finding_dispositions") or {}).get(fid)
+    if not isinstance(d, dict):
+        return None
+    ok = (d.get("disposition") in DISPOSITIONS and isinstance(d.get("evidence"), str) and len(d["evidence"]) >= 20
+          and (d.get("disposition") not in ("OWNED_BY", "EXPECTED_NONLIVE", "SECOND_HOME", "TRUE_DEFECT")
+               or re.match(r"^ISA-\d{4}$", str(d.get("owner") or ""))))
+    return dict(d, valid=bool(ok))
+
+
 def q1_two_computers(root: str = HERE, register=None) -> dict:
     """Q1 — more than one function COMPUTES a registered quantity.
 
@@ -1010,7 +1192,11 @@ def q1_two_computers(root: str = HERE, register=None) -> dict:
     ⚑ AND SCOPE MUST NOT BE A HIDING PLACE. A computer OUTSIDE the declared scope is not
     silently dropped — it is reported as OUT_OF_SCOPE, so a genuine new second home surfaces as
     a named warning rather than as nothing. A quantity with no `key_scope` is scoped to the
-    WHOLE TREE, which is the strict default."""
+    WHOLE TREE, which is the strict default.
+
+    ⚑ ISA-0695 (17-Sep-2026): every finding carries a stable `id`; an OUT_OF_SCOPE computer may carry a
+    register-declared disposition with evidence (`finding_dispositions`). NOT_THIS_QUANTITY /
+    FALSE_POSITIVE_ANALYZER rows are published as dispositioned (not dropped); SECOND_HOME rows FAIL."""
     reg = register if register is not None else load_quantity_register()
     findings, out_of_scope = [], []
     for q in reg:
@@ -1021,43 +1207,55 @@ def q1_two_computers(root: str = HERE, register=None) -> dict:
             comps = [c for c in all_comps if c["module"] in set(scope)]
             for c in all_comps:
                 if c["module"] not in set(scope):
+                    qn = "%s.%s" % (c["module"], c["function"])
+                    fid = finding_id("Q1OOS", name, qn)
                     out_of_scope.append({
-                        "check": "Q1/OUT_OF_SCOPE", "quantity": name,
-                        "computer": "%s.%s" % (c["module"], c["function"]),
+                        "id": fid, "check": "Q1/OUT_OF_SCOPE", "quantity": name,
+                        "computer": qn, "line": c.get("line"),
                         "declared_scope": sorted(scope),
                         "gbp_exposure": float(q.get("gbp_exposure") or 0.0),
-                        "detail": ("%s.%s computes a key named %r outside the declared scope "
+                        "disposition": _disposition(q, fid),
+                        "detail": ("%s computes a key named %r outside the declared scope "
                                    "%s. Either it is an unrelated quantity that shares a name, "
                                    "or it is a second home — the register must say which."
-                                   % (c["module"], c["function"], name, sorted(scope)))})
+                                   % (qn, name, sorted(scope)))})
         else:
             comps = all_comps
         declared = q.get("computer")
         if declared is None:
             continue                                    # handled by the UNADJUDICATED rule
+        fid = finding_id("Q1", name)
         if len(comps) > 1:
             findings.append({
-                "check": "Q1", "quantity": name,
+                "id": fid, "check": "Q1", "quantity": name,
                 "declared_computer": declared,
                 "computers_found": ["%s.%s" % (c["module"], c["function"]) for c in comps],
+                "sites": [{"computer": "%s.%s" % (c["module"], c["function"]), "line": c.get("line"),
+                           "form": c.get("form"), "class": "COMPUTE"} for c in comps],
                 "gbp_exposure": float(q.get("gbp_exposure") or 0.0),
+                "disposition": _disposition(q, fid),
                 "detail": ("%d functions COMPUTE %s; the register declares one (%s). Two "
                            "computers for one quantity is KR6, and the 10x difference between "
                            "them is spec §1.1 F1." % (len(comps), name, declared)),
             })
         elif comps and "%s.%s" % (comps[0]["module"], comps[0]["function"]) != declared:
             findings.append({
-                "check": "Q1", "quantity": name, "declared_computer": declared,
+                "id": fid, "check": "Q1", "quantity": name, "declared_computer": declared,
                 "computers_found": ["%s.%s" % (c["module"], c["function"]) for c in comps],
                 "gbp_exposure": float(q.get("gbp_exposure") or 0.0),
+                "disposition": _disposition(q, fid),
                 "detail": "the one computer found is not the declared one",
             })
+    second = [o for o in out_of_scope if (o["disposition"] or {}).get("valid")
+              and o["disposition"]["disposition"] in DISPOSITIONS_RED]
+    undisp = [o for o in out_of_scope if not (o["disposition"] or {}).get("valid")]
     return {"check": "Q1", "n_findings": len(findings), "findings": findings,
             "out_of_scope": out_of_scope, "n_out_of_scope": len(out_of_scope),
-            "state": "FAIL" if findings else ("WARN" if out_of_scope else "PASS"),
-            "basis": ("A COMPUTER builds the value; a RELAY reads it from elsewhere and passes "
-                      "it on. Only computers count — otherwise the correct post-P4 wiring, in "
-                      "which sleeve_split relays position_sizing's number, would fail.")}
+            "n_out_of_scope_undispositioned": len(undisp), "n_out_of_scope_red": len(second),
+            "state": "FAIL" if (findings or second) else ("WARN" if undisp else "PASS"),
+            "basis": ("A COMPUTER builds the value; a RELAY reads it from elsewhere (directly, through a local "
+                      "alias, a parameter, or a round/float/int/abs wrapper) and a literal 0/None is a SENTINEL. "
+                      "Only computers count (ISA-0695 site semantics).")}
 
 
 # ── Q2: a registered quantity that renders nowhere ─────────────────────────────────────
@@ -1105,7 +1303,7 @@ def q3_dead_computer(register=None, ledger: Optional[dict] = None,
         if int(kinds.get("live_run", 0)) > 0:
             continue
         exists = comp in on_disk
-        row = {"check": "Q3", "quantity": q["name"], "computer": comp,
+        row = {"id": finding_id("Q3", q["name"]), "check": "Q3", "quantity": q["name"], "computer": comp,
                "gbp_exposure": float(q.get("gbp_exposure") or 0.0),
                "kinds": kinds, "exists_on_disk": exists,
                "instrumented": bool(sites.get(comp, False))}
@@ -1125,6 +1323,7 @@ def q3_dead_computer(register=None, ledger: Optional[dict] = None,
             row["detail"] = ("%s is instrumented and has never run from a live caller (%s)."
                              % (comp, "no calls at all" if r is None
                                 else "only " + "/".join(sorted(kinds))))
+            row["disposition"] = _disposition(q, row["id"])
             findings.append(row)
     return {"check": "Q3", "n_findings": len(findings), "findings": findings,
             "not_instrumented": not_instrumented,
@@ -1331,6 +1530,7 @@ def q4_dead_vocabulary(root: str = HERE, register=None) -> dict:
         undeclared_value = (registered and
                             c["literal"] not in declared_vocab[c["field"]])
         findings.append({
+            "id": finding_id("Q4", c["module"], c["field"], c["literal"]),
             "check": "Q4", "field": c["field"], "literal": c["literal"],
             "filter_at": "%s:%d" % (c["module"], c["line"]),
             "gbp_exposure": exposure.get(c["field"], 0.0),
@@ -1399,7 +1599,9 @@ def quantity_register_report(root: str = HERE, ledger: Optional[dict] = None) ->
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # P0.3 — THRESHOLD REGISTER   (= R15.2, specified and declared for ZERO gates until today)
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# ⚑ THE RULE THIS INSTRUMENT MAKES MECHANICAL, adopted as R3.11 by this build:
+# ⚑ ORIGINAL (28-Aug) FRAMING, CORRECTED 17-Sep-2026 (ISA-0695): this block called the SD division "R3.11,
+#   adopted by this build". No such rule was adopted (§11); R3 ends at R3.10. The SD/t test below is kept as
+#   a DIAGNOSTIC and is binding only for EMPIRICAL thresholds - see threshold_class_verdict.
 #       BEFORE DECLARING ANY THRESHOLD, DIVIDE IT BY THE STANDARD DEVIATION OF THE THING IT
 #       TESTS.
 # -5pp against a measured 35.2%/yr tracking error is 0.14 SD and fires 44% of the time on
@@ -1466,29 +1668,115 @@ def load_threshold_register(path: Optional[str] = None) -> List[dict]:
     return doc["thresholds"] if isinstance(doc, dict) else doc
 
 
-def threshold_report(path: Optional[str] = None) -> dict:
+BASIS_CLASSES = ("DECLARED_POLICY", "EMPIRICAL", "DERIVED")
+_POLICY_FIELDS = ("who_set_it", "source", "what_would_falsify_it", "revalidate_by")
+
+
+def _rationale_declarations() -> dict:
+    try:
+        p = os.path.join(HERE, "Dashboard", "state", "isa_rationale_declarations.json")
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d.get("declarations", d) if isinstance(d, dict) else {}
+    except Exception:                                                   # noqa: BLE001
+        return {}
+
+
+def threshold_class_verdict(t: dict, *, today: Optional[str] = None, rationale: Optional[dict] = None,
+                            on_disk: Optional[set] = None) -> dict:
+    """ISA-0695 (BS-0695 §5E) — judge a threshold by the authority actually in force, per its basis class.
+
+    ⚑ R3.11 DOES NOT EXIST in the adopted ISA_Engineering_Rules.md (R3.1-R3.10 only). The old report said
+      every threshold must be divided by the SD of what it tests and called that 'adopted by this build';
+      no §11 DECISION adopted it. The SD/t diagnostic is kept and still published, but it is mandatory only
+      where the threshold claims to be EMPIRICAL. The binding rules are R13.1 (evidence_basis: DECLARED needs
+      a falsifier and a revisit date; MEASURED/BACKTESTED need as_of/source/effective N), R12.3 (a
+      capital-gating constant carries provenance in the rationale ledger) and R15.2 (expected fire-rate band).
+      -> {"class", "verdict", "severity": RED|WARN|OK, "missing": [...], "why"}"""
+    today = today or datetime.date.today().isoformat()
+    cls = t.get("basis_class")
+    diag = verdict_for(t.get("value"), t.get("sd_of_quantity"), t.get("fire_rate_history"))
+    out = {"class": cls, "diagnostic": diag, "missing": []}
+    if cls not in BASIS_CLASSES:
+        return dict(out, verdict="UNCLASSIFIED", severity="RED",
+                    why="no basis_class (%s) - the checker cannot tell which authority applies" % "|".join(BASIS_CLASSES))
+    band = t.get("expected_fire_rate_band")
+    band_missing = not (isinstance(band, dict) and band.get("low") is not None and band.get("high") is not None)
+    if cls == "DECLARED_POLICY":
+        rat = (rationale if rationale is not None else _rationale_declarations()).get(t.get("rationale_ref") or t.get("name")) or {}
+        missing = [f for f in _POLICY_FIELDS if not rat.get(f)]
+        if rat.get("revalidate_by") and str(rat["revalidate_by"]) < today:
+            missing.append("revalidate_by_past(%s)" % rat["revalidate_by"])
+        out["missing"] = missing
+        if diag["verdict"] in (VERDICT_NON_DISCRIMINATING, VERDICT_NON_INFORMATIVE):
+            return dict(out, verdict="DECLARED_POLICY_INSIDE_NOISE", severity="RED",
+                        why="declared policy whose own measured diagnostic is %s (t=%s) - a decision is owed"
+                            % (diag["verdict"], diag.get("t_ratio")))
+        if missing:
+            return dict(out, verdict="DECLARED_POLICY_INCOMPLETE", severity="RED",
+                        why="R12.3/R13.1 provenance missing in the rationale ledger: %s" % ", ".join(missing))
+        return dict(out, verdict="DECLARED_POLICY_OK", severity="WARN" if band_missing else "OK",
+                    why=("authority, falsifier and revisit declared (R13.1/R12.3)"
+                         + ("; R15.2 expected fire-rate band UNDECLARED" if band_missing else "")))
+    if cls == "EMPIRICAL":
+        cal = t.get("calibration") or {}
+        missing = [f for f in ("population", "window", "as_of", "effective_n") if not cal.get(f)]
+        if t.get("sd_of_quantity") is None:
+            missing.append("sd_of_quantity")
+        out["missing"] = missing
+        if missing:
+            return dict(out, verdict="EMPIRICAL_INCOMPLETE", severity="RED",
+                        why="empirical threshold without calibration evidence: %s" % ", ".join(missing))
+        if diag["verdict"] in (VERDICT_NON_DISCRIMINATING, VERDICT_NON_INFORMATIVE, VERDICT_UNMEASURED):
+            return dict(out, verdict="EMPIRICAL_" + diag["verdict"], severity="RED", why=diag["why"])
+        return dict(out, verdict="EMPIRICAL_" + diag["verdict"],
+                    severity="WARN" if (band_missing or diag["verdict"] == VERDICT_WEAK) else "OK", why=diag["why"])
+    # DERIVED
+    der = t.get("derivation") or {}
+    missing = [f for f in ("formula", "upstream_authority", "boundary_test") if not der.get(f)]
+    if der.get("boundary_test") and on_disk is not None and der["boundary_test"] not in on_disk:
+        missing.append("boundary_test_not_on_disk(%s)" % der["boundary_test"])
+    out["missing"] = missing
+    if missing:
+        return dict(out, verdict="DERIVED_INCOMPLETE", severity="RED",
+                    why="derived threshold without its derivation contract: %s" % ", ".join(missing))
+    return dict(out, verdict="DERIVED_OK", severity="WARN" if band_missing else "OK",
+                why="formula + upstream authority + boundary test declared" + ("; R15.2 band UNDECLARED" if band_missing else ""))
+
+
+def threshold_report(path: Optional[str] = None, root: str = HERE) -> dict:
     reg = load_threshold_register(path)
     rows, raises = [], []
+    rat = _rationale_declarations()
+    try:
+        on_disk = _functions_on_disk(root)
+    except Exception:                                                   # noqa: BLE001
+        on_disk = None
     for t in reg:
         v = verdict_for(t.get("value"), t.get("sd_of_quantity"),
                         t.get("fire_rate_history"))
+        cv = threshold_class_verdict(t, rationale=rat, on_disk=on_disk)
         row = {**{k: t.get(k) for k in ("name", "value", "units", "quantity_tested",
-                                        "sd_of_quantity", "sd_basis", "gates", "gbp_exposure")},
-               **v}
+                                        "sd_of_quantity", "sd_basis", "gates", "gbp_exposure", "basis_class")},
+               **v, "id": finding_id("T", t.get("name")), "class_verdict": cv["verdict"],
+               "severity": cv["severity"], "missing": cv["missing"], "class_why": cv["why"],
+               "owner": t.get("register_item"),
+               "band_id": finding_id("TB", t.get("name"))}
         rows.append(row)
-        if v["verdict"] in (VERDICT_NON_DISCRIMINATING, VERDICT_NON_INFORMATIVE,
-                            VERDICT_UNMEASURED):
-            raises.append({"threshold": t.get("name"), "verdict": v["verdict"],
-                           "t_ratio": v.get("t_ratio"),
+        if cv["severity"] != "OK":
+            raises.append({"id": row["id"], "threshold": t.get("name"), "verdict": cv["verdict"],
+                           "severity": cv["severity"], "t_ratio": v.get("t_ratio"),
                            "gbp_exposure": float(t.get("gbp_exposure") or 0.0),
                            "register_item": t.get("register_item"),
-                           "detail": v["why"]})
+                           "detail": cv["why"]})
     return {"flag": _flag("threshold_register"), "n_thresholds": len(rows), "rows": rows,
             "raises": raises,
-            "state": "FAIL" if any(r["verdict"] == VERDICT_NON_DISCRIMINATING for r in rows)
+            "counts_by_class": {c: sum(1 for r in rows if r.get("basis_class") == c) for c in BASIS_CLASSES + (None,)},
+            "state": "FAIL" if any(r["severity"] == "RED" for r in rows)
                      else ("WARN" if raises else "PASS"),
-            "rule": ("R3.11 — before declaring any threshold, divide it by the SD of the thing "
-                     "it tests. Adopted by this build.")}
+            "rule": ("R13.1 (evidence_basis) + R12.3 (constant provenance) + R15.2 (expected fire-rate band), by "
+                     "basis_class. The SD/t ratio is a published diagnostic, mandatory only for EMPIRICAL thresholds - "
+                     "'R3.11' was never adopted (ISA-0695, BS-0695 §5E).")}
 
 
 def unregistered_gating_constants(root: str = HERE, path: Optional[str] = None,
@@ -1651,25 +1939,61 @@ def _overlap(a: str, b: str, need: int = 6) -> bool:
     return any(" ".join(bw[i:i + need]) in grams for i in range(len(bw) - need + 1))
 
 
+CLAIM_RETIRED_STATES = ("RETIRED_FALSIFIED", "RETIRED_SUPERSEDED")
+
+
+def monthly_runs_between(after: Optional[str], until: Optional[str] = None) -> Optional[int]:
+    """Scheduled monthly pre-runs (the Saturday before the first Sunday) strictly after `after` and on/before
+    `until`. ISA-0695: `runs_since_tested` was a hand-kept counter nothing incremented, so every claim read
+    CURRENT for ever; expiry is now derived from the calendar."""
+    if not after:
+        return None
+    try:
+        a = datetime.date.fromisoformat(str(after)[:10])
+        u = datetime.date.fromisoformat(str(until)[:10]) if until else datetime.date.today()
+    except ValueError:
+        return None
+    n, y, m = 0, a.year, a.month
+    while (y, m) <= (u.year, u.month):
+        d = datetime.date(y, m, 1)
+        fs = d + datetime.timedelta(days=(6 - d.weekday()) % 7)
+        pre = fs - datetime.timedelta(days=1)
+        if a < pre <= u:
+            n += 1
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return n
+
+
 def negative_claim_report(path: Optional[str] = None, root: str = HERE,
-                          run_tests: bool = False) -> dict:
+                          run_tests: bool = False, today: Optional[str] = None) -> dict:
     """Every registered claim's expiry state, and (optionally) re-run its falsifier."""
     claims = load_negative_claims(path)
     rows, expired = [], []
     for c in claims:
-        runs = int(c.get("runs_since_tested") or 0)
+        derived = monthly_runs_between(c.get("last_tested"), today)
+        runs = max(int(c.get("runs_since_tested") or 0), derived if derived is not None else 0)
         limit = int(c.get("expires_after_runs") or DEFAULT_EXPIRY_RUNS)
         state = c.get("state") or "ASSERTED_TRUE"
-        row = {"claim": c.get("claim"), "asserted_in": c.get("asserted_in"),
+        row = {"id": finding_id("N", hashlib.sha256((c.get("claim") or "").encode("utf-8")).hexdigest()[:10]),
+               "claim": c.get("claim"), "asserted_in": c.get("asserted_in"),
                "asserted_on": c.get("asserted_on"), "test_id": c.get("test_id"),
                "last_tested": c.get("last_tested"), "gates": c.get("gates") or [],
-               "runs_since_tested": runs, "expires_after_runs": limit, "state": state}
+               "runs_since_tested": runs, "runs_basis": "derived from monthly pre-run calendar since last_tested",
+               "expires_after_runs": limit, "state": state}
         if state == "NOT_A_CAPABILITY_CLAIM":
             row["verdict"] = "NOT_A_CAPABILITY_CLAIM"
             row["consequence"] = ("adjudicated prose: it trips the phrase list without "
                                   "asserting that anything is unavailable. It gates nothing "
                                   "and it does not expire — but it stays in the register, so "
                                   "an edit that turns it into a real claim is noticed.")
+        elif state in CLAIM_RETIRED_STATES:
+            ok_ret = bool(c.get("retired_on")) and len(str(c.get("retirement_evidence") or "")) >= 40
+            row["verdict"] = state if ok_ret else "RETIREMENT_UNEVIDENCED"
+            row["consequence"] = ("retired with dated evidence: the claim is no longer asserted by any executable "
+                                  "path and stays in the register as history" if ok_ret else
+                                  "a retirement with no dated evidence is a deletion by another name")
+            if not ok_ret:
+                expired.append(row)
         elif state == "FALSIFIED":
             row["verdict"] = "FALSIFIED"
             row["consequence"] = ("the claim is FALSE. Every gate it supports must be rebuilt "
@@ -1687,6 +2011,8 @@ def negative_claim_report(path: Optional[str] = None, root: str = HERE,
             row["retest"] = _run_claim_test(c["test_id"])
         rows.append(row)
     unreg = unregistered_negative_claims(root, path)
+    for f in unreg.get("findings") or []:
+        f["id"] = finding_id("NU", f.get("module"), f.get("owner"), f.get("phrase"))
     falsified_live = [r for r in rows if r["verdict"] == "FALSIFIED"]
     return {"flag": _flag("negative_claim_expiry"), "n_claims": len(rows), "rows": rows,
             "expired": expired, "falsified": falsified_live, "unregistered": unreg,
@@ -1694,7 +2020,29 @@ def negative_claim_report(path: Optional[str] = None, root: str = HERE,
                       else "PASS"),
             "gates_forced_unmeasured": sorted({g for r in expired for g in r["gates"]}),
             "basis": ("P0.4. A claim of absence that gates capital carries a test and a date "
-                      "and EXPIRES. Default expiry %d runs." % DEFAULT_EXPIRY_RUNS)}
+                      "and EXPIRES. Default expiry %d runs; runs are derived from the pre-run calendar "
+                      "(ISA-0695)." % DEFAULT_EXPIRY_RUNS)}
+
+
+def probe_ratchet_cannot_fire(root: str = HERE) -> dict:
+    """Falsifier for 'the step-down ratchet cannot fire' (P0.4): reads the latest run_context's
+    summary.v21.ratchet. HOLDS only while the rule's own inputs make firing impossible."""
+    import glob as _g
+    cands = [p for p in _g.glob(os.path.join(root, "run_context_*_*.json"))
+             if re.fullmatch(r"run_context_[a-z]{3}_\d{4}\.json", os.path.basename(p))]
+    if not cands:
+        return {"ran": False, "verdict": "UNTESTABLE", "detail": "no run_context on disk"}
+    p = max(cands, key=os.path.getmtime)
+    with open(p, encoding="utf-8") as fh:
+        rc = json.load(fh)
+    r = ((rc.get("summary") or {}).get("v21") or {}).get("ratchet") or {}
+    inp = ((rc.get("summary") or {}).get("v21") or {}).get("ratchet_inputs") or {}
+    mm = inp.get("months_measured")
+    fired = r.get("fires")
+    holds = fired is not True and (mm is None or int(mm) < 12 or not all((r.get("legs") or {}).values()))
+    return {"ran": True, "artefact": os.path.basename(p), "months_measured": mm, "fires": fired,
+            "verdict": "CLAIM_HOLDS_TODAY" if holds else "CLAIM_FALSIFIED",
+            "detail": "ratchet inputs: %s measured month(s) of 12; legs %s" % (mm, r.get("legs"))}
 
 
 def _run_claim_test(test_id: str) -> dict:
@@ -1878,18 +2226,86 @@ def _exposure_for(qualified_fn: str) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # Step 0 — PREFLIGHT: declaration checks BEFORE any work
 # ═══════════════════════════════════════════════════════════════════════════════════════
-def preflight(root: str = HERE, strict: bool = False) -> dict:
+def integrity_findings(qr: dict, tr: dict, nc: dict) -> List[dict]:
+    """ISA-0695 (BS-0695 §7/§12) — ONE list of every integrity finding with a stable id, severity
+    (RED gates the build; WARN is published; INFO is dispositioned and still visible), disposition and owner.
+    A finding is never dropped: suppression would make a falling count look like improvement."""
+    out = []
+
+    def add(fid, check, severity, subject, why, disposition=None, owner=None, evidence=None):
+        out.append({"id": fid, "check": check, "severity": severity, "subject": subject, "why": str(why)[:300],
+                    "disposition": disposition, "owner": owner, "evidence": evidence})
+    if isinstance(qr, dict) and "Q1" in qr:
+        for f in qr["Q1"]["findings"]:
+            d = f.get("disposition") or {}
+            add(f["id"], "Q1", "RED", f["quantity"], f["detail"], d.get("disposition"), d.get("owner"), d.get("evidence"))
+        for o in qr["Q1"]["out_of_scope"]:
+            d = o.get("disposition") or {}
+            if not d.get("valid"):
+                add(o["id"], "Q1/OUT_OF_SCOPE", "WARN", o["computer"], o["detail"], "UNDISPOSITIONED")
+            else:
+                add(o["id"], "Q1/OUT_OF_SCOPE", "RED" if d["disposition"] in DISPOSITIONS_RED else "INFO",
+                    o["computer"], o["detail"], d["disposition"], d.get("owner"), d.get("evidence"))
+        for f in qr["Q2"]["findings"]:
+            add(finding_id("Q2", f["quantity"]), "Q2", "RED", f["quantity"], f["detail"])
+        for f in qr["Q3"]["findings"]:
+            d = f.get("disposition") or {}
+            add(f["id"], "Q3", "RED", f["computer"], f["detail"], d.get("disposition"), d.get("owner"), d.get("evidence"))
+        for f in qr["Q3"].get("not_instrumented") or []:
+            add(f["id"], "Q3/NOT_INSTRUMENTED", "WARN", f["computer"], f["detail"])
+        for f in qr["Q4"]["findings"]:
+            if f.get("undeclared_value"):
+                add(f["id"], "Q4", "RED", f["filter_at"], f["detail"])
+            else:
+                add(f["id"], "Q4", "INFO", f["filter_at"], f["detail"], "NON_GATING_UNREGISTERED_VOCABULARY",
+                    evidence="field not a registered vocabulary; gbp_exposure %s; Q4 build gate is register-scoped"
+                             % f.get("gbp_exposure"))
+        for r in (qr.get("unadjudicated") or {}).get("rows") or []:
+            add(finding_id("QU", r.get("quantity")), "UNADJUDICATED", "WARN", r.get("quantity"),
+                "quantity computer UNADJUDICATED", "OWNED_BY" if r.get("register_item") else None, r.get("register_item"))
+    if isinstance(tr, dict) and "rows" in tr:
+        for r in tr["rows"]:
+            if r["severity"] == "RED":
+                add(r["id"], "THRESHOLD", "RED", r["name"], "%s: %s" % (r["class_verdict"], r["class_why"]),
+                    "OWNED_BY" if r.get("owner") else None, r.get("owner"))
+            elif r["severity"] == "WARN":
+                add(r["band_id"], "THRESHOLD/R15.2_BAND", "WARN", r["name"], r["class_why"])
+    if isinstance(nc, dict) and "rows" in nc:
+        for r in nc["rows"]:
+            if r["verdict"] in ("FALSIFIED", "EXPIRED_UNTESTED", "RETIREMENT_UNEVIDENCED"):
+                add(r["id"], "NEGATIVE_CLAIM/" + r["verdict"], "RED", r["claim"], r.get("consequence"))
+            elif r["verdict"] in CLAIM_RETIRED_STATES + ("NOT_A_CAPABILITY_CLAIM",):
+                add(r["id"], "NEGATIVE_CLAIM/" + r["verdict"], "INFO", r["claim"], r.get("consequence"), r["verdict"])
+        for f in (nc.get("unregistered") or {}).get("findings") or []:
+            add(f["id"], "NEGATIVE_CLAIM/UNREGISTERED", "RED", "%s.%s" % (f["module"], f["owner"]), f["text"])
+    return out
+
+
+def integrity_counts(findings: List[dict]) -> dict:
+    """§12 observability: counts by severity, check, disposition and owner (never a single roll-up)."""
+    import collections as _c
+    return {"n": len(findings),
+            "by_severity": dict(_c.Counter(f["severity"] for f in findings)),
+            "by_check": dict(_c.Counter(f["check"].split("/")[0] for f in findings)),
+            "by_disposition": dict(_c.Counter(str(f.get("disposition")) for f in findings)),
+            "red_by_owner": dict(_c.Counter(str(f.get("owner")) for f in findings if f["severity"] == "RED")),
+            "red_unowned": [f["id"] for f in findings if f["severity"] == "RED" and not f.get("owner")]}
+
+
+def preflight(root: str = HERE, strict: bool = False, full_findings=False) -> dict:
     """Runs at Step 0 of the pre-run, before anything is computed.
 
     ⚑ A declaration failure should stop a run BEFORE it computes anything on a broken
     contract. Computing first and checking afterwards produces a plausible artefact and a red
     line underneath it, and the artefact is what gets read."""
     out = {"as_of": datetime.date.today().isoformat(), "checks": {}, "errors": []}
+    reports = {}
     for name, fn in (("quantity_register", lambda: quantity_register_report(root)),
-                     ("threshold_register", threshold_report),
+                     ("threshold_register", lambda: threshold_report(root=root)),
                      ("negative_claims", lambda: negative_claim_report(root=root))):
         try:
             r = fn()
+            reports[name] = r
             out["checks"][name] = {"state": r["state"]}
             if r["state"] == "FAIL":
                 out["errors"].append("%s: FAIL" % name)
@@ -1900,6 +2316,20 @@ def preflight(root: str = HERE, strict: bool = False) -> dict:
             out["checks"][name] = {"state": "ERROR",
                                    "reason": "%s: %s" % (type(exc).__name__, exc)}
             out["errors"].append("%s: ERROR" % name)
+    # ISA-0695: the exact finding set, with stable ids, so a release waiver can own findings - not a gate
+    try:
+        out["findings"] = integrity_findings(reports.get("quantity_register"), reports.get("threshold_register"),
+                                             reports.get("negative_claims"))
+        out["counts"] = integrity_counts(out["findings"])
+        # ISA-0695 (R2.x efficiency): the run_context carries RED/WARN only; INFO rows (dispositioned
+        # non-red) are counted, and the full ledger is integrity_findings(...) on demand.
+        if not full_findings:
+            _n_all = len(out["findings"])
+            out["findings"] = [f for f in out["findings"] if f.get("severity") != "INFO"]
+            out["findings_info_omitted"] = _n_all - len(out["findings"])
+    except Exception as exc:                                            # noqa: BLE001
+        out["findings"] = None
+        out["errors"].append("findings ledger: ERROR %s: %s" % (type(exc).__name__, exc))
     out["state"] = "FAIL" if out["errors"] else "OK"
     if strict and out["errors"]:
         raise IntegrityRefused("preflight FAILED:\n  " + "\n  ".join(out["errors"]))
@@ -2024,6 +2454,49 @@ def _selftest() -> int:
         _p.V2_FLAGS.pop("execution_ledger", None)
     else:
         _p.V2_FLAGS["execution_ledger"] = _prev
+
+    # ── ISA-0699 leg (d) instrument: run-bound EXECUTED evidence ──────────────────────
+    _saved_bind = dict(_RUN_BINDING)
+    _saved_mem = copy.deepcopy(_LEDGER_MEM)
+    try:
+        _tdl = tempfile.mkdtemp()
+        _lp1 = os.path.join(_tdl, "execution_ledger_fixture.json")
+        _LEDGER_MEM.clear()
+        _LEDGER_MEM["m.f"] = {"module": "m", "function": "f", "calls": 2, "kinds": {"live_run": 2}, "callers": ["x"]}
+        _RUN_BINDING.clear()
+        flush_ledger(_lp1)
+        ok("ISA-0699 NEGATIVE CONTROL: an unbound flush records a run marked UNBOUND and counts nothing as bound",
+           load_ledger(_lp1)["runs"][-1]["binding"] == {"state": "UNBOUND"} and bound_live_calls(load_ledger(_lp1)) == {})
+        bind_run(authority="AUTHORISED", build_id="TB-X", dry_run=True, checked_at="t1")
+        flush_ledger(_lp1)
+        ok("ISA-0699 NEGATIVE CONTROL: a DRY-RUN bound flush is not real-run evidence",
+           bound_live_calls(load_ledger(_lp1)) == {})
+        bind_run(authority="REFUSED", build_id="TB-X", dry_run=False, checked_at="t2")
+        flush_ledger(_lp1)
+        ok("ISA-0699 NEGATIVE CONTROL: a REFUSED-authority run is not real-run evidence",
+           bound_live_calls(load_ledger(_lp1)) == {})
+        bind_run(authority="AUTHORISED", build_id="TB-X", dry_run=False, checked_at="t3")
+        flush_ledger(_lp1)
+        _b = bound_live_calls(load_ledger(_lp1))
+        ok("ISA-0699 MUST-FIRE: an AUTHORISED non-dry run binds its OWN process's live_run calls (2, not the merged 8)",
+           _b.get("m.f", {}).get("calls") == 2 and len(load_ledger(_lp1)["runs"]) == 4, _b)
+    finally:
+        _RUN_BINDING.clear(); _RUN_BINDING.update(_saved_bind)
+        _LEDGER_MEM.clear(); _LEDGER_MEM.update(_saved_mem)
+    # wiring: the production orchestrator binds AFTER Step 0a authority and BEFORE the Step 6.99 flush
+    _pr = os.path.join(HERE, "monthly_isa_prerun.py")
+    if os.path.exists(_pr):
+        _t = ast.parse(open(_pr, encoding="utf-8").read())
+        _main = next((n for n in _t.body if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+        _lines = {}
+        for _n in ast.walk(_main) if _main else []:
+            if isinstance(_n, ast.Call):
+                _nm = getattr(_n.func, "attr", getattr(_n.func, "id", None))
+                if _nm in ("_capital_authority_step", "bind_run", "flush_ledger"):
+                    _lines.setdefault(_nm, _n.lineno)
+        ok("ISA-0699 WIRING (AST): monthly_isa_prerun.main calls bind_run after the capital-authority step and "
+           "before flush_ledger", len(_lines) == 3 and _lines["_capital_authority_step"] < _lines["bind_run"]
+           < _lines["flush_ledger"], _lines)
 
     # ── P0.2 Q1 compute vs relay ─────────────────────────────────────────────────────
     tmp = tempfile.mkdtemp()
@@ -2170,6 +2643,93 @@ def _selftest() -> int:
     e3 = negative_claim_report(claims_fresh, tempfile.mkdtemp())
     ok("N2-neg a fresh claim leaves its gate intact",
        e3["gates_forced_unmeasured"] == [] and e3["state"] == "PASS", e3)
+
+    # ── ISA-0695: site semantics, dispositions, threshold classes, claim expiry (BS-0695 §15) ──
+    def _site(body, fn="f", q="thing_gbp"):
+        t = ast.parse(body)
+        f = next(n for n in ast.walk(t) if isinstance(n, ast.FunctionDef) and n.name == fn)
+        vals = []
+        for sub in ast.walk(f):
+            if isinstance(sub, ast.Assign):
+                for tg in sub.targets:
+                    if isinstance(tg, ast.Subscript) and isinstance(tg.slice, ast.Constant) and tg.slice.value == q:
+                        vals.append(sub.value)
+        return [site_class(f, v, q) for v in vals]
+    ok("ISA-0695 RELAY through a local alias is not a computer (the sleeve_split shape)",
+       _site("def f(sm):\n    out = {}\n    x = 0.0\n    x = sm['thing_gbp']\n    out['thing_gbp'] = x\n")[-1] == "RELAY")
+    ok("ISA-0695 a literal 0 in a refusal branch is a SENTINEL, not a second formula",
+       _site("def f():\n    out = {}\n    out['thing_gbp'] = 0.0\n") == ["SENTINEL"])
+    ok("ISA-0695 a parameter echoed through round(float()) is a RELAY (the ceiling_verdict shape)",
+       _site("def f(thing_gbp):\n    out = {}\n    out['thing_gbp'] = round(float(thing_gbp), 2)\n") == ["RELAY"])
+    ok("ISA-0695 MUST-FIRE: a deliberately added second COMPUTATION (arithmetic) is COMPUTE",
+       _site("def f(a, b):\n    out = {}\n    out['thing_gbp'] = a * b\n") == ["COMPUTE"])
+    ok("ISA-0695 NEGATIVE CONTROL: an alias of a COMPUTED local is still COMPUTE (alias cannot launder a formula)",
+       _site("def f(sm, a):\n    out = {}\n    x = sm['thing_gbp']\n    x = a * 2\n    out['thing_gbp'] = x\n") == ["COMPUTE"])
+    ok("ISA-0695 NEGATIVE CONTROL: a rebound parameter is not a relay",
+       _site("def f(thing_gbp):\n    thing_gbp = thing_gbp * 1.1\n    out = {}\n    out['thing_gbp'] = thing_gbp\n") == ["COMPUTE"])
+    tmpq = tempfile.mkdtemp()
+    _write(tmpq, "alpha.py", "def compute(a, b):\n    out = {}\n    out['thing_gbp'] = a * b\n    return out\n")
+    _write(tmpq, "beta.py", "def route(sm):\n    out = {}\n    v = sm['thing_gbp']\n    out['thing_gbp'] = v\n    return out\n")
+    _write(tmpq, "gamma.py", "def other(x):\n    out = {}\n    out['thing_gbp'] = x + 1\n    return out\n")
+    regq = [{"name": "thing_gbp", "computer": "alpha.compute", "units": "GBP", "surface": ["x"],
+             "gbp_exposure": 10.0, "key_scope": ["alpha", "beta"]}]
+    reset_caches()
+    rq = q1_two_computers(tmpq, regq)
+    ok("ISA-0695 the alias relay (beta.route) does not make a second computer, and the out-of-scope computer is WARN undispositioned",
+       rq["n_findings"] == 0 and rq["state"] == "WARN" and rq["out_of_scope"][0]["id"] == "FI-Q1OOS-thing_gbp-gamma.other", rq)
+    regq[0]["finding_dispositions"] = {"FI-Q1OOS-thing_gbp-gamma.other": {
+        "disposition": "NOT_THIS_QUANTITY", "evidence": "gamma.other's thing_gbp is an unrelated fixture amount"}}
+    ok("ISA-0695 an evidenced NOT_THIS_QUANTITY disposition publishes the row as dispositioned (state PASS, row kept)",
+       q1_two_computers(tmpq, regq)["state"] == "PASS" and q1_two_computers(tmpq, regq)["n_out_of_scope"] == 1)
+    regq[0]["finding_dispositions"]["FI-Q1OOS-thing_gbp-gamma.other"] = {"disposition": "SECOND_HOME", "evidence": "a real second home of the quantity"}
+    ok("ISA-0695 NEGATIVE CONTROL: SECOND_HOME without an owner item is not a valid disposition (stays WARN, never PASS)",
+       q1_two_computers(tmpq, regq)["state"] == "WARN")
+    regq[0]["finding_dispositions"]["FI-Q1OOS-thing_gbp-gamma.other"]["owner"] = "ISA-0001"
+    ok("ISA-0695 MUST-FIRE: an owned SECOND_HOME FAILS Q1 (a real duplicate authority is RED, owned, not waved through)",
+       q1_two_computers(tmpq, regq)["state"] == "FAIL")
+    _rat = {"POL": {"who_set_it": "Raj", "source": "decision", "what_would_falsify_it": "x", "revalidate_by": "2099-01-01"}}
+    ok("ISA-0695 DECLARED_POLICY with full provenance and NO SD is OK/WARN - never UNMEASURED ('R3.11' is not in force)",
+       threshold_class_verdict({"name": "POL", "value": 0.8, "basis_class": "DECLARED_POLICY"}, rationale=_rat)["severity"] in ("OK", "WARN"))
+    ok("ISA-0695 MUST-FIRE: DECLARED_POLICY missing falsifier/revisit is RED (R13.1)",
+       threshold_class_verdict({"name": "POL2", "value": 0.8, "basis_class": "DECLARED_POLICY"}, rationale=_rat)["severity"] == "RED")
+    ok("ISA-0695 NEGATIVE CONTROL: a past revalidate_by is RED",
+       threshold_class_verdict({"name": "POL", "value": 0.8, "basis_class": "DECLARED_POLICY"},
+                               rationale={"POL": dict(_rat["POL"], revalidate_by="2020-01-01")})["severity"] == "RED")
+    ok("ISA-0695 MUST-FIRE: EMPIRICAL threshold missing calibration evidence is RED",
+       threshold_class_verdict({"name": "E", "value": 0.7, "sd_of_quantity": 0.1, "basis_class": "EMPIRICAL"})["verdict"] == "EMPIRICAL_INCOMPLETE")
+    ok("ISA-0695 the PROBATION_TRAIL_PP shape (declared policy inside its own noise, t=0.13) stays RED - not greenwashed",
+       threshold_class_verdict({"name": "POL", "value": 5.0, "sd_of_quantity": 38.6, "basis_class": "DECLARED_POLICY"},
+                               rationale=_rat)["verdict"] == "DECLARED_POLICY_INSIDE_NOISE")
+    ok("ISA-0695 NEGATIVE CONTROL: an unclassified threshold is RED",
+       threshold_class_verdict({"name": "U", "value": 1})["severity"] == "RED")
+    ok("ISA-0695 DERIVED without a boundary test on disk is RED",
+       threshold_class_verdict({"name": "D", "basis_class": "DERIVED", "derivation": {"formula": "a+b", "upstream_authority": "A19",
+                                "boundary_test": "nope.check"}}, on_disk={"x.y"})["severity"] == "RED")
+    ok("ISA-0695 claim expiry is DERIVED from the pre-run calendar: last tested 28-Aug-2026 -> 1 run by 17-Sep (05-Sep pre-run)",
+       monthly_runs_between("2026-08-28", "2026-09-17") == 1 and monthly_runs_between("2026-08-28", "2026-10-03") == 2)
+    claims_cal = os.path.join(tmp3, "nc5.json")
+    json.dump({"claims": [{"claim": "no such source is available for Y", "state": "ASSERTED_TRUE", "gates": ["gate_y"],
+                           "test_id": None, "last_tested": "2026-06-01", "runs_since_tested": 0, "expires_after_runs": 3}]},
+              open(claims_cal, "w"))
+    ok("ISA-0695 MUST-FIRE: a claim whose hand counter says 0 but whose last test predates 3 pre-runs EXPIRES",
+       negative_claim_report(claims_cal, tempfile.mkdtemp(), today="2026-09-17")["expired"] != [])
+    claims_ret = os.path.join(tmp3, "nc6.json")
+    json.dump({"claims": [{"claim": "retired thing", "state": "RETIRED_FALSIFIED", "gates": [], "retired_on": None}]},
+              open(claims_ret, "w"))
+    ok("ISA-0695 NEGATIVE CONTROL: a retirement without dated evidence is RED (RETIREMENT_UNEVIDENCED)",
+       negative_claim_report(claims_ret, tempfile.mkdtemp())["state"] == "FAIL")
+    _fl = integrity_findings({"Q1": {"findings": [], "out_of_scope": []}, "Q2": {"findings": []},
+                              "Q3": {"findings": [], "not_instrumented": []}, "Q4": {"findings": []}},
+                             {"rows": [{"id": "FI-T-X", "band_id": "FI-TB-X", "name": "X", "severity": "RED",
+                                        "class_verdict": "UNCLASSIFIED", "class_why": "w", "owner": None}]},
+                             {"rows": [], "unregistered": {"findings": []}})
+    ok("ISA-0695 an unowned RED finding is listed in red_unowned (observability never hides it)",
+       integrity_counts(_fl)["red_unowned"] == ["FI-T-X"])
+    if os.path.exists(os.path.join(HERE, "capital_destination.py")):
+        reset_caches()
+        _real = [c["function"] for c in _computers_of("stock_max_gbp", HERE)]
+        ok("ISA-0695 REAL TREE: capital_destination.sleeve_split is a RELAY of position_sizing.stock_max, not a second computer",
+           "sleeve_split" not in _real and "stock_max" in _real, _real)
 
     # N4 — prose ABOUT the rule must not trip the rule
     tmp4 = tempfile.mkdtemp()

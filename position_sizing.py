@@ -46,6 +46,7 @@ ROLLBACK (R4.13): isa_policy.V2_FLAGS["fixed_ladder"] / ["demand_pull_stock_max"
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import ast
 import inspect
@@ -395,6 +396,7 @@ def vci_size_pct(*, p_thesis, L, budget_available_pct, evidence_state,
 
     ⚑ A missing p_thesis is NOT p = 0. That exact null once flipped DENY->ADMIT on QBTS
     (FC-F, V-1). It RAISES here."""
+    _fi_mark("position_sizing", "vci_size_pct")   # ISA-0699: execution-ledger observation
     if p_thesis is None or L is None:
         raise SizingRefused(
             "VCI sizing needs both p_thesis and L. A missing p_thesis silently read as p = 0 is "
@@ -653,6 +655,7 @@ def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
 
     Returns {summary, warnings, ok}. Every refusal is named in `warnings`; the committed
     figure is None — never 0 — whenever it could not be measured (R4.3/V-1)."""
+    _fi_mark("position_sizing", "binary_budget_report")   # ISA-0699: execution-ledger observation
     import json as _json
     import os as _os
     warn = []
@@ -864,6 +867,7 @@ def min_entry_gbp(nav_gbp: float, policy=None) -> dict:
     """The entry floor in GBP. DERIVED from the ladder every run (R4.4), never stored."""
     lad = ladder(policy)
     starter_pct = lad["STARTER"]
+    _fi_mark("position_sizing", "min_entry_gbp")   # ISA-0695: the quantity register's declared computer
     return {"min_entry_gbp": round(MIN_ENTRY_FRACTION_OF_STARTER * starter_pct / 100.0
                                    * float(nav_gbp), 2),
             "starter_gbp": round(starter_pct / 100.0 * float(nav_gbp), 2),
@@ -912,6 +916,7 @@ def void_obligations(doc: dict, states: Dict[str, dict], *, today=None) -> dict:
             why = "thesis_state BROKEN"
         if why:
             o["voided"] = True
+            o["state"] = "VOIDED"
             o["voided_on"] = today
             o["voided_reason"] = why
     return doc
@@ -940,6 +945,9 @@ def refresh_obligations(states: Optional[Dict[str, dict]] = None, *, today=None,
         except Exception:                                            # noqa: BLE001
             pass
     before = [o["ticker"] for o in doc.get("obligations", []) if not o.get("voided")]
+    # ⚑ ISA-0701: every pre-run retains-but-voids open rows without execution provenance, so a
+    #   fabricated proposal-time row can never become (or stay) a first claim (R14.1).
+    _unproven = invalidate_unproven_obligations(doc, today=today)["voided"]
     doc = void_obligations(doc, states, today=today)
     after = [o["ticker"] for o in doc.get("obligations", []) if not o.get("voided")]
     # ⚑ A DRY RUN MUST NOT WRITE A STORE. Caught by running the real pre-run with --dry-run
@@ -952,6 +960,7 @@ def refresh_obligations(states: Optional[Dict[str, dict]] = None, *, today=None,
     return {"store": written, "dry_run": bool(dry_run),
             "n_total": len(doc.get("obligations", [])),
             "open": after, "voided_this_run": voided,
+            "voided_unproven_isa0701": _unproven,
             "warnings": (["Step 6.5 (ISA-0669): fill obligation VOIDED for %s — D17 voids on "
                           "evidence_state DEGRADED_* or thesis_state BROKEN. The claim on the "
                           "next tranche is cancelled and the row is RETAINED, not deleted." % t
@@ -961,10 +970,220 @@ def refresh_obligations(states: Optional[Dict[str, dict]] = None, *, today=None,
                              % (len(after), ", ".join(after))] if after else []))}
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0701 (16-Sep-2026) — FILL OBLIGATIONS ARE EXECUTION-OWNED
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# A first claim on the next tranche becomes ACTIVE only when an AUTHORISED decision is matched to
+# BROKER-CONFIRMED execution (activate_from_executions, pre-run Step 1.5). A proposal, report,
+# dry run, SHADOW run, scenario or re-run never creates one: allocate() is READ-ONLY on the store
+# and returns ephemeral `proposed_obligations`. ISA-0669 made obligations persist at all; it put
+# the write on PROPOSAL production, which fabricated HALO/ZAB.WA (12-Sep) - 9.0% NAV of first
+# claims for positions nobody bought. ROLLBACK (R4.13): none that re-enables proposal persistence;
+# V2_FLAGS["obligation_activation"]=False stops NEW activations (obligations then never become
+# ACTIVE - the safe state), it never restores the TB-04 write.
+OBLIGATION_KINDS = ("UNDERFILLED_ENTRY", "CAP_CONSTRAINED_ENTRY")
+OBLIGATION_STATES = ("ACTIVE", "FULFILLED", "VOIDED")
+OBLIGATION_PROVENANCE_KEYS = ("obligation_id", "source_decision_id", "execution_reference")
+ACTIVATION_OUTCOMES = ("ACTIVATED", "FULFILLED", "PARTIAL_FILL_RECORDED", "IDEMPOTENT_SKIP",
+                       "FILLED_AT_EXECUTION", "NO_PLANNED_SHORTFALL", "NO_AUTHORISED_PLAN",
+                       "PLAN_NOT_CONTEMPORANEOUS", "UNVERIFIED_EXECUTION",
+                       "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", "BLOCKED_ON_ISA-0686",
+                       "NOT_BUY_LIKE", "ACTIVATION_DISABLED")
+ACTIVATION_BLOCKED_ROUTES = {"vci": "ISA-0686"}
+
+
+def obligation_binding(o: dict) -> dict:
+    """-> {"binding": bool, "reason": str}. The ONE definition of a claim allocate() honours."""
+    if o.get("voided") or o.get("state") == "VOIDED":
+        return {"binding": False, "reason": "VOIDED"}
+    if o.get("state") != "ACTIVE":
+        return {"binding": False,
+                "reason": ("UNPROVEN_NO_EXECUTION_PROVENANCE (ISA-0701): state %r - only an ACTIVE, "
+                           "execution-activated obligation carries a first claim" % o.get("state"))}
+    missing = [k for k in OBLIGATION_PROVENANCE_KEYS if not o.get(k)]
+    if missing:
+        return {"binding": False,
+                "reason": "UNPROVEN_NO_EXECUTION_PROVENANCE (ISA-0701): missing %s" % ", ".join(missing)}
+    return {"binding": True, "reason": "ACTIVE with decision + execution provenance"}
+
+
+def invalidate_unproven_obligations(doc: dict, *, today=None, item: str = "ISA-0701") -> dict:
+    """Retain-but-VOID every open row without execution provenance (never delete - R2.13/R6.5).
+    Original fields are kept; correction provenance is appended. Idempotent."""
+    today = today or datetime.date.today().isoformat()
+    voided = []
+    for o in doc.get("obligations", []):
+        if o.get("voided") or o.get("state") in ("VOIDED", "FULFILLED"):
+            continue
+        b = obligation_binding(o)
+        if b["binding"]:
+            continue
+        o.setdefault("correction_provenance", []).append({
+            "item": item, "on": today, "action": "VOIDED_NON_BINDING",
+            "original": {"voided": o.get("voided"), "voided_reason": o.get("voided_reason"),
+                         "state": o.get("state")},
+            "why": b["reason"]})
+        o["voided"], o["state"], o["voided_on"] = True, "VOIDED", today
+        o["voided_reason"] = ("%s remediation: proposal-only obligation - written by a reporting/"
+                              "proposal run with no authorised decision matched to a confirmed broker "
+                              "execution; non-binding, retained as evidence" % item)
+        voided.append(o.get("ticker"))
+    return {"doc": doc, "voided": voided}
+
+
+def month_label_of(date_iso: str) -> str:
+    return datetime.date.fromisoformat(str(date_iso)[:10]).strftime("%b_%Y").lower()
+
+
+def activate_from_executions(entries: List[dict], plan_loader, *, today=None, path=None,
+                             dry_run: bool = False, doc: Optional[dict] = None) -> dict:
+    """ISA-0701 — the ONLY creator of an ACTIVE obligation (and of FULFILLED transitions).
+
+    `entries`: decision_ledger entries AFTER reconcile_executions_from_transactions.
+    `plan_loader(month_label)` -> {"allocation": {...}, "artifact": str, "sha256": str,
+    "as_of": "YYYY-MM-DD"} or None: the AUTHORISED allocation of the decision's month.
+    Requires, per obligation: buy-like decision + confirmed broker execution (transaction_record,
+    executed amount) + a PROPOSED obligation for that ticker in a plan dated no later than the
+    decision + a unique execution identity. Never infers from `held`; unmatched/off-framework trades
+    are never entries, so they can never activate anything."""
+    _fi_mark("position_sizing", "activate_from_executions")   # ISA-0699: execution-ledger observation
+    today = today or datetime.date.today().isoformat()
+    own = doc is None
+    doc = load_fill_obligations(path) if own else doc
+    try:
+        import isa_policy as _p
+        enabled = bool(_p.V2_FLAGS.get("obligation_activation", True))
+    except Exception:                                                   # noqa: BLE001
+        enabled = True
+    obls = doc.setdefault("obligations", [])
+    by_id = {o.get("obligation_id"): o for o in obls if o.get("obligation_id")}
+    outcomes, changed = [], False
+    for e in entries or []:
+        d = str(e.get("decision") or "").strip().lower()
+        if e.get("execution_status") != "confirmed_executed":
+            continue
+        tk, did = str(e.get("ticker") or "").upper(), e.get("_id")
+        rec = {"decision_id": did, "ticker": tk, "route": e.get("route")}
+        if d not in ("buy", "top_up"):
+            outcomes.append(dict(rec, outcome="NOT_BUY_LIKE"))
+            continue
+        if not enabled:
+            outcomes.append(dict(rec, outcome="ACTIVATION_DISABLED"))
+            continue
+        if str(e.get("route") or "").lower() in ACTIVATION_BLOCKED_ROUTES:
+            outcomes.append(dict(rec, outcome="BLOCKED_ON_ISA-0686",
+                                 why="VCI deploy decisions are not canonical in decision_ledger (ISA-0686); "
+                                     "no obligation is inferred from the holding"))
+            continue
+        amt = e.get("executed_amount_gbp")
+        if e.get("execution_source") != "transaction_record" or amt is None or not did:
+            outcomes.append(dict(rec, outcome="UNVERIFIED_EXECUTION",
+                                 why="execution not from the broker dealing record with an amount"))
+            continue
+        exec_ref = e.get("executed_reference") or ("DERIVED:%s|%s|%s" % (
+            e.get("executed_date"), e.get("executed_quantity"), amt))
+        oid = "OBL-" + hashlib.sha256(("%s|%s" % (did, exec_ref)).encode("utf-8")).hexdigest()[:16]
+        label = month_label_of(e.get("date"))
+        plan = plan_loader(label)
+        if not plan:
+            outcomes.append(dict(rec, outcome="NO_AUTHORISED_PLAN", month=label))
+            continue
+        if str(plan.get("as_of") or "9999")[:10] > str(e.get("date"))[:10]:
+            outcomes.append(dict(rec, outcome="PLAN_NOT_CONTEMPORANEOUS", artifact=plan.get("artifact"),
+                                 plan_as_of=plan.get("as_of"),
+                                 why="the plan on disk post-dates the decision; it cannot be the authorised plan"))
+            continue
+        al = plan.get("allocation") or {}
+        existing = [o for o in obls if o.get("ticker") == tk and obligation_binding(o)["binding"]]
+        if existing and oid not in by_id:
+            row = next((r for r in al.get("rows") or [] if r.get("ticker") == tk), {})
+            ob = existing[0]
+            ev = {"on": today, "decision_id": did, "execution_reference": exec_ref,
+                  "executed_gbp": amt, "plan_state": row.get("state"), "artifact": plan.get("artifact")}
+            ob.setdefault("fill_events", []).append(ev)
+            if row.get("state") == "OBLIGATION_FILLED":
+                ob.setdefault("lifecycle", []).append({"on": today, "to": "FULFILLED", "evidence": ev})
+                ob["state"], ob["fulfilled_on"] = "FULFILLED", e.get("executed_date")
+                outcomes.append(dict(rec, outcome="FULFILLED", obligation_id=ob.get("obligation_id")))
+            else:
+                outcomes.append(dict(rec, outcome="PARTIAL_FILL_RECORDED", obligation_id=ob.get("obligation_id")))
+            by_id[oid] = ob
+            changed = True
+            continue
+        if oid in by_id:
+            outcomes.append(dict(rec, outcome="IDEMPOTENT_SKIP", obligation_id=oid))
+            continue
+        prop = next((x for x in al.get("proposed_obligations") or [] if x.get("ticker") == tk), None)
+        if not prop:
+            outcomes.append(dict(rec, outcome="NO_PLANNED_SHORTFALL", artifact=plan.get("artifact")))
+            continue
+        target = float(prop.get("target_gbp") or 0.0)
+        shortfall = round(target - float(amt), 2)
+        if shortfall <= 0.005:
+            outcomes.append(dict(rec, outcome="FILLED_AT_EXECUTION", target_gbp=target, executed_gbp=amt))
+            continue
+        if prop.get("is_new") and float(amt) < float(prop.get("min_entry_gbp") or 0.0):
+            outcomes.append(dict(rec, outcome="EXECUTION_DEVIATION_BELOW_MIN_ENTRY", executed_gbp=amt,
+                                 min_entry_gbp=prop.get("min_entry_gbp"),
+                                 why=("broker execution left a NEW position below the minimum meaningful "
+                                      "entry - named for review; no automatic first claim is created")))
+            continue
+        row = {"obligation_id": oid, "ticker": tk, "kind": prop.get("kind"), "state": "ACTIVE",
+               "source_decision_id": did, "route": e.get("route"),
+               "source_allocation_artifact": plan.get("artifact"), "source_allocation_sha256": plan.get("sha256"),
+               "source_allocation_as_of": plan.get("as_of"),
+               "execution_reference": exec_ref, "executed_date": e.get("executed_date"),
+               "executed_quantity": e.get("executed_quantity"), "executed_gbp": amt,
+               "opened_on": e.get("executed_date"),
+               "target_rung": prop.get("target_rung"), "target_pct": prop.get("target_pct"),
+               "target_gbp_at_authorisation": target,
+               "authorised_allocation_gbp": prop.get("authorised_allocation_gbp"),
+               "shortfall_at_activation_gbp": shortfall, "obligation_gbp": shortfall,
+               "evidence_state_at_entry": prop.get("evidence_state"),
+               "conditional": bool(prop.get("conditional")), "condition": prop.get("condition"),
+               "voided": False, "voided_reason": None,
+               "lifecycle": [{"on": today, "to": "ACTIVE", "by": "position_sizing.activate_from_executions"}],
+               "basis": ("ISA-0701: ACTIVE only after an authorised decision matched to broker execution. "
+                         "`obligation_gbp` is evidence at activation; the next fill uses the CURRENT "
+                         "qualifying gap. D17 first claim; RAJ D24 clock rule unchanged.")}
+        obls.append(row)
+        by_id[oid] = row
+        changed = True
+        outcomes.append(dict(rec, outcome="ACTIVATED", obligation_id=oid, shortfall_gbp=shortfall))
+    # ⚑ Report each (decision, outcome) ONCE: historic executions are re-evaluated every run (a blocked
+    #   VCI row can become activatable when ISA-0686 closes) but only a NEW or CHANGED outcome is
+    #   escalated, so the review is not flooded by the same July row each month.
+    alog = doc.setdefault("activation_log", {})
+    fresh = []
+    for o in outcomes:
+        assert o["outcome"] in ACTIVATION_OUTCOMES, o
+        key = str(o.get("decision_id"))
+        prev = alog.get(key)
+        if prev is None or prev.get("outcome") != o["outcome"]:
+            alog[key] = {"outcome": o["outcome"], "first_seen": today, "ticker": o.get("ticker")}
+            changed = True
+            fresh.append(o)
+    written = save_fill_obligations(doc, path) if (own and changed and not dry_run) else None
+    return {"store": written, "dry_run": bool(dry_run), "changed": changed, "outcomes": outcomes,
+            "activated": [o["ticker"] for o in outcomes if o["outcome"] == "ACTIVATED"],
+            "fulfilled": [o["ticker"] for o in outcomes if o["outcome"] == "FULFILLED"],
+            "new_or_changed": [o.get("decision_id") for o in fresh],
+            "review_required": [o for o in fresh if o["outcome"] in (
+                "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", "PLAN_NOT_CONTEMPORANEOUS", "BLOCKED_ON_ISA-0686",
+                "UNVERIFIED_EXECUTION", "NO_AUTHORISED_PLAN")],
+            "doc": doc}
+
+
 def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
              ranking_basis: str, policy=None, obligations=None,
-             sequencer_order: Optional[List[str]] = None, today=None) -> dict:
+             sequencer_order: Optional[List[str]] = None, today=None,
+             concentration=None) -> dict:
     """Floor-then-priority fill. Returns the per-name allocation and the residual.
+
+    `concentration` (ISA-0465): optional callable (ticker, gbp, is_new, admitted) -> gate dict from
+    concentration_control.gate, consulted SEQUENTIALLY so candidate 2 sees candidate 1. A refused
+    name is skipped (its pound stays in the queue for later destinations, then funds); a capped
+    name receives only its headroom. None = no concentration gate (OFF/SHADOW authoritative pass).
 
     ⚑⚑ THE £9,000 CASE IS RAJ'S OWN WORKED EXAMPLE AND IT DOES **NOT** GIVE £5k + £4k.
     Floor-then-priority fills #1 COMPLETELY first, so the residual is £3,528.76 — below the
@@ -989,8 +1208,12 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
     #   Ownership rule: if the caller SUPPLIED the doc it owns persistence; if `allocate`
     #   loaded it, `allocate` saves it. That keeps tests and dry runs able to pass a doc in
     #   and get no side effect.
-    _owns_doc = obligations is None
-    doc = obligations if obligations is not None else load_fill_obligations()
+    # ⚑⚑ ISA-0701 SUPERSEDES THE OWNERSHIP RULE ABOVE: allocate() NEVER writes the store and never
+    #   mutates a caller's doc. A proposal is not an execution; activation is owned by
+    #   activate_from_executions() at the execution-reconciliation boundary (pre-run Step 1.5).
+    import copy as _copy
+    doc = _copy.deepcopy(obligations if obligations is not None else load_fill_obligations())
+    proposed, block_events, non_binding = [], [], []
 
     uses = list(qualifying_uses)
     for u in uses:
@@ -1007,8 +1230,19 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
         order_basis = ranking_basis
 
     # ⚑ D17 — UNDERFILLED OBLIGATIONS TAKE THE HEAD OF THE ORDER, ahead of ANY new position.
-    live_obl = {o["ticker"]: o for o in doc.get("obligations", [])
-                if not o.get("voided")}
+    live_obl = {}
+    for o in doc.get("obligations", []):
+        _b = obligation_binding(o)
+        if _b["binding"]:
+            live_obl[o["ticker"]] = o
+        elif not (o.get("voided") or o.get("state") in ("VOIDED", "FULFILLED")):
+            non_binding.append({"ticker": o.get("ticker"), "reason": _b["reason"]})
+    # ⚑ ISA-0701: a claim needs a position. An ACTIVE row for a name not currently held carries no
+    #   head priority and does not waive the new-entry floor (published, not silently honoured).
+    _held_now = {u["ticker"] for u in uses if float(u.get("current_value_gbp") or 0.0) > 0.0}
+    for _t in [t for t in live_obl if t not in _held_now and t in {u["ticker"] for u in uses}]:
+        non_binding.append({"ticker": _t, "reason": "ACTIVE obligation but position not held"})
+        live_obl.pop(_t)
     head = [u for u in uses if u["ticker"] in live_obl]
     tail = [u for u in uses if u["ticker"] not in live_obl]
     uses = head + tail
@@ -1030,7 +1264,7 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
     for u in uses:
         tk = u["ticker"]
         gap = float(u.get("gbp") or 0.0)
-        is_new = float(u.get("current_value_gbp") or 0.0) <= 0.0 and tk not in live_obl
+        is_new = float(u.get("current_value_gbp") or 0.0) <= 0.0          # ISA-0701: held truth only
         if remaining <= 0:
             rows.append({"ticker": tk, "allocated_gbp": 0.0, "state": "NO_CAPITAL",
                          "gap_gbp": round(gap, 2)})
@@ -1106,23 +1340,108 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
                 rows.append({"ticker": tk, "allocated_gbp": 0.0, "state": "HELD_AS_RESERVE",
                              "gap_gbp": round(gap, 2)})
                 break
+        _cg = None
+        if concentration is not None:
+            _cg = concentration(tk, alloc, is_new, {r["ticker"]: r["allocated_gbp"]
+                                                   for r in rows if r.get("allocated_gbp")})
+            if _cg.get("allowed_gbp", 0.0) <= 0.0:
+                # ⚑ RAJ A1.3 (16-Sep-2026): a blocked fill RELEASES its capital to the next
+                # admissible destination in THIS run — it never retains a first claim it cannot use.
+                _blocked_obl = tk in live_obl
+                rows.append({"ticker": tk, "allocated_gbp": 0.0,
+                             "state": ("CONDITIONAL_FILL_BLOCKED" if _blocked_obl else _cg["verdict"]),
+                             "gap_gbp": round(gap, 2), "released_gbp": round(alloc, 2),
+                             "concentration": _cg,
+                             "skip_reason": ("ISA-0465 concentration gate: %s — GBP %.2f released to "
+                                             "the next admissible destination"
+                                             % (_cg["verdict"], alloc))})
+                if _blocked_obl:
+                    # ISA-0701: reported, never written back from a proposal run
+                    block_events.append({"obligation_id": live_obl[tk].get("obligation_id"), "ticker": tk,
+                                         "blocked_on": today or datetime.date.today().isoformat(),
+                                         "verdict": _cg["verdict"], "released_gbp": round(alloc, 2)})
+                skipped.append(tk)
+                continue
+            if _cg.get("verdict") == "CAP_CONSTRAINED_ENTRY":
+                alloc, state = float(_cg["allowed_gbp"]), "CAP_CONSTRAINED_ENTRY"
+            elif _cg["allowed_gbp"] + 0.005 < alloc:
+                alloc, state = float(_cg["allowed_gbp"]), state + "_CONCENTRATION_CAPPED"
         remaining -= alloc
         row = {"ticker": tk, "allocated_gbp": round(alloc, 2), "state": state,
                "gap_gbp": round(gap, 2), "rung": u.get("rung"),
                "target_pct": u.get("target_pct")}
-        if state == "UNDERFILLED":
+        if _cg is not None:
+            row["concentration_verdict"] = _cg.get("verdict")
+        if state == "CAP_CONSTRAINED_ENTRY":
+            # ⚑ RAJ A1.3 — distinct from UNDERFILLED: the binding constraint is concentration
+            # headroom, not capital. Its later fill is CONDITIONAL (fresh headroom + continued
+            # eligibility); a blocked fill releases capital the same run (branch above).
             row["obligation_gbp"] = round(gap - alloc, 2)
-            doc.setdefault("obligations", []).append({
-                "ticker": tk, "opened_on": today or datetime.date.today().isoformat(),
-                "allocated_gbp": round(alloc, 2), "target_rung": u.get("rung"),
-                "obligation_gbp": round(gap - alloc, 2),
-                "evidence_state_at_entry": u.get("evidence_state"),
-                "voided": False, "voided_reason": None,
-                "basis": ("D17 — a sub-STARTER entry carries a FIRST CLAIM on the next "
+            proposed.append({
+                "ticker": tk, "state": "PROPOSED", "proposed_on": today or datetime.date.today().isoformat(),
+                "authorised_allocation_gbp": round(alloc, 2), "target_rung": u.get("rung"),
+                "target_pct": u.get("target_pct"), "target_gbp": round(gap, 2), "is_new": is_new,
+                "min_entry_gbp": floor, "shortfall_gbp": round(gap - alloc, 2),
+                "evidence_state": u.get("evidence_state"),
+                "kind": "CAP_CONSTRAINED_ENTRY", "conditional": True,
+                "condition": ("fill only with fresh ISA-0465 concentration headroom AND continued "
+                              "eligibility (a qualifying use); when blocked, capital is released to "
+                              "the next admissible destination that run"),
+                "basis": ("RAJ A1.3 16-Sep-2026 (ISA-0465 R19.3 amendment); D24 clock rule unchanged. "
+                          "ISA-0701: PROPOSED only - activates on confirmed execution")})
+        elif state == "UNDERFILLED":
+            row["obligation_gbp"] = round(gap - alloc, 2)
+            proposed.append({
+                "ticker": tk, "state": "PROPOSED", "kind": "UNDERFILLED_ENTRY",
+                "proposed_on": today or datetime.date.today().isoformat(),
+                "authorised_allocation_gbp": round(alloc, 2), "target_rung": u.get("rung"),
+                "target_pct": u.get("target_pct"), "target_gbp": round(gap, 2), "is_new": is_new,
+                "min_entry_gbp": floor, "shortfall_gbp": round(gap - alloc, 2),
+                "evidence_state": u.get("evidence_state"), "conditional": False,
+                "basis": ("ISA-0701: PROPOSED only - activates on confirmed execution. D17 — a sub-STARTER entry carries a FIRST CLAIM on the next "
                           "tranche, ahead of any new position. ⚑ RAJ D24 (02-Sep-2026, "
                           "ISA-0545): filling it does NOT restart the min-hold clock. A9's lot "
                           "clock is RETIRED — the framework COMPELS this fill, so a resetting "
                           "clock would let it extend Raj's own lock-in involuntarily.")})
+        elif state in ("OBLIGATION_FILLED", "OBLIGATION_PARTIAL"):
+            # ⚑ ISA-0543 — A9 INSTRUMENTED (13-Sep-2026). The obligation-fill branch above
+            # (D17/D24, ISA-0545) has always ASSERTED that filling an obligation does not
+            # restart the min-hold clock; nothing MEASURED it. `would_have_reset_clock` answers,
+            # from THIS fill's own dates, whether the RETIRED A9 lot-clock rule (a fresh clock
+            # starting at the fill's own date) would have read a LATER min_hold_until than
+            # D24's position-level clock (anchored to the position's first entry) does. It
+            # reuses `min_hold_ok()` itself — the production function — rather than
+            # re-deriving the 182-day arithmetic a second time (R4.4: one home for the rule).
+            _fill_date = today or datetime.date.today().isoformat()
+            _entry = live_obl.get(tk, {}).get("opened_on")
+            if _entry:
+                _real = min_hold_ok(position_first_entry_date=_entry, today=_fill_date)
+                _cf = min_hold_ok(position_first_entry_date=_fill_date, today=_fill_date)
+                _real_until = datetime.date.fromisoformat(_real["min_hold_until"])
+                _cf_until = datetime.date.fromisoformat(_cf["min_hold_until"])
+                _extend_days = (_cf_until - _real_until).days
+                row["position_first_entry_date"] = _entry
+                row["would_have_reset_clock"] = _extend_days > 0
+                row["would_have_reset_clock_days"] = _extend_days
+                row["would_have_reset_clock_basis"] = (
+                    ("A9 (RETIRED, RAJ D24/ISA-0545): a lot clock anchored to THIS fill's own "
+                     "date (%s) would read min_hold_until %s. D24's position-level clock, "
+                     "anchored to the position's first entry (%s), reads %s. %s Instrumented "
+                     "for ISA-0543.") % (
+                        _fill_date, _cf["min_hold_until"], _entry, _real["min_hold_until"],
+                        ("The retired A9 rule would have extended the lock-in by %d day(s)."
+                         % _extend_days) if _extend_days > 0 else
+                        "This fill lands on the position's own first-entry date, so the two "
+                        "clocks agree."))
+            else:
+                # ⚑ NAMED ABSENCE, not a silently-skipped field (R4.9). An obligation-fill row
+                # whose live obligation record carries no `opened_on` cannot be
+                # counterfactually dated — that is itself worth seeing rather than hiding as a
+                # missing key.
+                row["would_have_reset_clock"] = None
+                row["would_have_reset_clock_basis"] = (
+                    "UNMEASURED: the live obligation record for %s carries no `opened_on`, so "
+                    "the D24 anchor date is unavailable this fill." % tk)
         rows.append(row)
         opened.append(tk)
     residual = round(max(remaining, 0.0), 2)
@@ -1144,9 +1463,12 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
         "order_basis": order_basis, "ranking_basis": ranking_basis,
         "order": [u["ticker"] for u in uses],
         "obligations_at_head": sorted(live_obl),
-        "obligations_persisted_to": (save_fill_obligations(doc) if _owns_doc else None),
-        "obligations_open": [o["ticker"] for o in doc.get("obligations", [])
-                             if not o.get("voided")],
+        "obligations_persisted_to": None,          # ISA-0701: a proposal never writes the store
+        "obligations_store_mutated": False,
+        "proposed_obligations": proposed,
+        "obligation_block_events": block_events,
+        "obligations_non_binding": non_binding,
+        "obligations_open": sorted(live_obl),
         "stopped_reason": stopped_reason,
         # ⚑ SKIPPED IS NOT STOPPED (ISA-0563). A name the queue passed over is a different
         # fact from the queue ending, and collapsing them is how "we could not afford HRMY"
@@ -1177,6 +1499,7 @@ def min_hold_ok(*, position_first_entry_date: Optional[str] = None, today: Optio
     There is no tax consequence inside an ISA, so lot selection is governed by the clock's
     PURPOSE (anti-churn), not by lot order.
     ⚑ And inside min-hold a position IN PROFIT may be trimmed; a position AT A LOSS may not."""
+    _fi_mark("position_sizing", "min_hold_ok")   # ISA-0699: execution-ledger observation
     # ⚑ D24 (ISA-0545). `entry_date` was the LOT date. Its meaning changed, so the OLD NAME
     # RAISES rather than quietly carrying the new semantics — a contract change must fail an
     # un-updated caller, never default (R4.7). This is the FC-B rename discipline: when a value
@@ -1333,6 +1656,251 @@ def _selftest_isa0548(verbose: bool = True) -> int:
     return n
 
 
+def _selftest_isa0465(verbose: bool = False) -> int:
+    """ISA-0465 R19.3 A1.3 — CAP_CONSTRAINED_ENTRY and conditional fills through the REAL allocate().
+    liveness_ref: position_sizing._selftest_isa0465"""
+    import concentration_control as _ccm
+    n = 0
+    NAV = 146_189.0
+    pol = load_policy()
+    floor = min_entry_gbp(NAV, pol)["min_entry_gbp"]
+    tax = {"sector": {"H1": {"value": "Tech"}, "NEW1": {"value": "Tech"}, "NEW2": {"value": "Health"},
+                      "OB1": {"value": "Tech"}},
+           "theme": {"H1": ["AI"], "NEW1": ["AI"], "NEW2": [], "OB1": ["AI"]}}
+
+    def hook(held):
+        def fn(tk, gbp, is_new, admitted):
+            b = dict(held)
+            for k, v in admitted.items():
+                b[k] = b.get(k, 0.0) + v
+            return _ccm.gate(b, tk, gbp, nav_gbp=NAV, tax=tax, is_new=is_new, min_entry_gbp=floor)
+        return fn
+    sec_cap = _ccm.SECTOR_CAP_NAV * NAV
+    held = {"H1": sec_cap - floor - 500.0, "ZZ": 60_000.0}
+    tax["sector"]["ZZ"], tax["theme"]["ZZ"] = {"value": "Other"}, []
+    uses = [{"ticker": "NEW1", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 9},
+            {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
+    out = allocate(uses, capital_gbp=12_000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                   obligations={"obligations": []}, concentration=hook(held))
+    r = {x["ticker"]: x for x in out["rows"]}
+    assert r["NEW1"]["state"] == "CAP_CONSTRAINED_ENTRY" and abs(r["NEW1"]["allocated_gbp"] - (floor + 500.0)) < 0.02, r["NEW1"]
+    n += 1
+    ob = [o for o in out["proposed_obligations"] if o["ticker"] == "NEW1"]
+    assert ob and ob[0]["conditional"] is True and ob[0]["kind"] == "CAP_CONSTRAINED_ENTRY" \
+        and ob[0]["state"] == "PROPOSED", ob
+    n += 1
+    assert r["NEW2"]["allocated_gbp"] == 5000.0, "released headroom capital must reach the next destination"
+    n += 1
+    # ⚑ NEGATIVE CONTROL — headroom below the minimum meaningful entry: no entry, capital released
+    held2 = {"H1": sec_cap - floor + 100.0, "ZZ": 60_000.0}
+    out2 = allocate(uses, capital_gbp=12_000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                    obligations={"obligations": []}, concentration=hook(held2))
+    r2 = {x["ticker"]: x for x in out2["rows"]}
+    assert r2["NEW1"]["allocated_gbp"] == 0.0 and r2["NEW1"]["state"] == "REFUSE_SECTOR", r2["NEW1"]
+    assert not [o for o in out2["proposed_obligations"] if o["ticker"] == "NEW1"]
+    assert r2["NEW2"]["allocated_gbp"] == 5000.0
+    n += 3
+    # ⚑ MUST-FIRE — a conditional obligation with NO fresh headroom is blocked and RELEASES capital
+    obl = {"obligations": [{"ticker": "OB1", "opened_on": "2026-09-01", "allocated_gbp": floor,
+                            "obligation_gbp": 2000.0, "kind": "CAP_CONSTRAINED_ENTRY",
+                            "conditional": True, "voided": False, "state": "ACTIVE",
+                            "obligation_id": "OBL-ob1", "source_decision_id": "2026-09-01::OB1::buy",
+                            "execution_reference": "REF-ob1"}]}
+    held3 = {"OB1": sec_cap, "ZZ": 60_000.0}
+    uses3 = [{"ticker": "OB1", "gbp": 2000.0, "current_value_gbp": sec_cap, "rung": "NORMAL", "source_score": 1},
+             {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
+    out3 = allocate(uses3, capital_gbp=5_300.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                    obligations=obl, today="2026-10-03", concentration=hook(held3))
+    r3 = {x["ticker"]: x for x in out3["rows"]}
+    assert r3["OB1"]["state"] == "CONDITIONAL_FILL_BLOCKED" and r3["OB1"]["released_gbp"] == 2000.0, r3["OB1"]
+    assert r3["NEW2"]["allocated_gbp"] == 5000.0, "the released first claim must fund the next name"
+    assert out3["obligation_block_events"][0]["blocked_on"] == "2026-10-03" \
+        and "last_blocked_on" not in obl["obligations"][0], "ISA-0701: block recorded in the result, never written back"
+    n += 3
+    # POSITIVE CONTROL — with fresh headroom the conditional obligation fills first
+    held4 = {"OB1": floor, "ZZ": 60_000.0}
+    obl4 = {"obligations": [dict(obl["obligations"][0], blocked_count=0)]}
+    out4 = allocate(uses3, capital_gbp=7_300.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                    obligations=obl4, concentration=hook(held4))
+    r4 = {x["ticker"]: x for x in out4["rows"]}
+    assert r4["OB1"]["allocated_gbp"] == 2000.0 and r4["OB1"]["state"] == "OBLIGATION_FILLED", r4["OB1"]
+    n += 1
+    if verbose:
+        print("position_sizing._selftest_isa0465: %d assertions, 0 failed" % n)
+    return n
+
+
+def _selftest_isa0701(verbose: bool = False) -> int:
+    """ISA-0701 BuildSpec §7 acceptance through the REAL allocate() / activate_from_executions().
+    liveness_ref: position_sizing._selftest_isa0701"""
+    import tempfile
+    n = 0
+    NAV = 146_189.45
+    pol = load_policy()
+    floor = min_entry_gbp(NAV, pol)["min_entry_gbp"]
+    new_uses = [{"ticker": "HALOX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
+                 "target_pct": 4.5, "source_score": 9},
+                {"ticker": "ZABX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
+                 "target_pct": 4.5, "source_score": 8},
+                {"ticker": "GEN", "gbp": 5116.63, "current_value_gbp": 0.0, "rung": "STARTER",
+                 "target_pct": 3.5, "source_score": 7}]
+    with tempfile.TemporaryDirectory() as td:
+        st = os.path.join(td, "underfilled_positions.json")
+        # 1 NEGATIVE: a reporting/proposal allocate() with the store loaded by allocate leaves it byte-identical
+        global FILL_STORE
+        _saved_store = FILL_STORE
+        FILL_STORE = st
+        try:
+            save_fill_obligations({"obligations": []}, st)
+            b0 = open(st, "rb").read()
+            out = allocate(new_uses, capital_gbp=11000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol)
+            assert open(st, "rb").read() == b0 and out["obligations_persisted_to"] is None, \
+                "ISA-0701 NEGATIVE CONTROL: a proposal run must leave the store byte-identical"
+            n += 1
+            # 3 NEGATIVE: the underfilled proposal is PROPOSED only
+            assert out["proposed_obligations"] and all(p["state"] == "PROPOSED" for p in out["proposed_obligations"]) \
+                and load_fill_obligations(st)["obligations"] == [], "ISA-0701: proposal creates no ACTIVE row"
+            n += 1
+            # 2 NEGATIVE: re-run / dry-run shapes (obligations passed, repeated) - still no write, caller doc untouched
+            passed = {"obligations": []}
+            allocate(new_uses, capital_gbp=11000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                     obligations=passed)
+            allocate(new_uses, capital_gbp=11000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol)
+            assert passed == {"obligations": []} and open(st, "rb").read() == b0, \
+                "ISA-0701 NEGATIVE CONTROL: re-runs never mutate the store or a caller's doc"
+            n += 1
+        finally:
+            FILL_STORE = _saved_store
+        # 15 HALO/ZAB-like fabricated rows: non-binding at head, retained when invalidated
+        fab = {"obligations": [dict(ticker=t, opened_on="2026-09-12", allocated_gbp=6657.34,
+                                    target_rung="NORMAL", obligation_gbp=250.11, voided=False,
+                                    voided_reason=None) for t in ("HALOX", "ZABX")]}
+        out_f = allocate(new_uses, capital_gbp=13564.79, nav_gbp=NAV, ranking_basis="source_score",
+                         policy=pol, obligations=fab)
+        assert out_f["obligations_at_head"] == [] and len(out_f["obligations_non_binding"]) == 2, \
+            "ISA-0701 MUST-FIRE: fabricated rows without provenance are NOT at the head of the queue"
+        n += 1
+        r_f = {r["ticker"]: r for r in out_f["rows"]}
+        assert r_f["HALOX"]["state"] in ("FULL", "UNDERFILLED") and "OBLIGATION" not in r_f["HALOX"]["state"], \
+            "ISA-0701: an unheld name is a NEW entry under the entry floor, never an obligation fill"
+        n += 1
+        held_uses = [dict(u, current_value_gbp=1000.0) for u in new_uses[:2]]
+        out_h = allocate(held_uses, capital_gbp=13564.79, nav_gbp=NAV, ranking_basis="source_score",
+                         policy=pol, obligations=fab)
+        assert out_h["obligations_at_head"] == [] and all(
+            "UNPROVEN" in x["reason"] for x in out_h["obligations_non_binding"]), \
+            "ISA-0701 NEGATIVE CONTROL: even for a HELD name, a row without execution provenance is no first claim (0685-safe)"
+        n += 1
+        inv = invalidate_unproven_obligations(json.loads(json.dumps(fab)), today="2026-09-16")
+        assert inv["voided"] == ["HALOX", "ZABX"] and all(
+            o["state"] == "VOIDED" and o["allocated_gbp"] == 6657.34 and o["opened_on"] == "2026-09-12"
+            and o["correction_provenance"][0]["item"] == "ISA-0701" for o in inv["doc"]["obligations"]), \
+            "ISA-0701: fabricated rows are RETAINED with original fields + correction provenance"
+        n += 1
+        assert invalidate_unproven_obligations(inv["doc"], today="2026-09-17")["voided"] == [], \
+            "ISA-0701: invalidation is idempotent"
+        n += 1
+        # activation fixtures
+        plan_doc = allocate(new_uses[2:], capital_gbp=floor + 100.0, nav_gbp=NAV, ranking_basis="source_score",
+                            policy=pol, obligations={"obligations": []})
+        assert plan_doc["proposed_obligations"][0]["ticker"] == "GEN"
+        plans = {"oct_2026": {"allocation": plan_doc, "artifact": "capital_destination_oct_2026.json",
+                              "sha256": "x", "as_of": "2026-10-03"}}
+        loader = lambda m: plans.get(m)                                          # noqa: E731
+
+        def ent(tk="GEN", decision="buy", status="confirmed_executed", amount=floor + 100.0, route="growth",
+                source="transaction_record", ref="REF1", date="2026-10-04"):
+            return {"_id": "%s::%s::%s" % (date, tk, decision), "date": date, "ticker": tk, "route": route,
+                    "decision": decision, "execution_status": status, "execution_source": source,
+                    "executed_amount_gbp": amount, "executed_date": "2026-10-06", "executed_quantity": 10,
+                    "executed_reference": ref}
+        d0 = {"obligations": []}
+        # 4 NEGATIVE: unexecuted recommendation
+        r = activate_from_executions([ent(status="recommended")], loader, doc=d0)
+        assert not d0["obligations"] and not r["outcomes"], "ISA-0701: an unexecuted recommendation creates nothing"
+        n += 1
+        # 5/6 NEGATIVE: off-framework trades and held-without-admission never appear as entries; VCI blocked on 0686
+        r = activate_from_executions([ent(route="vci")], loader, doc=d0)
+        assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "BLOCKED_ON_ISA-0686" \
+            and len(r["review_required"]) == 1, r
+        n += 1
+        r = activate_from_executions([ent(route="vci")], loader, doc=d0)
+        assert r["outcomes"][0]["outcome"] == "BLOCKED_ON_ISA-0686" and r["review_required"] == [], \
+            "ISA-0701: an unchanged outcome is re-evaluated but escalated once"
+        n += 1
+        d0 = {"obligations": []}
+        r = activate_from_executions([ent(source="holdings_delta")], loader, doc=d0)
+        assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "UNVERIFIED_EXECUTION"
+        n += 1
+        # NEGATIVE: plan post-dating the decision is not the authorised plan
+        r = activate_from_executions([ent(date="2026-10-02")], loader, doc=d0)
+        assert not d0["obligations"] and r["outcomes"][0]["outcome"] in ("PLAN_NOT_CONTEMPORANEOUS", "NO_AUTHORISED_PLAN")
+        n += 1
+        # 8 NEGATIVE: new-position execution below minimum entry -> named deviation, no claim
+        r = activate_from_executions([ent(amount=floor - 500.0)], loader, doc=d0)
+        assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", r
+        n += 1
+        # 10 POSITIVE: authorised underfilled entry + matching execution -> exactly one ACTIVE with provenance
+        r = activate_from_executions([ent()], loader, doc=d0)
+        a = d0["obligations"]
+        assert r["activated"] == ["GEN"] and len(a) == 1 and a[0]["state"] == "ACTIVE" \
+            and a[0]["source_decision_id"] == "2026-10-04::GEN::buy" and a[0]["execution_reference"] == "REF1" \
+            and a[0]["opened_on"] == "2026-10-06" and obligation_binding(a[0])["binding"], a
+        n += 1
+        # 7 NEGATIVE: idempotent re-reconciliation
+        r = activate_from_executions([ent()], loader, doc=d0)
+        assert len(d0["obligations"]) == 1 and r["outcomes"][0]["outcome"] == "IDEMPOTENT_SKIP", r
+        n += 1
+        # 11/12 POSITIVE: the ACTIVE claim heads the next queue and fills the CURRENT gap, not the stale amount
+        nxt = [{"ticker": "NEWB", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 99},
+               {"ticker": "GEN", "gbp": 777.77, "current_value_gbp": floor + 100.0, "rung": "STARTER",
+                "source_score": 1}]
+        o2 = allocate(nxt, capital_gbp=10000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol, obligations=d0)
+        assert o2["order"][0] == "GEN" and o2["rows"][0]["state"] == "OBLIGATION_FILLED" \
+            and o2["rows"][0]["allocated_gbp"] == 777.77 and d0["obligations"][0]["obligation_gbp"] != 777.77, o2["rows"][0]
+        n += 1
+        # 14 POSITIVE: fulfil on a later confirmed top-up whose plan row filled the obligation; row retained
+        plans["nov_2026"] = {"allocation": o2, "artifact": "capital_destination_nov_2026.json", "sha256": "y",
+                             "as_of": "2026-11-07"}
+        r = activate_from_executions([ent(decision="top_up", date="2026-11-08", ref="REF2", amount=777.77)],
+                                     loader, doc=d0)
+        assert r["fulfilled"] == ["GEN"] and d0["obligations"][0]["state"] == "FULFILLED" \
+            and len(d0["obligations"]) == 1 and not obligation_binding(d0["obligations"][0])["binding"], r
+        n += 1
+        # 9/13 CAP_CONSTRAINED_ENTRY: proposal creates nothing; executed one activates conditional
+        cc_plan = {"proposed_obligations": [{"ticker": "CAPC", "kind": "CAP_CONSTRAINED_ENTRY", "conditional": True,
+                                             "condition": "fresh headroom", "target_gbp": 6000.0, "is_new": True,
+                                             "min_entry_gbp": floor, "authorised_allocation_gbp": floor + 10,
+                                             "target_rung": "NORMAL", "state": "PROPOSED"}], "rows": []}
+        plans["dec_2026"] = {"allocation": cc_plan, "artifact": "a", "sha256": "z", "as_of": "2026-12-05"}
+        d1 = {"obligations": []}
+        activate_from_executions([ent(tk="CAPC", status="recommended", date="2026-12-06")], loader, doc=d1)
+        assert d1["obligations"] == [], "ISA-0701: proposal-only CAP_CONSTRAINED_ENTRY creates no obligation"
+        n += 1
+        activate_from_executions([ent(tk="CAPC", date="2026-12-06", amount=floor + 10, ref="R9")], loader, doc=d1)
+        assert d1["obligations"][0]["kind"] == "CAP_CONSTRAINED_ENTRY" and d1["obligations"][0]["conditional"] is True \
+            and d1["obligations"][0]["state"] == "ACTIVE"
+        n += 1
+        # NEGATIVE CONTROL of the control: flag off -> no activation (safe state), never proposal persistence
+        import isa_policy as _ip
+        _had = "obligation_activation" in _ip.V2_FLAGS
+        _old = _ip.V2_FLAGS.get("obligation_activation")
+        try:
+            _ip.V2_FLAGS["obligation_activation"] = False
+            d2 = {"obligations": []}
+            r = activate_from_executions([ent(ref="REF3")], loader, doc=d2)
+            assert d2["obligations"] == [] and r["outcomes"][0]["outcome"] == "ACTIVATION_DISABLED"
+            n += 1
+        finally:
+            if _had:
+                _ip.V2_FLAGS["obligation_activation"] = _old
+            else:
+                _ip.V2_FLAGS.pop("obligation_activation", None)
+    if verbose:
+        print("position_sizing._selftest_isa0701: %d assertions, 0 failed" % n)
+    return n
+
+
 def _selftest():
     """⚑ Added 26-Aug-2026 after the delivered-location sweep found this module's --selftest
     importing a scaffolding module that was never written. The other eight V2.1 modules each
@@ -1458,12 +2026,78 @@ def _selftest():
         "D23: min_topup_gbp must stay ABSENT - the GBP 250 reserve is the single control"
     assert float((_pol["stock_sleeve"])["cash_reserve_gbp"]) > 0
 
+    # ── ISA-0543 (A9 half, 13-Sep-2026) — would_have_reset_clock, MEASURED not DECLARED ────
+    def _a9_use(tk="AAA", gbp=300.0, cv=100.0, score=10.0):
+        return {"ticker": tk, "gbp": gbp, "current_value_gbp": cv, "rung": "STARTER",
+                "target_pct": 3.5, "evidence_state": "T1", "source_score": score}
+
+    def _a9_doc(opened_on):
+        _obl = {"ticker": "AAA", "voided": False, "voided_reason": None, "state": "ACTIVE",
+                "obligation_id": "OBL-fixture", "source_decision_id": "2026-08-01::AAA::buy",
+                "execution_reference": "REF-fixture",
+                "allocated_gbp": 200.0, "target_rung": "STARTER", "obligation_gbp": 300.0,
+                "evidence_state_at_entry": "T1", "basis": "ISA-0543 selftest fixture"}
+        if opened_on is not None:
+            _obl["opened_on"] = opened_on
+        return {"obligations": [_obl]}
+
+    # POSITIVE CONTROL — a full obligation fill 30 days after the position's first entry:
+    # the retired A9 rule would have anchored a fresh clock at the fill date, extending the
+    # lock-in by exactly the gap between the two dates.
+    _a9r1 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
+                     ranking_basis="source_score", obligations=_a9_doc("2026-08-14"),
+                     today="2026-09-13")["rows"][0]
+    assert _a9r1["state"] == "OBLIGATION_FILLED"
+    assert _a9r1["would_have_reset_clock"] is True and _a9r1["would_have_reset_clock_days"] == 30, \
+        f"ISA-0543 POSITIVE CONTROL: a fill 30 days after first entry must read " \
+        f"would_have_reset_clock=True, days=30, got {_a9r1}"
+
+    # BOUNDARY CONTROL — a fill landing on the position's OWN first-entry date: the two
+    # clocks agree, so the retired rule would NOT have extended anything.
+    _a9r2 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
+                     ranking_basis="source_score", obligations=_a9_doc("2026-09-13"),
+                     today="2026-09-13")["rows"][0]
+    assert _a9r2["would_have_reset_clock"] is False and _a9r2["would_have_reset_clock_days"] == 0, \
+        f"ISA-0543 BOUNDARY CONTROL: a same-day fill must read would_have_reset_clock=False, " \
+        f"days=0, got {_a9r2}"
+
+    # POSITIVE CONTROL — a PARTIAL obligation fill (remaining < gap) is the same defect class
+    # and must be instrumented identically to a full fill.
+    _a9r3 = allocate([_a9_use(gbp=300.0)], capital_gbp=100.0, nav_gbp=100_000.0,
+                     ranking_basis="source_score", obligations=_a9_doc("2026-07-01"),
+                     today="2026-09-13")["rows"][0]
+    assert _a9r3["state"] == "OBLIGATION_PARTIAL" and _a9r3["would_have_reset_clock"] is True, \
+        f"ISA-0543 POSITIVE CONTROL: OBLIGATION_PARTIAL must be instrumented too, got {_a9r3}"
+
+    # NEGATIVE CONTROL — an obligation record with no `opened_on` is a NAMED absence
+    # (None + an UNMEASURED basis string), never a silently-omitted key or a guessed date.
+    _a9r4 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
+                     ranking_basis="source_score", obligations=_a9_doc(None),
+                     today="2026-09-13")["rows"][0]
+    assert _a9r4["would_have_reset_clock"] is None and "UNMEASURED" in _a9r4["would_have_reset_clock_basis"], \
+        f"ISA-0543 NEGATIVE CONTROL: a missing opened_on must read None with a named " \
+        f"UNMEASURED basis, not a guessed value, got {_a9r4}"
+
+    # NEGATIVE CONTROL — a brand-new position (UNDERFILLED, not an obligation fill) must NOT
+    # carry the field at all: the counterfactual only means something for a fill onto an
+    # EXISTING position, and a new open getting a stray True/False/None would be noise.
+    _a9r5 = allocate([{"ticker": "NEWX", "gbp": 5000.0, "current_value_gbp": 0.0,
+                       "rung": "STARTER", "target_pct": 3.5, "evidence_state": "T1",
+                       "source_score": 5.0}],
+                     capital_gbp=3000.0, nav_gbp=100_000.0, ranking_basis="source_score",
+                     obligations={"obligations": []}, today="2026-09-13")["rows"][0]
+    assert _a9r5["state"] == "UNDERFILLED" and "would_have_reset_clock" not in _a9r5, \
+        f"ISA-0543 NEGATIVE CONTROL: a new-position UNDERFILLED row must carry no " \
+        f"would_have_reset_clock key at all, got {_a9r5}"
+
     _n = sum(1 for _nd in ast.walk(ast.parse(inspect.getsource(_selftest)))
              if isinstance(_nd, (ast.Assert,)))
     # ── ISA-0548 negative controls, INSIDE _selftest so the R5.5 census sees them ──────
     # The census counts labelled markers in THIS function's body by AST; a delegated call
     # would run the controls and count as none, which is the vacuous pass it exists to catch.
     _n0548 = _selftest_isa0548(verbose=False)
+    _n0548 += _selftest_isa0465(verbose=False)
+    _n0548 += _selftest_isa0701(verbose=False)
     assert _n0548 >= 10, "the ISA-0548 control block must not be emptied by a refactor"
     # ⚑ NEGATIVE CONTROL: a HELD stock absent from the binary registry must be REFUSED, never
     #   read as not-a-binary — `false` is a declaration, absence means nobody has decided.

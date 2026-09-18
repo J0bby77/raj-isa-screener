@@ -2048,10 +2048,23 @@ def _selftest():
     t = thresholds(a, tw)
     ok(t["derived"]["section_c_on_track"] == round(a, 1), "Section C on-track must BE the anchor")
     ok(t["derived"]["section_b_on_track"] == round(a + STOCK_SLEEVE_PREMIUM_PP, 1), "B derived")
-    ok(abs(t["derived"]["section_b_on_track"] - t["legacy_frozen"]["section_b_on_track"]) <= THRESHOLD_PARITY_TOL_PP,
-       "derived stock threshold must reproduce the legacy 18.0 at today's anchor")
-    ok(abs(t["derived"]["section_c_watch"] - t["legacy_frozen"]["section_c_watch"]) <= THRESHOLD_PARITY_TOL_PP,
-       "derived Section C watch must reproduce the legacy 13.0")
+    # ⚑ ISA-0694 (16-Sep-2026). These two asserted LEVEL parity at TODAY's anchor, so they went red
+    #   the moment the anchor re-derived 13.9 -> 13.7 (05-Sep-2026) — correctly, because
+    #   `thresholds()` declares the DERIVED value operative and REPORTS the divergence. The same
+    #   assertion was repaired in tests_jul2026/test_return_architecture.py on 26-Aug-2026 and this
+    #   copy was not moved with it. Level parity is now a POINT-IN-TIME fixture at the 12-Jul-2026
+    #   anchor the legacy constants were frozen at (13.9); at today's anchor the PROPERTY must hold.
+    _t_frozen = thresholds(13.9, tw)
+    ok(abs(_t_frozen["derived"]["section_b_on_track"] - _t_frozen["legacy_frozen"]["section_b_on_track"]) <= THRESHOLD_PARITY_TOL_PP,
+       "derived stock threshold reproduces the legacy 18.0 at the 13.9 anchor it was frozen at")
+    ok(abs(_t_frozen["derived"]["section_c_watch"] - _t_frozen["legacy_frozen"]["section_c_watch"]) <= THRESHOLD_PARITY_TOL_PP,
+       "derived Section C watch reproduces the legacy 13.0 at the 13.9 anchor")
+    ok(all(abs(t["derived"][k] - t["legacy_frozen"][k]) <= THRESHOLD_PARITY_TOL_PP
+           or any(x.get("threshold") == k and x.get("operative") == "derived" and x.get("note")
+                  for x in t["divergences"])
+           for k in t["legacy_frozen"] if k in t["derived"]),
+       "at today's anchor every derived/legacy gap beyond tolerance is REPORTED with the derived "
+       "value operative — never silent")
     # negative control: move the anchor and the parity check MUST fire
     t2 = thresholds(a + 3.0, tw)
     ok(t2["divergences"], "a moved anchor must produce reported divergences, not silence")
@@ -2176,7 +2189,10 @@ def _selftest():
 
     # ── stock inputs: zero-confidence E[r] is a refusal, not a zero ──────────────────
     si, zc = stock_inputs([{"ticker": "QQ", "name": "Q", "value_gbp": 10.0}], {}, 100.0, a)
-    ok(si[0]["prior_pct"] == a + STOCK_SLEEVE_PREMIUM_PP, "stock prior is anchor-derived")
+    # ⚑ ISA-0694: exact float equality held at 13.9 + 4.1 and fails at 13.7 + 4.1 = 17.7999...,
+    #   against a producer that rounds to 4dp. Compared at the producer's own precision.
+    ok(abs(si[0]["prior_pct"] - round(a + STOCK_SLEEVE_PREMIUM_PP, 4)) < 1e-9,
+       "stock prior is anchor-derived")
     ok(si[0]["er_by_basis"]["realised"] is None, "no metrics row => no forward E[r], not zero")
 
     # ── invariants report, and a broken fixture must FAIL them ──────────────────────

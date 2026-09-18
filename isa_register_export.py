@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
 import sys
@@ -292,6 +293,73 @@ def write_xlsx(dest: Path, data: list, columns=None) -> Path:
         return alt
 
 
+def check(dest=None) -> dict:
+    """R14.3 / R15.4 -- the CSV/XLSX exports are RENDERS of the store too (R7.1), and drifted
+    silently until ISA-0690 (13-Sep-2026) because isa_register_render.check() -- the function
+    consistency_check.pair_register_renders_current() actually calls -- only ever regenerated
+    and compared the three markdown views. Nothing checked these two files, so the register was
+    written and the .md views refreshed while ISA_Item_Register.csv/.xlsx sat hours stale, and
+    the R14.3 gate reported GREEN throughout: a control that exists for one sibling render and
+    not the other is the same failure class as a control that exists and is called by nothing.
+
+    CSV is byte-compared, same as the markdown views -- csv.DictWriter is deterministic. XLSX is
+    compared by VALUE, never by byte: openpyxl stamps a fresh `created`/`modified` timestamp into
+    every workbook it writes, so a byte-identical XLSX is unreachable even when the data has not
+    changed one bit -- byte-diffing it would report drift on every single run, and a gate that
+    fires on its own output dies waived within a week, the way every self-defeating rule does
+    (R14.3's own docstring). Comparing the "All items" sheet's cell values against a fresh
+    isa_register.read_all() catches every real drift without ever tripping on the timestamp.
+    """
+    d = Path(dest).resolve() if dest else Path(__file__).resolve().parent
+    drift = []
+    full = rows()
+    core = rows(columns=CORE_COLUMNS)
+
+    csv_path = d / CSV_NAME
+    if not csv_path.exists():
+        drift.append(f"{CSV_NAME}: absent - never rendered")
+    else:
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=[c[0] for c in COLUMNS])
+        w.writeheader()
+        w.writerows(full)
+        expected = buf.getvalue().replace("\r\n", "\n")
+        actual = csv_path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+        if actual != expected:
+            drift.append(f"{CSV_NAME}: differs from the store's render")
+
+    xlsx_path = d / XLSX_NAME
+    if not xlsx_path.exists():
+        drift.append(f"{XLSX_NAME}: absent - never rendered")
+    else:
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+            if "All items" not in wb.sheetnames:
+                drift.append(f"{XLSX_NAME}: 'All items' sheet missing")
+            else:
+                ws = wb["All items"]
+                headers = [c[0] for c in CORE_COLUMNS]
+                # openpyxl reads an empty-string cell back as None (ISA-0690 finding): an
+                # empty string written and a None read are the SAME fact, not drift, so both
+                # sides are normalised the same way before comparing (never invent a difference
+                # that is purely a library round-trip artefact).
+                _norm = lambda v: "" if v is None else v
+                on_disk_rows = [tuple(_norm(v) for v in r)
+                                for r in ws.iter_rows(min_row=2, values_only=True)]
+                expected_rows = [tuple(_norm(r[h]) for h in headers) for r in core]
+                if on_disk_rows != expected_rows:
+                    drift.append(
+                        f"{XLSX_NAME}: 'All items' sheet content differs from the store's "
+                        f"render ({len(on_disk_rows)} row(s) on disk vs {len(expected_rows)} "
+                        f"expected)")
+            wb.close()
+        except Exception as e:                                     # noqa: BLE001
+            drift.append(f"{XLSX_NAME}: could not verify ({type(e).__name__}: {e})")
+
+    return {"ok": not drift, "drift": drift}
+
+
 def write(dest=None) -> dict:
     d = Path(dest).resolve() if dest else Path(__file__).resolve().parent
     full = rows()                       # CSV: every field, nothing lost
@@ -367,6 +435,29 @@ def selftest(verbose=True) -> int:
         ok(ws.max_row == len(data) + 1, "every item is a row on All items")
         ok(ws.freeze_panes == "D2" and ws.auto_filter.ref, "header frozen and filterable")
         ok(wb["Rationale ledger"].max_row > 1, "the rationale ledger view is populated")
+
+        # -- ISA-0690, 13-Sep-2026: check() is the companion R14.3 control isa_register_render.py
+        # already had and this module did not, discovered when isa_items.jsonl was revalidated in
+        # a cleanup session and only the markdown views were refreshed -- nothing checked these
+        # two files, so consistency_check's R14.3 gate stayed GREEN while they sat hours stale.
+        empty = tmp / "empty_dest"
+        empty.mkdir()
+        ok(not check(empty)["ok"], "an unrendered export is drift (absent)")
+        ok(check(tmp)["ok"], "a freshly written export must check clean")
+        with open(res["csv"], "a", encoding="utf-8-sig") as fh:
+            fh.write(",,,hand-edited row,,,\n")
+        chk = check(tmp)
+        ok(not chk["ok"] and any("csv" in d.lower() and "differs" in d for d in chk["drift"]),
+           "a hand-edited CSV must FAIL --check (R14.3 negative control)")
+        write(tmp)   # restore before the next probe so it isolates the XLSX case
+        wb2 = load_workbook(res["xlsx"])
+        wb2["All items"].cell(row=2, column=5).value = "HAND EDITED"
+        wb2.save(res["xlsx"])
+        chk2 = check(tmp)
+        ok(not chk2["ok"] and any("xlsx" in d.lower() and "differs" in d for d in chk2["drift"]),
+           "a hand-edited XLSX cell must FAIL --check (R14.3 negative control)")
+        write(tmp)
+        ok(check(tmp)["ok"], "re-writing after a hand-edit must check clean again")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if verbose:
@@ -378,6 +469,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="One-row-per-item export of the register")
     ap.add_argument("--dest", default=None)
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--check", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
@@ -386,6 +478,10 @@ def main(argv=None):
     if a.write:
         print(json.dumps(write(a.dest), indent=2))
         return 0
+    if a.check:
+        r = check(a.dest)
+        print("export check: OK" if r["ok"] else "export DRIFT:\n  - " + "\n  - ".join(r["drift"]))
+        return 0 if r["ok"] else 1
     ap.print_help()
     return 0
 

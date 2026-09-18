@@ -804,9 +804,9 @@ DEPLOY_ENTRY_FLOOR        = 0.50      # entry-weight floor (was ~0)
 UPGRADE_DELTA             = 15
 
 # Part 8 — sleeve sector / theme concentration caps (netted against fund look-through) + diversification.
-SLEEVE_SECTOR_CAP_ISA     = 0.12      # max one GICS sector across direct stocks (share of ISA)
-SLEEVE_THEME_CAP          = 0.50      # max one theme as share of the sleeve
-DIVERSIFY_OVERRIDE_DELTA  = 10        # source margin a 3rd same-sector name must beat the best other-sector name by
+# ⚑ ISA-0465 (16-Sep-2026): SLEEVE_SECTOR_CAP_ISA / SLEEVE_THEME_CAP moved to their ONE home,
+#   concentration_control.SECTOR_CAP_NAV / THEME_CAP_SLEEVE (Raj decision). DIVERSIFY_OVERRIDE_DELTA is
+#   RETIRED: a Source Score margin may not override a hard concentration limit.
 
 
 # --- WP-C position alerts (29-Jul-2026): between-run early warning thresholds -----------------

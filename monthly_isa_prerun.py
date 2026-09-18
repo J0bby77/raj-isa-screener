@@ -51,6 +51,7 @@ import datetime
 import os
 import re
 import subprocess
+import tempfile
 import sys
 import time
 import traceback
@@ -546,6 +547,7 @@ def _plan_stability_only(args) -> int:
     ctx["warnings"] = warnings
     ctx.setdefault("_meta", {})["assurance_completed_at"] = \
         datetime.now().strftime("%Y-%m-%d %H:%M")
+    _stamp_capital_authority(ctx)          # R18.5 — this command rewrites the artefact too
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(ctx, fh, indent=2, ensure_ascii=False)
@@ -553,6 +555,49 @@ def _plan_stability_only(args) -> int:
     print("  run_context updated: assurance=%s  (%.0fs)"
           % (summary["assurance"]["state"], time.time() - t0))
     return 0 if ok else 1
+
+
+def _capital_authority_step(errors: list, warnings: list, root: str = None) -> dict:
+    """Step 0a (R18.5, ISA-0629). Returns the authority record and escalates a non-AUTHORISED
+    verdict into BOTH lists: warnings carry the declared escalation prefix (ISA-0447) and errors
+    make the run's status reflect it. An unavailable release gate is REFUSED, never AUTHORISED."""
+    try:
+        import release_gate as _rg0
+        ta = _rg0.capital_run_authority("monthly_isa_prerun", root or SCRIPT_DIR)
+    except Exception as _e:                                            # noqa: BLE001
+        ta = {"surface": "monthly_isa_prerun", "authority": "REFUSED", "live_state": "UNKNOWN",
+              "build_id": None, "why": "release_gate unavailable — %s: %s" % (type(_e).__name__, _e)}
+    if ta.get("authority") != "AUTHORISED":
+        _tail = ("%s — LIVE is %s against Trusted Build %s: %s. No capital decision may be taken "
+                 "from this run_context until LIVE is reconciled with a signed receipt."
+                 % (ta.get("authority"), ta.get("live_state"), ta.get("build_id"),
+                    str(ta.get("why"))[:300]))
+        # the literal prefix is the declared ISA-0447 escalation (email_prefill.SUMMARY_ESCALATED)
+        warnings.append("R18.5 CAPITAL AUTHORITY " + _tail)
+        if ta.get("authority") != "NOT_ENFORCED":
+            errors.append("R18.5 CAPITAL AUTHORITY " + _tail)
+    return ta
+
+
+def _stamp_capital_authority(ctx: dict) -> dict:
+    """R18.5 / R4.11 — the authority travels ON the artefact the review reads. Anything but
+    AUTHORISED forces `_meta.status = ERROR` (NOT_ENFORCED excepted: the rollback is recorded, and
+    the decision is Raj's). Absence of the Step-0a record is REFUSED, never AUTHORISED (R4.3)."""
+    ta = (ctx.get("summary") or {}).get("trusted_build") or {}
+    auth = ta.get("authority")
+    if auth not in ("AUTHORISED", "REFUSED", "NOT_ENFORCED"):
+        auth = "REFUSED"
+    meta = ctx.setdefault("_meta", {})
+    meta["capital_authority"] = auth
+    meta["trusted_build_id"] = ta.get("build_id")
+    meta["trusted_build_live_state"] = ta.get("live_state") or "UNKNOWN"
+    if auth == "REFUSED":
+        meta["status"] = "ERROR"
+        note = ("R18.5: capital authority REFUSED (LIVE %s against %s). "
+                % (meta["trusted_build_live_state"], ta.get("build_id")))
+        if not str(ctx.get("error") or "").startswith("R18.5:"):
+            ctx["error"] = note + str(ctx.get("error") or "")
+    return ctx
 
 
 def write_run_context(
@@ -657,6 +702,7 @@ def write_run_context(
     #   was understood and applied unevenly (R18.1: a rehearsal must be side-effect free).
     #   ⚑ It writes to a SEPARATE path rather than not writing at all: a dry run whose output
     #     cannot be read cannot be verified either.
+    _stamp_capital_authority(ctx)          # R18.5 / ISA-0629 — on the artefact, every write
     _suffix = ".DRYRUN" if dry_run else ""
     out_path = os.path.join(SCRIPT_DIR, f"run_context_{month_label}{_suffix}.json")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -783,6 +829,42 @@ def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
 
 # Main pipeline
 # ---------------------------------------------------------------------------
+def _dry_run_in_sandbox(args) -> int:
+    """ISA-0704: copy the tree, re-exec this orchestrator inside it with the guard on. Returns rc."""
+    import isa_write_guard as _wg
+    live_ia = SCRIPT_DIR
+    isa_folder = args.isa_folder or os.path.dirname(SCRIPT_DIR)
+    before = _wg.snapshot(live_ia)
+    sb = _wg.sandbox_copy(live_ia)
+    argv = [a for a in sys.argv[1:] if not a.startswith("--isa-folder")]
+    if args.isa_folder and args.isa_folder in argv:
+        argv.remove(args.isa_folder)
+    env = dict(os.environ, ISA_DRYRUN_SANDBOX=sb,
+               ISA_MEMORY_DIR=os.environ.get("ISA_MEMORY_DIR") or MEMORY_BASE,   # same inputs as the real run
+               ISA_DRYRUN_PROTECTED=os.pathsep.join([os.path.realpath(live_ia), os.path.realpath(isa_folder)]))
+    print(f"[ISA-0704] --dry-run: rehearsing in sandbox copy {sb} (live folder is read-only for this run)")
+    rc = subprocess.run([sys.executable, os.path.join(sb, os.path.basename(__file__)), *argv,
+                         "--isa-folder", isa_folder], env=env).returncode
+    after = _wg.snapshot(live_ia)
+    d = _wg.diff(before, after)
+    print(f"[ISA-0704] live folder mutations during dry run: {d['n']} "
+          f"(modified {d['modified'][:5]}, created {d['created'][:5]}, deleted {d['deleted'][:5]}); "
+          f"disposable sandbox {sb}")
+    if d["n"]:
+        print("[ISA-0704] REFUSED: the dry run mutated the live folder - this is a defect, not a result")
+        return 3
+    # The ONLY things brought back: the DRY_RUN-labelled review artefacts, into a disposable output
+    # root that no reader treats as state (never the canonical names).
+    import glob as _glob, shutil as _sh
+    outdir = os.path.join(live_ia, "_dryrun_outputs", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(outdir, exist_ok=True)
+    for f in _glob.glob(os.path.join(sb, "run_context_*.DRYRUN.json")) + [os.path.join(sb, "dryrun_write_manifest.json")]:
+        if os.path.exists(f):
+            _sh.copy2(f, os.path.join(outdir, os.path.basename(f)))
+    print(f"[ISA-0704] DRY_RUN outputs copied to {outdir}")
+    return rc
+
+
 def main():
     # ⚑⚑ ISA-0589, 03-Sep-2026. THESE SIX ARE BOUND FIRST, BEFORE ANY GUARD CAN APPEND TO THEM.
     # They used to be initialised 111 lines below, AFTER the ISA-0572 memory-base guard and the
@@ -833,6 +915,25 @@ def main():
                              "after a run whose assurance state is PARTIAL; needs no re-run of "
                              "Steps 1-9, because the grid reads capital_destination from disk.")
     args = parser.parse_args()
+
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ISA-0704 — A DRY RUN REHEARSES IN A DISPOSABLE COPY, NEVER IN THE TREE IT OBSERVES
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # MEASURED 16-Sep-2026: the in-place --dry-run rewrote 30 canonical artefacts (decision ledger,
+    # return store, symbol map, conviction record, capital/execution/risk ledgers). The dry run now
+    # copies the Investment Analysis tree to a temp sandbox and re-executes there with the write
+    # guard protecting BOTH the live folder and the ISA input folder; nothing is copied back. Same
+    # admissible inputs (the ISA folder is read in place), same code, zero live mutation.
+    if args.dry_run and not os.environ.get("ISA_DRYRUN_SANDBOX"):
+        sys.exit(_dry_run_in_sandbox(args))
+    if os.environ.get("ISA_DRYRUN_SANDBOX"):
+        import isa_write_guard as _wg
+        _prot = [p for p in os.environ.get("ISA_DRYRUN_PROTECTED", "").split(os.pathsep) if p]
+        _g = _wg.install(_prot, [os.environ["ISA_DRYRUN_SANDBOX"], tempfile.gettempdir()])
+        print(f"[ISA-0704] DRY RUN in sandbox {os.environ['ISA_DRYRUN_SANDBOX']} - write guard {_g['state']}")
+        import atexit as _atexit
+        _atexit.register(lambda: open(os.path.join(SCRIPT_DIR, "dryrun_write_manifest.json"), "w").write(
+            json.dumps(dict(_wg.manifest(), mode="DRY_RUN", source_roll=None), indent=1)))
 
     if args.plan_stability_only:
         sys.exit(_plan_stability_only(args))
@@ -941,6 +1042,59 @@ def main():
     # computers). Blocking Raj's pre-run on its first sight of a problem is how a control gets
     # switched off — the R5.7 lesson the KR5 block in run_tests.py already records. It NAMES
     # them, every run, so the number is visible and shrinking rather than assumed.
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 0a — TRUSTED BUILD / CAPITAL AUTHORITY (R18.5, ISA-0629, 16-Sep-2026)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ BEFORE ANYTHING IS COMPUTED, ask whether the code about to compute it is the code that
+    # was certified. Until today the only consumer of that answer was Step 9d's A18 pair —
+    # after every capital figure had been produced. The verdict is stamped onto run_context
+    # `_meta.capital_authority` by write_run_context itself (R4.11), so no later step and no
+    # later pass can drop it. The run still computes on REFUSED: the artefacts are diagnostic
+    # evidence, and the stamp (status ERROR) is what stops a capital decision being taken from
+    # them. Rollback: isa_policy.V2_FLAGS["refuse_untrusted_capital_run"] = False (NOT_ENFORCED).
+    print("\n[0a] Trusted Build / capital authority (R18.5 — BEFORE any work)...")
+    _mf_begin("0a", "release_gate.capital_run_authority")
+    # ISA-0696 A2 (Raj 17-Sep-2026): RUN-TIME SELF-HEALING CENSUS before capital authority. A FRESH_GREEN
+    # census is a no-op; otherwise the census runs in its sandbox for a bounded budget and resumes in the
+    # SKILL's second pass (Step 4), which writes the final run_context. Never raises into the run.
+    if not os.environ.get("ISA_DRYRUN_SANDBOX"):
+        try:
+            import suite_census_runner as _scr
+            summary["census_ensure"] = _scr.ensure(SCRIPT_DIR, budget_s=float(os.environ.get("ISA_CENSUS_ENSURE_BUDGET", "150")),
+                                                   kind="run_time")
+            print("  census ensure: %s %s" % (summary["census_ensure"].get("state"),
+                                                summary["census_ensure"].get("census_state") or ""))
+            _ce_r = summary["census_ensure"]
+            if not (_ce_r.get("state") == "FRESH" or _ce_r.get("census_state") == "FRESH_GREEN"):
+                warnings.append("ISA-0696 CENSUS %s (%s): %s - capital authority will be REFUSED until a FRESH_GREEN "
+                                "census publishes (the second pass resumes it; or run `python3 suite_census_runner.py "
+                                "--ensure`)" % (_ce_r.get("state"), _ce_r.get("census_state") or "-", str(_ce_r.get("why"))[:300]))
+        except Exception as _ce:                                        # noqa: BLE001
+            summary["census_ensure"] = {"state": "ERROR", "why": "%s: %s" % (type(_ce).__name__, _ce)}
+            warnings.append("ISA-0696 CENSUS ensure failed (%s: %s) - capital authority reads the census "
+                            "as it stands" % (type(_ce).__name__, _ce))
+    summary["trusted_build"] = _capital_authority_step(errors, warnings)
+    # ISA-0699 leg (d) instrument: bind this process's execution-ledger marks to THIS run's
+    # authority, so EXECUTED evidence can tell a real AUTHORISED run from a rehearsal or dry run.
+    try:
+        import framework_integrity as _fib
+        _fib.bind_run(surface="monthly_isa_prerun", authority=summary["trusted_build"].get("authority"),
+                      build_id=summary["trusted_build"].get("build_id"),
+                      live_state=summary["trusted_build"].get("live_state"),
+                      checked_at=summary["trusted_build"].get("checked_at"),
+                      dry_run=bool(args.dry_run or os.environ.get("ISA_DRYRUN_SANDBOX")))
+    except Exception as _be:                                            # noqa: BLE001
+        warnings.append("ISA-0699: execution-ledger run binding failed (%s: %s) - this run's marks "
+                        "will record UNBOUND and cannot evidence EXECUTED" % (type(_be).__name__, _be))
+    _mf_measure(status=("OK" if summary["trusted_build"]["authority"] == "AUTHORISED"
+                        else "ERROR"),
+                note="%s (%s) build %s" % (summary["trusted_build"]["authority"],
+                                           summary["trusted_build"].get("live_state"),
+                                           summary["trusted_build"].get("build_id")))
+    print("  capital authority %s — LIVE %s against %s"
+          % (summary["trusted_build"]["authority"], summary["trusted_build"].get("live_state"),
+             summary["trusted_build"].get("build_id")))
+
     print("\n[0] Framework-integrity preflight (declaration checks BEFORE any work)...")
     _mf_begin("0", "framework_integrity.preflight")
     try:
@@ -992,7 +1146,18 @@ def main():
                 with open(portfolio_path, encoding="utf-8") as f:
                     port_data = json.load(f)
                 s = port_data["summary"]
-                summary = {
+                # ⚑ ISA-0596 (05-Sep-2026, fixed 13-Sep-2026). This used to REBIND `summary` to a
+                # brand-new dict literal here - `summary = {...}` - which silently discarded
+                # every key Step 0 (framework-integrity preflight, line ~949) had already written
+                # onto the ORIGINAL summary dict, because a fresh dict shares no state with the
+                # one main() initialised at "summary: dict = {}" and Step 0 mutated. The key was
+                # assigned, on the same object, in the same scope - and still vanished, because
+                # this line replaced the object out from under it before serialisation ever saw
+                # it (R4.4: one home, one dict - a REBIND here is a second home for `summary`
+                # that only exists between Step 0 and Step 1). Updating IN PLACE preserves every
+                # key any earlier step wrote, present or future, rather than requiring each new
+                # Step-0-style producer to also patch this literal.
+                summary.update({
                     "total_value_gbp":       s["total_value_gbp"],
                     "cash_effective_gbp":    s["cash_effective_gbp"],
                     "cash_deployable_gbp":   s["cash_deployable_gbp"],
@@ -1002,7 +1167,7 @@ def main():
                     "num_funds":             s["num_fund_positions"],
                     "data_date":             port_data["_meta"]["data_date"],
                     "source_file":           port_data["_meta"]["source_file"],
-                }
+                })
                 if port_data["flags"].get("concentration_over_12_5pct"):
                     flags.append({
                         "type": "CONCENTRATION",
@@ -1124,7 +1289,10 @@ def main():
                 _txns = _dl_mod.load_transactions(transactions_path)
                 _res = _dl_mod.reconcile_executions_from_transactions(
                     ledger_path, _txns, _held, prior_holdings=_prior_h,
-                    date=run_date.isoformat())
+                    date=run_date.isoformat(),
+                    # ISA-0704: a dry run executes inside a sandbox copy, so persisting there keeps
+                    # parity with the real run (Step 1.5's A13 override log re-reads the ledger).
+                    persist=True)
                 _rc = _res["counts"]
                 summary["ledger_reconcile"] = _rc
                 summary["ledger_reconcile_source"] = _res["source"]
@@ -1215,6 +1383,34 @@ def main():
                               f"{[o['ticker'] + ':' + o['action'] for o in _ov]}")
                 except Exception as _oex:
                     warnings.append(f"A13 override log skipped: {_oex}")
+                # ── ISA-0701 — FILL OBLIGATIONS ARE EXECUTION-OWNED ─────────────────────────
+                # The ONLY place an ACTIVE D17 obligation is created: an authorised decision
+                # (ledger entry) matched to broker-confirmed execution (just reconciled above) and
+                # to a PROPOSED obligation in the decision month's authorised plan. A reporting
+                # run (capital_destination) never writes the store. Dry run: computed, not saved.
+                try:
+                    import position_sizing as _ps15
+                    import capital_destination as _cd15
+                    _act = _ps15.activate_from_executions(
+                        _dl_mod.load_ledger(ledger_path).get("entries", []),
+                        _cd15.authorised_plan_loader(SCRIPT_DIR),
+                        today=run_date.isoformat(), dry_run=bool(args.dry_run))
+                    summary["obligation_activation"] = {k: v for k, v in _act.items() if k != "doc"}
+                    for _o15 in _act["review_required"]:
+                        warnings.append(
+                            "Step 1.5 (ISA-0701): %s %s -> %s - no fill obligation created; review. %s"
+                            % (_o15.get("ticker"), _o15.get("decision_id"), _o15.get("outcome"),
+                               _o15.get("why") or ""))
+                    if _act["activated"] or _act["fulfilled"]:
+                        warnings.append(
+                            "Step 1.5 (ISA-0701): execution-owned fill obligations - activated %s; "
+                            "fulfilled %s (first claim on the next tranche only for ACTIVE rows)"
+                            % (_act["activated"] or "none", _act["fulfilled"] or "none"))
+                    print(f"  ISA-0701 obligation activation: activated={_act['activated']} "
+                          f"fulfilled={_act['fulfilled']} review={len(_act['review_required'])}")
+                except Exception as _aex:
+                    warnings.append(f"Step 1.5 (ISA-0701): obligation activation FAILED - no obligation "
+                                    f"was created or changed this run: {_aex}")
             except Exception as _ex:
                 warnings.append(f"Step 1.5 (ledger reconcile) skipped: {_ex}")
                 print(f"  WARNING: {_ex}")
@@ -4391,15 +4587,30 @@ def main():
         # ⚑ ISA-0590 — the run's own start time, so the ISA-0321 register gate does not
         # fire on the artefacts THIS run just wrote. Tighter than the prefix list:
         # a file the run did NOT write still trips it.
-        _recs = _cchk.check_all(tagged=True, since_ts=_RUN_STARTED_AT)
+        _fc = {}
+        _recs = _cchk.check_all(tagged=True, since_ts=_RUN_STARTED_AT, fire_counts=_fc)
         _a18_err = [r["message"] for r in _recs if r["severity"] == "ERROR"]
         _a18_warn = [r["message"] for r in _recs if r["severity"] != "ERROR"]
         for _m in _a18_err:
             errors.append(f"Step 9d A18 consistency: {_m}")
         for _m in _a18_warn:
             warnings.append(f"Step 9d A18 consistency (WARN, not an error): {_m}")
+        # ⚑ ISA-0543 (A18 half, 13-Sep-2026). "No pair other than the regime branch needs WARN"
+        # was DECLARED, never MEASURED. `_fc` now names every pair that fired this run and how
+        # often, at WARN and at ERROR grade - so the belief is readable from _fc itself rather
+        # than re-derived from prose each time someone asks. `pair_screen_capture_coverage` is
+        # the regime branch (ISA-0546); anything else appearing in `_warn_pairs` is the belief
+        # being CONTRADICTED by this run's own data, not a failure of the instrumentation.
+        _warn_pairs = sorted(n for n, c in _fc.items() if c.get("n_warn"))
+        _unexpected_warn_pairs = [n for n in _warn_pairs if n != "pair_screen_capture_coverage"]
         summary["a18_consistency"] = {"n_error": len(_a18_err), "n_warn": len(_a18_warn),
-                                      "basis": "ISA-0546 - severity declared at production"}
+                                      "basis": "ISA-0546 - severity declared at production",
+                                      "fire_counts": _fc, "warn_pairs": _warn_pairs,
+                                      "unexpected_warn_pairs": _unexpected_warn_pairs}
+        if _unexpected_warn_pairs:
+            print(f"  A18: WARN pair(s) other than the regime branch fired this run - "
+                  f"{_unexpected_warn_pairs} - see summary.a18_consistency.fire_counts "
+                  f"(ISA-0543 belief)")
         if _a18_err:
             print(f"  A18: {len(_a18_err)} MISMATCH(ES) -> errors[], "
                   f"{len(_a18_warn)} -> warnings[]")
@@ -4685,5 +4896,87 @@ def main():
     print("  Review task reads: " + ctx_path)
 
 
+def _selftest(verbose: bool = True) -> int:
+    """ISA-0629 — Step 0a and the run_context stamp, proven able to REFUSE and able to AUTHORISE.
+    Scoped to the two helpers this module owns; the orchestration itself is exercised by the real
+    pre-run (R5.9), not re-simulated here."""
+    import tempfile
+    fails = []
+
+    def ok(name, cond):
+        if not cond:
+            fails.append(name)
+        if verbose:
+            print(("  ok   " if cond else "  FAIL ") + name)
+
+    # ── ISA-0704: --dry-run rehearses in a sandbox copy; a live mutation is detected and refused ──
+    global SCRIPT_DIR
+    import shutil as _sh0704, types as _ty0704
+    _saved_sd, _saved_argv = SCRIPT_DIR, list(sys.argv)
+    try:
+        for _case, _body in (("clean", "open('run_context_x.DRYRUN.json','w').write('{}')\n"),
+                             ("escape", "import os\nlive=os.environ['ISA_DRYRUN_PROTECTED'].split(os.pathsep)[0]\n"
+                                        "open(os.path.join(live,'decision_ledger.json'),'w').write('MUTATED')\n")):
+            _live = os.path.join(tempfile.mkdtemp(prefix="dr0704_"), "Investment Analysis")
+            os.makedirs(_live)
+            open(os.path.join(_live, "decision_ledger.json"), "w").write("ORIGINAL")
+            open(os.path.join(_live, os.path.basename(__file__)), "w").write(
+                "import os\nos.chdir(os.path.dirname(os.path.abspath(__file__)))\n" + _body)
+            SCRIPT_DIR = _live
+            sys.argv = [os.path.join(_live, os.path.basename(__file__)), "--dry-run"]
+            _rc = _dry_run_in_sandbox(_ty0704.SimpleNamespace(isa_folder=os.path.dirname(_live), dry_run=True))
+            _led = open(os.path.join(_live, "decision_ledger.json")).read()
+            if _case == "clean":
+                ok("ISA-0704 POSITIVE CONTROL: a dry run that writes only in its sandbox leaves the live tree "
+                   "byte-identical, returns the child rc and brings back only the DRYRUN artefact",
+                   _rc == 0 and _led == "ORIGINAL" and not os.path.exists(os.path.join(_live, "run_context_x.DRYRUN.json"))
+                   and any(os.path.exists(os.path.join(d, "run_context_x.DRYRUN.json"))
+                           for d in __import__("glob").glob(os.path.join(_live, "_dryrun_outputs", "*"))))
+            else:
+                ok("ISA-0704 NEGATIVE CONTROL (must-fire): a rehearsal that writes the LIVE tree is detected "
+                   "and REFUSED (exit 3)", _rc == 3)
+            _sh0704.rmtree(os.path.dirname(_live), ignore_errors=True)
+    finally:
+        SCRIPT_DIR, sys.argv = _saved_sd, _saved_argv
+
+    # NEGATIVE CONTROL: a tree with no Trusted receipt -> REFUSED, escalated into BOTH lists
+    td = tempfile.mkdtemp()
+    errs, warns = [], []
+    ta = _capital_authority_step(errs, warns, root=td)
+    ok("NEGATIVE CONTROL: an unsigned tree gives Step 0a authority REFUSED",
+       ta.get("authority") == "REFUSED")
+    ok("...escalated with the declared prefix into warnings AND into errors",
+       any(w.startswith("R18.5 CAPITAL AUTHORITY") for w in warns)
+       and any(e.startswith("R18.5 CAPITAL AUTHORITY") for e in errs))
+    ctx = _stamp_capital_authority({"_meta": {"status": "OK"}, "summary": {"trusted_build": ta},
+                                    "error": ""})
+    ok("NEGATIVE CONTROL: a REFUSED record forces _meta.status ERROR and stamps REFUSED",
+       ctx["_meta"]["status"] == "ERROR" and ctx["_meta"]["capital_authority"] == "REFUSED"
+       and ctx["error"].startswith("R18.5:"))
+    ctx0 = _stamp_capital_authority({"_meta": {"status": "OK"}, "summary": {}})
+    ok("NEGATIVE CONTROL: an ABSENT Step-0a record is REFUSED, never AUTHORISED (R4.3)",
+       ctx0["_meta"]["capital_authority"] == "REFUSED" and ctx0["_meta"]["status"] == "ERROR")
+    # POSITIVE CONTROL: an AUTHORISED record leaves status alone
+    ctx1 = _stamp_capital_authority({"_meta": {"status": "PARTIAL"}, "error": "",
+                                     "summary": {"trusted_build": {"authority": "AUTHORISED",
+                                                                   "build_id": "TB-X",
+                                                                   "live_state": "TRUSTED"}}})
+    ok("POSITIVE CONTROL: AUTHORISED stamps AUTHORISED and does not touch status or error",
+       ctx1["_meta"]["capital_authority"] == "AUTHORISED" and ctx1["_meta"]["status"] == "PARTIAL"
+       and ctx1["error"] == "" and ctx1["_meta"]["trusted_build_id"] == "TB-X")
+    ctx2 = _stamp_capital_authority({"_meta": {"status": "OK"}, "error": "",
+                                     "summary": {"trusted_build": {"authority": "NOT_ENFORCED"}}})
+    ok("ROLLBACK: NOT_ENFORCED is recorded and does not masquerade as AUTHORISED",
+       ctx2["_meta"]["capital_authority"] == "NOT_ENFORCED")
+    ctx3 = _stamp_capital_authority(dict(ctx))
+    ok("idempotent: a second stamp does not prepend the R18.5 note twice",
+       ctx3["error"].count("R18.5:") == 1)
+    if verbose:
+        print("monthly_isa_prerun selftest: %d failure(s)" % len(fails))
+    return 1 if fails else 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

@@ -280,6 +280,13 @@ def selftest(verbose=True) -> int:
         if verbose:
             print(("  ok   " if c else "  FAIL ") + n)
 
+    # ⚑ ISA-0704: the manifest this selftest writes goes to a temp path, never the live register_callsites.json.
+    import tempfile as _tf0704
+    global MANIFEST
+    _manifest_saved = MANIFEST
+    MANIFEST = Path(_tf0704.mkdtemp(prefix="rcs_selftest_")) / "register_callsites.json"
+    if _manifest_saved.exists():
+        MANIFEST.write_text(_manifest_saved.read_text(encoding="utf-8"), encoding="utf-8")
     w = scan_writers()
     ck("AST scan finds at least one register writer", len(w) >= 1)
     ck("a module that only NAMES the function in a string is not a call site",
@@ -307,6 +314,7 @@ def selftest(verbose=True) -> int:
        isinstance(verify()["recogniser_coverage_holes"], list))
     print(f"\nregister_callsites selftest: {len(fails)} failure(s)"
           + (" -> " + ", ".join(fails) if fails else " — 9 assertions green"))
+    MANIFEST = _manifest_saved
     return 1 if fails else 0
 
 

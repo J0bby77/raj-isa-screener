@@ -76,7 +76,8 @@ def _stock_monthly_returns(ticker, store):
         month is PARTIAL. A part-month return sitting in a column of full-month returns understates
         its own volatility and corrupts every covariance it touches.
     """
-    obs = ((store.get("names") or {}).get(ticker) or {}).get("observations") or {}
+    import stock_return_store as _srs549
+    obs = _srs549.record_of(store, ticker).get("observations") or {}   # ISA-0549
     if not obs:
         return []
     today = dt.date.today()

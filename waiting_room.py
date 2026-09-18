@@ -515,6 +515,11 @@ def selftest(verbose=True) -> int:
         if verbose:
             print(("  ok   " if cond else "  FAIL ") + name)
 
+    # ⚑ ISA-0704: capital_destination.build (reached through donor_order) writes its side artefacts
+    #   to a temp root during this selftest, never beside the scripts.
+    import capital_destination as _CD0704
+    _cd_out_saved = _CD0704.OUTPUT_DIR
+    _CD0704.OUTPUT_DIR = tempfile.mkdtemp(prefix="wr_selftest_cd_")
     tmp = Path(tempfile.mkdtemp()) / "wr_ledger.json"      # ⚑ NEVER beside the scripts: the mount
     #                                                        denies delete, so a fixture written
     #                                                        here would become live policy.
@@ -619,6 +624,7 @@ def selftest(verbose=True) -> int:
     print("\nwaiting_room selftest: %d failure(s)%s"
           % (len(fails), (" -> " + ", ".join(fails)) if fails
              else " — %d assertions green" % len(ran)))
+    _CD0704.OUTPUT_DIR = _cd_out_saved
     return 1 if fails else 0
 
 

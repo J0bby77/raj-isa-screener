@@ -637,6 +637,36 @@ def pair_retrospectives_ingested(intake=None, screens=None):
         errs += [f"ISA-0231: {g}" for g in intake.run_coverage(screens)]
     return errs
 
+def pair_return_store_identity_unique(srs=None, doc=None):
+    """ISA-0549. No two keys of stock_weekly_returns.json may resolve to one declared security
+    (store_return_store.identity_report). A legacy alias or a conflict FAILS; an unreadable store
+    or symbol map is UNKNOWN, never PASS."""
+    try:
+        if srs is None:
+            import stock_return_store as srs
+        rep = srs.identity_report(doc if doc is not None else srs.load())
+    except Exception as e:                                        # noqa: BLE001
+        return [f"ISA-0549: return-store identity could not be checked ({type(e).__name__}: {e}) - "
+                f"UNKNOWN, never PASS"]
+    if rep["state"] == "CANONICAL":
+        return []
+    return [f"ISA-0549: return store identity {rep['state']}: {rep['raw_keys']} keys for "
+            f"{rep['canonical_keys']} securities; collisions {sorted(rep['collisions'])[:8]}; "
+            f"conflicts {len(rep['conflicts'])}; chains {len(rep['chains'])} - run "
+            f"`python3 stock_return_store.py --canonicalise` (refuses on conflict)"]
+
+def pair_deliverable_findings_registered(intake=None):
+    """ISA-0473. An analysis/audit/handoff/BuildSpec/build-record deliverable may not cite an unissued
+    id, carry a provisional backlog marker, or list a finding row without an issued id or a
+    disposition. One home for the rules: isa_retrospective_intake.deliverable_coverage."""
+    if intake is None:
+        try:
+            import isa_retrospective_intake as intake
+        except Exception as e:                                    # noqa: BLE001
+            return [f"ISA-0473: isa_retrospective_intake unavailable ({e}) - deliverable intake "
+                    f"reported as UNKNOWN, never as PASS"]
+    return list(intake.deliverable_coverage())
+
 def pair_rationale_ledger(ledger=None):
     """R12.3 / P2.5. Every capital-gating constant must have a ledger record.
 
@@ -700,30 +730,64 @@ def pair_register_store_protected(exists=os.path.exists, never_purge=None, perma
     return errs
 
 
-def pair_register_renders_current(check=None):
-    """R14.3 / R15.4. The markdown registers are RENDERS; drift is a defect either way.
+def pair_register_renders_current(check=None, export_check=None):
+    """R14.3 / R15.4. The registers renders AND exports are RENDERS; drift in either is a defect.
 
     If a view differs from what the store produces, either someone hand-edited a generated file
     (and the edit is about to vanish, with the store never learning of it) or the store moved and
     the view was not refreshed. Both are a document that says one thing and is another - which is
     the failure class this whole register exists to catch, applied to the register itself.
+
+    ⚑ ISA-0689 (13-Sep-2026). This function originally checked only the three markdown views
+    (isa_register_render.check()). isa_register_export.py's CSV/XLSX exports are renders of the
+    same store (R7.1) but had no equivalent check, so they could - and did - sit hours stale
+    after 59 register writes while this gate, and the release_gate.py consistency_pairs Trusted
+    Build gate it feeds, stayed GREEN. export_check is injected the same way check is, so both
+    artefact classes are covered by one gate and one negative-control pattern.
     """
+    errs = []
+
     if check is None:
         try:
             import isa_register_render
             check = isa_register_render.check
         except Exception as e:                                    # noqa: BLE001
-            return [f"R14.3: isa_register_render unavailable ({e}) - register-view drift cannot "
-                    f"be verified, reported as UNKNOWN rather than PASS"]
-    try:
-        res = check(HERE)
-    except Exception as e:                                        # noqa: BLE001
-        return [f"R14.3: register render check failed to run: {type(e).__name__}: {e}"]
-    drift = res.get("drift", [])
-    if drift:
-        drift = list(drift) + ["fix: python3 isa_register_render.py --write  "
-                               "(the store is right; the views are behind it)"]
-    return [f"R14.3: {d}" for d in drift]
+            errs.append(f"R14.3: isa_register_render unavailable ({e}) - register-view drift "
+                        f"cannot be verified, reported as UNKNOWN rather than PASS")
+            check = None
+    if check is not None:
+        try:
+            res = check(HERE)
+        except Exception as e:                                    # noqa: BLE001
+            errs.append(f"R14.3: register render check failed to run: {type(e).__name__}: {e}")
+        else:
+            drift = res.get("drift", [])
+            if drift:
+                drift = list(drift) + ["fix: python3 isa_register_render.py --write  "
+                                       "(the store is right; the views are behind it)"]
+            errs += [f"R14.3: {d}" for d in drift]
+
+    if export_check is None:
+        try:
+            import isa_register_export
+            export_check = isa_register_export.check
+        except Exception as e:                                    # noqa: BLE001
+            errs.append(f"R14.3: isa_register_export unavailable ({e}) - register-export drift "
+                        f"cannot be verified, reported as UNKNOWN rather than PASS")
+            export_check = None
+    if export_check is not None:
+        try:
+            res = export_check(HERE)
+        except Exception as e:                                    # noqa: BLE001
+            errs.append(f"R14.3: register export check failed to run: {type(e).__name__}: {e}")
+        else:
+            drift = res.get("drift", [])
+            if drift:
+                drift = list(drift) + ["fix: python3 isa_register_export.py --write  "
+                                       "(the store is right; the exports are behind it)"]
+            errs += [f"R14.3: {d}" for d in drift]
+
+    return errs
 
 
 def pair_monthly_capture_retention(ctx_text, exists=os.path.exists):
@@ -4379,6 +4443,23 @@ def _norm(x) -> dict:
     return {"severity": ERROR, "message": str(x)}
 
 
+def _tally_pair_fire(fire_counts, name, out):
+    """ISA-0543 (A18 half). Accumulates `{name: {"n_warn": int, "n_error": int}}` into
+    `fire_counts` IN PLACE and returns `out` unchanged, so `check_all()` can wrap every
+    `errs += pair_X(...)` call site as `errs += _tally("pair_X", pair_X(...))` with no change
+    to what gets appended to `errs`. `fire_counts=None` (the default check_all() passes when
+    no caller asks) is a no-op passthrough - kept as a MODULE-LEVEL function, not a closure
+    inside check_all(), specifically so this accumulation logic is unit-testable without
+    paying for a full check_all() run (R5.9 - the fast path is the one that actually runs in
+    a selftest; a 50+ second live run belongs in liveness evidence, not in every selftest)."""
+    if fire_counts is not None:
+        recs = [_norm(x) for x in (out if isinstance(out, list) else [out])]
+        slot = fire_counts.setdefault(name, {"n_warn": 0, "n_error": 0})
+        slot["n_warn"] += sum(1 for r in recs if r["severity"] == WARN)
+        slot["n_error"] += sum(1 for r in recs if r["severity"] == ERROR)
+    return out
+
+
 
 def pair_cash_reserve_is_single_topup_control(root=None):
     """D23 / ISA-0544. The GBP 250 ISA cash reserve is the SINGLE control on residual deployment.
@@ -4784,53 +4865,504 @@ SUITE_STATUS_REL = os.path.join("Dashboard", "state", "suite_status.json")
 SUITE_STATUS_MAX_AGE_DAYS = 8          # KR5: "red suites, or routine battery idle >8 days"
 
 
-def record_suite_status(modules=None, root=None) -> dict:
-    """Run the battery-grade selftests ONCE and record the result. The runner calls this.
+_SUITE_FAIL_NAMES = ("fails", "failures", "n_fail", "n_failed", "failed")
 
-    ⚑ WHY RECORDED RATHER THAN RUN INSIDE THE PAIR (R9.2, and R5.7's own lesson). The first
-    version of `pair_red_suite_is_an_incident` imported and executed all seven selftests inline
-    and turned a two-minute battery into a ten-minute one. A control that costs half the run is a
-    control that gets switched off — which is precisely how `framework_integrity` came to be
-    report-only. So the expensive part runs once, in the runner, and writes an artefact; the
-    battery asserts that artefact is GREEN and FRESH. An absent or stale status is a FAILURE, not
-    a skip: "nobody ran the suites" and "the suites are green" must never render the same
-    (R2.10)."""
-    import importlib, io, contextlib, datetime as _dt
+
+def _selftest_convention(fn_node) -> str:
+    """How a module's selftest SIGNALS failure, derived from its AST — never from its printed text
+    (prose is not a mechanism). ISA-0683: the tree has two conventions and `record_suite_status`
+    assumed one. `RC_FAILURES` returns a failure count/flag built from a `fails` list (`return 1 if
+    fails else 0`, `len(fails)`); `RAISE_ON_FAIL` raises/asserts on a failure and returns something
+    else (a PASS count, True, a dict) — 21 modules return their assertion COUNT, which the old
+    reader would have scored RED on a clean run."""
+    import ast as _ast
+    nested = set()
+    for n in _ast.walk(fn_node):
+        if n is not fn_node and isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)):
+            nested.update(id(x) for x in _ast.walk(n) if x is not n)
+    for n in _ast.walk(fn_node):
+        if isinstance(n, _ast.Return) and id(n) not in nested and n.value is not None:
+            if any(isinstance(x, _ast.Name) and x.id in _SUITE_FAIL_NAMES for x in _ast.walk(n.value)):
+                return "RC_FAILURES"
+    return "RAISE_ON_FAIL"
+
+
+def suite_census(root=None) -> list:
+    """ISA-0683 — EVERY suite that exists, derived from disk (R14.2: a generated denominator, not
+    a hand-kept list). A top-level module with a top-level `_selftest()`/`selftest()` is a suite.
+
+    ⚑ WHY. `suite_status.json` covered the seven modules in BATTERY_SELFTEST_MODULES and reported
+    `n_red = 0` while `capital_destination` — the module that routes the marginal pound — had five
+    failing controls, and (measured 16-Sep-2026 over all 77 suites) `framework_atlas`,
+    `return_architecture`, `conviction_capture` and `test_valuation_single_home` were red too. A
+    census over a subset, reported as the whole, is the denominator defect (ISA-0580's class)."""
+    import ast as _ast
     root = root or HERE
-    mods = modules if modules is not None else BATTERY_SELFTEST_MODULES
     rows = []
-    for m in mods:
-        p = os.path.join(root, m + ".py")
-        if not os.path.exists(p):
-            rows.append({"module": m, "rc": None, "state": "ABSENT"})
+    for fn in sorted(os.listdir(root)):
+        if not fn.endswith(".py"):
             continue
         try:
-            mod = importlib.import_module(m)
-            st = getattr(mod, "_selftest", None) or getattr(mod, "selftest", None)
-            if st is None:
-                rows.append({"module": m, "rc": None, "state": "NO_SELFTEST"})
+            tree = _ast.parse(open(os.path.join(root, fn), encoding="utf-8").read())
+        except (OSError, SyntaxError, ValueError) as e:
+            rows.append({"module": fn[:-3], "fn": None, "convention": None,
+                         "parse_error": f"{type(e).__name__}: {e}"[:160]})
+            continue
+        top = {n.name: n for n in tree.body if isinstance(n, _ast.FunctionDef)}
+        for name in ("_selftest", "selftest"):
+            if name in top:
+                rows.append({"module": fn[:-3], "fn": name,
+                             "convention": _selftest_convention(top[name])})
+                break
+    return rows
+
+
+_SUITE_CHILD = r"""
+import sys, json, importlib, io, contextlib, os
+sys.path.insert(0, os.getcwd())
+mod, fn, conv = sys.argv[1], sys.argv[2], sys.argv[3]
+res = {"module": mod}
+buf = io.StringIO()
+if os.environ.get("ISA_SUITE_GUARD") == "1":
+    # ISA-0704: a selftest may not write the tree it runs in - the guard refuses the escape.
+    import tempfile as _tf
+    sys.path.insert(1, os.environ.get("ISA_GUARD_PATH", ""))
+    import isa_write_guard as _wg
+    _wg.install([os.getcwd()] + [x for x in os.environ.get("ISA_SUITE_PROTECT", "").split(os.pathsep) if x],
+                [_tf.gettempdir()])
+try:
+    with contextlib.redirect_stdout(buf):
+        m = importlib.import_module(mod)
+        st = getattr(m, fn)
+        names = getattr(getattr(st, "__code__", None), "co_varnames", ())
+        v = st(verbose=False) if "verbose" in names else st()
+    if conv == "RC_FAILURES":
+        try:
+            n = int(v or 0)
+        except (TypeError, ValueError):
+            n = 1
+        res.update(rc=n, state="GREEN" if n == 0 else "RED")
+    else:
+        bad = (v is False) or (isinstance(v, dict) and v.get("ok") is False)
+        res.update(rc=(1 if bad else 0), state="RED" if bad else "GREEN")
+except ModuleNotFoundError as e:
+    missing = (e.name or "").split(".")[0]
+    local = os.path.exists(os.path.join(os.getcwd(), missing + ".py"))
+    res.update(rc=1, state=("RAISED" if local or not missing else "ENVIRONMENT_UNKNOWN"),
+               why=f"ModuleNotFoundError: {e}"[:200])
+except BaseException as e:
+    res.update(rc=1, state="RAISED", why=f"{type(e).__name__}: {e}"[:200])
+if os.environ.get("ISA_SUITE_GUARD") == "1":
+    try:
+        _m = _wg.manifest()
+        if _m["n_blocked"]:
+            res["write_escapes_blocked"] = [b["path"] for b in _m["blocked"]][:10]
+            if res.get("state") == "GREEN":
+                res.update(state="WRITE_ESCAPE_BLOCKED",
+                           why="ISA-0704: the selftest attempted %d write(s) into its own tree (refused)" % _m["n_blocked"])
+    except Exception:
+        pass
+print("\\n@@SUITE@@" + json.dumps(res))
+"""
+
+
+def _run_one_suite(row, root, timeout_s):
+    import subprocess, sys as _sys, time as _time
+    t0 = _time.time()
+    # ⚑ ISA-0704 — THE WRITER CENSUS. Each suite's root is snapshotted before and after; a suite that
+    #   writes its own tree is MUTATES_ROOT, never GREEN, however its assertions came out. Measured
+    #   16-Sep-2026: six suites did, one of them rewriting capital artefacts. The guard (child env)
+    #   refuses the write outright; the snapshot catches what the guard cannot see (subprocesses).
+    try:
+        import isa_write_guard as _wg
+        _snap0 = _wg.snapshot(root)
+    except Exception:                                                   # noqa: BLE001
+        _wg, _snap0 = None, None
+    try:
+        p = subprocess.run([_sys.executable, "-c", _SUITE_CHILD, row["module"], row["fn"],
+                            row["convention"]], cwd=root, capture_output=True, text=True,
+                           timeout=timeout_s, env=dict(os.environ, ISA_SUITE_GUARD="1", ISA_GUARD_PATH=HERE))
+        tag = p.stdout.rsplit("@@SUITE@@", 1)
+        if len(tag) == 2:
+            out = json.loads(tag[1].strip().splitlines()[0])
+        else:
+            out = {"module": row["module"], "rc": p.returncode, "state": "RAISED",
+                   "why": (p.stderr or "no result line")[-200:]}
+    except subprocess.TimeoutExpired:
+        out = {"module": row["module"], "rc": None, "state": "TIMEOUT",
+               "why": f"exceeded {timeout_s}s - UNKNOWN, never GREEN (R4.3)"}
+    out["convention"] = row["convention"]
+    out["secs"] = round(_time.time() - t0, 1)
+    if _wg is None:
+        out["write_isolation"] = "UNKNOWN (isa_write_guard unavailable)"
+        if out.get("state") == "GREEN":
+            out["state"] = "ENVIRONMENT_UNKNOWN"
+    else:
+        _d = _wg.diff(_snap0, _wg.snapshot(root))
+        _d = {k: [x for x in v if not x.startswith(os.path.join("Dashboard", "state", "suite_status"))]
+              for k, v in _d.items() if k != "n"}
+        _n = sum(len(v) for v in _d.values())
+        out["write_isolation"] = "CLEAN" if _n == 0 else "MUTATED"
+        if _n:
+            out["root_mutations"] = {k: v[:20] for k, v in _d.items() if v}
+            if out.get("state") == "GREEN":
+                out["state"] = "MUTATES_ROOT"
+                out["why"] = ("ISA-0704: the selftest wrote %d file(s) inside the tree it runs in; a "
+                              "suite that mutates state is not evidence (R18.1)" % _n)
+    return out
+
+
+def _source_roll(root):
+    try:
+        import release_gate as _rg
+        return _rg.source_fingerprint(root).get("roll")
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+SUITE_STATUS_CADENCE_DAYS = 7            # ISA-0696: the weekly census cadence (next_due)
+_DATA_EXTS = (".json", ".jsonl", ".csv", ".xlsx", ".pdf", ".md", ".txt")
+_DATA_EXCLUDE = ("suite_status.json", "suite_census_history.jsonl")
+
+
+def _config_roll(root):
+    try:
+        import release_gate as _rg
+        return _rg.config_fingerprint(root).get("roll")
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+def _trusted_build_id(root):
+    try:
+        with open(os.path.join(root, "Dashboard", "state", "trusted_build.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("build_id")
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+def _runtime_fingerprint() -> dict:
+    import platform as _pl
+    out = {"python": _pl.python_version(), "implementation": _pl.python_implementation(),
+           "platform": _pl.system()}
+    try:
+        import importlib.metadata as _md
+        for pkg in ("pandas", "numpy", "openpyxl", "yfinance", "pdfminer.six"):
+            try:
+                out[pkg] = _md.version(pkg)
+            except Exception:                                        # noqa: BLE001
+                out[pkg] = None
+    except Exception:                                                # noqa: BLE001
+        pass
+    return out
+
+
+def data_snapshot(root) -> dict:
+    """ISA-0696 A1 — fingerprint (name, size, whole-second mtime) of the data files a census ran over:
+    top-level data files and Dashboard/state. RECORDED and compared (drift is published), not enforced
+    at the capital boundary (Amendment A1 §2)."""
+    import hashlib as _h
+    files = {}
+    for sub in ("", os.path.join("Dashboard", "state")):
+        d = os.path.join(root, sub)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(_DATA_EXTS) or fn in _DATA_EXCLUDE or fn.endswith(".tmp"):
                 continue
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                names = getattr(getattr(st, "__code__", None), "co_varnames", ())
-                rc = st(verbose=False) if "verbose" in names else st()
-            rows.append({"module": m, "rc": int(rc or 0),
-                         "state": "GREEN" if not rc else "RED"})
-        except Exception as e:                                    # noqa: BLE001
-            rows.append({"module": m, "rc": 1, "state": "RAISED",
-                         "why": f"{type(e).__name__}: {e}"[:200]})
-    doc = {"as_of": _dt.date.today().isoformat(), "rows": rows,
-           "n_red": sum(1 for r in rows if r["state"] != "GREEN"),
-           "basis": ("R5.7 - a red suite is an incident. Recorded by the runner so the battery "
-                     "can assert it cheaply; an absent or stale record FAILS (R2.10).")}
+            pth = os.path.join(d, fn)
+            try:
+                st = os.stat(pth)
+            except OSError:
+                continue
+            if not os.path.isfile(pth):
+                continue
+            files[os.path.join(sub, fn) if sub else fn] = "%d|%d" % (st.st_size, int(st.st_mtime))
+    roll = _h.sha256("\n".join("%s|%s" % (k, files[k]) for k in sorted(files)).encode("utf-8")).hexdigest()
+    return {"roll": roll, "n_files": len(files), "files": files}
+
+
+def suite_status_state(root=None, *, now=None, status=None, census=None, live=None) -> dict:
+    """ISA-0696 — THE one reading of the suite census a capital preflight consumes (BS-0696 §10, A1).
+
+    -> {state: FRESH_GREEN | FRESH_RED | STALE | IDENTITY_MISMATCH | INCOMPLETE | ABSENT, ...}
+    Only FRESH_GREEN satisfies the suite-status precondition; it never authorises capital by itself.
+    Precedence: ABSENT > IDENTITY_MISMATCH > STALE > INCOMPLETE > FRESH_RED > FRESH_GREEN, so the
+    reported state is the most fundamental reason the status cannot be used.
+    `live` (tests) = {"source_roll", "config_roll", "build_id", "data_snapshot"} of the tree now."""
+    import datetime as _dt
+    root = root or HERE
+    now = now or _dt.datetime.now()
+    out = {"basis": ("BS-0696 as amended by A1: build/source/config identity, complete all-GREEN denominator, "
+                     "age <= %d days and CLEAN isolation are enforced; data drift is reported" % SUITE_STATUS_MAX_AGE_DAYS)}
+    p = os.path.join(root, SUITE_STATUS_REL)
+    if status is None:
+        if not os.path.exists(p):
+            return dict(out, state="ABSENT", why="no suite status at %s" % SUITE_STATUS_REL)
+        try:
+            with open(p, encoding="utf-8") as fh:
+                status = json.load(fh)
+        except Exception as e:                                        # noqa: BLE001
+            return dict(out, state="ABSENT", why="suite status unreadable (%s) - UNKNOWN, never usable" % e)
+    live = live if live is not None else {"source_roll": _source_roll(root), "config_roll": _config_roll(root),
+                                          "build_id": _trusted_build_id(root), "data_snapshot": data_snapshot(root)}
+    ts = status.get("as_of_ts") or ((status.get("as_of") or "") + "T00:00:00")
+    try:
+        age_h = (now - _dt.datetime.fromisoformat(ts)).total_seconds() / 3600.0
+    except Exception:                                                 # noqa: BLE001
+        return dict(out, state="STALE", why="suite status carries no readable as_of/as_of_ts (R4.2)")
+    census = census if census is not None else suite_census(root)
+    recorded = {r.get("module") for r in status.get("rows", [])}
+    missing = sorted(c["module"] for c in census if c["module"] not in recorded)
+    nongreen = [{"module": r.get("module"), "state": r.get("state"), "why": str(r.get("why") or "")[:160]}
+                for r in status.get("rows", []) if r.get("state") != "GREEN"]
+    _ds_rec = ((status.get("data_snapshot") or {}).get("files") or {})
+    _ds_now = ((live.get("data_snapshot") or {}).get("files") or {})
+    drift = sorted(k for k in set(_ds_rec) | set(_ds_now) if _ds_rec.get(k) != _ds_now.get(k))
+    mism = []
+    # build_id is recorded but not compared: a certification census is recorded in the Candidate BEFORE
+    # promotion stamps the new id, and the receipt signs exactly these two rolls (verify_live owns the id).
+    for key in ("source_roll", "config_roll"):
+        if status.get(key) is None or live.get(key) is None or status.get(key) != live.get(key):
+            mism.append({"field": key, "recorded": str(status.get(key))[:16], "live": str(live.get(key))[:16]})
+    iso = status.get("isolation") or {}
+    out.update({
+        "as_of_ts": ts, "age_hours": round(age_h, 1), "age_days": round(age_h / 24.0, 2),
+        "max_age_days": SUITE_STATUS_MAX_AGE_DAYS, "cadence_days": SUITE_STATUS_CADENCE_DAYS,
+        "next_due": (_dt.datetime.fromisoformat(ts) + _dt.timedelta(days=SUITE_STATUS_CADENCE_DAYS)).isoformat(timespec="minutes"),
+        "refuses_after": (_dt.datetime.fromisoformat(ts) + _dt.timedelta(days=SUITE_STATUS_MAX_AGE_DAYS)).isoformat(timespec="minutes"),
+        "build_id": status.get("build_id"), "census_kind": status.get("census_kind"),
+        "denominator": {"expected": len(census), "recorded": len(recorded), "missing": missing[:20]},
+        "non_green": nongreen[:20], "n_non_green": len(nongreen),
+        "identity_mismatch": mism, "isolation_all_clean": iso.get("all_clean"),
+        "data_drift": {"n_changed": len(drift), "changed": drift[:25], "enforced": False},
+        "counts": status.get("counts"), "runtime": status.get("runtime"),
+    })
+    if mism:
+        return dict(out, state="IDENTITY_MISMATCH",
+                    why="suite status recorded against other %s - it cannot vouch for this tree"
+                        % ", ".join(m["field"] for m in mism))
+    if age_h > SUITE_STATUS_MAX_AGE_DAYS * 24:
+        return dict(out, state="STALE", why="suite status is %.1f days old (limit %d, KR5)"
+                                            % (age_h / 24.0, SUITE_STATUS_MAX_AGE_DAYS))
+    if missing or any(r["state"] == "TIMEOUT" for r in nongreen):
+        return dict(out, state="INCOMPLETE",
+                    why="%d suite(s) on disk not recorded; %d TIMEOUT row(s) - a census that did not finish "
+                        "is not a verdict" % (len(missing), sum(1 for r in nongreen if r["state"] == "TIMEOUT")))
+    if nongreen or iso.get("all_clean") is False:
+        return dict(out, state="FRESH_RED", why="%d non-GREEN suite(s)%s" % (
+            len(nongreen), "" if iso.get("all_clean") is not False else "; write isolation not CLEAN"))
+    if iso.get("all_clean") is not True:
+        return dict(out, state="INCOMPLETE", why="the status carries no write-isolation evidence (pre-ISA-0696 schema)")
+    return dict(out, state="FRESH_GREEN",
+                why="complete all-GREEN census, %.1f h old, same build/source/config; %d data file(s) drifted "
+                    "since (reported, not enforced - A1)" % (age_h, len(drift)))
+
+
+def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
+                        budget_s=None) -> dict:
+    """Run the suites and record the result, bound to the SOURCE it ran against.
+
+    ⚑ ISA-0683 (16-Sep-2026). Four changes, each closing a way this record could be green while
+    the framework was not:
+      1. THE DENOMINATOR IS THE CENSUS (`suite_census`), not the seven-module tuple.
+         BATTERY_SELFTEST_MODULES remains the core that must be present; it is no longer the list.
+      2. EACH SUITE RUNS IN ITS OWN PROCESS, in `root`, so one module's flags/env/caches cannot
+         colour the next, and failure is read by the module's DERIVED convention.
+      3. `ModuleNotFoundError` for a third-party package is ENVIRONMENT_UNKNOWN (R2.9), never GREEN.
+      4. THE RECORD CARRIES `source_roll` — release_gate's source fingerprint — so a status recorded
+         against other code cannot vouch for this code (the pair refuses it).
+    ⚑ It had ZERO call sites: the only reference was an instruction inside an error message. It is
+    now invoked by the build (release_gate.certify reads it as the `suite_census` gate), and
+    `merge=True` + `budget_s` let a host with a short per-call ceiling record it in chunks. Rows
+    merge only when `source_roll` matches — a partial record from other code is discarded.
+    ⚑ SIDE EFFECTS: several selftests write artefacts beside themselves (capital_destination
+    writes capital_destination_<mmm>_<yyyy>.json). Record in a CANDIDATE copy, never in LIVE."""
+    import time as _time, datetime as _dt
+    root = root or HERE
+    census = suite_census(root)
+    by_mod = {r["module"]: r for r in census}
+    want = list(modules) if modules is not None else [r["module"] for r in census]
+    roll = _source_roll(root)
     out = os.path.join(root, SUITE_STATUS_REL)
+    prior = {}
+    if merge and os.path.exists(out):
+        try:
+            _old = json.load(open(out, encoding="utf-8"))
+            if _old.get("source_roll") == roll and roll is not None:
+                prior = {r["module"]: r for r in _old.get("rows", [])}
+        except (OSError, ValueError):
+            prior = {}
+    rows = dict(prior)
+    t0 = _time.time()
+    for m in want:
+        if merge and m in prior and prior[m].get("state") != "TIMEOUT":
+            continue                    # a TIMEOUT is not a verdict, so a later chunk retries it
+        if budget_s is not None and _time.time() - t0 > budget_s:
+            break
+        r = by_mod.get(m)
+        if r is None:
+            rows[m] = {"module": m, "rc": None, "state": "ABSENT",
+                       "why": "named but no top-level selftest found on disk"}
+            continue
+        if not r.get("fn"):
+            rows[m] = {"module": m, "rc": None, "state": "RAISED", "why": r.get("parse_error")}
+            continue
+        rows[m] = _run_one_suite(r, root, timeout_s)
+    for core in BATTERY_SELFTEST_MODULES:
+        if core not in by_mod and core not in rows:
+            rows[core] = {"module": core, "rc": None, "state": "ABSENT",
+                          "why": "a core battery module has no selftest on disk"}
+    ordered = [rows[k] for k in sorted(rows)]
+    _states = [r["state"] for r in ordered]
+    doc = {"as_of": _dt.date.today().isoformat(), "rows": ordered,
+           "as_of_ts": _dt.datetime.now().isoformat(timespec="seconds"),
+           "n_red": sum(1 for r in ordered if r["state"] != "GREEN"),
+           "source_roll": roll,
+           # ⚑ ISA-0696 (17-Sep-2026) — the identity and provenance a capital preflight binds to.
+           "config_roll": _config_roll(root),
+           "build_id": _trusted_build_id(root),
+           "runtime": _runtime_fingerprint(),
+           "data_snapshot": data_snapshot(root),
+           "census_kind": os.environ.get("ISA_CENSUS_KIND", "build"),
+           "counts": {"green": _states.count("GREEN"), "red": _states.count("RED"),
+                      "raised": _states.count("RAISED"), "timeout": _states.count("TIMEOUT"),
+                      "environment_unknown": _states.count("ENVIRONMENT_UNKNOWN"),
+                      "isolation_failures": sum(1 for r in ordered
+                                                if r["state"] in ("MUTATES_ROOT", "WRITE_ESCAPE_BLOCKED")),
+                      "other": sum(1 for x in _states if x not in ("GREEN", "RED", "RAISED", "TIMEOUT",
+                                                                     "ENVIRONMENT_UNKNOWN", "MUTATES_ROOT",
+                                                                     "WRITE_ESCAPE_BLOCKED"))},
+           "isolation": {"all_clean": all(r.get("write_isolation") == "CLEAN" for r in ordered
+                                          if r.get("state") not in ("ABSENT",)),
+                         "not_clean": [r["module"] for r in ordered
+                                       if r.get("write_isolation") not in (None, "CLEAN")][:20]},
+           "suite_secs_total": round(sum(float(r.get("secs") or 0) for r in ordered), 1),
+           "census": {"n_on_disk": len(census), "n_recorded": len(ordered),
+                      "complete": all(c["module"] in rows for c in census)},
+           "basis": ("R5.7 - a red suite is an incident. ISA-0683: the denominator is every suite on "
+                     "disk (suite_census), each run in its own process and read by its derived "
+                     "convention, bound to source_roll. Recorded so the battery can assert it "
+                     "cheaply; an absent, stale, incomplete or other-source record FAILS (R2.10).")}
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=1, sort_keys=True)
     return doc
 
 
-def pair_red_suite_is_an_incident(status=None, root=None, today=None):
+def _latest_month_pair(root=None):
+    """The newest email_data_[mmm_yyyy].json on disk and its matching run_context file, by the
+    shared [mmm_yyyy] suffix in the filename (not by mtime alone -- the two files are written
+    hours apart in the same run and must be compared as a PAIR, never cross-month)."""
+    import glob as _glob
+    root = root or HERE
+    cands = sorted(_glob.glob(os.path.join(root, "email_data_*.json")),
+                   key=os.path.getmtime, reverse=True)
+    for p in cands:
+        label = os.path.basename(p)[len("email_data_"):-len(".json")]
+        rc_path = os.path.join(root, f"run_context_{label}.json")
+        if os.path.exists(rc_path):
+            return p, rc_path, label
+    return None, None, None
+
+
+# ISA-0618 (06-Sep-2026) — this is the CHEAPER INTERIM CONTROL the item names, not the deep fix
+# (moving email_prefill after the final run_context write, or reading in-memory state). It runs
+# AFTER the assurance stages have finished writing run_context, so by the time this check runs
+# the file it compares against IS the complete one — the same asymmetry that made the original
+# defect possible (email_prefill reads a PARTIAL run_context; this check reads the FINAL one).
+_ABSENT_PATTERNS = (
+    # (email_data JMESPath-ish getter, human label, matching run_context summary key)
+    (lambda e: ((e.get("s2_capital_allocation") or {}).get("standing_lines") or [None])[0] or "",
+     "Section C / Total ISA expected return standing line", "return_architecture"),
+    (lambda e: (((e.get("s2_capital_allocation") or {}).get("capital_router") or {})
+                .get("absent_line") or ""),
+     "s2.capital_allocation.capital_router.absent_line", "capital_destination"),
+    (lambda e: (((e.get("s7_stock_sleeve") or {}).get("v21") or {}).get("absent_line") or ""),
+     "s7.stock_sleeve.v21.absent_line", "v21"),
+)
+_ABSENT_WORDS = re.compile(r"\bNOT COMPUTED\b|\bABSENT\b", re.I)
+
+
+def _latest_run_context(root=None):
+    """The newest run_context_[mmm_yyyy].json on disk (DRYRUN/scenario variants excluded)."""
+    import glob as _glob
+    root = root or HERE
+    cands = [p for p in _glob.glob(os.path.join(root, "run_context_*.json"))
+             if re.fullmatch(r"run_context_[a-z]{3}_\d{4}\.json", os.path.basename(p))]
+    cands.sort(key=os.path.getmtime, reverse=True)
+    return cands[0] if cands else None
+
+
+def pair_framework_integrity_preflight_reaches_run_context(run_ctx=None, root=None):
+    """ISA-0596. monthly_isa_prerun.py Step 0 writes summary['framework_integrity_preflight']
+    onto the SAME dict object write_run_context() later serialises — and it was still absent
+    from every run_context on disk, because a later Step (1) REBOUND the local `summary`
+    variable to a fresh dict literal, discarding it. This is the CONSUMER the item's corrective
+    action calls for: assert the structured key actually reaches the artefact, not just that a
+    disposition is declared for it (pair_summary_key_disposition/ISA-0447 checks the DECLARATION
+    and would not have caught a runtime rebind - a different failure class at a different
+    layer)."""
+    if run_ctx is None:
+        p = _latest_run_context(root)
+        if p is None:
+            return []                              # nothing on disk to check yet
+        try:
+            run_ctx = json.load(open(p, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return [f"ISA-0596: run_context unreadable ({e}) - UNKNOWN, never PASS"]
+    pf = (run_ctx.get("summary") or {}).get("framework_integrity_preflight")
+    if pf is None:
+        return ["ISA-0596: summary.framework_integrity_preflight is ABSENT from run_context - "
+                "Step 0's preflight verdict was computed but did not reach the artefact "
+                "(historically: a later step rebound `summary` to a new dict, discarding it). "
+                "Check for a `summary = {...}` (rebind) between Step 0 and write_run_context() "
+                "in monthly_isa_prerun.py - it must be `summary.update({...})`."]
+    if not isinstance(pf, dict) or "state" not in pf:
+        return [f"ISA-0596: summary.framework_integrity_preflight is present but malformed "
+                f"(no 'state' key): {pf!r}"]
+    return []
+
+
+def pair_email_absent_notice_contradicts_run_context(email_data=None, run_ctx=None, root=None):
+    """ISA-0618. FAIL when a pre-filled email block says ABSENT/NOT COMPUTED for something the
+    FINAL run_context actually produced — the prose-disagrees-with-state class A18 already
+    polices elsewhere, applied to the one surface that had it backwards (a defensive notice
+    that is itself wrong is worse than a missing section, because it asserts a run failure that
+    did not happen)."""
+    if email_data is None or run_ctx is None:
+        p, rc_path, label = _latest_month_pair(root)
+        if p is None:
+            return []                              # no paired files on disk — nothing to check
+        try:
+            email_data = json.load(open(p, encoding="utf-8"))
+            run_ctx = json.load(open(rc_path, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return [f"ISA-0618: {label} email/run_context unreadable ({e}) - UNKNOWN, never PASS"]
+    summary = run_ctx.get("summary") or {}
+    errs = []
+    for getter, label_txt, rc_key in _ABSENT_PATTERNS:
+        try:
+            text = getter(email_data)
+        except Exception:                                          # noqa: BLE001
+            continue
+        if not _ABSENT_WORDS.search(text or ""):
+            continue
+        rc_val = summary.get(rc_key)
+        if rc_val:                     # non-empty dict/str/number in the FINAL run_context
+            errs.append(
+                f"ISA-0618: email_data says {label_txt} is ABSENT/NOT COMPUTED, but "
+                f"run_context.summary.{rc_key!r} is populated in the final run_context - the "
+                f"notice is WRONG, not defensive. Rebuild the block from the final run_context "
+                f"(email_prefill.build_capital_router_block / build_v21_block / _ra_load) before "
+                f"sending.")
+    return errs
+
+
+def pair_red_suite_is_an_incident(status=None, root=None, today=None, census=None,
+                                  current_roll=None):
     """R5.7 / KR5 — a red suite is an INCIDENT, and a battery nobody ran is not a green one.
 
     ⚑⚑ R5.7's ONLY appearance in the tree before today was `run_tests.py` printing that
@@ -4869,82 +5401,119 @@ def pair_red_suite_is_an_incident(status=None, root=None, today=None):
             errs.append(f"R5.7: {r['module']}._selftest is {r.get('state')} "
                         f"(rc={r.get('rc')}){(' - ' + r['why']) if r.get('why') else ''}. A red "
                         f"suite is an INCIDENT.")
+    # ⚑ ISA-0683 — THE DENOMINATOR. A suite that EXISTS and is not in the record is not green; it
+    #   is unobserved. Measured against the census of the tree being checked, not a declared list.
+    recorded = {r.get("module") for r in status.get("rows", [])}
+    census = census if census is not None else suite_census(root)
+    uncovered = sorted(c["module"] for c in census if c["module"] not in recorded)
+    if uncovered:
+        errs.append(f"R5.7/ISA-0683: {len(uncovered)} suite(s) exist on disk and are NOT in the "
+                    f"suite status: {', '.join(uncovered[:12])}{' ...' if len(uncovered) > 12 else ''}. "
+                    f"A census over a subset reported as the whole is not a green battery.")
+    # ⚑ ISA-0683 — IDENTITY. A status recorded against other source cannot vouch for this source.
+    if status.get("config_roll") is not None and current_roll is None:
+        _cr = _config_roll(root)
+        if _cr is not None and status.get("config_roll") != _cr:
+            errs.append(f"R5.7/ISA-0696: the suite status was recorded against config "
+                        f"{str(status.get('config_roll'))[:12]} and the tree's config is {str(_cr)[:12]}. "
+                        f"A config change can move a data-dependent suite - re-record the census.")
+    roll = current_roll if current_roll is not None else _source_roll(root)
+    if roll is not None and status.get("source_roll") != roll:
+        errs.append(f"R5.7/ISA-0683: the suite status was recorded against source "
+                    f"{str(status.get('source_roll'))[:12]} and the tree is {str(roll)[:12]}. Suites "
+                    f"green on other code are not evidence about this code - re-record in the "
+                    f"Candidate (consistency_check.record_suite_status).")
     return errs
 
 
-def check_all(tagged: bool = False, since_ts=None):
+def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     """`since_ts` (ISA-0590): the calling RUN's start time, so the register gate does not fire on
-    the run's own outputs. Omitted outside a run, where full strictness is correct."""
+    the run's own outputs. Omitted outside a run, where full strictness is correct.
+
+    ⚑ ISA-0543 (A18 half) - `fire_counts`, when a caller passes a mutable dict, is populated
+    IN PLACE with `{pair_name: {"n_warn": int, "n_error": int}}` for every `pair_*` call this
+    run makes - "no pair other than the regime branch needs WARN" was a belief nothing
+    measured; this makes it readable from run data. Optional and additive (R4.7): a caller
+    that never passes `fire_counts` gets byte-identical behaviour to before this change, so
+    check_all()'s existing string/tagged contract is unchanged. Accumulation itself lives in
+    the module-level `_tally_pair_fire()` so it is unit-testable without a full run."""
     errs = []
+
+    def _tally(name, out):
+        return _tally_pair_fire(fire_counts, name, out)
     run_ctx = _read("Run_Context_ISA_Growth_Stock_Analysis.md")
     bem = _read("build_email.py")
-    errs += pair_standard_referenced()           # ISA-0027 / O-10 (12-Aug-2026)
-    errs += pair_retrospectives_ingested()       # ISA-0229 / ISA-0231 (12-Aug-2026)
-    errs += pair_rationale_ledger()              # R12.3 / P2.5 (12-Aug-2026)
-    errs += pair_archive_backlog()               # ageing policy (12-Aug-2026)
-    errs += pair_run_surface_basis()             # ISA-0211 (12-Aug-2026)
-    errs += pair_register_store_protected()      # ISA-0026 (12-Aug-2026)
-    errs += pair_register_renders_current()      # R14.3 register-view drift (12-Aug-2026)
-    errs += pair_benchmark_registry()             # ISA-0320 / ISA-0307 (13-Aug-2026)
-    errs += pair_no_informational_in_register()  # ISA-0336 (13-Aug-2026)
-    errs += pair_register_fourc_complete()       # ISA-0337 (13-Aug-2026)
-    errs += pair_target_weights_bucket_reconciliation()   # ISA-0394 root (20-Aug-2026)
-    errs += pair_build_readiness_declared()      # ISA-0399 (20-Aug-2026)
-    errs += pair_lookthrough_xray_reconciliation()        # XR1 — ISA-0407 (20-Aug-2026)
-    errs += pair_regional_m_contracts()                   # RM1-RM4 — ISA-0160 (20-Aug-2026)
-    errs += pair_fund_expected_return_contracts()         # FE1-FE4 — ISA-0328 (20-Aug-2026)
-    errs += pair_adoption_gate_refuses()                  # ISA-0409 (20-Aug-2026)
-    errs += pair_return_basis_declared()                  # ISA-0402 / ISA-0401 (20-Aug-2026)
-    errs += pair_occurrence_guard_coverage()              # ISA-0479/0480/0481/0482 (27-Aug-2026)
+    errs += _tally("pair_standard_referenced", pair_standard_referenced())           # ISA-0027 / O-10 (12-Aug-2026)
+    errs += _tally("pair_return_store_identity_unique", pair_return_store_identity_unique())  # ISA-0549 (16-Sep-2026)
+    errs += _tally("pair_deliverable_findings_registered", pair_deliverable_findings_registered())  # ISA-0473 (16-Sep-2026)
+    errs += _tally("pair_retrospectives_ingested", pair_retrospectives_ingested())       # ISA-0229 / ISA-0231 (12-Aug-2026)
+    errs += _tally("pair_rationale_ledger", pair_rationale_ledger())              # R12.3 / P2.5 (12-Aug-2026)
+    errs += _tally("pair_archive_backlog", pair_archive_backlog())               # ageing policy (12-Aug-2026)
+    errs += _tally("pair_run_surface_basis", pair_run_surface_basis())             # ISA-0211 (12-Aug-2026)
+    errs += _tally("pair_register_store_protected", pair_register_store_protected())      # ISA-0026 (12-Aug-2026)
+    errs += _tally("pair_register_renders_current", pair_register_renders_current())      # R14.3 register-view drift (12-Aug-2026)
+    errs += _tally("pair_benchmark_registry", pair_benchmark_registry())             # ISA-0320 / ISA-0307 (13-Aug-2026)
+    errs += _tally("pair_no_informational_in_register", pair_no_informational_in_register())  # ISA-0336 (13-Aug-2026)
+    errs += _tally("pair_register_fourc_complete", pair_register_fourc_complete())       # ISA-0337 (13-Aug-2026)
+    errs += _tally("pair_target_weights_bucket_reconciliation", pair_target_weights_bucket_reconciliation())   # ISA-0394 root (20-Aug-2026)
+    errs += _tally("pair_build_readiness_declared", pair_build_readiness_declared())      # ISA-0399 (20-Aug-2026)
+    errs += _tally("pair_lookthrough_xray_reconciliation", pair_lookthrough_xray_reconciliation())        # XR1 — ISA-0407 (20-Aug-2026)
+    errs += _tally("pair_regional_m_contracts", pair_regional_m_contracts())                   # RM1-RM4 — ISA-0160 (20-Aug-2026)
+    errs += _tally("pair_fund_expected_return_contracts", pair_fund_expected_return_contracts())         # FE1-FE4 — ISA-0328 (20-Aug-2026)
+    errs += _tally("pair_adoption_gate_refuses", pair_adoption_gate_refuses())                  # ISA-0409 (20-Aug-2026)
+    errs += _tally("pair_return_basis_declared", pair_return_basis_declared())                  # ISA-0402 / ISA-0401 (20-Aug-2026)
+    errs += _tally("pair_occurrence_guard_coverage", pair_occurrence_guard_coverage())              # ISA-0479/0480/0481/0482 (27-Aug-2026)
     # ── ISA-0623 / ISA-0467 ENFORCEMENT (09-Sep-2026) ───────────────────────────────────
     # ⚑⚑ THESE ARE THE CALL SITES. Every control below already existed; ISA-0467's finding was
     #    that nothing invoked them. `framework_atlas.check()` returned False against the
     #    delivered tree on 09-Sep-2026 with ZERO call sites anywhere in the repository.
-    errs += pair_atlas_current()                          # R15.4 item 1 - ISA-0467
-    errs += pair_rules_all_classified()                   # R15.4 item 3 - ISA-0624
-    errs += pair_no_false_asserted()                      # §17 - ISA-0627
-    errs += pair_live_is_trusted()                        # R18.5 / KR10 - ISA-0629
-    errs += pair_capability_chain()                       # R4.14 / KR12 - ISA-0628
-    errs += pair_discussion_preflight_wired()             # R12.4 - ISA-0630
-    errs += pair_orientation_fields()                     # R12.1 / R4.4 - ISA-0630
-    errs += pair_one_register()                           # R7.1 - ISA-0627
-    errs += pair_red_suite_is_an_incident()               # R5.7 - ISA-0627 / ISA-0625
+    errs += _tally("pair_atlas_current", pair_atlas_current())                          # R15.4 item 1 - ISA-0467
+    errs += _tally("pair_rules_all_classified", pair_rules_all_classified())                   # R15.4 item 3 - ISA-0624
+    errs += _tally("pair_no_false_asserted", pair_no_false_asserted())                      # §17 - ISA-0627
+    errs += _tally("pair_live_is_trusted", pair_live_is_trusted())                        # R18.5 / KR10 - ISA-0629
+    errs += _tally("pair_capability_chain", pair_capability_chain())                       # R4.14 / KR12 - ISA-0628
+    errs += _tally("pair_discussion_preflight_wired", pair_discussion_preflight_wired())             # R12.4 - ISA-0630
+    errs += _tally("pair_orientation_fields", pair_orientation_fields())                     # R12.1 / R4.4 - ISA-0630
+    errs += _tally("pair_one_register", pair_one_register())                           # R7.1 - ISA-0627
+    errs += _tally("pair_red_suite_is_an_incident", pair_red_suite_is_an_incident())               # R5.7 - ISA-0627 / ISA-0625
+    errs += _tally("pair_email_absent_notice_contradicts_run_context", pair_email_absent_notice_contradicts_run_context())  # ISA-0618
+    errs += _tally("pair_framework_integrity_preflight_reaches_run_context", pair_framework_integrity_preflight_reaches_run_context())  # ISA-0596
     # ── V2.1-A, each behind its declared rollback flag (R4.13) ─────────────────────────
     try:
         import isa_policy as _pol
         if _pol.flag("duplicate_threshold_check"):             # ISA-0432 / ISA-0433
-            errs += pair_no_literal_fallback_for_derived_thresholds()   # forms 1-3
-            errs += pair_no_derived_threshold_in_json()                 # form 4
-            errs += pair_no_duplicate_module_constant()                 # form 5
+            errs += _tally("pair_no_literal_fallback_for_derived_thresholds", pair_no_literal_fallback_for_derived_thresholds())   # forms 1-3
+            errs += _tally("pair_no_derived_threshold_in_json", pair_no_derived_threshold_in_json())                 # form 4
+            errs += _tally("pair_no_duplicate_module_constant", pair_no_duplicate_module_constant())                 # form 5
         if _pol.flag("stock_ladder_caps"):                     # ISA-0427
-            errs += pair_stock_ladder_reconciles()
-        errs += pair_v21_modules_executed()                # A11 / ISA-0354
-        errs += pair_v21_summary_has_renderer()            # ISA-0439
-        errs += pair_summary_key_disposition()             # ISA-0447 (26-Aug-2026)
-        errs += pair_single_sizing_authority()             # ISA-0442 (26-Aug-2026)
+            errs += _tally("pair_stock_ladder_reconciles", pair_stock_ladder_reconciles())
+        errs += _tally("pair_v21_modules_executed", pair_v21_modules_executed())                # A11 / ISA-0354
+        errs += _tally("pair_v21_summary_has_renderer", pair_v21_summary_has_renderer())            # ISA-0439
+        errs += _tally("pair_summary_key_disposition", pair_summary_key_disposition())             # ISA-0447 (26-Aug-2026)
+        errs += _tally("pair_single_sizing_authority", pair_single_sizing_authority())             # ISA-0442 (26-Aug-2026)
     except Exception as _e:                                    # noqa: BLE001
         errs.append(f"ISA-0354: the V2.1-A checks could NOT run ({type(_e).__name__}: {_e}). "
                     f"Reported, never silently skipped (R4.9)")
-    errs += pair_cash_reserve_is_single_topup_control()   # D23 / ISA-0544 (02-Sep-2026)
-    errs += pair_min_hold_is_position_level()             # D24 / ISA-0545 (02-Sep-2026)
-    errs += pair_orchestrator_parity()
-    errs += pair_er_callsite_manifest()          # D-24 §1.3 (09-Aug-2026)
-    errs += pair_score_panel_date_format()       # D-15 (09-Aug-2026)
-    errs += pair_stale_partb(run_ctx)
-    errs += pair_summary_floor_prose(run_ctx)
-    errs += pair_top10_columns(run_ctx, bem)
-    errs += pair_email_sections(run_ctx, bem)
+    errs += _tally("pair_cash_reserve_is_single_topup_control", pair_cash_reserve_is_single_topup_control())   # D23 / ISA-0544 (02-Sep-2026)
+    errs += _tally("pair_min_hold_is_position_level", pair_min_hold_is_position_level())             # D24 / ISA-0545 (02-Sep-2026)
+    errs += _tally("pair_orchestrator_parity", pair_orchestrator_parity())
+    errs += _tally("pair_er_callsite_manifest", pair_er_callsite_manifest())          # D-24 §1.3 (09-Aug-2026)
+    errs += _tally("pair_score_panel_date_format", pair_score_panel_date_format())       # D-15 (09-Aug-2026)
+    errs += _tally("pair_stale_partb", pair_stale_partb(run_ctx))
+    errs += _tally("pair_summary_floor_prose", pair_summary_floor_prose(run_ctx))
+    errs += _tally("pair_top10_columns", pair_top10_columns(run_ctx, bem))
+    errs += _tally("pair_email_sections", pair_email_sections(run_ctx, bem))
     try:
-        errs += pair_monthly_return_architecture(
+        errs += _tally("pair_monthly_return_architecture", pair_monthly_return_architecture(
             _read("Run_Context_Monthly_ISA_Review.md"), _read("email_prefill.py"),
-            _read("return_architecture.py"))
+            _read("return_architecture.py")))
     except Exception as _e:                                    # noqa: BLE001
         errs.append(f"A18/6.08 pair could not run: {type(_e).__name__}: {_e}")
-    errs += pair_retired_constants({fn: _read(fn) for fn in
+    errs += _tally("pair_retired_constants", pair_retired_constants({fn: _read(fn) for fn in
                                     ("build_excel.py", "build_email.py", "update_watchlist.py",
-                                     "screener_core.py", "rerank_watchlist.py", "scoring_config.py")})
+                                     "screener_core.py", "rerank_watchlist.py", "scoring_config.py")}))
     try:
-        errs += pair_min_hold_exempt()                          # ISA-0647
+        errs += _tally("pair_min_hold_exempt", pair_min_hold_exempt())                          # ISA-0647
     except Exception as _e:                                     # noqa: BLE001
         errs.append(f"ISA-0647 pair could not run: {type(_e).__name__}: {_e}")
     try:
@@ -4952,10 +5521,10 @@ def check_all(tagged: bool = False, since_ts=None):
             state = json.load(f)
         sys.path.insert(0, HERE)
         import scoring_config as cfg
-        errs += pair_anchor(state, getattr(cfg, "REQUIRED_RETURN_MID", None))
-        errs += pair_anchor_cadence(state)
-        errs += pair_register_updated_after_build(since_ts=since_ts)
-        errs += pair_max_scale(cfg)
+        errs += _tally("pair_anchor", pair_anchor(state, getattr(cfg, "REQUIRED_RETURN_MID", None)))
+        errs += _tally("pair_anchor_cadence", pair_anchor_cadence(state))
+        errs += _tally("pair_register_updated_after_build", pair_register_updated_after_build(since_ts=since_ts))
+        errs += _tally("pair_max_scale", pair_max_scale(cfg))
     except Exception as e:
         errs.append(f"A18/A19: anchor/config check failed to run ({e})")
         cfg = None
@@ -4965,31 +5534,31 @@ def check_all(tagged: bool = False, since_ts=None):
         mctx   = _read(MONTHLY_CTX)
         mbuild = _read("build_monthly_isa_email.py")
         prerun = _read("monthly_isa_prerun.py")
-        errs += pair_monthly_action_categories(mctx)
-        errs += pair_monthly_email_sections(mctx, mbuild)
-        errs += pair_monthly_retired(mctx)
-        errs += pair_monthly_prerun_stages(mctx, prerun)
-        errs += pair_monthly_prerun_reads(mctx)
-        errs += pair_prose_quantity_values(mctx)      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
-        errs += pair_prose_sizing_numbers(mctx)      # P0.5 / P7.7 - ISA-0466 (28-Aug-2026)
-        errs += pair_no_gate_reads_conviction_score()  # A3 / P7.1 - D21 (28-Aug-2026)
-        errs += pair_single_stock_max_authority()     # P4-A1/A2 - ISA-0454 (28-Aug-2026)
-        errs += pair_entry_and_review_fractions_distinct()  # P4-A10 - P4.4
-        errs += pair_projection_carries_consumer_fields()   # ISA-0487 (29-Aug-2026)
-        errs += pair_capital_pipeline_wired()               # ISA-0490 (29-Aug-2026)
-        errs += pair_artefact_shape_single_home()           # ISA-0512 (02-Sep-2026)
-        errs += pair_flags_wired()                          # ISA-0528 (02-Sep-2026)
-        errs += pair_symbol_map_covers_universe()           # ISA-0577/0578 (03-Sep-2026)
-        errs += pair_local_used_before_bound()              # ISA-0589 (03-Sep-2026)
-        errs += pair_prose_task_schedules()                 # P0.5 extension (02-Sep-2026)
-        errs += pair_tier_caps_rung_aware()                 # ISA-0496 (02-Sep-2026, Raj)
-        errs += pair_monthly_capture_retention(mctx)
-        errs += pair_monthly_two_regimes(mctx)
-        errs += pair_monthly_lean_email(mctx, mbuild)
-        errs += pair_screen_capture_coverage()
-        errs += pair_fallback_inputs_classified()          # ISA-0498 (11-Sep-2026)
+        errs += _tally("pair_monthly_action_categories", pair_monthly_action_categories(mctx))
+        errs += _tally("pair_monthly_email_sections", pair_monthly_email_sections(mctx, mbuild))
+        errs += _tally("pair_monthly_retired", pair_monthly_retired(mctx))
+        errs += _tally("pair_monthly_prerun_stages", pair_monthly_prerun_stages(mctx, prerun))
+        errs += _tally("pair_monthly_prerun_reads", pair_monthly_prerun_reads(mctx))
+        errs += _tally("pair_prose_quantity_values", pair_prose_quantity_values(mctx))      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
+        errs += _tally("pair_prose_sizing_numbers", pair_prose_sizing_numbers(mctx))      # P0.5 / P7.7 - ISA-0466 (28-Aug-2026)
+        errs += _tally("pair_no_gate_reads_conviction_score", pair_no_gate_reads_conviction_score())  # A3 / P7.1 - D21 (28-Aug-2026)
+        errs += _tally("pair_single_stock_max_authority", pair_single_stock_max_authority())     # P4-A1/A2 - ISA-0454 (28-Aug-2026)
+        errs += _tally("pair_entry_and_review_fractions_distinct", pair_entry_and_review_fractions_distinct())  # P4-A10 - P4.4
+        errs += _tally("pair_projection_carries_consumer_fields", pair_projection_carries_consumer_fields())   # ISA-0487 (29-Aug-2026)
+        errs += _tally("pair_capital_pipeline_wired", pair_capital_pipeline_wired())               # ISA-0490 (29-Aug-2026)
+        errs += _tally("pair_artefact_shape_single_home", pair_artefact_shape_single_home())           # ISA-0512 (02-Sep-2026)
+        errs += _tally("pair_flags_wired", pair_flags_wired())                          # ISA-0528 (02-Sep-2026)
+        errs += _tally("pair_symbol_map_covers_universe", pair_symbol_map_covers_universe())           # ISA-0577/0578 (03-Sep-2026)
+        errs += _tally("pair_local_used_before_bound", pair_local_used_before_bound())              # ISA-0589 (03-Sep-2026)
+        errs += _tally("pair_prose_task_schedules", pair_prose_task_schedules())                 # P0.5 extension (02-Sep-2026)
+        errs += _tally("pair_tier_caps_rung_aware", pair_tier_caps_rung_aware())                 # ISA-0496 (02-Sep-2026, Raj)
+        errs += _tally("pair_monthly_capture_retention", pair_monthly_capture_retention(mctx))
+        errs += _tally("pair_monthly_two_regimes", pair_monthly_two_regimes(mctx))
+        errs += _tally("pair_monthly_lean_email", pair_monthly_lean_email(mctx, mbuild))
+        errs += _tally("pair_screen_capture_coverage", pair_screen_capture_coverage())
+        errs += _tally("pair_fallback_inputs_classified", pair_fallback_inputs_classified())          # ISA-0498 (11-Sep-2026)
         if cfg is not None:
-            errs += pair_monthly_t1_mode(mctx, bool(getattr(cfg, "T1_QUALIFICATION_MODE", False)))
+            errs += _tally("pair_monthly_t1_mode", pair_monthly_t1_mode(mctx, bool(getattr(cfg, "T1_QUALIFICATION_MODE", False))))
         # Contracts that name executables: a missing script is a silent monthly failure.
         # ROOT CAUSE of ISA-0002, 12-Aug-2026: this guard was built specifically to catch
         # fetch_metrics_local.py and was then pointed at ONE document. The file that still
@@ -5005,17 +5574,17 @@ def check_all(tagged: bool = False, since_ts=None):
             errs.append(f"A18/monthly: run-surface enumeration unavailable ({_e}) - "
                         "scripts referenced by SKILL prompts and other Run_Contexts were NOT "
                         "checked this run. Reported, never silently skipped (R4.9)")
-        errs += pair_referenced_scripts_exist(_surfaces)
-        errs += pair_monthly_retired("\n".join(_surfaces.values()))
+        errs += _tally("pair_referenced_scripts_exist", pair_referenced_scripts_exist(_surfaces))
+        errs += _tally("pair_monthly_retired", pair_monthly_retired("\n".join(_surfaces.values())))
         # Name-resolution across the scripts the two runs depend on.
-        errs += pair_undefined_constants({fn: _read(fn) for fn in TRACKED_SCRIPTS
-                                          if os.path.exists(os.path.join(HERE, fn))})
-        errs += pair_literal_attr_calls({fn: _read(fn) for fn in NAME_RESOLUTION_SCRIPTS
-                                         if os.path.exists(os.path.join(HERE, fn))})
-        errs += pair_broker_file_predates_cash()        # ISA-0571 — snapshot older than the money
-        errs += pair_unimported_stdlib_modules(
+        errs += _tally("pair_undefined_constants", pair_undefined_constants({fn: _read(fn) for fn in TRACKED_SCRIPTS
+                                          if os.path.exists(os.path.join(HERE, fn))}))
+        errs += _tally("pair_literal_attr_calls", pair_literal_attr_calls({fn: _read(fn) for fn in NAME_RESOLUTION_SCRIPTS
+                                         if os.path.exists(os.path.join(HERE, fn))}))
+        errs += _tally("pair_broker_file_predates_cash", pair_broker_file_predates_cash())        # ISA-0571 — snapshot older than the money
+        errs += _tally("pair_unimported_stdlib_modules", pair_unimported_stdlib_modules(
             {fn: _read(fn) for fn in NAME_RESOLUTION_SCRIPTS
-             if os.path.exists(os.path.join(HERE, fn))})      # ISA-0264
+             if os.path.exists(os.path.join(HERE, fn))}))      # ISA-0264
     except Exception as e:
         errs.append(f"A18/monthly: monthly pair set failed to run ({e})")
     recs = [_norm(e) for e in errs]
@@ -5501,6 +6070,36 @@ def _selftest():
         def run_coverage(screens):
             return [f"{x}: recorded neither a finding nor an explicit no-findings result"
                     for x in screens]
+    class _DelivDirty:
+        @staticmethod
+        def deliverable_coverage():
+            return ["ISA-0473 D1: X.md:3 cites unissued id(s) ISA-0450 (R7.7)"]
+
+    class _DelivClean:
+        @staticmethod
+        def deliverable_coverage():
+            return []
+    import stock_return_store as _srs549
+    _sm549 = {"ONT": "ONT.L", "ONT.L": "ONT.L"}
+    _o549 = {"2026-01-02": {"gbp": 1.0}}
+
+    class _Srs549:
+        CanonicalIdentityConflict = _srs549.CanonicalIdentityConflict
+        @staticmethod
+        def identity_report(doc):
+            return _srs549.identity_report(doc, _sm549)
+        @staticmethod
+        def load():
+            return {}
+    assert pair_return_store_identity_unique(_Srs549, {"names": {"ONT": {"observations": _o549},
+                                                                "ONT.L": {"observations": _o549}}}), \
+        "ISA-0549 MUST-FIRE: two keys for one security must fail the pair"
+    assert not pair_return_store_identity_unique(_Srs549, {"names": {"ONT.L": {"observations": _o549}}}), \
+        "ISA-0549 NEGATIVE CONTROL: a canonical store must pass the pair"
+    assert pair_deliverable_findings_registered(_DelivDirty), \
+        "ISA-0473 MUST-FIRE: a deliverable violation must fail the pair"
+    assert not pair_deliverable_findings_registered(_DelivClean), \
+        "ISA-0473 NEGATIVE CONTROL: a clean deliverable set must pass the pair"
     assert pair_retrospectives_ingested(_FakeIntake), \
         "ISA-0229: an un-ingested retrospective must FAIL"
     assert pair_retrospectives_ingested(_FakeIntake, screens=["20260815_SP500"]), \
@@ -5566,8 +6165,17 @@ def _selftest():
         permanent=tuple(os.path.splitext(f)[0] for f in REGISTER_STORE_FILES)), \
         "ISA-0026: a present, protected store must pass"
     # R14.3 negative control: reported drift must surface as an error, not be swallowed.
-    assert pair_register_renders_current(check=lambda _h: {"ok": False, "drift": ["X.md: differs"]})
-    assert not pair_register_renders_current(check=lambda _h: {"ok": True, "drift": []})
+    # Both checks are injected independently so a clean render can't mask a dirty export, or the
+    # reverse (ISA-0689: the export side had no equivalent control until this).
+    _ok_check = lambda _h: {"ok": True, "drift": []}
+    _bad_check = lambda _h: {"ok": False, "drift": ["X.md: differs"]}
+    _ok_export = lambda _h: {"ok": True, "drift": []}
+    _bad_export = lambda _h: {"ok": False, "drift": ["X.csv: differs"]}
+    assert pair_register_renders_current(check=_bad_check, export_check=_ok_export)
+    assert pair_register_renders_current(check=_ok_check, export_check=_bad_export), \
+        "ISA-0689: export-only drift must surface even when the markdown views are clean"
+    assert not pair_register_renders_current(check=_ok_check, export_check=_ok_export)
+    assert pair_register_renders_current(check=_bad_check, export_check=_bad_export)
 
     # ISA-0461 / ISA-0471 negative controls: a schedule literal disagreeing with
     # Run_Context:108, in one of the two real SKILL mirrors, must FAIL; agreement, a pointer,
@@ -5608,7 +6216,187 @@ def _selftest():
     assert pair_prose_quantity_values("Schedule: no cron literal here.", {"X": "irrelevant"}), \
         "P0.5: an unmeasurable canonical schedule must be reported, never silently passed"
 
+    # ── ISA-0618 (06-Sep-2026) ──────────────────────────────────────────────────────────
+    _e0618 = {
+        "s2_capital_allocation": {
+            "standing_lines": ["Total ISA expected return: NOT COMPUTED this run - Step 6.08 "
+                               "did not produce a Section C."],
+            "capital_router": {"absent_line": "Marginal-pound router output ABSENT from this "
+                                              "run's context."},
+        },
+        "s7_stock_sleeve": {"v21": {"absent_line": "V2.1 engine output ABSENT from this run's "
+                                                    "context."}},
+    }
+    _rc0618_populated = {"summary": {"return_architecture": {"section_c": {"value_pct": 11.6}},
+                                     "capital_destination": {"x": 1}, "v21": {"y": 1}}}
+    _errs0618 = pair_email_absent_notice_contradicts_run_context(_e0618, _rc0618_populated)
+    assert len(_errs0618) == 3, \
+        f"ISA-0618 POSITIVE CONTROL: the exact 06-Sep defect shape (3 absent notices, all " \
+        f"contradicted by a populated run_context) must FAIL on all 3, got {_errs0618}"
+    _rc0618_empty = {"summary": {"return_architecture": None, "capital_destination": {},
+                                 "v21": None}}
+    assert not pair_email_absent_notice_contradicts_run_context(_e0618, _rc0618_empty), \
+        "ISA-0618 NEGATIVE CONTROL: the SAME absent notices must NOT fail when run_context " \
+        "genuinely has nothing there - a defensive notice that is RIGHT must stay clean, or " \
+        "this control just bans the defensive behaviour it is supposed to protect"
+    _e0618_clean = {
+        "s2_capital_allocation": {
+            "standing_lines": ["Total ISA expected return: 11.64% vs a required 13.7%"],
+            "capital_router": {"split_line": "x"}},
+        "s7_stock_sleeve": {"v21": {"policy_line": "x"}},
+    }
+    assert not pair_email_absent_notice_contradicts_run_context(_e0618_clean, _rc0618_populated), \
+        "ISA-0618 NEGATIVE CONTROL: no absent/NOT-COMPUTED language at all must never fail, " \
+        "whatever run_context says"
+
+    # ── ISA-0596 (05-Sep-2026) ──────────────────────────────────────────────────────────
+    assert not pair_framework_integrity_preflight_reaches_run_context(
+        {"summary": {"framework_integrity_preflight": {"state": "OK"}}}), \
+        "ISA-0596 POSITIVE CONTROL: a present, well-formed preflight key must pass"
+    assert pair_framework_integrity_preflight_reaches_run_context({"summary": {}}), \
+        "ISA-0596: the exact defect shape (key absent from summary) must FAIL"
+    assert pair_framework_integrity_preflight_reaches_run_context(
+        {"summary": {"framework_integrity_preflight": "not a dict"}}), \
+        "ISA-0596 NEGATIVE CONTROL: a malformed (non-dict / no state) value must also FAIL, " \
+        "not be treated as present"
+
+    # ── ISA-0543 (A18 half, 13-Sep-2026) — per-pair fire-count tally ───────────────────
+    import inspect as _inspect
+    assert "fire_counts" in _inspect.signature(check_all).parameters, \
+        "ISA-0543 CONTRACT: check_all() must keep accepting fire_counts= (R4.7) - a caller " \
+        "(monthly_isa_prerun.py Step 9d) threads it through and its removal would fail silent"
+    _fc = {}
+    _out_w = _tally_pair_fire(_fc, "pair_demo", [warn("m1"), warn("m2")])
+    assert _out_w == [warn("m1"), warn("m2")], \
+        "ISA-0543 POSITIVE CONTROL: _tally_pair_fire must return `out` UNCHANGED - it is a " \
+        "side-effecting accumulator, never a filter, or check_all()'s errs[] would silently lose rows"
+    assert _fc == {"pair_demo": {"n_warn": 2, "n_error": 0}}, \
+        f"ISA-0543 POSITIVE CONTROL: two WARN records from one pair must tally n_warn=2, " \
+        f"n_error=0, got {_fc}"
+    _tally_pair_fire(_fc, "pair_demo", ["plain error string"])
+    assert _fc == {"pair_demo": {"n_warn": 2, "n_error": 1}}, \
+        f"ISA-0543 POSITIVE CONTROL: a SECOND call for the SAME pair name (pair_monthly_retired " \
+        f"fires twice inside check_all() with different args) must ACCUMULATE, not overwrite - " \
+        f"got {_fc}"
+    _tally_pair_fire(_fc, "pair_other", "bare string, not a list")
+    assert _fc["pair_other"] == {"n_warn": 0, "n_error": 1}, \
+        f"ISA-0543 BOUNDARY CONTROL: a pair that returns a bare non-list value (not wrapped " \
+        f"in a list) must still be counted, not silently skipped by an isinstance(list) branch - " \
+        f"got {_fc.get('pair_other')}"
+    _fc_before = dict(_fc)
+    _out_none = _tally_pair_fire(None, "pair_demo", [warn("m3")])
+    assert _out_none == [warn("m3")] and _fc == _fc_before, \
+        "ISA-0543 NEGATIVE CONTROL: fire_counts=None (check_all()'s default, i.e. every " \
+        "EXISTING caller that predates ISA-0543) must be a pure no-op - no dict mutated, " \
+        "`out` still returned - so this change is additive, never a behaviour change (R4.7)"
+
+    _suite_census_controls()
     print("consistency_check SELF-TEST OK (growth pairs + 10 monthly pairs + register pairs)")
+
+
+def _suite_census_controls():
+    """ISA-0683 — the census, the convention reader and the pair, each shown able to FAIL, with a
+    positive comparator beside every negative so 'always RED' cannot pass either."""
+    import tempfile, datetime as _dt
+    td = tempfile.mkdtemp()
+    files = {
+        "s_rc_green.py": "def _selftest(verbose=True):\n    fails = []\n    return 1 if fails else 0\n",
+        "s_rc_red.py": "def _selftest(verbose=True):\n    fails = ['x']\n    return 1 if fails else 0\n",
+        "s_count_green.py": "def selftest():\n    n = 5\n    return n\n",
+        "s_raise_red.py": "def selftest():\n    assert False, 'boom'\n",
+        "s_false_red.py": "def _selftest():\n    return False\n",
+        "s_env.py": "import definitely_not_a_real_pkg_zz\ndef _selftest():\n    return 0\n",
+        "not_a_suite.py": "def helper():\n    return 1\n",
+        "s_writer.py": ("import os\ndef _selftest(verbose=True):\n    fails = []\n    try:\n"
+                        "        open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state.json'), 'w').write('x')\n"
+                        "    except Exception:\n        pass\n    return 1 if fails else 0\n"),
+        "s_subproc_writer.py": ("import os, subprocess, sys\ndef _selftest(verbose=True):\n    fails = []\n"
+                                "    subprocess.run([sys.executable, '-c', \"open('sub_state.json','w').write('x')\"],"
+                                " cwd=os.path.dirname(os.path.abspath(__file__)))\n    return 1 if fails else 0\n"),
+    }
+    for fn, src in files.items():
+        open(os.path.join(td, fn), "w", encoding="utf-8").write(src)
+    cen = {r["module"]: r for r in suite_census(td)}
+    assert set(cen) == {f[:-3] for f in files} - {"not_a_suite"}, \
+        f"ISA-0683: the census is every top-level selftest on disk and nothing else - got {sorted(cen)}"
+    assert cen["s_rc_green"]["convention"] == "RC_FAILURES" and \
+        cen["s_count_green"]["convention"] == "RAISE_ON_FAIL", \
+        "ISA-0683: the failure convention is derived from the AST (a `fails` return vs a count)"
+    doc = record_suite_status(root=td, timeout_s=60)
+    st = {r["module"]: r["state"] for r in doc["rows"]}
+    assert st["s_rc_green"] == "GREEN" and st["s_count_green"] == "GREEN", \
+        f"ISA-0683 POSITIVE CONTROL: a clean suite in either convention is GREEN - got {st}"
+    assert st["s_rc_red"] == "RED" and st["s_raise_red"] == "RAISED" and st["s_false_red"] == "RED", \
+        f"ISA-0683 NEGATIVE CONTROL: a failing suite in either convention is not GREEN - got {st}"
+    assert st["s_env"] == "ENVIRONMENT_UNKNOWN", \
+        f"ISA-0683: a missing third-party package is ENVIRONMENT_UNKNOWN, never GREEN (R2.9) - got {st}"
+    assert st["s_writer"] != "GREEN" and not os.path.exists(os.path.join(td, "state.json")), \
+        f"ISA-0704 MUST-FIRE: a selftest writing its own tree (write swallowed by a bare except) is refused by the guard and not GREEN - got {st['s_writer']}"
+    assert st["s_subproc_writer"] == "MUTATES_ROOT", \
+        f"ISA-0704 MUST-FIRE: a write the in-process guard cannot see (subprocess) is caught by the writer census - got {st['s_subproc_writer']}"
+    assert doc["census"]["complete"] and doc["n_red"] == 6 + len(BATTERY_SELFTEST_MODULES) and \
+        all(st[c] == "ABSENT" for c in BATTERY_SELFTEST_MODULES), \
+        f"ISA-0683: n_red counts every non-GREEN row, and a CORE battery module missing from the " \
+        f"tree is ABSENT rather than silently dropped - got {doc['n_red']}"
+    today = _dt.date.fromisoformat(doc["as_of"])
+    roll = doc["source_roll"]
+    green = {"as_of": doc["as_of"], "source_roll": roll,
+             "rows": [{"module": m, "state": "GREEN"} for m in cen]}
+    assert pair_red_suite_is_an_incident(status=green, root=td, today=today, current_roll=roll) == [], \
+        "ISA-0683 POSITIVE CONTROL: a complete, fresh, same-source, all-GREEN status passes the pair"
+    partial = dict(green, rows=[r for r in green["rows"] if r["module"] != "s_count_green"])
+    assert any("NOT in the suite status" in e for e in
+               pair_red_suite_is_an_incident(status=partial, root=td, today=today, current_roll=roll)), \
+        "ISA-0683 NEGATIVE CONTROL: a suite that exists and is absent from the status FAILS the pair"
+    other = dict(green, source_roll="0" * 64)
+    assert any("recorded against source" in e for e in
+               pair_red_suite_is_an_incident(status=other, root=td, today=today,
+                                             current_roll=roll or "1" * 64)), \
+        "ISA-0683 NEGATIVE CONTROL: a status recorded against other source FAILS the pair"
+
+    # ── ISA-0696: the capital-preflight reading of the census (BS-0696 §15, A1) ──────────────
+    _now = _dt.datetime(2026, 10, 3, 9, 0, 0)
+    _cen = [{"module": m} for m in ("a", "b")]
+    _live = {"source_roll": "S" * 64, "config_roll": "C" * 64, "build_id": "TB-X",
+             "data_snapshot": {"files": {"x.json": "1|1"}}}
+    def _st(**kw):
+        base = {"as_of_ts": (_now - _dt.timedelta(days=7)).isoformat(timespec="seconds"),
+                "source_roll": "S" * 64, "config_roll": "C" * 64, "build_id": "TB-W",
+                "rows": [{"module": "a", "state": "GREEN", "write_isolation": "CLEAN"},
+                         {"module": "b", "state": "GREEN", "write_isolation": "CLEAN"}],
+                "isolation": {"all_clean": True}, "data_snapshot": {"files": {"x.json": "1|1"}}}
+        base.update(kw)
+        return suite_status_state(root=td, now=_now, status=base, census=_cen, live=_live)
+    _g = _st()
+    assert _g["state"] == "FRESH_GREEN" and _g["data_drift"]["n_changed"] == 0, \
+        f"ISA-0696 POSITIVE CONTROL: a 7-day-old complete exact-identity GREEN census passes - got {_g}"
+    assert _st(as_of_ts=(_now - _dt.timedelta(days=8, hours=1)).isoformat())["state"] == "STALE", \
+        "ISA-0696 MUST-FIRE: a census older than 8 days is STALE"
+    assert _st(as_of_ts=(_now - _dt.timedelta(hours=1)).isoformat(), config_roll="D" * 64)["state"] == "IDENTITY_MISMATCH", \
+        "ISA-0696 MUST-FIRE: a 1-hour-old census against other config is IDENTITY_MISMATCH"
+    assert _st(source_roll="T" * 64)["state"] == "IDENTITY_MISMATCH", \
+        "ISA-0696 MUST-FIRE: a census against other source is IDENTITY_MISMATCH"
+    assert _st(rows=[{"module": "a", "state": "GREEN", "write_isolation": "CLEAN"}])["state"] == "INCOMPLETE", \
+        "ISA-0696 NEGATIVE CONTROL: one existing suite omitted -> INCOMPLETE, never GREEN"
+    assert _st(rows=[{"module": "a", "state": "GREEN", "write_isolation": "CLEAN"},
+                     {"module": "b", "state": "TIMEOUT"}])["state"] == "INCOMPLETE", \
+        "ISA-0696 NEGATIVE CONTROL: a TIMEOUT row -> INCOMPLETE, not absent and not GREEN"
+    _r = _st(rows=[{"module": "a", "state": "GREEN", "write_isolation": "CLEAN"},
+                   {"module": "b", "state": "RED", "why": "anchor 13.9 != 13.7 (data moved)", "write_isolation": "CLEAN"}])
+    assert _r["state"] == "FRESH_RED" and _r["non_green"][0]["module"] == "b", \
+        "ISA-0696 MUST-FIRE: a failing data-dependent suite -> FRESH_RED, named"
+    assert _st(isolation={"all_clean": False})["state"] == "FRESH_RED", \
+        "ISA-0696 NEGATIVE CONTROL: a census whose isolation is not CLEAN is not GREEN"
+    assert _st(isolation={})["state"] == "INCOMPLETE", \
+        "ISA-0696 NEGATIVE CONTROL: a pre-0696 status with no isolation evidence cannot satisfy the precondition"
+    _dd = _st(data_snapshot={"files": {"x.json": "1|0"}})
+    assert _dd["state"] == "FRESH_GREEN" and _dd["data_drift"]["changed"] == ["x.json"] and _dd["data_drift"]["enforced"] is False, \
+        "ISA-0696 A1: data drift is REPORTED by name and not enforced"
+    assert suite_status_state(root=os.path.join(td, "no_such_root"), now=_now, census=_cen, live=_live)["state"] == "ABSENT", \
+        "ISA-0696 NEGATIVE CONTROL: no status file -> ABSENT, never usable"
+    assert doc.get("config_roll") is not None or _config_roll(td) is None, "ISA-0696: the record carries config_roll"
+    assert isinstance(doc.get("isolation"), dict) and isinstance(doc.get("counts"), dict) and doc.get("as_of_ts"), \
+        "ISA-0696: the record carries isolation, counts and a timestamp for hour-level age"
 
 
 if __name__ == "__main__":

@@ -140,10 +140,10 @@ def replays(root: str = HERE) -> List[dict]:
             fh.write("# t\nSee ISA_Engineering_Rules.md.\n")
         with open(os.path.join(d, "ISA_Engineering_Rules.md"), "w", encoding="utf-8") as fh:
             fh.write("# rules\n")
-        for cfg in ("isa_policy.py", "scoring_config.py", "target_state.json",
-                    "target_weights.json", "threshold_register.json",
-                    "quantity_register.json", "negative_claims.json",
-                    "degradation_bands.json"):
+        # ISA-0702: read the ONE home of the config surface - this fixture hand-copied the tuple and
+        # went RED (ENVIRONMENT_UNKNOWN on a fixture file) the day the surface gained the taxonomy.
+        for cfg in rg.CONFIG_FILES:
+            os.makedirs(os.path.dirname(os.path.join(d, cfg)), exist_ok=True)
             with open(os.path.join(d, cfg), "w", encoding="utf-8") as fh:
                 fh.write("{}\n" if cfg.endswith(".json") else "# stub\n")
         with open(os.path.join(d, "m.py"), "w", encoding="utf-8") as fh:
@@ -194,13 +194,20 @@ def replays(root: str = HERE) -> List[dict]:
         on_disk = {"position_sizing.stock_max"}
         cap = {"id": "CAP-r", "name": "stock_max_gbp", "producer": "position_sizing.stock_max",
                "outputs": ["email.s2.capital_router"], "consumers": ["email_prefill"],
-               "consumption_ref": "pair_capital_router_render",
+               # ISA-0628 (16-Sep-2026): evidence is a TYPED check whose suite is GREEN on the
+               # source, never a sentence - the fixture carries the typed form and its suite map.
+               "consumption_ref": {"kind": "check", "ref": "position_sizing.stock_max"},
                "must_fire": [{"state": "BUY", "fixture": "f"}],
-               "decision_effective_ref": "green", "decision_states": ["BUY"],
-               "gbp_exposure": 11250.0}
-        probe_only = cr.live_state(cap, cr.evidence_chain(cap, on_disk, {}, HERE))
+               # ISA-0699 (17-Sep-2026): a decision ref names the orchestrator it traverses (`via`);
+               # the fixture is synthetic, so the AST traversal check is off (check_ast=False).
+               "decision_effective_ref": {"kind": "check", "ref": "position_sizing.stock_max",
+                                          "via": "position_sizing.stock_max"},
+               "decision_states": ["BUY"], "gbp_exposure": 11250.0}
+        _suites = {"position_sizing": "GREEN"}
+        probe_only = cr.live_state(cap, cr.evidence_chain(cap, on_disk, {}, HERE, suites=_suites,
+                                                          check_ast=False))
         live_ok = cr.live_state(cap, cr.evidence_chain(
-            cap, on_disk, {"position_sizing.stock_max": 27}, HERE))
+            cap, on_disk, {"position_sizing.stock_max": 27}, HERE, suites=_suites, check_ast=False))
         out.append(_replay(
             "reachable_but_never_live",
             defect_fires=(probe_only["live"] is False and probe_only["blocked_at"] == "EXECUTED"),

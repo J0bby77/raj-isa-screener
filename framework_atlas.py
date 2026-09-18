@@ -483,7 +483,18 @@ def _tree_stamp(root: Path) -> tuple:
     n = 0
     newest = 0.0
     total = 0
-    for f in _iter_py(root):
+    # ⚑ ISA-0693 (16-Sep-2026): the graph also reads every RUN SURFACE (`scan_run_surfaces`,
+    #   RUN_SURFACE_GLOBS). The key covered `.py` only, so a Run_Context or SKILL edit in the
+    #   same process returned the pre-edit run-surface map — the selftest's import-form control
+    #   was red behind the triage one. Every file `build()` reads is now in the key.
+    _files = list(_iter_py(root))
+    _seen = set(_files)
+    for pattern in RUN_SURFACE_GLOBS:
+        for f in sorted(Path(root).glob(pattern)):
+            if f not in _seen:
+                _seen.add(f)
+                _files.append(f)
+    for f in _files:
         try:
             st = f.stat()
         except OSError:
@@ -495,9 +506,27 @@ def _tree_stamp(root: Path) -> tuple:
     return (str(Path(root).resolve()), n, round(newest, 6), total)
 
 
+def _triage_stamp() -> tuple:
+    """ISA-0693 (16-Sep-2026) — the part of `build()`'s output that does NOT live in the tree.
+
+    ⚑ `build()` ends in `apply_triage(findings)`, which reads `atlas_triage.json` from
+    `state_dir()` and today's date (acceptances expire). The cache was keyed on `.py` files
+    only, so `accept_finding()` followed by `build()` in one process returned the graph from
+    BEFORE the acceptance — the triage decision silently did not apply, and the selftest control
+    "an accepted finding does not resurface" was red with nothing stopping. ISA-0625's class (a
+    cache that shares a lifetime with nothing that invalidates it), one module over."""
+    p = state_dir() / TRIAGE_FILE
+    try:
+        st = p.stat()
+        tri = (str(p), st.st_size, round(st.st_mtime, 6))
+    except OSError:
+        tri = (str(p), None, None)
+    return tri + (date.today().isoformat(),)
+
+
 def build(root: Path = None, *, refresh: bool = False) -> dict:
     root = root or repo_root()
-    _key = _tree_stamp(root)
+    _key = _tree_stamp(root) + _triage_stamp()
     if not refresh and _key in _BUILD_CACHE:
         return _BUILD_CACHE[_key]
     return _build_uncached(root, _key)

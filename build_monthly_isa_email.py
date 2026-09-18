@@ -500,7 +500,8 @@ def _render_capital_router(d):
         if rr:
             out += para(f'<strong>{label}:</strong>', small=True)
             out += "".join(para("&#8226; " + se(r), muted=True, small=True) for r in rr)
-    for k in ("band_line", "band_choice_line", "idle_line", "waiting_room_line", "parity_line"):
+    for k in ("band_line", "band_choice_line", "idle_line", "residual_routing_line",
+              "concentration_line", "waiting_room_line", "parity_line"):
         if v.get(k):
             out += para(se(v[k]), small=(k in ("band_choice_line", "parity_line")))
     for w in (v.get("warnings") or []):
@@ -1697,28 +1698,59 @@ def main():
         _month = _m.group(1) if _m else None
     _gate_note = None
     if _month:
-        _cpath = os.path.join(os.path.dirname(os.path.abspath(args.data)),
-                              f"step9_conviction_{_month}.json")
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # ISA-0698 (Raj, 16-Sep-2026, Option B) — CHECK THE JUDGEMENT PASS, THEN RENDER
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # ⚑ This builder is a RENDERER (R20.2): it computes no refusal and no re-route. The step
+        #   `python3 capital_destination.py --judgement-pass [mmm_yyyy]` gates the Step 9 record per
+        #   name on the pre-judgement scope, re-runs the router with any refusals and writes the
+        #   result INTO run_context, stamped with the record's sha256. Here: (1) a structurally
+        #   invalid/absent record blocks (exit 2, override as before); (2) the pass stamp must
+        #   match the CURRENT record, or the build refuses — a plan judged against an older
+        #   record is not this month's decision; (3) §2's router block is re-rendered from the
+        #   run context, its one source (ISA-0447).
+        import hashlib as _hl
+        _dir = os.path.dirname(os.path.abspath(args.data))
+        _cpath = os.path.join(_dir, f"step9_conviction_{_month}.json")
+        _rcpath = os.path.join(_dir, f"run_context_{_month}.json")
+        _errs, _jg, _rc = [], None, None
         try:
-            import conviction_capture as _cc
-            with open(_cpath, encoding="utf-8") as _cf:
-                _cdoc = json.load(_cf)
-            _errs = _cc.gate(_cdoc)
+            with open(_rcpath, encoding="utf-8") as _rf:
+                _rc = json.load(_rf)
+            _jg = ((_rc.get("summary") or {}).get("capital_destination") or {}).get("judgement_gate")
         except FileNotFoundError:
-            _errs = [f"step9_conviction_{_month}.json does not exist — the Step 9 judgement "
-                     f"record was never written"]
-        except Exception as _ge:
-            _errs = [f"conviction gate could not run: {_ge}"]
+            _errs.append(f"run_context_{_month}.json does not exist — the router plan and its "
+                         f"judgement scope cannot be read")
+        except Exception as _re:
+            _errs.append(f"run_context unreadable: {_re}")
+        try:
+            with open(_cpath, "rb") as _cf:
+                _craw = _cf.read()
+        except FileNotFoundError:
+            _craw = None
+            _errs.append(f"step9_conviction_{_month}.json does not exist — the Step 9 judgement "
+                         f"record was never written")
+        if _craw is not None and _rc is not None:
+            if not _jg:
+                _errs.append("ISA-0698: the judgement pass has not been applied to run_context. "
+                             f"Run: python3 capital_destination.py --judgement-pass {_month}")
+            elif _jg.get("conviction_sha256") != _hl.sha256(_craw).hexdigest():
+                _errs.append("ISA-0698: the judgement pass stamp is for a DIFFERENT version of "
+                             "the Step 9 record (it changed after the pass). Re-run: "
+                             f"python3 capital_destination.py --judgement-pass {_month}")
+            elif _jg.get("blocking"):
+                _errs.extend("conviction record: " + str(e) for e in _jg["blocking"])
         if _errs:
             if not args.allow_unrecorded_conviction:
-                print(f"ERROR: §7.6.2 conviction gate FAILED — {len(_errs)} blocking issue(s).")
+                print(f"ERROR: §7.6.2 judgement gate FAILED — {len(_errs)} blocking issue(s).")
                 for _e in _errs[:10]:
                     print(f"  BLOCK: {_e}")
                 if len(_errs) > 10:
                     print(f"  ... and {len(_errs) - 10} more")
-                print("\nThe month's Step 9 judgements are not recorded. Fill them via")
+                print("\nFill the record via")
                 print("  python3 conviction_capture.py --apply <judgements.json> --month "
                       f"{_month}")
+                print(f"then run  python3 capital_destination.py --judgement-pass {_month}")
                 print("or, if you accept the gap, re-run with --allow-unrecorded-conviction")
                 print("and --gate-override-reason \"...\" (recorded in the email footer).")
                 sys.exit(2)
@@ -1726,12 +1758,35 @@ def main():
                 print("ERROR: --allow-unrecorded-conviction requires --gate-override-reason.")
                 print("An override without a stated reason is indistinguishable from a mistake.")
                 sys.exit(2)
-            _gate_note = (f"Step 9 conviction record INCOMPLETE ({len(_errs)} unrecorded) — "
-                          f"overridden: {args.gate_override_reason.strip()}")
+            _gate_note = (f"Step 9 judgement gate NOT satisfied ({len(_errs)} issue(s)) — "
+                          f"overridden: {args.gate_override_reason.strip()}. No new stock "
+                          f"capital may be placed from an unjudged plan (ISA-0698).")
             print(f"WARNING: {_gate_note}")
             data.setdefault("meta", {})["conviction_gate_override"] = _gate_note
+            data.setdefault("s2_capital_allocation", {})["capital_router"] = {
+                "absent_line": ("NOT COMPUTED — the ISA-0698 judgement pass is not applied to this "
+                                "record, so the router plan is unjudged and no new stock capital "
+                                "may be placed from it.")}
         else:
-            print(f"  §7.6.2 conviction gate: PASS ({_month})")
+            import email_prefill as _ep
+            _cds = (_rc.get("summary") or {}).get("capital_destination") or {}
+            _blk = _ep.build_capital_router_block(_cds, (_rc.get("summary") or {}).get("waiting_room"))
+            if _jg.get("rerouted"):
+                _blk["split_reason_line"] = (
+                    "ISA-0698 judgement gate: %s of %s capital-precondition candidate(s) REFUSED "
+                    "new capital for missing/invalid D21 judgement (%s); this is the router RE-RUN "
+                    "with those refusals. %s"
+                    % (len(_jg.get("refused_capital") or []) if isinstance(_jg.get("refused_capital"), list)
+                       else "ALL", (_jg.get("counts") or {}).get("required", "?"),
+                       ", ".join(_jg["refused_capital"])[:300]
+                       if isinstance(_jg.get("refused_capital"), list) else "scope UNKNOWN",
+                       _blk.get("split_reason_line") or ""))
+            data.setdefault("s2_capital_allocation", {})["capital_router"] = _blk
+            data.setdefault("meta", {})["judgement_gate"] = {
+                k: _jg.get(k) for k in ("scope_state", "counts", "refused_capital",
+                                        "rerouted", "plan_source", "applied_at")}
+            print(f"  §7.6.2 judgement gate (ISA-0698): scope {_jg.get('scope_state')}, counts "
+                  f"{_jg.get('counts')}, refused new capital: {_jg.get('refused_capital')}")
     else:
         print("  §7.6.2 conviction gate: SKIPPED — month label could not be inferred; "
               "pass --month to enforce it.")

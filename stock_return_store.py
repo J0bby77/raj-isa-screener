@@ -72,6 +72,137 @@ STALE_WEEKS = 2
 SCHEMA_VERSION = 2
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0549 (16-Sep-2026) — ONE ECONOMIC SECURITY, ONE STORE IDENTITY
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# The store held BOTH `ONT` (broker label) and `ONT.L` (Yahoo symbol) as first-class names with
+# 159/159 identical observations, so any consumer that unioned the store counted one holding twice
+# (a spurious rho = 1.000 pair, double weight, deflated N_eff). The alias was applied on the way IN
+# (fetch) and never on the way OUT (store). The canonical identity of a store record is the
+# DECLARED Yahoo symbol from stock_price_fetch.load_symbol_map (one alias truth — no second
+# registry, no similarity guessing). Every reader resolves a requested label through
+# `record_of()`; every writer keys by `canonical_name()`; `canonicalise()` migrates a legacy store
+# and REFUSES (never merges) two keys for one security whose series differ. The invariant is
+# identity UNIQUENESS: rho == 1 between two DISTINCT canonical ids is only a review diagnostic.
+# ROLLBACK (R4.13): restore this module, its readers AND the pre-migration store together — the
+# old readers look records up by raw label and would silently lose the alias key.
+IDENTITY_TOL = 1e-9
+
+
+class CanonicalIdentityConflict(RuntimeError):
+    """Two labels resolve to one security but cannot be one record (or the map is ambiguous)."""
+
+
+_SMAP_CACHE: Dict[str, object] = {"key": None, "map": None}
+
+
+def symbol_map() -> Dict[str, str]:
+    """The declared alias truth, cached per symbol-map file state (refresh_symbol_map may add
+    entries mid-run; a stale map would key a new name under its old label)."""
+    import stock_price_fetch as _spf                       # lazy: stock_price_fetch imports this module
+    p = getattr(_spf, "SYMBOL_MAP_STORE", None)
+    try:
+        key = (p, os.path.getmtime(p)) if p and os.path.exists(p) else (p, None)
+    except OSError:
+        key = (p, None)
+    if _SMAP_CACHE["key"] != key or _SMAP_CACHE["map"] is None:
+        _SMAP_CACHE["map"] = dict(_spf.load_symbol_map())
+        _SMAP_CACHE["key"] = key
+    return _SMAP_CACHE["map"]                                         # type: ignore[return-value]
+
+
+def canonical_name(ticker: str, smap: Optional[Dict[str, str]] = None) -> str:
+    """Declared symbol for `ticker`, or the label itself when undeclared. An alias CHAIN
+    (a -> b -> c) is ambiguous and REFUSES (R4.8): one hop is the whole contract."""
+    t = str(ticker or "").strip()
+    m = symbol_map() if smap is None else smap
+    c = m.get(t, t)
+    if m.get(c, c) != c:
+        raise CanonicalIdentityConflict("ISA-0549: alias chain %s -> %s -> %s is ambiguous"
+                                        % (t, c, m.get(c)))
+    return c
+
+
+def record_of(doc: dict, ticker: str, smap: Optional[Dict[str, str]] = None) -> dict:
+    """THE reader for one record: resolves the requested label to its canonical key. A legacy
+    (pre-migration) store keyed only by the alias still resolves, so no reader loses a series."""
+    names = (doc or {}).get("names") or {}
+    t = str(ticker or "").strip()
+    c = canonical_name(t, smap)
+    return names.get(c) or names.get(t) or {}
+
+
+def _series_identical(a: dict, b: dict) -> bool:
+    oa, ob = a.get("observations") or {}, b.get("observations") or {}
+    if set(oa) != set(ob):
+        return False
+    for k in oa:
+        ga, gb = (oa[k] or {}).get("gbp"), (ob[k] or {}).get("gbp")
+        if ga is None or gb is None or abs(float(ga) - float(gb)) > IDENTITY_TOL * max(1.0, abs(float(ga))):
+            return False
+    return a.get("currency") == b.get("currency") and \
+        bool(a.get("total_return_basis")) == bool(b.get("total_return_basis"))
+
+
+def identity_report(doc: dict, smap: Optional[Dict[str, str]] = None) -> dict:
+    """-> raw vs canonical key counts, collisions {canonical: [keys]}, conflicts, chains."""
+    names = (doc or {}).get("names") or {}
+    m = symbol_map() if smap is None else smap
+    groups, chains = {}, []
+    for k in sorted(names):
+        try:
+            groups.setdefault(canonical_name(k, m), []).append(k)
+        except CanonicalIdentityConflict as exc:
+            chains.append({"key": k, "why": str(exc)})
+    coll = {c: ks for c, ks in groups.items() if len(ks) > 1 or ks[0] != c}
+    conflicts = []
+    for c, ks in coll.items():
+        recs = [names[k] for k in ks]
+        if any(not _series_identical(recs[0], r) for r in recs[1:]):
+            conflicts.append({"canonical": c, "keys": ks,
+                              "observations": {k: len(names[k].get("observations") or {}) for k in ks}})
+    return {"raw_keys": len(names), "canonical_keys": len(groups), "collisions": coll,
+            "conflicts": conflicts, "chains": chains,
+            "state": ("CONFLICT" if conflicts or chains else ("LEGACY_ALIASES" if coll else "CANONICAL"))}
+
+
+def canonicalise(doc: dict, smap: Optional[Dict[str, str]] = None, *, today: Optional[str] = None) -> dict:
+    """Migrate alias keys onto the canonical key. ATOMIC: every group is checked BEFORE anything
+    is mutated; a conflict or chain raises and leaves `doc` untouched. Identical aliases merge once
+    and are retained as `aliases` + an `identity_migrations` history row (R2.13/R6.5)."""
+    rep = identity_report(doc, smap)
+    if rep["conflicts"] or rep["chains"]:
+        raise CanonicalIdentityConflict(
+            "ISA-0549 CANONICAL_IDENTITY_CONFLICT: migration REFUSED, store unchanged: %s"
+            % json.dumps({"conflicts": rep["conflicts"], "chains": rep["chains"]})[:600])
+    names = doc.setdefault("names", {})
+    moved = []
+    for c, ks in sorted(rep["collisions"].items()):
+        keep = c if c in ks else ks[0]
+        base = names[keep]
+        aliases = sorted(set(base.get("aliases") or []) | {k for k in ks if k != c})
+        fetched = [names[k].get("last_fetched_on") for k in ks if names[k].get("last_fetched_on")]
+        for k in ks:
+            if k != keep:
+                names.pop(k)
+        if keep != c:
+            names[c] = names.pop(keep)
+        rec = names[c]
+        if aliases:
+            rec["aliases"] = aliases
+        if fetched:
+            rec["last_fetched_on"] = max(fetched)
+        moved.append({"canonical": c, "collapsed_keys": ks,
+                      "observations": len(rec.get("observations") or {})})
+    if moved:
+        doc.setdefault("identity_migrations", []).append(
+            {"on": today or datetime.date.today().isoformat(), "item": "ISA-0549",
+             "raw_keys_before": rep["raw_keys"], "canonical_keys_after": len(names), "merged": moved,
+             "basis": "identical series under one declared symbol merged once; aliases retained"})
+    return {"changed": bool(moved), "merged": moved, "raw_keys_before": rep["raw_keys"],
+            "canonical_keys_after": len(names)}
+
+
 # ────────────────────────────────────────────────────────────────── calendar
 def friday_of(d: datetime.date) -> datetime.date:
     """The Friday of the ISO week containing d. Anchoring every observation to one weekday is
@@ -131,6 +262,7 @@ def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
     whatever pays the most income — which in this sleeve is systematically the least volatile
     name. Stored either way; `weekly_returns()` reports which basis each name is on."""
     _fi_mark("stock_return_store", "record_level")
+    ticker = canonical_name(ticker)                        # ISA-0549: writers key by canonical identity
     if level is None or float(level) <= 0:
         raise ValueError(f"{ticker}: refusing a non-positive level {level!r} at {on} — "
                          f"'missing' must not be representable as a number (R4.1)")
@@ -194,7 +326,7 @@ def weekly_returns(doc: dict, ticker: str) -> Tuple[Dict[str, float], dict]:
     that as a 1-week return would deflate measured volatility and inflate apparent
     diversification — the same directional error as daily sampling. Gaps are counted and
     reported (R4.9: a reader that cannot match a row COUNTS it)."""
-    rec = (doc.get("names") or {}).get(ticker) or {}
+    rec = record_of(doc, ticker)                          # ISA-0549: resolve the requested label
     obs = rec.get("observations") or {}
     keys = sorted(obs)
     rets, gaps = {}, 0
@@ -225,6 +357,18 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
     # unmeasured" while 119 universe names had no series at all. A metric whose denominator is
     # its own numerator's source can only ever report 100%.
     tickers = tickers if tickers is not None else sorted(doc.get("names") or {})
+    # ⚑ ISA-0549: ONE row per economic security. Two requested labels for one canonical id (ONT and
+    #   ONT.L) are counted ONCE; the first label is kept (callers key weights by it) and the
+    #   collapse is published, never silent (R4.9).
+    _seen, _dedup, _collapsed = {}, [], []
+    for _t in tickers:
+        _c = canonical_name(_t)
+        if _c in _seen:
+            _collapsed.append({"label": _t, "canonical": _c, "kept_label": _seen[_c]})
+            continue
+        _seen[_c] = _t
+        _dedup.append(_t)
+    tickers = _dedup
     # ⚑ ISA-0578. `refusals` (from stock_price_fetch.load_declared_refusals) is what lets this
     # report tell "NEVER FETCHED" from "TOO SHORT". Both read UNMEASURED and both take A2.3's
     # adverse 0.70, but they are different facts with different fixes — one needs a declared
@@ -239,7 +383,7 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
                   "MEASURED_SHORT" if n >= MIN_WEEKS else "UNMEASURED")
         if status != "UNMEASURED":
             measured += 1
-        obs = ((doc.get("names") or {}).get(t) or {}).get("observations") or {}
+        obs = record_of(doc, t).get("observations") or {}   # ISA-0549
         n_pit = sum(1 for k in obs if obs[k].get("stamp_basis") == "point_in_time")
         n_bf = len(obs) - n_pit
         # ⚑ P1.6 THE STALENESS CONTRACT. A frozen series and a live one are IDENTICAL on every
@@ -296,6 +440,7 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
                 "%d-week minimum. All three read UNMEASURED and take A2.3's adverse 0.70, and "
                 "they are NOT the same fact (R2.10, ISA-0578)." % MIN_WEEKS),
             "names": out, "n_names": len(tickers), "n_measured": measured,
+            "aliases_collapsed": _collapsed,
             "n_unmeasured": len(tickers) - measured,
             "stale_excluded": stale, "n_stale": len(stale), "stale_after_weeks": STALE_WEEKS,
             "n_point_in_time": pit, "n_backfilled": tot - pit,
@@ -346,11 +491,68 @@ def _selftest():
         assert "non-positive" in str(e)
     cov0 = coverage(_empty(), ["ZZZ"])
     assert cov0["names"]["ZZZ"]["status"] == "UNMEASURED" and cov0["n_measured"] == 0
-    print("stock_return_store selftest OK (9 assertions)")
+    # ── ISA-0549 canonical identity (BuildSpec §15 fixtures 1-4, 8) ─────────────────────────
+    smap = {"ONT": "ONT.L", "ONT.L": "ONT.L", "TWIN_A": "TWIN_A", "TWIN_B": "TWIN_B"}
+
+    def _series(doc, key, vals):
+        doc["names"][key] = {"currency": "GBP", "total_return_basis": False,
+                             "observations": {(base + datetime.timedelta(weeks=i)).isoformat():
+                                              {"gbp": v} for i, v in enumerate(vals)}}
+    vals = [100.0 + i for i in range(159)]
+    leg = _empty(); _series(leg, "ONT", vals); _series(leg, "ONT.L", vals)
+    rep = identity_report(leg, smap)
+    assert rep["state"] == "LEGACY_ALIASES" and rep["canonical_keys"] == 1, rep
+    assert weekly_returns(leg, "ONT")[0] == weekly_returns(leg, "ONT.L")[0], \
+        "ISA-0549: both labels resolve to ONE series before migration"
+    mig = canonicalise(leg, smap, today="2026-09-16")
+    assert mig["changed"] and list(leg["names"]) == ["ONT.L"] \
+        and len(leg["names"]["ONT.L"]["observations"]) == 159 and leg["names"]["ONT.L"]["aliases"] == ["ONT"], \
+        "ISA-0549 MUST-FIRE fixture 1: identical ONT + ONT.L -> one canonical record, no data loss"
+    assert len(record_of(leg, "ONT", smap)["observations"]) == 159, \
+        "ISA-0549: the broker label still resolves after migration"
+    assert canonicalise(leg, smap)["changed"] is False, "ISA-0549: migration is idempotent"
+    bad = _empty(); _series(bad, "ONT", vals); _series(bad, "ONT.L", vals[:-1] + [999.0])
+    before = json.dumps(bad, sort_keys=True)
+    try:
+        canonicalise(bad, smap)
+        raise AssertionError("ISA-0549 NEGATIVE CONTROL fixture 2: conflicting series must REFUSE migration")
+    except CanonicalIdentityConflict:
+        pass
+    assert json.dumps(bad, sort_keys=True) == before, \
+        "ISA-0549 NEGATIVE CONTROL: a refused migration leaves the store byte-identical (atomic)"
+    tw = _empty(); _series(tw, "TWIN_A", vals); _series(tw, "TWIN_B", vals)
+    assert identity_report(tw, smap)["state"] == "CANONICAL" and canonicalise(tw, smap)["changed"] is False \
+        and sorted(tw["names"]) == ["TWIN_A", "TWIN_B"], \
+        "ISA-0549 NEGATIVE CONTROL fixture 3: distinct securities with identical series stay DISTINCT"
+    try:
+        canonical_name("X", {"X": "Y", "Y": "Z"})
+        raise AssertionError("ISA-0549 NEGATIVE CONTROL fixture 4: an alias chain must REFUSE")
+    except CanonicalIdentityConflict:
+        pass
+    ch = _empty(); _series(ch, "X", vals)
+    try:
+        canonicalise(ch, {"X": "Y", "Y": "Z"})
+        raise AssertionError("ISA-0549 NEGATIVE CONTROL: migration over an ambiguous map must REFUSE")
+    except CanonicalIdentityConflict:
+        pass
+    print("stock_return_store selftest OK (9 + 11 ISA-0549 assertions)")
 
 
 if __name__ == "__main__":
     import sys
     if "--selftest" in sys.argv:
         _selftest(); sys.exit(0)
+    if "--identity-report" in sys.argv:
+        print(json.dumps(identity_report(load()), indent=1)); sys.exit(0)
+    if "--canonicalise" in sys.argv:
+        # ISA-0549 one-time migration of a legacy store. Writes a byte-exact pre-migration copy beside it.
+        import shutil
+        _doc = load()
+        _bk = STORE + ".pre_ISA-0549_canonicalise"
+        if not os.path.exists(_bk):
+            shutil.copy2(STORE, _bk)
+        _r = canonicalise(_doc)
+        if _r["changed"]:
+            save(_doc)
+        print(json.dumps(dict(_r, backup=_bk, after=identity_report(load())), indent=1)); sys.exit(0)
     print(json.dumps(coverage(load()), indent=1))

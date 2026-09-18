@@ -9,10 +9,10 @@
    "asserted_in": "stock_return_store.py (module docstring)",
    "asserted_on": "2026-08-23",
    "test_id": "stock_price_fetch._network_probe",
-   "last_tested": "2026-08-28",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 3,
-   "state": "FALSIFIED",
+   "state": "RETIRED_FALSIFIED",
    "gates": [
     "correlation_engine.assess",
     "position_sizing.apply_correlation",
@@ -20,44 +20,50 @@
    ],
    "evidence": "HTTP 200 from the cloud container 28-Aug-2026 for AVGO (371.54 USD), ONT.L (179.4 GBp) and GBPUSD=X (1.3585). Contradicted by the framework's own ISA-0411 FIVE DAYS BEFORE it was written: a 400-ticker MIDCAP400 Yahoo screen from local bash on 21-Aug-2026.",
    "cost": "the entire correlation gate, and therefore the top three ladder rungs",
-   "register_item": "ISA-0455"
+   "register_item": "ISA-0455",
+   "retired_on": "2026-09-17",
+   "retirement_evidence": "Falsified 28-Aug-2026 and re-tested 17-Sep-2026: stock_price_fetch._network_probe -> reachable true, AVGO 339.51 USD via the v8 chart endpoint with stdlib urllib. The asserting prose is corrected (stock_return_store.py module docstring L20 now reads 'Until 28-Aug-2026 this docstring said...'), and the gates it supported were rebuilt on the true capability (stock_price_fetch Step 5y populates stock_weekly_returns.json: 177 names, 174 measured on 17-Sep). ISA-0695."
   },
   {
    "claim": "the device has no network",
    "asserted_in": "ISA_Analysis_RegionalM_and_FundStructuralEr_20Aug2026.md",
    "asserted_on": "2026-08-20",
    "test_id": "stock_price_fetch._network_probe",
-   "last_tested": "2026-08-28",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 3,
-   "state": "FALSIFIED",
+   "state": "RETIRED_FALSIFIED",
    "gates": [
     "regional_m.fetch"
    ],
    "evidence": "same probe; ISA-0411 records a live 400-ticker fetch from the device shell.",
-   "register_item": "ISA-0455"
+   "register_item": "ISA-0455",
+   "retired_on": "2026-09-17",
+   "retirement_evidence": "Falsified 28-Aug-2026 and re-tested 17-Sep-2026 (_network_probe reachable). The claim survives only as dated analysis prose in ISA_Analysis_RegionalM_and_FundStructuralEr_20Aug2026.md (a historical record, retained verbatim); no executable path asserts it - regional_m.py reads no network assumption (its only 'network' reference passes through an input _meta.network_note). ISA-0695."
   },
   {
    "claim": "no 104-week price series exists on disk for the direct-stock sleeve",
    "asserted_in": "stock_return_store.py (module docstring)",
    "asserted_on": "2026-08-23",
    "test_id": "stock_return_store.coverage",
-   "last_tested": "2026-08-28",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 1,
-   "state": "ASSERTED_TRUE",
+   "state": "RETIRED_SUPERSEDED",
    "gates": [
     "correlation_engine.assess"
    ],
    "evidence": "TRUE as at 28-Aug-2026 and falsified BY THIS BUILD at P1. Expiry set to 1 run so it is re-tested the first time the fetch runs, rather than surviving three.",
-   "register_item": "ISA-0455"
+   "register_item": "ISA-0455",
+   "retired_on": "2026-09-17",
+   "retirement_evidence": "Re-tested 17-Sep-2026 with its falsifier stock_return_store.coverage over the live store: n_names 177, n_measured 174, n_unmeasured 3 - the absence it asserted (true on 23-Aug) no longer holds because Step 5y has populated the store since 28-Aug. The correlation gate now measures rather than defaulting. ISA-0695."
   },
   {
    "claim": "E3 guidance has no free structured source",
    "asserted_in": "ISA_BuildSpec_FrameworkIntegrity_27Aug2026.md D21b",
    "asserted_on": "2026-08-27",
    "test_id": "stock_price_fetch._e3_source_probe",
-   "last_tested": "2026-08-27",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 6,
    "state": "ASSERTED_TRUE",
@@ -65,14 +71,18 @@
     "evidence_state.classify.E3"
    ],
    "evidence": "Raj, 27-Aug-2026 (D21b). E3 is declared PERMANENTLY UNMEASURED and the remaining four channels become MANDATORY for STRONG — an unmeasurable channel is NOT quietly dropped from the count. Under D22 it is None, not a coverage failure. ⚑ 'Permanent' still carries a 6-run expiry: a permanent claim with no expiry is exactly the shape of the Yahoo claim.",
-   "register_item": "ISA-0469"
+   "register_item": "ISA-0469",
+   "last_test_result": {
+    "on": "2026-09-17",
+    "verdict": "NO_FREE_STRUCTURED_SOURCE"
+   }
   },
   {
    "claim": "the step-down ratchet cannot fire",
    "asserted_in": "retention.py",
    "asserted_on": "2026-08-26",
-   "test_id": "retention.ratchet_status",
-   "last_tested": "2026-08-28",
+   "test_id": "framework_integrity.probe_ratchet_cannot_fire",
+   "last_tested": "2026-09-12",
    "runs_since_tested": 0,
    "expires_after_runs": 1,
    "state": "ASSERTED_TRUE",
@@ -85,7 +95,8 @@
     "module": "retention",
     "owner": null,
     "phrase": "cannot fire"
-   }
+   },
+   "test_correction": "ISA-0695 17-Sep-2026: the registered test_id retention.ratchet_status never existed (an unrunnable falsifier read CURRENT); replaced by a probe over the latest run_context. Evidence at 12-Sep pre-run: summary.v21.ratchet_inputs months_measured 1 of 12, legs trail_pp/months_trailing/ex_largest all null, population eligible (6 positions)."
   },
   {
    "claim": "a position reaches 3.5% or it does not exist",
@@ -128,7 +139,7 @@
    "asserted_in": "stock_price_fetch.e2_quarter_beat / _e2_source_probe",
    "asserted_on": "2026-08-28",
    "test_id": "stock_price_fetch._e2_source_probe",
-   "last_tested": "2026-08-28",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 3,
    "state": "ASSERTED_TRUE",
@@ -137,7 +148,11 @@
     "position_sizing.target_pct(STRONG)"
    ],
    "evidence": "⚑ THIS CORRECTS THE BUILD SPEC. §P1.11 states E2 is sourced from Yahoo `earningsHistory` at 'one extra endpoint per ticker'. Tested 28-Aug-2026: v10 quoteSummary returns HTTP 401 Unauthorized (it now requires a cookie/crumb pair). Nothing in the tree carries epsActual/epsEstimate either — watchlist_scored holds FORWARD fields (fwd_eps_growth, eps_trend_mom_pct, rev_est_fwd_pct), which are E1 revision material, not an E2 quarter BEAT. ⚑ CONSEQUENCE, STATED NOT ABSORBED: with E2 and E3 both unsourced, D21b's STRONG (= all four of E1/E2/E4/E5) is UNREACHABLE, so the ladder ceiling stays at CONFIRMED -> NORMAL 4.5%. The 1.29x figure is unaffected because it IS NORMAL vs STARTER; HIGH and EARNED_MAX remain out of reach for a NAMED, DATED, EXPIRING reason instead of an unexamined one. ⚑ EXPIRY IS 3 RUNS, NOT E3's 6, because this is an ACCESS problem and access changes; the non-existence of a free guidance feed does not.",
-   "register_item": "ISA-0484"
+   "register_item": "ISA-0484",
+   "last_test_result": {
+    "on": "2026-09-17",
+    "verdict": "CLAIM_HOLDS_TODAY"
+   }
   },
   {
    "claim": "the VCI prescore artefact records no exchange or currency for its names",
@@ -159,7 +174,7 @@
    "asserted_in": "stock_price_fetch.e1_analyst_revision (docstring)",
    "asserted_on": "2026-08-29",
    "test_id": "stock_price_fetch._e1_source_probe",
-   "last_tested": "2026-08-29",
+   "last_tested": "2026-09-17",
    "runs_since_tested": 0,
    "expires_after_runs": 6,
    "state": "HOLDS",
@@ -171,7 +186,83 @@
    "evidence": "E1's declared definition is `90d revision breadth > 0 AND FY1 estimate up over 90d`. The only breadth fields on the screen row are `est_rev_eps_up_30d` / `est_rev_eps_down_30d` (30 days, yfinance). Measured 29-Aug-2026 over the 32-name deployable stack: 0 of 32 rows carry any 90-day revision field. A 30-day breadth is a DIFFERENT quantity, not a shorter view of the same one; substituting it would be ISA-0405's class and would CONFIRM rather than merely fail to confirm.",
    "cost": "one of the two fundamental-family channels. With E2 (HTTP 401) and E3 (no free source) also unsourced, only E4 (price) and E5 (route) remain: 2 channels in 2 families, so CONFIRMED is reachable and STRONG/EARNED_MAX are structurally unreachable. The ladder ceiling is NORMAL 4.5%.",
    "register_item": "ISA-0489",
-   "expiry_behaviour": "on expiry E1 reads UNMEASURED and the run must say so; it NEVER reads False. 6 runs, matching E3, because this is a DATA-MODEL gap rather than an access problem — access changes faster than a schema does."
+   "expiry_behaviour": "on expiry E1 reads UNMEASURED and the run must say so; it NEVER reads False. 6 runs, matching E3, because this is a DATA-MODEL gap rather than an access problem — access changes faster than a schema does.",
+   "last_test_result": {
+    "on": "2026-09-17",
+    "verdict": "CLAIM_HOLDS_TODAY"
+   }
+  },
+  {
+   "claim": "AND IF IT CANNOT BE MEASURED THE SEQUENCER REFUSES TO BAND (P6.1)",
+   "asserted_in": "deployment_sequencer.measure_score_se (docstring)",
+   "asserted_on": "2026-09-17",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "deployment_sequencer",
+    "owner": "measure_score_se",
+    "phrase": "cannot be measured"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "Adjudicated 17-Sep-2026 (ISA-0695): a conditional refusal rule (the sequencer refuses to band when the score SE is unmeasurable), not an assertion that a source or capability is unavailable. Registered rather than stop-listed so an edit that turns it into a real claim is noticed.",
+   "register_item": "ISA-0695"
+  },
+  {
+   "claim": "a position is at 0.80 x STARTER or it does not exist",
+   "asserted_in": "position_sizing.min_hold_ok (docstring)",
+   "asserted_on": "2026-09-17",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "position_sizing",
+    "owner": "min_hold_ok",
+    "phrase": "does not exist"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "Adjudicated 17-Sep-2026 (ISA-0695): the D16 entry-floor POLICY restated in min_hold_ok's docstring (same class as the registered 'a position reaches 3.5% or it does not exist'), not a capability claim. Registered rather than stop-listed so an edit that turns it into a real claim is noticed.",
+   "register_item": "ISA-0695"
+  },
+  {
+   "claim": "THE FALSIFIER for the P0.4 negative claim \"Yahoo is network-blocked\"",
+   "asserted_in": "stock_price_fetch._network_probe (docstring)",
+   "asserted_on": "2026-09-17",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "stock_price_fetch",
+    "owner": "_network_probe",
+    "phrase": "network-blocked"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "Adjudicated 17-Sep-2026 (ISA-0695): the docstring of the FALSIFIER naming the (retired) claim it tests - prose about the rule, not the claim itself. Registered rather than stop-listed so an edit that turns it into a real claim is noticed.",
+   "register_item": "ISA-0695"
+  },
+  {
+   "claim": "\"the probe could not run\" and \"the network is blocked\" are different facts",
+   "asserted_in": "stock_price_fetch._network_probe (docstring)",
+   "asserted_on": "2026-09-17",
+   "state": "NOT_A_CAPABILITY_CLAIM",
+   "site": {
+    "module": "stock_price_fetch",
+    "owner": "_network_probe",
+    "phrase": "is blocked"
+   },
+   "test_id": null,
+   "last_tested": null,
+   "runs_since_tested": 0,
+   "expires_after_runs": 999,
+   "gates": [],
+   "evidence": "Adjudicated 17-Sep-2026 (ISA-0695): the falsifier's docstring distinguishing two outcomes - prose about the rule, not an assertion of absence. Registered rather than stop-listed so an edit that turns it into a real claim is noticed.",
+   "register_item": "ISA-0695"
   }
  ],
  "_rule_site": "`site` resolves a docstring occurrence to its register entry by MODULE + OWNER + PHRASE, for claims whose wording in the code differs from the register's canonical text. It is a resolution rule, never an exemption: the entry still carries a state, a test and a date.",

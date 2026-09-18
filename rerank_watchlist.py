@@ -362,9 +362,14 @@ def _apply_diversification(stack, cfg, ctx):
     room is investable. SOFT tilt: over-represented-sector BUYs carry a DIVERSIFY_OVERRIDE_DELTA sort
     penalty, so an under-represented alternative wins unless the over-rep name beats it by >= the delta.
     No-op when ctx has no sector map (standalone rerank) — the pre-run supplies the look-through."""
-    _fi_mark("rerank_watchlist", "_apply_diversification")
-    if not ctx:
-        return
+    # ⚑ ISA-0465 (Raj, 16-Sep-2026): RETIRED AS A CAPITAL RULE. This ranking surface reaches no
+    #   capital consumer (the V2.1 router reads only held_axis rows), its ctx was never populated,
+    #   and a Source-Score override of a hard limit is refused by policy. The sector/theme
+    #   backstops live in ONE home: concentration_control.py, consulted by position_sizing.allocate.
+    #   The stack order carries no diversification term.
+    for r in stack:
+        r["_divpen"] = 0.0
+    return
     cap       = getattr(cfg, "SLEEVE_SECTOR_CAP_ISA", 0.12)
     theme_cap = getattr(cfg, "SLEEVE_THEME_CAP", 0.50)
     delta     = getattr(cfg, "DIVERSIFY_OVERRIDE_DELTA", 10)

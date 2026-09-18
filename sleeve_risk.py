@@ -60,7 +60,8 @@ def _levels(store: dict, ticker: str) -> Dict[str, float]:
     got = _LEVEL_CACHE.get(key)
     if got is not None:
         return got
-    rec = ((store.get("names") or {}).get(ticker) or {})
+    import stock_return_store as _srs549
+    rec = _srs549.record_of(store, ticker)                # ISA-0549: resolve the requested label
     out = {}
     for d, o in (rec.get("observations") or {}).items():
         g = (o or {}).get("gbp")

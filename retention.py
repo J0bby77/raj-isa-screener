@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ISA-0695 note (17-Sep-2026): "R3.11" was proposed by the 27-Aug BuildSpec but never adopted into
+# ISA_Engineering_Rules.md; the binding basis for noise-normalised thresholds is R13.1/R15.2.
 """
 retention.py — V2.1-D s9: immutable entry underwriting, realised_fraction, and the
 mandatory re-underwrite, the s3 step-down ratchet, and A8's selection-bias haircut
@@ -81,7 +83,7 @@ ELIGIBLE_BASIS = "all_open_direct_stock_positions"
 # ⚑ AND THE THRESHOLD IS KNOWN TO BE WEAK, WHICH IS WHY LEG (a) IS NOT ALONE. Measured sleeve
 # tracking error vs VUAG is 38.6%/yr, so -5pp is t = 0.1295 — NON_DISCRIMINATING, firing ~44%
 # of the time on ZERO true alpha at 6, 12 AND 24 months. Widening the window does not fix a
-# threshold expressed in the units of the quantity rather than of its noise (R3.11). The
+# threshold expressed in the units of the quantity rather than of its noise (noise-normalisation, R15.2). The
 # conjunction of three weak legs is what makes the rule mean anything, and D19 is Raj's.
 PROBATION_LEGS = ("trail_pp", "months_trailing", "ex_largest")
 
@@ -330,7 +332,7 @@ def re_underwrite_outcome(*, clears_underwriting: bool, above_risk_target: bool,
 #       return the plan needs, in nine weeks.
 #
 #   realisation t = r / (sigma_ann * sqrt(days/365))
-#       the same gain expressed in units of the position's OWN noise. R3.11: before declaring
+#       the same gain expressed in units of the position's OWN noise. R15.2 (noise-normalisation): before declaring
 #       ANY threshold, divide it by the SD of the thing it tests and publish the t.
 #
 # ⚑ WHY THE t AND NOT A PERCENTAGE. ONT peaked at +24.0% and ABCL sits at +53%, on sigmas of
@@ -566,6 +568,7 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
 
     Returns a disposition plus the D5 exemption verdict, kept separate so a decided sale that
     cannot yet execute is visible AS a decided sale."""
+    _fi_mark("retention", "graduation_disposition")   # ISA-0699: execution-ledger observation
     import datetime as _dt
     today = today or _dt.date.today().isoformat()
     out = {"ticker": ticker, "as_of": today, "catalyst_status": catalyst_status}
@@ -703,7 +706,7 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
 # 57% below modelled FV against a 15-20%-of-FV trigger, fv_asymmetry 2.33x against a 2.00
 # floor and therefore reading as HEALTHY.
 #
-# ⚑⚑ BUT R3.11 CHANGES THE CONCLUSION, AND IT IS WORTH STATING PLAINLY. Divide the threshold
+# ⚑⚑ BUT NOISE-NORMALISATION (R15.2) CHANGES THE CONCLUSION, AND IT IS WORTH STATING PLAINLY. Divide the threshold
 #    by the SD of the thing it tests before declaring it. Measured on the framework's own
 #    weekly Friday closes (the only series it holds — an intraday high is not admissible,
 #    ISA-0670):
@@ -718,7 +721,7 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
 #
 #    So a FIXED give-back percentage is not one rule. A give-back of 50% of the peak gain is
 #    **0.65 sigma for ONT and 1.17 sigma for ABCL** — the same declared number, nearly twice
-#    the move required of one name as the other. That is exactly the error R3.11 exists to
+#    the move required of one name as the other. That is exactly the error noise-normalisation (R15.2) exists to
 #    prevent, and the same class as the 15-20%-of-FV trigger that never fired.
 #
 #    And ONT's give-back t never exceeds ~0.95. **Both of ONT's legs are sub-1-sigma**: its
@@ -835,7 +838,7 @@ def giveback(peak: float, current: float, entry: float, *, sigma_ann: float = No
     if not sigma_ann or sigma_ann <= 0:
         out.update(t=None, peak_gain_monthly_sigma=None,
                    why=("sigma_ann absent, so the give-back cannot be expressed in units of "
-                        "the position's own noise. R3.11 binds: a give-back percentage "
+                        "the position's own noise. R15.2/R13.1 bind (noise-normalised threshold): a give-back percentage "
                         "declared without its t is 0.65 sigma on one name and 1.17 on another."))
         return out
     monthly_sigma = sigma_ann / _m.sqrt(12.0)
@@ -864,7 +867,7 @@ def giveback_trigger(gb: dict, k: float = None,
     if k is None:
         return {"fired": False, "state": "UNDECLARED", "k": None,
                 "measurement": gb,
-                "why": ("GIVEBACK_K is not declared. R3.11 requires the threshold to be "
+                "why": ("GIVEBACK_K is not declared. R13.1/R15.2 require the threshold to be "
                         "divided by the SD of what it tests before it is declared at all, and "
                         "the measurement shows a fixed give-back percentage is 0.65 sigma on "
                         "ONT and 1.17 sigma on ABCL — it is not one rule. UNDECLARED returns "
@@ -1071,7 +1074,7 @@ def evaluate_ratchet(*, decisions=None, sleeve_vs_vuag_pp=None, months_measured=
     against a measured sleeve tracking error of 38.6%/yr — it fires about 44% of the time on
     ZERO true alpha, and it does so at 6, 12 AND 24 months. The window is the wrong lever: a
     threshold expressed in the units of the quantity rather than of its noise is a coin flip
-    that LOOKS discriminating (R3.11). Three weak, differently-wrong legs in conjunction is
+    that LOOKS discriminating (noise-normalisation, R15.2). Three weak, differently-wrong legs in conjunction is
     what buys discrimination here, and the conjunction is Raj's declared design (D19).
 
     ⚑ LEG (c) IS NOT OPTIONAL. On ISA-0429's restated numbers the all-in and ex-MU legs

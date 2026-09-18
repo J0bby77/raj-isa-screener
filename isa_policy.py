@@ -135,6 +135,9 @@ V2_FLAGS: Dict[str, bool] = {
     # number. A rollback that computes a DIFFERENT number is a second authority.
     "demand_pull_live":           True,   # P4: sleeve_split reads position_sizing.stock_max
     "partial_starter_entry":      True,   # P4: D15-D17 floor-then-priority fill
+    # ISA-0465 (Raj 16-Sep-2026): "OFF" | "SHADOW" | "LIVE" — concentration_control. CANDIDATE ONLY:
+    # SHADOW until Raj reviews the shadow impact; LIVE requires a certified promotion.
+    "concentration_gate":         "SHADOW",
     # ⚑ ISA-0490 (29-Aug-2026). The three flags above were ON and the three modules they
     # govern were GREEN, and `build()` still called none of them: it passed candidates=None
     # to sleeve_split, which read it as [] and routed every pound to funds. A flag that is ON

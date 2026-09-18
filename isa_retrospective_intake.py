@@ -424,8 +424,41 @@ def save_nonregistrable(rows: list) -> None:
     nonregistrable_path().write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
+# ISA-0638 (11-Sep-2026). isa_retrospective_intake --ingest returned ingested=0 on the 11-Sep
+# NASDAQ retrospective (Composio-fallback format: a "## CRITICAL - ..." heading and bullet
+# notes, neither of which FINDING_SECTIONS/_HEAD3/_NUMBERED match) and coverage() went GREEN on
+# it anyway - a format a parser does not recognise reads as "nothing to register" (FC-B: an
+# absent record that reads as clean). This is corrective-action option (a): FAIL coverage when a
+# retrospective is ingested with ZERO findings of any kind (registrable or informational) while
+# its raw text names a severity the framework's own vocabulary treats as actionable. It does not
+# invent a parse of the new format (option (b), left for whoever normalises the Composio
+# fallback template) - it makes the silent case loud.
+_SUSPICIOUS_ZERO_FINDINGS = re.compile(r"\b(CRITICAL|HIGH|FAILED|unavailable)\b", re.I)
+
+
+def _suspicious_zero_findings(path: Path, known: dict) -> str | None:
+    """None if fine; else the reason a 0-finding ingestion of this file is not trustworthy."""
+    if known is None:
+        return None                                    # coverage() already flags "never ingested"
+    if (known.get("new_items") or 0) or (known.get("informational") or 0):
+        return None                                    # it found SOMETHING - not this defect's shape
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    hit = _SUSPICIOUS_ZERO_FINDINGS.search(text)
+    if not hit:
+        return None
+    return (f"{path.name}: ingested on {known.get('ingested_on')} with ZERO findings "
+            f"(registrable or informational), but the file contains {hit.group(0)!r} - a "
+            f"format the parser does not recognise reads as 'nothing to register' (ISA-0638). "
+            f"Register the finding by hand, or re-run --ingest --backfill once the parser or the "
+            f"retrospective template is fixed.")
+
+
 def coverage(root=None) -> list:
-    """Retrospectives on disk that have never been ingested, or that changed since."""
+    """Retrospectives on disk that have never been ingested, that changed since, or that were
+    ingested with a SUSPICIOUS zero-finding result (ISA-0638)."""
     root = root_dir(root)
     log = load_log()
     out = []
@@ -437,6 +470,10 @@ def coverage(root=None) -> list:
         elif known.get("sha") != h:
             out.append(f"{p.name}: changed since ingestion on {known.get('ingested_on')} - "
                        f"re-run isa_retrospective_intake.py --ingest")
+        else:
+            susp = _suspicious_zero_findings(p, known)
+            if susp:
+                out.append(susp)
     return out
 
 
@@ -599,6 +636,109 @@ def run_coverage(screens: list) -> list:
             f"(ISA-0229/ISA-0231)" for label in screens if label not in seen]
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0473 (16-Sep-2026) — DELIVERABLE INTAKE GATE: analysis / audit / handoff / BuildSpec /
+# build-record findings cannot stay outside the canonical register without a disposition.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# The retrospective half above covers weekly-screener retrospectives. Nothing covered the
+# deliverables of ANALYSIS sessions: on 26/27-Aug nineteen findings sat as "items to raise" in a
+# spec, and on measurement (16-Sep) seven build records/specs cite 14 ISA ids that were never
+# issued (e.g. ISA-0450 - quoted from a predicted next_id()). Three mechanical rules per in-scope
+# deliverable, each an ERROR naming file:line:
+#   D1  every ISA-#### cited exists in the canonical register (or the id map) - no unissued ids;
+#   D2  no provisional backlog marker ("items to raise", "to be registered", ISA-TBD, ISA-W14...)
+#       on a line that carries no issued id or explicit disposition token;
+#   D3  in a findings-type section (FINDING_SECTIONS - the one home above), every list/table row
+#       carries an issued id or a disposition token (NO_ITEM: / NOT_REGISTRABLE: / DUPLICATE_OF).
+# SCOPE: deliverables matching DELIVERABLE_PATTERN in the Investment Analysis root. Deliverables
+# that existed before the gate are GRANDFATHERED by content sha in a write-once baseline; editing
+# one brings it into scope. LIMIT (stated, R2.10): a finding written as plain prose outside a
+# findings section with no marker is not mechanically detectable - R7.7 stays PARTIAL, not ASSERTED.
+DELIVERABLE_PATTERN = re.compile(
+    r"(buildspec|buildrecord|build_record|handoff|checkpoint|report|audit|review|changecontract)",
+    re.I)
+DELIVERABLE_EXCLUDE = re.compile(r"^(Run_Context_|_to_delete)", re.I)
+DELIVERABLE_BASELINE = "deliverable_intake_baseline.json"
+DISPOSITION_TOKEN = re.compile(r"\b(NO_ITEM:|NOT_REGISTRABLE:|DUPLICATE_OF\s+ISA-\d{4})")
+ISSUED_ID = re.compile(r"\bISA-(\d{4})\b")
+PROVISIONAL_MARKER = re.compile(
+    r"\bISA-(?:TBD|XXXX|NEW|W\d{1,2})\b|\bitems? to (?:be )?raise\b|\bto be registered\b|"
+    r"\bnot yet registered\b|\bprovisional (?:item )?(?:id|tag)s?\b", re.I)
+_ROW = re.compile(r"^\s*(?:[-*]\s+|\d{1,2}[.)]\s+|\|(?!\s*-{3}))")
+
+
+def _deliverables(root=None):
+    base = root_dir(root)
+    return sorted(p for p in base.glob("*.md")
+                  if DELIVERABLE_PATTERN.search(p.name) and not DELIVERABLE_EXCLUDE.match(p.name))
+
+
+def _baseline_path(root=None) -> Path:
+    return root_dir(root) / "Dashboard" / "state" / DELIVERABLE_BASELINE
+
+
+def write_deliverable_baseline(root=None, *, as_of: str = None) -> dict:
+    """WRITE-ONCE (R4.8): refuses if a baseline exists, so re-baselining cannot silence a violation."""
+    bp = _baseline_path(root)
+    if bp.exists():
+        raise ValueError("ISA-0473: %s already exists - the grandfather baseline is write-once; a "
+                         "violation is fixed or dispositioned, never re-baselined away" % bp.name)
+    rows = {p.name: _sha(p.read_text(encoding="utf-8", errors="replace")) for p in _deliverables(root)}
+    doc = {"_what": ("ISA-0473 grandfather baseline: deliverables on disk when the intake gate shipped, "
+                     "by content sha. An edited file leaves the baseline and must comply."),
+           "as_of": as_of, "n": len(rows), "files": rows}
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+    return doc
+
+
+def deliverable_violations(text: str, issued: set) -> list:
+    out, in_findings = [], False
+    for i, line in enumerate(text.split("\n"), 1):
+        h = re.match(r"^\s*#{1,6}\s+(.*)$", line)
+        if h:
+            in_findings = bool(FINDING_SECTIONS.search(h.group(1)))
+        ids = {"ISA-" + x for x in ISSUED_ID.findall(line)}
+        bad = sorted(ids - issued)
+        if bad:
+            out.append((i, "D1", "cites unissued id(s) %s" % ", ".join(bad)))
+        disposed = bool((ids & issued) or DISPOSITION_TOKEN.search(line))
+        if PROVISIONAL_MARKER.search(line) and not disposed:
+            out.append((i, "D2", "provisional backlog marker %r with no issued id or disposition"
+                        % PROVISIONAL_MARKER.search(line).group(0)))
+        if not h and in_findings and _ROW.match(line) and line.strip("|-: \t") and not disposed \
+                and not re.match(r"^\s*\|.*\b(id|item|finding|#)\b.*\|\s*$", line, re.I):
+            out.append((i, "D3", "findings-section row carries no issued id or disposition token"))
+    return out
+
+
+def deliverable_coverage(root=None, issued=None) -> list:
+    """-> error lines. UNKNOWN (never PASS) when the register or baseline cannot be read."""
+    try:
+        if issued is None:
+            issued = {i["id"] for i in R.read_all()}
+            try:
+                idmap = json.loads((R.store_dir() / "isa_id_map.json").read_text(encoding="utf-8"))
+                issued |= {v for v in idmap.values() if isinstance(v, str)}
+            except (OSError, ValueError):
+                pass
+    except Exception as e:                                               # noqa: BLE001
+        return ["ISA-0473: register unreadable (%s) - deliverable intake UNKNOWN, never PASS" % e]
+    bp = _baseline_path(root)
+    if not bp.exists():
+        return ["ISA-0473: %s absent - deliverable intake cannot tell grandfathered files from new "
+                "ones; UNKNOWN, never PASS" % DELIVERABLE_BASELINE]
+    base = json.loads(bp.read_text(encoding="utf-8")).get("files") or {}
+    errs = []
+    for p in _deliverables(root):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if base.get(p.name) == _sha(text):
+            continue
+        for ln, rule, why in deliverable_violations(text, issued):
+            errs.append("ISA-0473 %s: %s:%d %s (R7.7)" % (rule, p.name, ln, why))
+    return errs
+
+
 def selftest(verbose=True) -> int:
     import os, shutil, tempfile
     n = 0
@@ -710,6 +850,30 @@ def selftest(verbose=True) -> int:
         ok(len(load_nonregistrable()["findings"]) == 2,
            "retro_nonregistrable_log.json records every exclusion with the rule that made it")
         ok(not coverage(tmp), "after ingestion coverage must be clean")
+
+        # ISA-0638 (11-Sep-2026). A retrospective written in a format parse() does not
+        # recognise (the Composio-fallback shape: a "## CRITICAL - ..." heading, no
+        # "### N." findings) must not read as coverage-clean just because ingestion
+        # legitimately found nothing TO PARSE.
+        (tmp / "20260911_NASDAQ_retrospective.md").write_text(
+            '# NASDAQ Retrospective\n\n## CRITICAL - Local bash sandbox unavailable\n- the local device shell could not be reached\n- fell back to Composio for the whole run\n',
+            encoding="utf-8")
+        susp = ingest(tmp, backfill=True)
+        ok(susp["per_file"].get("20260911_NASDAQ_retrospective.md") == 0,
+           "control: the fixture really does parse to zero findings (that IS the defect shape)")
+        cov = coverage(tmp)
+        ok(any("20260911_NASDAQ_retrospective.md" in c and "ISA-0638" in c for c in cov),
+           f"ISA-0638 POSITIVE CONTROL: a 0-finding ingestion of a file naming CRITICAL must "
+           f"FAIL coverage, not read as clean; got {cov}")
+        (tmp / "20260912_benign_retrospective.md").write_text(
+            '# Benign Retrospective\n\n## Notes\nEverything ran cleanly this week.\n',
+            encoding="utf-8")
+        ingest(tmp, backfill=True)
+        cov2 = coverage(tmp)
+        ok(not any("20260912_benign_retrospective.md" in c for c in cov2),
+           f"ISA-0638 NEGATIVE CONTROL: a 0-finding ingestion of a file naming NO severity "
+           f"word must stay coverage-clean - the control is not vacuous; got {cov2}")
+
         again = ingest(tmp, backfill=True)
         ok(again["ingested"] == 0,
            "content-derived ids: a re-run must not inflate the record even with --backfill")
@@ -767,6 +931,42 @@ def selftest(verbose=True) -> int:
         else:
             os.environ.pop("ISA_REGISTER_STORE", None)
         R._schema_cache.clear()
+
+    # ── ISA-0473 deliverable intake gate ──
+    dtmp = Path(tempfile.mkdtemp(prefix="isa_deliv_"))
+    (dtmp / "Dashboard" / "state").mkdir(parents=True)
+    (dtmp / "ISA_BuildRecord_Old_01Sep2026.md").write_text("## Items to raise\n- W3 something\n", encoding="utf-8")
+    write_deliverable_baseline(dtmp, as_of="2026-09-16")
+    issued = {"ISA-0001", "ISA-0002"}
+    ok(deliverable_coverage(dtmp, issued) == [],
+       "ISA-0473 POSITIVE CONTROL: an unchanged grandfathered deliverable is not in scope")
+    raised = False
+    try:
+        write_deliverable_baseline(dtmp)
+    except ValueError:
+        raised = True
+    ok(raised, "ISA-0473 NEGATIVE CONTROL: the baseline is write-once - re-baselining cannot silence a violation")
+    (dtmp / "ISA_BuildSpec_New_17Sep2026.md").write_text(
+        "# Spec\n\nFixes ISA-0001 and ISA-0450.\n\nItems to raise: the cache key.\n\n"
+        "## Findings\n\n- ISA-0002 stale anchor\n- sector field drift\n- noise NO_ITEM: cosmetic typo\n"
+        "\n## Plan\n- step one without id\n", encoding="utf-8")
+    errs = deliverable_coverage(dtmp, issued)
+    ok(any("D1" in e and "ISA-0450" in e for e in errs),
+       "ISA-0473 MUST-FIRE D1: a deliverable citing an unissued id (the ISA-0450 shape) FAILS")
+    ok(any("D2" in e and ":5 " in e for e in errs),
+       "ISA-0473 MUST-FIRE D2: 'items to raise' with no issued id FAILS")
+    ok(any("D3" in e and ":10 " in e for e in errs) and not any(":9 " in e or ":11 " in e for e in errs),
+       "ISA-0473 MUST-FIRE D3: a findings row with no id fails; rows with an issued id or NO_ITEM: pass")
+    ok(not any(":14 " in e for e in errs),
+       "ISA-0473 NEGATIVE CONTROL: a plain list row OUTSIDE a findings section is not a finding (no false fire)")
+    old = dtmp / "ISA_BuildRecord_Old_01Sep2026.md"
+    old.write_text(old.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+    ok(any("ISA_BuildRecord_Old_01Sep2026.md" in e for e in deliverable_coverage(dtmp, issued)),
+       "ISA-0473 MUST-FIRE: editing a grandfathered deliverable brings it into scope")
+    (dtmp / "Dashboard" / "state" / DELIVERABLE_BASELINE).unlink()
+    ok(any("UNKNOWN" in e for e in deliverable_coverage(dtmp, issued)),
+       "ISA-0473 NEGATIVE CONTROL: no baseline -> UNKNOWN, never PASS")
+    shutil.rmtree(dtmp, ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
     if verbose:
         print(f"isa_retrospective_intake selftest: {n} assertions, 0 failed")
@@ -782,7 +982,17 @@ def main(argv=None):
     ap.add_argument("--coverage", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--deliverables", action="store_true", help="ISA-0473 deliverable intake coverage")
+    ap.add_argument("--write-deliverable-baseline", action="store_true")
     a = ap.parse_args(argv)
+    if a.write_deliverable_baseline:
+        d = write_deliverable_baseline(a.root, as_of=__import__("datetime").date.today().isoformat())
+        print("baseline written: %d deliverables" % d["n"])
+        return 0
+    if a.deliverables:
+        gaps = deliverable_coverage(a.root)
+        print("\n".join(gaps) if gaps else "every in-scope deliverable's findings are registered or dispositioned")
+        return 1 if gaps else 0
     if a.selftest:
         selftest()
         return 0

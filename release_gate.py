@@ -48,6 +48,7 @@ import ast
 import datetime
 import hashlib
 import json
+import re
 import os
 import sys
 from typing import Dict, List, Optional
@@ -134,12 +135,18 @@ def _iter_source(root: str):
                 yield os.path.join(dirpath, fn)
 
 
-def _fingerprint_files(paths) -> Dict[str, str]:
+def _fingerprint_files(paths, root: str) -> Dict[str, str]:
+    """⚑ ISA-0697 (16-Sep-2026): keys are relative to the TREE, not to the process's working
+    directory. `os.path.relpath(p)` made every fingerprint a function of `cwd`: the unchanged LIVE
+    tree verified TRUSTED from inside the folder and UNTRUSTED_LIVE_STATE (428 'changed' files,
+    keyed '../sessions/.../x.py') from anywhere else — and the scheduled pre-run invokes
+    monthly_isa_prerun.py by absolute path with no declared cwd. `root` is now mandatory (R4.7:
+    an un-updated caller fails rather than silently keeping the old keying)."""
     out = {}
     for p in sorted(paths):
         try:
             with open(p, "rb") as fh:
-                out[os.path.relpath(p)] = _sha(fh.read())
+                out[os.path.relpath(p, root)] = _sha(fh.read())
         except OSError:
             continue
     return out
@@ -150,7 +157,7 @@ def _roll(d: Dict[str, str]) -> str:
 
 
 def source_fingerprint(root: str = HERE) -> dict:
-    files = _fingerprint_files(_iter_source(root))
+    files = _fingerprint_files(_iter_source(root), root)
     return {"roll": _roll(files), "n_files": len(files), "files": files}
 
 
@@ -185,13 +192,23 @@ def run_surface_fingerprint(root: str = HERE) -> dict:
                        "about the framework (R2.9)" % exc}
 
 
+# R18.5 config surface — ONE home (the selftest fixture reads it too, R4.4).
+# ⚑ ISA-0465/0700 pre-LIVE close-out (16-Sep-2026): `concentration_theme_taxonomy.json` is the
+#   declared golden source the theme cap refuses capital on. It was outside every fingerprint, so a
+#   hand edit to a membership would have left LIVE reading TRUSTED (KR10 blind to a capital input).
+CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "target_weights.json",
+                "threshold_register.json", "quantity_register.json", "negative_claims.json",
+                "degradation_bands.json", "concentration_theme_taxonomy.json",
+                # ISA-0473: the write-once grandfather baseline of the deliverable intake gate is
+                # signed - an unsigned edit could otherwise grandfather a violating deliverable.
+                os.path.join("Dashboard", "state", "deliverable_intake_baseline.json"))
+
+
 def config_fingerprint(root: str = HERE) -> dict:
-    names = ("isa_policy.py", "scoring_config.py", "target_state.json", "target_weights.json",
-             "threshold_register.json", "quantity_register.json", "negative_claims.json",
-             "degradation_bands.json")
+    names = CONFIG_FILES
     present = [os.path.join(root, n) for n in names if os.path.exists(os.path.join(root, n))]
     missing = [n for n in names if not os.path.exists(os.path.join(root, n))]
-    files = _fingerprint_files(present)
+    files = _fingerprint_files(present, root)
     return {"roll": _roll(files), "n_files": len(files), "missing": missing, "files": files,
             "state": GREEN if not missing else ENV_UNKNOWN,
             "why": None if not missing else
@@ -272,7 +289,7 @@ def verify_live(root: str = HERE, receipt: Optional[dict] = None) -> dict:
             continue
         if cur.get("roll") != dec.get("roll"):
             entry = {"surface": key, "declared": dec.get("roll"), "live": cur.get("roll")}
-            if key == "source":
+            if key in ("source", "config"):
                 d_files, c_files = dec.get("files") or {}, cur.get("files") or {}
                 changed = sorted(f for f in set(d_files) | set(c_files)
                                  if d_files.get(f) != c_files.get(f))
@@ -293,6 +310,8 @@ def verify_live(root: str = HERE, receipt: Optional[dict] = None) -> dict:
                         % len(unknowns))}
     return {"state": "TRUSTED", "build_id": rec.get("build_id"),
             "promoted_on": rec.get("promoted_on"), "blocks_capital_run": False,
+            "live_rolls": {k: (now.get(k) or {}).get("roll") for k in
+                           ("source", "rules", "run_surfaces", "config", "atlas", "capabilities")},
             "why": "LIVE matches Trusted Build %s on every fingerprinted surface"
                    % rec.get("build_id")}
 
@@ -513,10 +532,187 @@ def negative_control_census(modules: List[str], root: str = HERE) -> dict:
 # R18.3 — the one canonical release gate
 # ────────────────────────────────────────────────────────────────────────────────────────
 
+# R18.5 — THE REFUSAL, AT THE RUN SURFACE (ISA-0629, 16-Sep-2026)
+# ⚑ WHAT WAS MISSING. `verify_live()` answered R18.5's question and NOTHING THAT MOVES CAPITAL
+#   ASKED IT: no call site in monthly_isa_prerun, the VCI run capture or any SKILL/Run_Context.
+#   Its only live consumer was `consistency_check.pair_live_is_trusted`, which runs at pre-run
+#   Step 9d — AFTER every capital figure is computed — and lands as one line in errors[]. An
+#   unsigned tree would have produced a complete, plausible run_context with a red line underneath
+#   it, and the artefact is what gets read. "Blocks a capital-decision run" was prose.
+# ⚑ THE CONTRACT. One function, one vocabulary, stamped onto the artefact the decision is read
+#   from (R4.11 — capture is a property of producing the artefact):
+#     AUTHORISED    LIVE matches the Trusted receipt on every surface — capital decisions may proceed
+#     REFUSED       UNTRUSTED_LIVE_STATE / NO_RECEIPT / ENVIRONMENT_UNKNOWN / DISABLED / UNKNOWN —
+#                   no capital decision may be taken from this run's outputs until reconciled
+#     NOT_ENFORCED  the rollback flag is off; the untrusted state is RECORDED and the decision is
+#                   Raj's, never implied AUTHORISED
+#   Anything else, including absence, is read as REFUSED by every consumer (R4.3).
+CAPITAL_AUTHORITY_STATES = ("AUTHORISED", "REFUSED", "NOT_ENFORCED")
+
+
+def _refuse_untrusted() -> bool:
+    """Rollback constant (R4.13). Default TRUE — the refusal is the adopted rule (R18.5), so
+    turning it off must be a deliberate act (V2_FLAGS['refuse_untrusted_capital_run'] = False),
+    not the consequence of a missing key."""
+    try:
+        import isa_policy as _p
+        if "refuse_untrusted_capital_run" in _p.V2_FLAGS:
+            return bool(_p.V2_FLAGS["refuse_untrusted_capital_run"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return True
+
+
+def _census_gates_capital() -> bool:
+    """Rollback constant (R4.13) for ISA-0696. Default TRUE: a capital run needs a FRESH_GREEN suite
+    census as well as a TRUSTED tree. V2_FLAGS['census_gates_capital'] = False records NOT_ENFORCED."""
+    try:
+        import isa_policy as _p
+        if "census_gates_capital" in _p.V2_FLAGS:
+            return bool(_p.V2_FLAGS["census_gates_capital"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return True
+
+
+def capital_run_authority(surface: str, root: str = HERE) -> dict:
+    """R18.5 — may a capital-decision run on `surface` proceed on this tree? Records the exact
+    identity it checked (build id + every surface roll) so the run can say WHAT it ran.
+
+    ⚑ ISA-0696 (17-Sep-2026): AUTHORISED additionally requires the suite census to read FRESH_GREEN
+    through consistency_check.suite_status_state (complete, all GREEN, CLEAN isolation, <= 8 days,
+    recorded against this exact source and config). A TRUSTED tree whose census is stale, red,
+    incomplete or other-identity is REFUSED (NOT_ENFORCED under the census rollback), never AUTHORISED."""
+    import datetime as _dt
+    try:
+        v = verify_live(root)
+    except Exception as exc:                                            # noqa: BLE001
+        v = {"state": UNKNOWN, "why": "verify_live raised %s: %s" % (type(exc).__name__, exc),
+             "blocks_capital_run": True}
+    trusted = v.get("state") == "TRUSTED" and v.get("blocks_capital_run") is False
+    try:
+        import consistency_check as _cc
+        suite = _cc.suite_status_state(root)
+    except Exception as exc:                                            # noqa: BLE001
+        suite = {"state": "ABSENT", "why": "suite census could not be read (%s: %s) - UNKNOWN, never usable"
+                                          % (type(exc).__name__, exc)}
+    census_ok = suite.get("state") == "FRESH_GREEN"
+    if trusted and census_ok:
+        authority = "AUTHORISED"
+    elif not trusted:
+        authority = "REFUSED" if _refuse_untrusted() else "NOT_ENFORCED"
+    else:
+        authority = "REFUSED" if _census_gates_capital() else "NOT_ENFORCED"
+    why = v.get("why")
+    if trusted and not census_ok:
+        why = ("LIVE is TRUSTED but the suite census is %s: %s (ISA-0696 - run "
+               "`python3 suite_census_runner.py --step` until CENSUS_PUBLISHED)" % (suite.get("state"), suite.get("why")))
+    return {
+        "surface": surface,
+        "authority": authority,
+        "live_state": v.get("state"),
+        "build_id": v.get("build_id"),
+        "promoted_on": v.get("promoted_on"),
+        "live_rolls": v.get("live_rolls"),
+        "diffs": v.get("diffs"),
+        "unknowns": v.get("unknowns"),
+        "why": why,
+        "suite_census": {k: suite.get(k) for k in ("state", "why", "as_of_ts", "age_hours", "age_days",
+                                                  "refuses_after", "next_due", "denominator", "n_non_green",
+                                                  "non_green", "identity_mismatch", "isolation_all_clean",
+                                                  "data_drift", "census_kind", "build_id")},
+        "census_gates_capital": _census_gates_capital(),
+        "checked_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "basis": ("R18.5 — a scheduled capital run refuses unsigned changes. AUTHORISED only when "
+                  "LIVE matches the Trusted receipt on every fingerprinted surface AND the suite census "
+                  "is FRESH_GREEN for that exact source/config (ISA-0696); anything else is REFUSED (or "
+                  "NOT_ENFORCED under the recorded rollback), never PASS (R4.3)."),
+    }
+
+
+def capital_authority_of(doc) -> str:
+    """The ONE reader of an artefact's stamped authority. Absent/unknown -> REFUSED (R4.3)."""
+    a = ((doc or {}).get("_meta") or {}).get("capital_authority")
+    if a is None:
+        a = ((doc or {}).get("trusted_build") or {}).get("authority")
+    return a if a in CAPITAL_AUTHORITY_STATES else "REFUSED"
+
+
 def _gate(name, state, why, **extra):
     d = {"gate": name, "state": state, "why": why}
     d.update(extra)
     return d
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# ISA-0695 (BS-0695 §5D) — EXACT WAIVER OWNERSHIP
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# ⚑ MEASURED FAILURE: a waiver was {gate, item, why}. On 17-Sep-2026 a consistency_pairs waiver written for
+#   3 known errors absorbed 11 (8 stale register views appeared after it was written), and the
+#   framework_integrity waiver cited an item (ISA-0683) that owned none of the gate's findings. A waiver now
+#   owns FINDINGS, not gates: every current finding id of the waived gate must be listed with an owning
+#   canonical item at its exact revision, the item must be open and must NAME the finding id, and any finding
+#   not listed keeps the gate blocking. A partially owned RED stays RED and unwaived.
+_TERMINAL_ITEM_STATES = ("CLOSED_FIXED", "CLOSED_WONTFIX", "CLOSED_NOT_A_DEFECT", "SUPERSEDED")
+
+
+def _norm_finding_text(text: str) -> str:
+    t = str(text)
+    while True:                                   # nested parentheses, innermost first
+        t2 = re.sub(r"\([^()]*\)", "", t)
+        if t2 == t:
+            break
+        t = t2
+    t = re.sub(r"TB-\d{4}-\d{2}-\d{2}-\d{2}", "TB", t)
+    t = re.sub(r"[0-9a-f]{8,}", "H", t)
+    t = re.sub(r"\d+(\.\d+)?", "N", t)
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def text_finding_id(prefix: str, text: str) -> str:
+    """Stable id for a message-shaped finding: its rule prefix + a hash of the message with numbers,
+    hashes, build ids and parenthesised lists removed (they change run to run; the defect does not)."""
+    head = str(text).split(":", 1)[0][:40]
+    return "%s-%s-%s" % (prefix, re.sub(r"[^A-Za-z0-9.]+", "_", head).strip("_"),
+                         hashlib.sha1(_norm_finding_text(text).encode("utf-8")).hexdigest()[:10])
+
+
+def waiver_check(gate: dict, waiver: dict, read_item=None) -> dict:
+    """-> {"valid": bool, "unowned": [ids], "owner_errors": [...], "stale": [ids], "owned": {id: owner}}"""
+    if read_item is None:
+        import isa_register as _R
+
+        def read_item(i):
+            return _R.get(i)
+    current = [f["id"] for f in (gate.get("findings") or [])]
+    listed = {}
+    errs = []
+    if not isinstance(waiver.get("findings"), list) or not waiver["findings"]:
+        return {"valid": False, "unowned": current, "owner_errors": [
+            "waiver for %s lists no findings - a gate-level waiver cannot prove it owns what it hides "
+            "(ISA-0695)" % gate.get("gate")], "stale": [], "owned": {}}
+    for w in waiver["findings"]:
+        fid, owner, rev = w.get("id"), w.get("owner"), w.get("owner_revision")
+        if not fid or not re.match(r"^ISA-\d{4}$", str(owner or "")):
+            errs.append("malformed waiver finding %r" % w)
+            continue
+        listed[fid] = owner
+        try:
+            item = read_item(owner)
+        except Exception as exc:                                        # noqa: BLE001
+            errs.append("%s: owner %s unreadable (%s)" % (fid, owner, exc))
+            continue
+        if item.get("state") in _TERMINAL_ITEM_STATES:
+            errs.append("%s: owner %s is %s - a closed item cannot own a live finding" % (fid, owner, item.get("state")))
+        if rev is None or int(item.get("revision") or 0) != int(rev):
+            errs.append("%s: owner %s is at revision %s, waiver cites %s - re-read the owner" % (
+                fid, owner, item.get("revision"), rev))
+        if fid in current and fid not in json.dumps(item, ensure_ascii=False):
+            errs.append("%s: owner %s does not name this finding id - citing an item is not owning a finding" % (fid, owner))
+    unowned = [f for f in current if f not in listed]
+    stale = [f for f in listed if f not in current]
+    return {"valid": not unowned and not errs, "unowned": unowned, "owner_errors": errs, "stale": stale,
+            "owned": {f: listed[f] for f in current if f in listed}}
 
 
 def certify(root: str = HERE, *, build_id: str, items: List[str],
@@ -574,18 +770,46 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
         gates.append(_gate("consistency_pairs", GREEN if not errs else RED,
                            "%d ERROR-severity mismatch(es)" % len(errs),
                            errors=[e["message"][:200] for e in errs[:12]],
+                           findings=[{"id": text_finding_id("CP", e["message"]), "text": e["message"][:300]}
+                                     for e in errs],
                            n_errors=len(errs), n_records=len(recs)))
     except Exception as exc:                                            # noqa: BLE001
         gates.append(_gate("consistency_pairs", ENV_UNKNOWN,
                            "consistency_check could not run (%s) — R2.9/R5.12" % exc))
 
+    # 4b — R5.7 / ISA-0683: EVERY suite on disk is recorded GREEN against THIS source. Read
+    #      through the pair's one home (consistency_check.pair_red_suite_is_an_incident), so the
+    #      gate and the battery cannot disagree about what "green" means (R4.4). Recording is
+    #      the expensive half and is done beforehand in the Candidate
+    #      (consistency_check.record_suite_status); an absent, partial, stale or other-source
+    #      record is RED here, never a skip (R2.10).
+    try:
+        import consistency_check as _cc_s
+        _se = _cc_s.pair_red_suite_is_an_incident(root=root)
+        gates.append(_gate("suite_census", GREEN if not _se else RED,
+                           "R5.7/ISA-0683: %d suite-census finding(s)" % len(_se),
+                           errors=[e[:240] for e in _se[:12]],
+                           findings=[{"id": text_finding_id("SC", e), "text": e[:300]} for e in _se]))
+    except Exception as exc:                                            # noqa: BLE001
+        gates.append(_gate("suite_census", ENV_UNKNOWN,
+                           "suite census could not be read (%s) — R2.9/R5.12" % exc))
+
     # 5 — Phase 0: declaration and execution integrity.
     try:
         import framework_integrity as fi
         pf = fi.preflight(root)
-        gates.append(_gate("framework_integrity", GREEN if pf.get("state") == "PASS" else RED,
-                           "framework_integrity.preflight: %s" % pf.get("state"),
-                           errors=pf.get("errors")))
+        # ⚑ ISA-0695: preflight returns OK/FAIL; this compared against "PASS", so the gate could never be GREEN.
+        _red = [f for f in (pf.get("findings") or []) if f.get("severity") == "RED"]
+        _fi_state = GREEN if (pf.get("state") in ("OK", "PASS") and pf.get("findings") is not None) else RED
+        gates.append(_gate("framework_integrity", _fi_state,
+                           "framework_integrity.preflight: %s (%d RED finding(s), counts %s)"
+                           % (pf.get("state"), len(_red), (pf.get("counts") or {}).get("by_severity")),
+                           errors=pf.get("errors"),
+                           findings=([{"id": f["id"], "text": "%s %s: %s" % (f["check"], f["subject"], f["why"])[:300],
+                                       "declared_owner": f.get("owner")} for f in _red]
+                                     if pf.get("findings") is not None else
+                                     [{"id": "FI-LEDGER-UNAVAILABLE", "text": "; ".join(pf.get("errors") or [])}]),
+                           counts=pf.get("counts")))
     except Exception as exc:                                            # noqa: BLE001
         gates.append(_gate("framework_integrity", ENV_UNKNOWN,
                            "framework_integrity could not run (%s)" % exc))
@@ -603,7 +827,10 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                                "exposure not proven decision-effective"
                                % (rec["n_live"], rec["n_capabilities"],
                                   rec["gbp_exposure_not_live"]),
-                               blocked_at=rec["blocked_at"]))
+                               blocked_at=rec["blocked_at"],
+                               findings=[{"id": "CC-%s" % r["name"], "text": "%s not LIVE: blocked at %s (%s)"
+                                          % (r["name"], r["live"]["blocked_at"], r["live"]["state"])}
+                                         for r in rec["rows"] if not r["live"]["live"]]))
     except Exception as exc:                                            # noqa: BLE001
         gates.append(_gate("capability_chain", ENV_UNKNOWN,
                            "capability_registry could not run (%s)" % exc))
@@ -612,7 +839,9 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
     ncc = negative_control_census(changed_modules, root)
     gates.append(_gate("negative_controls", ncc["state"], ncc["why"] or
                        "every changed module's selftest carries a labelled negative control",
-                       rows=[r for r in ncc["rows"] if r["state"] != GREEN]))
+                       rows=[r for r in ncc["rows"] if r["state"] != GREEN],
+                       findings=[{"id": "NC-%s" % r["module"], "text": str(r.get("why"))[:300]}
+                                 for r in ncc["rows"] if r["state"] != GREEN]))
 
     # 8 — R4.15: run surfaces dispositioned.
     if run_surfaces is None:
@@ -671,8 +900,14 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                        unknowns=envs))
 
     for g in gates:
+        if g["state"] != GREEN and not g.get("findings"):
+            g["findings"] = [{"id": "G-%s" % g["gate"], "text": str(g.get("why"))[:300]}]
         if g["gate"] in waived and g["state"] != GREEN:
-            g["waived"] = next(w for w in waivers if w["gate"] == g["gate"])
+            w = next(w for w in waivers if w["gate"] == g["gate"])
+            chk = waiver_check(g, w)
+            g["waiver_validation"] = chk
+            if chk["valid"]:
+                g["waived"] = w
     blocking = [g for g in gates if g["state"] != GREEN and "waived" not in g]
     return {
         "build_id": build_id,
@@ -680,7 +915,8 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
         "certified": not blocking,
         "state": "CERTIFIED" if not blocking else "BLOCKED",
         "gates": gates,
-        "blocking": [{"gate": g["gate"], "state": g["state"], "why": g["why"]} for g in blocking],
+        "blocking": [{"gate": g["gate"], "state": g["state"], "why": g["why"],
+                      "waiver_validation": g.get("waiver_validation")} for g in blocking],
         "waivers": waivers,
         "items": items,
         "changed_modules": sorted(set(changed_modules)),
@@ -767,9 +1003,7 @@ def _selftest(verbose: bool = True) -> int:
     #   as the control failing when it was the FIXTURE that was incomplete. A candidate that
     #   cannot reproduce the declared surfaces is not evidence about correctness, and that
     #   applies to a test's own candidate too.
-    for _cfg in ("isa_policy.py", "scoring_config.py", "target_state.json",
-                 "target_weights.json", "threshold_register.json", "quantity_register.json",
-                 "negative_claims.json", "degradation_bands.json"):
+    for _cfg in CONFIG_FILES:
         with open(os.path.join(tmp, _cfg), "w", encoding="utf-8") as fh:
             fh.write("{}\n" if _cfg.endswith(".json") else "# stub\n")
     # ⚑ AND A RUN SURFACE. `run_surface_fingerprint` was passing the REAL repository root while
@@ -800,8 +1034,113 @@ def _selftest(verbose: bool = True) -> int:
            fp, config={"state": ENV_UNKNOWN, "why": "control"})}
        )["state"] in ("UNTRUSTED_LIVE_STATE", ENV_UNKNOWN))
 
+    # ── ISA-0465/0700: the declared theme taxonomy is a fingerprinted capital input ─────────
+    _tx = os.path.join(tmp, "concentration_theme_taxonomy.json")
+    _tx_orig = open(_tx, "rb").read() if os.path.exists(_tx) else None
+    with open(_tx, "w", encoding="utf-8") as fh:
+        fh.write('{"memberships": {"HAND_EDIT": {}}}\n')
+    _v_tx = verify_live(tmp)
+    if _tx_orig is None:
+        os.remove(_tx)
+    else:
+        with open(_tx, "wb") as fh:
+            fh.write(_tx_orig)
+    ok("ISA-0700 MUST-FIRE: a hand edit to concentration_theme_taxonomy.json is UNTRUSTED_LIVE_STATE "
+       "naming the file (it gates capital, so it must not verify TRUSTED)",
+       _v_tx["state"] == "UNTRUSTED_LIVE_STATE" and any(
+           d.get("surface") == "config" and "concentration_theme_taxonomy.json" in d.get("changed_files", [])
+           for d in _v_tx.get("diffs", [])), _v_tx)
+    ok("ISA-0700 comparator: restoring the signed taxonomy bytes verifies TRUSTED again",
+       verify_live(tmp)["state"] == "TRUSTED")
+
+    # ── ISA-0697: the verdict must not depend on the process's working directory ────────────
+    _cwd = os.getcwd()
+    try:
+        os.chdir(tempfile.mkdtemp())
+        _v_elsewhere = verify_live(tmp)
+    finally:
+        os.chdir(_cwd)
+    ok("ISA-0697 MUST-FIRE: the same signed tree verifies TRUSTED from an UNRELATED working "
+       "directory - a fingerprint keyed on cwd made unchanged LIVE read UNTRUSTED from anywhere "
+       "but inside the folder", _v_elsewhere["state"] == "TRUSTED", _v_elsewhere)
+    ok("ISA-0697: fingerprint keys are tree-relative (no '..' segments)",
+       all(not k.startswith("..") for k in source_fingerprint(tmp)["files"]))
+
+    # ── ISA-0629: the refusal AT THE RUN SURFACE, on the same fixture ───────────────────
+    # ISA-0696: the signed fixture carries a complete, CLEAN, same-identity census (its tree has no suites)
+    import consistency_check as _ccf
+    import datetime as _dtf
+    _st_path = os.path.join(tmp, "Dashboard", "state", "suite_status.json")
+    os.makedirs(os.path.dirname(_st_path), exist_ok=True)
+    _fresh = {"as_of": _dtf.date.today().isoformat(),
+              "as_of_ts": _dtf.datetime.now().isoformat(timespec="seconds"),
+              "source_roll": source_fingerprint(tmp)["roll"], "config_roll": config_fingerprint(tmp)["roll"],
+              "rows": [{"module": r["module"], "state": "GREEN", "write_isolation": "CLEAN"}
+                       for r in _ccf.suite_census(tmp)],
+              "isolation": {"all_clean": True}, "data_snapshot": _ccf.data_snapshot(tmp)}
+    with open(_st_path, "w", encoding="utf-8") as fh:
+        json.dump(_fresh, fh)
+    _ca = capital_run_authority("fixture_run", tmp)
+    ok("ISA-0629 POSITIVE CONTROL: a signed, unchanged tree gives capital authority AUTHORISED "
+       "and records the build id and every surface roll it checked",
+       _ca["authority"] == "AUTHORISED" and _ca["build_id"] == "TB-TEST-01"
+       and set((_ca.get("live_rolls") or {})) >= {"source", "config", "run_surfaces"}, _ca)
+    _stale = dict(_fresh, as_of_ts=(_dtf.datetime.now() - _dtf.timedelta(days=9)).isoformat(timespec="seconds"))
+    with open(_st_path, "w", encoding="utf-8") as fh:
+        json.dump(_stale, fh)
+    _ca_st = capital_run_authority("fixture_run", tmp)
+    ok("ISA-0696 MUST-FIRE: the SAME signed, TRUSTED tree with a 9-day-old census is REFUSED, naming STALE",
+       _ca_st["authority"] == "REFUSED" and _ca_st["live_state"] == "TRUSTED"
+       and _ca_st["suite_census"]["state"] == "STALE", _ca_st)
+    _red = dict(_fresh, rows=_fresh["rows"] + [{"module": "data_dependent_suite", "state": "RED"}])
+    with open(_st_path, "w", encoding="utf-8") as fh:
+        json.dump(_red, fh)
+    ok("ISA-0696 MUST-FIRE: a fresh census with a RED suite REFUSES capital authority (FRESH_RED)",
+       capital_run_authority("fixture_run", tmp)["suite_census"]["state"] == "FRESH_RED"
+       and capital_run_authority("fixture_run", tmp)["authority"] == "REFUSED")
+    try:
+        import isa_policy as _polc
+        _hadc = "census_gates_capital" in _polc.V2_FLAGS
+        _oldc = _polc.V2_FLAGS.get("census_gates_capital")
+        _polc.V2_FLAGS["census_gates_capital"] = False
+        _ca_nc = capital_run_authority("fixture_run", tmp)
+        if _hadc:
+            _polc.V2_FLAGS["census_gates_capital"] = _oldc
+        else:
+            _polc.V2_FLAGS.pop("census_gates_capital", None)
+        ok("ISA-0696 ROLLBACK: census gate off -> NOT_ENFORCED (recorded), never AUTHORISED on a red census",
+           _ca_nc["authority"] == "NOT_ENFORCED", _ca_nc)
+    except ImportError:
+        ok("ISA-0696 ROLLBACK control could not import isa_policy - UNKNOWN, not PASS", False)
+    os.remove(_st_path)
+    ok("ISA-0696 NEGATIVE CONTROL: no census at all on a TRUSTED tree is REFUSED (ABSENT)",
+       capital_run_authority("fixture_run", tmp)["suite_census"]["state"] == "ABSENT"
+       and capital_run_authority("fixture_run", tmp)["authority"] == "REFUSED")
+    with open(_st_path, "w", encoding="utf-8") as fh:
+        json.dump(_fresh, fh)
     with open(os.path.join(tmp, "m.py"), "a", encoding="utf-8") as fh:
         fh.write("def g():\n    return 2\n")
+    _ca2 = capital_run_authority("fixture_run", tmp)
+    ok("ISA-0629 MUST-FIRE: one unsigned line of source makes capital authority REFUSED",
+       _ca2["authority"] == "REFUSED" and _ca2["live_state"] == "UNTRUSTED_LIVE_STATE", _ca2)
+    try:
+        import isa_policy as _pol
+        _had = "refuse_untrusted_capital_run" in _pol.V2_FLAGS
+        _old = _pol.V2_FLAGS.get("refuse_untrusted_capital_run")
+        _pol.V2_FLAGS["refuse_untrusted_capital_run"] = False
+        _ca3 = capital_run_authority("fixture_run", tmp)
+        if _had:
+            _pol.V2_FLAGS["refuse_untrusted_capital_run"] = _old
+        else:
+            _pol.V2_FLAGS.pop("refuse_untrusted_capital_run", None)
+        ok("ISA-0629 ROLLBACK: with the flag off the same tree is NOT_ENFORCED - recorded, never "
+           "AUTHORISED (R4.3, R4.13)", _ca3["authority"] == "NOT_ENFORCED", _ca3)
+    except ImportError:
+        ok("ISA-0629 ROLLBACK control could not import isa_policy - UNKNOWN, not PASS", False)
+    ok("ISA-0629: an artefact with NO stamped authority reads REFUSED through the one reader",
+       capital_authority_of({}) == "REFUSED"
+       and capital_authority_of({"_meta": {"capital_authority": "AUTHORISED"}}) == "AUTHORISED"
+       and capital_authority_of({"_meta": {"capital_authority": "MAYBE"}}) == "REFUSED")
     v = verify_live(tmp)
     ok("⚑ NEGATIVE CONTROL: ONE unsigned line of source flips LIVE to UNTRUSTED_LIVE_STATE and "
        "blocks the capital run - this is the mechanical meaning of 'the rules actually ran' "
@@ -915,6 +1254,40 @@ def _selftest(verbose: bool = True) -> int:
        "through the declared stability window (R18.4)",
        os.path.exists(os.path.join(tmp, STATE_REL, RECEIPT_DIR, "TB-TEST-01.json")))
 
+    # ── ISA-0695: exact waiver ownership (BS-0695 §15) ────────────────────────────────────
+    _items = {"ISA-9001": {"id": "ISA-9001", "state": "OPEN", "revision": 3,
+                           "corrective_action": "owns FI-T-A and FI-Q3-B"},
+              "ISA-9002": {"id": "ISA-9002", "state": "CLOSED_FIXED", "revision": 2, "corrective_action": "FI-T-A"},
+              "ISA-9003": {"id": "ISA-9003", "state": "OPEN", "revision": 1,
+                           "corrective_action": "mentions the framework_integrity gate but no finding id"}}
+    _ri = lambda i: _items[i]                                                   # noqa: E731
+    _g = {"gate": "framework_integrity", "findings": [{"id": "FI-T-A"}, {"id": "FI-Q3-B"}]}
+    _full = {"gate": "framework_integrity", "findings": [{"id": "FI-T-A", "owner": "ISA-9001", "owner_revision": 3},
+                                                         {"id": "FI-Q3-B", "owner": "ISA-9001", "owner_revision": 3}]}
+    ok("ISA-0695 POSITIVE CONTROL: every current finding listed with an open owner at its exact revision that names it -> valid",
+       waiver_check(_g, _full, _ri)["valid"] is True, waiver_check(_g, _full, _ri))
+    _drop = dict(_full, findings=_full["findings"][:1])
+    ok("ISA-0695 MUST-FIRE: removing one finding's owner from the waiver leaves it UNOWNED and the gate blocking",
+       waiver_check(_g, _drop, _ri)["unowned"] == ["FI-Q3-B"] and not waiver_check(_g, _drop, _ri)["valid"])
+    _new = {"gate": "framework_integrity", "findings": _g["findings"] + [{"id": "FI-Q1-NEW"}]}
+    ok("ISA-0695 MUST-FIRE: a NEW finding under the same gate is not absorbed by the old waiver",
+       waiver_check(_new, _full, _ri)["unowned"] == ["FI-Q1-NEW"])
+    ok("ISA-0695 NEGATIVE CONTROL: an owner item that mentions the gate but not the finding id does not own it",
+       not waiver_check({"gate": "g", "findings": [{"id": "FI-T-A"}]},
+                        {"gate": "g", "findings": [{"id": "FI-T-A", "owner": "ISA-9003", "owner_revision": 1}]}, _ri)["valid"])
+    ok("ISA-0695 NEGATIVE CONTROL: a CLOSED owner cannot own a live finding",
+       not waiver_check({"gate": "g", "findings": [{"id": "FI-T-A"}]},
+                        {"gate": "g", "findings": [{"id": "FI-T-A", "owner": "ISA-9002", "owner_revision": 2}]}, _ri)["valid"])
+    ok("ISA-0695 NEGATIVE CONTROL: a stale owner revision is refused",
+       not waiver_check(_g, dict(_full, findings=[dict(f, owner_revision=2) for f in _full["findings"]]), _ri)["valid"])
+    ok("ISA-0695 NEGATIVE CONTROL: a legacy gate-level waiver (no findings) is refused",
+       not waiver_check(_g, {"gate": "framework_integrity", "item": "ISA-9001", "why": "x"}, _ri)["valid"])
+    ok("ISA-0695: message finding ids are stable across changing numbers, build ids and file lists",
+       text_finding_id("CP", "R18.5/KR10: UNTRUSTED against TB-2026-09-17-03 - source (5 file(s): a.py, b.py); 12 errs")
+       == text_finding_id("CP", "R18.5/KR10: UNTRUSTED against TB-2026-09-17-04 - source (2 file(s): c.py); 7 errs"))
+    ok("ISA-0695 NEGATIVE CONTROL: different defects get different ids",
+       text_finding_id("CP", "ISA-0596: key ABSENT from run_context") != text_finding_id("CP", "ISA-0229: retrospective has ZERO findings"))
+
     if verbose:
         print("\nrelease_gate selftest: %d assertion(s), %d FAIL(s)%s"
               % (_ASSERTS[0], len(fails), (": " + ", ".join(fails)) if fails else ""))
@@ -925,6 +1298,12 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--selftest" in argv:
         return _selftest()
+    if "--capital-authority" in argv:
+        i = argv.index("--capital-authority")
+        surface = argv[i + 1] if len(argv) > i + 1 and not argv[i + 1].startswith("--") else "manual"
+        a = capital_run_authority(surface)
+        print(json.dumps(a, indent=2, default=str))
+        return 0 if a["authority"] == "AUTHORISED" else 1
     if "--verify-live" in argv:
         v = verify_live()
         print(json.dumps(v, indent=2))
