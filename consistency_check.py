@@ -227,6 +227,501 @@ def _register_gate_sources(root=None):
     return sorted(out)
 
 
+def pair_binary_fields_have_separate_consumers(root=None, src=None):
+    """ISA-0688 (20-Sep-2026) — the two binary concepts cannot silently collapse back into one.
+
+    ⚑ BY AST over `position_sizing.budget_available`, never by file text (ISA-0446). The defect
+    was one flag answering two questions, so the control asserts the two ANSWERS are computed
+    from two DIFFERENT fields inside the one function that consumes both:
+
+      * the expected-loss population must not be selected on `catalyst_is_binary`;
+      * the concurrent-event population must not be selected on `position_event_risk`.
+
+    A future edit that routes one consumer to the other field re-creates the defect exactly,
+    and it would otherwise be invisible — the numbers would still be numbers.
+    """
+    import ast as _ast
+    root = root or HERE
+    path = os.path.join(root, "position_sizing.py")
+    try:
+        text = src if src is not None else open(path, encoding="utf-8").read()
+        tree = _ast.parse(text)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_binary_fields_have_separate_consumers: position_sizing unreadable (%s)" % exc]
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "budget_available"), None)
+    if fn is None:
+        return ["pair_binary_fields_have_separate_consumers/ISA-0688: "
+                "position_sizing.budget_available not found - the control has nothing to "
+                "measure, which is not the same as a pass (R2.10)."]
+    names = {a.attr for a in _ast.walk(fn) if isinstance(a, _ast.Attribute)}
+    names |= {a.id for a in _ast.walk(fn) if isinstance(a, _ast.Name)}
+    consts = {c.value for c in _ast.walk(fn)
+              if isinstance(c, _ast.Constant) and isinstance(c.value, str)}
+    seen = names | consts
+    errs = []
+    if "consumes_concurrent_event_slot" not in seen:
+        errs.append("pair_binary_fields_have_separate_consumers/ISA-0688: budget_available no "
+                    "longer selects the concurrent-event population on "
+                    "`consumes_concurrent_event_slot`. The cap and the expected-loss budget "
+                    "must ask DIFFERENT questions; a single flag answering both is the defect.")
+    if "commits_budget" not in seen:
+        errs.append("pair_binary_fields_have_separate_consumers/ISA-0688: budget_available no "
+                    "longer selects the expected-loss population on `commits_budget`.")
+    if "n_concurrent_event_slots" not in seen or "expected_loss_population" not in seen:
+        errs.append("pair_binary_fields_have_separate_consumers/ISA-0688: budget_available must "
+                    "PUBLISH both populations separately, so a reader can see where they "
+                    "differ instead of being told they are the same set (R20.1).")
+    return errs
+
+
+def pair_membership_gates_first_claims(root=None, review=None):
+    """ISA-0685 (20-Sep-2026) — every held direct stock carries a membership verdict, and no
+    ADMITTED_UNDECIDED holding holds a first claim.
+
+    ⚑ Reads the review artefact rather than recomputing: a pair that recomputes a verdict is a
+    second membership authority, which is the shape of the defect it polices.
+    """
+    root = root or HERE
+    if review is None:
+        try:
+            import held_position_review as _hpr
+            import capital_destination as _cd_m
+            # ⚑ ISA-0719 (23-Sep-2026): the book is chosen by its DECLARED data_date through the
+            #   one resolver, never by reverse-alphabetical filename ('sep' sorts after 'oct', so
+            #   in October this pair would have reviewed the September book).
+            try:
+                _pf_m = _cd_m.latest_portfolio_path(root=root)
+            except Exception:                                           # noqa: BLE001
+                _pf_m = None
+            if not _pf_m:
+                return [warn("pair_membership_gates_first_claims/ISA-0685: no portfolio_data on "
+                             "disk, so the held population is UNKNOWN. Nothing was checked - "
+                             "which is not agreement (R2.10).")]
+            review = _hpr.review(str(_pf_m), dry_run=True)
+        except Exception as exc:                                        # noqa: BLE001
+            return ["pair_membership_gates_first_claims/ISA-0685: held_position_review "
+                    "unavailable (%s) - UNKNOWN, never PASS" % exc]
+    summ = (review or {}).get("summary") or {}
+    mem = summ.get("membership") or {}
+    if mem.get("state") == "UNAVAILABLE" or not mem:
+        return ["pair_membership_gates_first_claims/ISA-0685: the review published NO "
+                "membership verdict (%s). 'Held' would then be the membership test again."
+                % (mem.get("why") or "absent")]
+    n_exp, n_cls = mem.get("n_expected"), mem.get("n_classified")
+    errs = []
+    if n_exp != n_cls:
+        errs.append("pair_membership_gates_first_claims/ISA-0685: %s of %s held direct stock(s) "
+                    "carry a membership verdict. A name with no verdict is not 'admitted by "
+                    "default' - that inference IS the defect." % (n_cls, n_exp))
+    undec = mem.get("admitted_undecided") or []
+    if undec:
+        errs.append(warn("pair_membership_gates_first_claims/ISA-0685: %d held name(s) are "
+                         "ADMITTED_UNDECIDED - %s (GBP %.2f). Visible, risk-counted and "
+                         "reportable, and NOT a sell signal; they may not create a fill "
+                         "obligation or hold new-capital priority until a decision admits them."
+                         % (len(undec), ", ".join(undec),
+                            float(mem.get("admitted_undecided_gbp") or 0.0))))
+    ex = mem.get("exit_decided") or []
+    if ex:
+        errs.append(warn("pair_membership_gates_first_claims/ISA-0716: %d held name(s) carry a "
+                         "current EXIT decision - %s (GBP %.2f). Visible and risk-counted until "
+                         "sold; no new capital, no fill obligation. The sale's timing is the "
+                         "min-hold / sale-permission route's."
+                         % (len(ex), ", ".join(ex),
+                            float(mem.get("exit_decided_value_gbp") or 0.0))))
+    return errs
+
+
+def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None, weights=None):
+    """ISA-0680 (23-Sep-2026) — ONE risk window across the covariance producers, proven on the held sleeve.
+
+    Two INDEPENDENT derivations of the same sleeve quantities (R5.2): sleeve_risk (joint window,
+    sample covariance: the D27 ceiling, the ISA-0600 gate, the ISA-0708 risk-share authority) and
+    stock_price_fetch.matrix (pairwise rho + population sigma: risk_contribution's review flag, held
+    sigma). ERROR when the WINDOWS differ (weeks used, or a producer not reading
+    isa_policy.RISK_WINDOW_WEEKS) - that is the defect. WARN, published not blended (R6.2), when the
+    sleeve sigma the two imply differs by more than 1% on the same window."""
+    import glob as _glob, math as _m
+    root = root or HERE
+    try:
+        import isa_policy as _pol
+        W = int(_pol.RISK_WINDOW_WEEKS)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_risk_window_single_basis/ISA-0680: isa_policy.RISK_WINDOW_WEEKS unavailable (%s) "
+                "- UNKNOWN, never PASS" % exc]
+    errs = []
+    if ce_window is None:
+        try:
+            import correlation_engine as _ce
+            ce_window = int(_ce.WINDOW_WEEKS)
+        except Exception as exc:                                        # noqa: BLE001
+            return ["pair_risk_window_single_basis/ISA-0680: correlation_engine unavailable (%s)" % exc]
+    if ce_window != W:
+        errs.append("pair_risk_window_single_basis/ISA-0680: correlation_engine window %s != declared %s"
+                    % (ce_window, W))
+    if auth is None or mx is None or weights is None:
+        try:
+            import sleeve_risk as _sr, stock_return_store as _srs, stock_price_fetch as _spf
+            cands = sorted(_glob.glob(os.path.join(root, "portfolio_data_*.json")), key=os.path.getmtime)
+            if not cands:
+                return errs + [warn("pair_risk_window_single_basis/ISA-0680: no portfolio_data file - "
+                                    "nothing was checked, which is not agreement")]
+            pf = json.load(open(cands[-1], encoding="utf-8"))
+            store = _srs.load()
+            auth = auth or _sr.risk_share_authority(store, pf)
+            weights = weights or auth["weights"]
+            mx = mx or _spf.matrix(store, sorted(weights))
+        except Exception as exc:                                        # noqa: BLE001
+            return errs + [warn("pair_risk_window_single_basis/ISA-0680: the sleeve could not be measured "
+                                "(%s: %s) - nothing was compared" % (type(exc).__name__, exc))]
+    aw = (auth.get("window") or {})
+    if (aw.get("weeks_declared") not in (None, W)) or int(aw.get("n_weeks") or 0) != int(mx.get("weeks_used_max") or -1):
+        errs.append("pair_risk_window_single_basis/ISA-0680: sleeve_risk window %s weeks (%s..%s, declared %s) vs "
+                    "stock_price_fetch.matrix %s weeks - two covariance windows on one sleeve"
+                    % (aw.get("n_weeks"), aw.get("first"), aw.get("last"), aw.get("weeks_declared"),
+                       mx.get("weeks_used_max")))
+        return errs
+    sig, rho = mx.get("sigma_ann") or {}, mx.get("rho") or {}
+    names = sorted(t for t in weights if weights[t])
+
+    def _r(a, b):
+        if a == b:
+            return 1.0
+        return rho.get("%s|%s" % (a, b), rho.get("%s|%s" % (b, a)))
+    try:
+        var = sum(weights[a] * weights[b] * _r(a, b) * sig[a] * sig[b] for a in names for b in names)
+        n = int(mx["weeks_used_max"])
+        s_mx = _m.sqrt(max(var, 0.0) * n / (n - 1.0))
+    except Exception as exc:                                            # noqa: BLE001
+        return errs + [warn("pair_risk_window_single_basis/ISA-0680: matrix lacks a sleeve name or pair "
+                            "(%s: %s) - not compared" % (type(exc).__name__, exc))]
+    s_sr = float(auth.get("sleeve_sigma_ann") or 0.0)
+    if s_sr <= 0 or abs(s_mx - s_sr) / s_sr > 0.01:
+        errs.append(warn("pair_risk_window_single_basis/ISA-0680: on the SAME %d-week window the sleeve sigma "
+                         "is %.4f (sleeve_risk, sample cov) vs %.4f (matrix rho x sigma, n/(n-1)); a gap "
+                         "above 1%% is published, never blended (R6.2)" % (n, s_sr, s_mx)))
+    return errs
+
+
+def pair_broker_dealable_destinations(root=None, step9_pre=None, plan=None, resolver=None):
+    """ISA-0607 (23-Sep-2026) — no capital destination sits on a venue the broker cannot deal
+    ONLINE. Checks the newest step9_pre (its `deployable_stack`) and the capital plan of the same
+    month (every allocation row with allocated_gbp > 0) against the ONE broker verdict.
+
+    ⚑ Severity by provenance, not by convenience: an artefact produced AFTER the control existed
+    (step9_pre carries `_meta.broker_dealability`) that still ranks or funds a non-dealable name is
+    an ERROR - the control failed. An artefact that PRE-DATES the control is reported as WARN,
+    naming every name the control would now refuse, because it records history the control never
+    saw (Sep-2026's ZAB.WA GBP 6,578.53 was voided by hand, ISA-0701)."""
+    root = root or HERE
+    try:
+        import broker_dealability as _bd
+        rs = resolver or _bd.Resolver(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_broker_dealable_destinations/ISA-0607: broker_dealability unavailable "
+                "(%s) - UNKNOWN, never PASS" % exc]
+    if step9_pre is None:
+        try:
+            import capital_destination as _cd_b
+            step9_pre, _nm = _cd_b._latest_step9_pre()
+        except Exception as exc:                                        # noqa: BLE001
+            return [warn("pair_broker_dealable_destinations/ISA-0607: no readable step9_pre "
+                         "(%s) - nothing was checked, which is not agreement" % exc)]
+    meta = (step9_pre or {}).get("_meta") or {}
+    post = bool(meta.get("broker_dealability"))
+    label = meta.get("month_label")
+    if plan is None and label:
+        _pp = os.path.join(root, "capital_destination_%s.json" % label)
+        if os.path.exists(_pp):
+            try:
+                plan = json.load(open(_pp, encoding="utf-8"))
+            except Exception:                                           # noqa: BLE001
+                plan = None
+    bad_rank = []
+    for r in (step9_pre or {}).get("deployable_stack") or []:
+        v = rs(r.get("ticker"))
+        if not v.get("admissible_for_new_capital"):
+            bad_rank.append("%s(%s)" % (r.get("ticker"), v.get("state")))
+    bad_alloc, gbp = [], 0.0
+    rows = (((plan or {}).get("sleeve_split") or {}).get("allocation") or {}).get("rows") or []
+    for r in rows:
+        a = float(r.get("allocated_gbp") or 0.0)
+        if a > 0:
+            v = rs(r.get("ticker"))
+            if not v.get("admissible_for_new_capital"):
+                bad_alloc.append("%s GBP %.2f (%s)" % (r.get("ticker"), a, v.get("state")))
+                gbp += a
+    if not bad_rank and not bad_alloc:
+        return []
+    msg = ("pair_broker_dealable_destinations/ISA-0607: %s %s - deployable_stack ranks %d "
+           "non-dealable name(s) [%s]; the %s plan funds %d [%s] (GBP %.2f)"
+           % (label, "(post-control)" if post else "(PRE-DATES the control; history, would now be refused)",
+              len(bad_rank), ", ".join(bad_rank[:8]), label, len(bad_alloc),
+              ", ".join(bad_alloc[:8]), gbp))
+    return [msg if post else warn(msg)]
+
+
+def pair_checkpoint_d_population(root=None, checkpoint=None, run_ctx=None, step9_pre=None, resolver=None):
+    """ISA-0608 (23-Sep-2026) — the recorded Checkpoint-D top-5 is the run's FEASIBLE top-5.
+
+    Post-control (run_context carries summary.capital_destination.pipeline.opportunity_set): a
+    recorded top-5 that differs from the published one is an ERROR. Pre-control artefacts are
+    reported as WARN naming each recorded member that could not have received capital (not on
+    deployable_stack, not t1_qualified, or not broker-dealable) - history, not silently passed."""
+    root = root or HERE
+    try:
+        import capital_destination as _cd_p
+        if step9_pre is None:
+            step9_pre, _ = _cd_p._latest_step9_pre()
+    except Exception as exc:                                            # noqa: BLE001
+        return [warn("pair_checkpoint_d_population/ISA-0608: no readable step9_pre (%s)" % exc)]
+    label = ((step9_pre or {}).get("_meta") or {}).get("month_label")
+    if checkpoint is None:
+        _p = os.path.join(root, "checkpoint_d_%s.json" % label)
+        if not os.path.exists(_p):
+            return []                      # no Checkpoint-D recorded yet this month: nothing to police
+        checkpoint = json.load(open(_p, encoding="utf-8"))
+    top = [str(t).upper() for t in (checkpoint.get("top5") or [])]
+    if run_ctx is None:
+        _rp = os.path.join(root, "run_context_%s.json" % label)
+        run_ctx = json.load(open(_rp, encoding="utf-8")) if os.path.exists(_rp) else {}
+    ops = ((((run_ctx or {}).get("summary") or {}).get("capital_destination") or {})
+           .get("pipeline") or {}).get("opportunity_set")
+    if ops and ops.get("checkpoint_d_top5") is not None:
+        pub = [str(t).upper() for t in ops["checkpoint_d_top5"]]
+        if set(top) != set(pub):
+            return ["pair_checkpoint_d_population/ISA-0608: %s recorded Checkpoint-D top-5 %s is not "
+                    "the run's feasible top-5 %s (%s)" % (label, top, pub, ops.get("opportunity_set_id"))]
+        return []
+    stack = {str(r.get("ticker")).upper(): r for r in (step9_pre or {}).get("deployable_stack") or []}
+    try:
+        import broker_dealability as _bd
+        rs = resolver or _bd.Resolver(root)
+    except Exception:                                                   # noqa: BLE001
+        rs = None
+    bad = []
+    for t in top:
+        r = stack.get(t)
+        why = None
+        if rs is not None and not rs(t).get("admissible_for_new_capital"):
+            why = "not broker-dealable"
+        elif r is None:
+            why = "not on deployable_stack"
+        elif r.get("t1_qualified") is not True:
+            why = "t1_qualified=%r" % (r.get("t1_qualified"),)
+        if why:
+            bad.append("%s (%s)" % (t, why))
+    if bad:
+        return [warn("pair_checkpoint_d_population/ISA-0608: %s Checkpoint-D (PRE-DATES the control) "
+                     "held %d place(s) for names capital could not reach: %s"
+                     % (label, len(bad), ", ".join(bad)))]
+    return []
+
+
+def pair_one_risk_share_authority(root=None, ctx=None):
+    """ISA-0708 (20-Sep-2026) — the D27 ceiling and the review flag quote ONE risk-share id.
+
+    ⚑ R6.2: PUBLISH the disagreement, never blend it. The two implementations were measured
+    side by side on the Sep-2026 book for the first time on 20-Sep-2026 and they differ by up
+    to 3.0pp of sleeve risk (AVGO 28.24% authoritative vs 25.25% locally computed). Before
+    this, one of those numbers decided a capital REFUSAL and the other the REVIEW FLAG, with
+    nothing asserting they agreed.
+
+    Reads the run artefact rather than recomputing: a pair that recomputes is a third
+    implementation of the quantity it is policing.
+    """
+    root = root or HERE
+    doc = ctx
+    if doc is None:
+        import glob as _glob
+        paths = sorted(_glob.glob(os.path.join(root, "run_context_*.json")), reverse=True)
+        paths = [p for p in paths if "DRYRUN" not in os.path.basename(p)]
+        if not paths:
+            return [warn("pair_one_risk_share_authority/ISA-0708: no run_context_*.json on "
+                         "disk, so the two consumers cannot be compared. Nothing was checked "
+                         "- which is not the same as agreement (R2.10).")]
+        try:
+            with open(paths[0], encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except Exception as exc:                                        # noqa: BLE001
+            return ["pair_one_risk_share_authority: %s unreadable (%s)"
+                    % (os.path.basename(paths[0]), exc)]
+    v21 = ((doc.get("summary") or {}).get("v2_1") or (doc.get("v2_1") or {}))
+    rc = (v21.get("risk_contribution") or {})
+    if not rc:
+        return [warn("pair_one_risk_share_authority/ISA-0708: the run artefact carries no "
+                     "risk_contribution block, so the review-flag consumer cannot be read.")]
+    cid = rc.get("risk_share_calc_id")
+    errs = []
+    if not cid:
+        errs.append("pair_one_risk_share_authority/ISA-0708: the review-flag consumer "
+                    "published NO risk_share_calc_id (%s). A risk share quoted without the "
+                    "authority's id was computed somewhere else, and the D27 ceiling that "
+                    "REFUSES entries is using a different one."
+                    % (rc.get("risk_share_authority_unavailable") or "no reason recorded"))
+    div = rc.get("risk_share_divergence") or []
+    if div:
+        worst = max(div, key=lambda d: abs(d.get("delta") or 0))
+        errs.append(warn(
+            "pair_one_risk_share_authority/ISA-0708: the two risk-share implementations "
+            "differ on %d name(s); worst %s, authoritative %.4f vs locally computed %.4f "
+            "(delta %+.4f). The authoritative figure is what decides; the gap is PUBLISHED "
+            "rather than blended (R6.2) and closing it is ISA-0708's remaining work."
+            % (len(div), worst["ticker"], worst["authoritative"],
+               worst["locally_computed"], worst["delta"])))
+    return errs
+
+
+def pair_single_binary_budget_authority(root=None, src=None):
+    """ISA-0706 (20-Sep-2026) — only the authoritative home may call the L1 budget primitive.
+
+    ⚑ BY AST, NEVER BY FILE TEXT (ISA-0446): a mention in prose must not satisfy a check. The
+    defect was not that the second copy was wrong in principle — it was that it existed. A
+    module that assembles its own binary rows and hands them to `budget_available*` IS a second
+    sizing authority, whatever it computes, and on the Sep-2026 book the two disagreed:
+    0.305593%/1.194407% from the declared home against a WITHHELD budget from the copy, which
+    made every `vci_size_pct` UNEVALUATED.
+    """
+    import ast as _ast
+    root = root or HERE
+    home = "position_sizing"
+    primitives = {"budget_available", "budget_available_reported"}
+    errs = []
+    try:
+        import framework_integrity as _fi
+        files = _fi.source_files(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_single_binary_budget_authority: source enumeration unavailable (%s) - R2.9"
+                % exc]
+    def _is_test_scope(fn_name):
+        n = str(fn_name or "")
+        return n.startswith("_selftest") or n.startswith("selftest") or n.startswith("test_")
+
+    for path in files:
+        mod = os.path.splitext(os.path.basename(path))[0]
+        # ⚑ THE EXEMPTIONS ARE NAMED, not silent. `position_sizing` IS the home. Test scopes
+        #   are exempt because a fixture that calls the primitive directly is proving the
+        #   primitive, not deciding capital — and `held_position_review._selftest` does
+        #   exactly that, deliberately (its MUST-FIRE for the priceable branch). A production
+        #   caller, including a helper a production path reaches, is NOT exempt.
+        if mod in (home, "consistency_check") or mod.startswith("test_"):
+            continue
+        try:
+            tree = _ast.parse(open(path, encoding="utf-8").read())
+        except Exception:                                               # noqa: BLE001
+            continue
+        scopes = {}
+        for fn in _ast.walk(tree):
+            if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                for sub in _ast.walk(fn):
+                    scopes.setdefault(id(sub), fn.name)
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            if _is_test_scope(scopes.get(id(node))):
+                continue
+            f = node.func
+            name = (f.attr if isinstance(f, _ast.Attribute)
+                    else (f.id if isinstance(f, _ast.Name) else None))
+            if name in primitives:
+                errs.append(
+                    "pair_single_binary_budget_authority/ISA-0706: %s line %d calls %s() "
+                    "directly. The held-binary L1 budget has ONE home - "
+                    "position_sizing.held_binary_budget - and every consumer must take its "
+                    "result and its calc_id. A caller that assembles its own rows is a second "
+                    "sizing authority even when it happens to agree."
+                    % (mod, getattr(node, "lineno", -1), name))
+    return errs
+
+
+def pair_held_issuer_coverage(root=None, month=None, report_fn=None):
+    """ISA-0713 (20-Sep-2026) — every held direct stock carries an issuer-specific evidence
+    disposition for the current month.
+
+    ⚑ TWO SEVERITIES, AND THE DIFFERENCE IS DELIBERATE (R2.10 in both directions):
+      * the artefact EXISTS and is short of the broker book -> ERROR. A coverage document that
+        names 5 of 6 holdings and reads as a result is the exact defect: "no matching email" is
+        not "no issuer news", and a missing name is never "no news".
+      * the artefact is ABSENT -> WARN naming ISA-0713 and the GBP at stake. The retrieval
+        stage is not yet wired into a run surface, so a contract that has never had the chance
+        to run has not been breached - manufacturing a RED for the months before the capability
+        existed would be a false accusation, and a habitually red control is a control nobody
+        reads. It is still reported by name and by GBP, because silence is what this item
+        exists to end.
+
+    ⚑ The control that actually protects capital is NOT this pair - it is
+    `issuer_freshness.capital_disposition`, which BLOCKS new capital for any name whose issuer
+    evidence is unestablished. This pair is observability over that control's input.
+    """
+    root = root or HERE
+    try:
+        import issuer_freshness as _if
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_held_issuer_coverage: issuer_freshness unavailable (%s) - R2.9" % exc]
+    rep = (report_fn or _if.report)(month, root)
+    st = rep.get("state")
+    if st == "COMPLETE":
+        return []
+    if st == "NO_PORTFOLIO":
+        return ["pair_held_issuer_coverage: " + rep["why"]]
+    if st == "NO_REVIEWS":
+        # ISA-0546: severity is marked AT THE POINT OF PRODUCTION, not by a string prefix a
+        # reader has to parse. `warn()` is the declared marker; an unmarked return is ERROR.
+        return [warn("pair_held_issuer_coverage/ISA-0713: " + rep["why"])]
+    cov = rep.get("coverage") or {}
+    return ["pair_held_issuer_coverage/ISA-0713: %d of %d held direct stock(s) carry an "
+            "issuer-specific disposition for %s; MISSING %s (GBP %.2f). A missing name is an "
+            "ERROR, not 'no news' - and the mid-month brief cannot certify per-holding coverage."
+            % (cov.get("n_produced", 0), cov.get("n_expected", 0), rep.get("month"),
+               ", ".join(cov.get("missing") or []), cov.get("missing_gbp") or 0.0)]
+
+
+def pair_vci_decision_captured(root=None, ledger_path=None, glob_fn=None):
+    """ISA-0686 (20-Sep-2026) — every capital-effective name in every VCI deploy/run artefact
+    ON DISK has a decision-ledger entry on the vci route.
+
+    R5.1 at the boundary, and deliberately RETROSPECTIVE: the defect was not that one month
+    failed, it was that nothing ever looked. The sleeve's first ever deployment (QBTS,
+    09-Aug-2026) reconciled as `bought_outside_framework` because the deploy artefact and the
+    ledger had no contract between them; this pair is that contract, and it reads the months
+    already written rather than waiting for the next one.
+
+    ⚑ It measures CAPITAL-EFFECTIVE names only (deploy-eligible, auto-deployable). A PASS or a
+    manual-confirm HOLD is captured too but its absence is backlog, not a capital breach —
+    a control that fires on everything is a control nobody reads.
+    """
+    import glob as _glob
+    root = root or HERE
+    errs = []
+    try:
+        import decision_ledger as _dl
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_vci_decision_captured: decision_ledger unavailable (%s) - R2.9" % exc]
+    ledger_path = ledger_path or _dl.default_path(root)
+    finder = glob_fn or (lambda pat: sorted(_glob.glob(os.path.join(root, pat))))
+    files = finder("vci_deploy_*.json") + finder("vci_run_*.json")
+    if not files:
+        # R2.10 — "nothing to check" and "checked and clean" must not look the same.
+        return ["pair_vci_decision_captured: NO vci_deploy_*/vci_run_* artefact found under "
+                "%s - the check found nothing to measure, which is not the same as a pass"
+                % root]
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except Exception as exc:                                        # noqa: BLE001
+            errs.append("pair_vci_decision_captured: %s unreadable (%s)"
+                        % (os.path.basename(f), exc))
+            continue
+        auth = ((doc.get("trusted_build") or {}).get("authority")
+                if isinstance(doc, dict) else None) or "AUTHORISED"
+        chk = _dl.assert_vci_captured(ledger_path, doc, source_path=f, authority=auth)
+        if not chk["ok"]:
+            errs.append("pair_vci_decision_captured: " + chk["why"])
+    return errs
+
+
 def pair_register_updated_after_build(root=None, today=None, items=None, since_ts=None):
     """ISA-0321. A build that did not touch the register FAILS the battery.
 
@@ -4809,6 +5304,45 @@ def pair_orientation_fields(ctx_text=None):
     return []
 
 
+def pair_score_definition_declared(root=None, current=None, registry=None):
+    """ISA-0619 / ISA-0616 (24-Sep-2026) - SCORES FROM DIFFERENT DEFINITIONS ARE NEVER LIKE-FOR-LIKE.
+
+    1. The executable scoring identity (score_definition.current_identity: normalised AST of the
+       scoring call graph + the constants it references) must be DECLARED in
+       scoring_config.SCORE_DEFINITIONS as the one CURRENT definition. A code change that alters
+       scoring semantics without a declaration is an ERROR even when no config value moved.
+    2. Exactly one CURRENT definition.
+    3. No parallel C-1 authority: the retired persistence test must stay retired."""
+    errs = []
+    try:
+        import score_definition as _sd
+        cur = current or _sd.current_identity(root)
+        reg = registry if registry is not None else _sd.registry(root)
+    except Exception as exc:                                               # noqa: BLE001
+        return ["pair_score_definition_declared/ISA-0619: identity unavailable (%s) - UNKNOWN, "
+                "never PASS (R4.3)" % exc]
+    currents = [h for h, d in (reg or {}).items() if (d or {}).get("status") == "CURRENT"]
+    if len(currents) != 1:
+        errs.append("pair_score_definition_declared/ISA-0619: %d CURRENT score definitions declared "
+                    "(need exactly 1): %s" % (len(currents), currents))
+    if cur.get("hash") not in (reg or {}):
+        errs.append("pair_score_definition_declared/ISA-0619: executable scoring identity %s is NOT "
+                    "declared in scoring_config.SCORE_DEFINITIONS - the scoring code changed without "
+                    "a definition change. Declare it (new id, compatible_with stated) before any "
+                    "score is compared across the boundary." % cur.get("hash"))
+    elif cur.get("hash") not in currents:
+        errs.append("pair_score_definition_declared/ISA-0619: executable identity %s is declared but "
+                    "not CURRENT (status %s)" % (cur.get("hash"), reg[cur["hash"]].get("status")))
+    try:
+        import t1_gates as _t1
+        if _t1.entry_stability("ANY").get("verdict") != "RETIRED_ISA0616":
+            errs.append("pair_score_definition_declared/ISA-0616: t1_gates.entry_stability is "
+                        "live again - a parallel persistence authority beside C-1")
+    except Exception as exc:                                               # noqa: BLE001
+        errs.append("pair_score_definition_declared/ISA-0616: t1_gates unavailable (%s)" % exc)
+    return errs
+
+
 def pair_one_register(root=None):
     """R7.1 — `Dashboard/state/isa_items.jsonl` has exactly one writer.
 
@@ -4914,7 +5448,92 @@ def suite_census(root=None) -> list:
                 rows.append({"module": fn[:-3], "fn": name,
                              "convention": _selftest_convention(top[name])})
                 break
+    # ⚑ ISA-0729 (23-Sep-2026) — THE SCRIPT BATTERY IS IN THE DENOMINATOR. The census covered module
+    #   selftests only; the standalone scripts (tests_jul2026/*.py and root test_*.py with no selftest)
+    #   reached no gate, and on TB-2026-09-23-03 at least nine were red while the census read 97/97.
+    #   Every script on disk is now either a RELEASE row (run, exit code read, write-isolated) or
+    #   DECLARED out with a reason in SCRIPT_CENSUS_FILE; an undeclared script, or a RELEASE entry
+    #   missing from disk, is a non-GREEN row - so omitting a release test turns the census RED.
+    rows.extend(script_census(root)["rows"])
     return rows
+
+
+SCRIPT_CENSUS_FILE = "script_suite_census.json"
+SCRIPT_DIRS = ("tests_jul2026",)
+SCRIPT_CLASSES = ("RELEASE", "HISTORICAL_SUPERSEDED", "MANUAL_DIAGNOSTIC", "TOOL")
+SCRIPT_ROW_PREFIX = "script:"
+
+
+def _script_candidates(root) -> list:
+    """Every standalone script the census must classify: each *.py in SCRIPT_DIRS, and each top-level
+    test_*.py that carries no top-level selftest (one with a selftest is already a module row)."""
+    import ast as _ast
+    out = []
+    for d in SCRIPT_DIRS:
+        p = os.path.join(root, d)
+        if os.path.isdir(p):
+            out += ["%s/%s" % (d, fn) for fn in sorted(os.listdir(p))
+                    if fn.endswith(".py") and os.path.isfile(os.path.join(p, fn))]
+    for fn in sorted(os.listdir(root)):
+        if not (fn.startswith("test_") and fn.endswith(".py")):
+            continue
+        try:
+            tree = _ast.parse(open(os.path.join(root, fn), encoding="utf-8").read())
+        except (OSError, SyntaxError, ValueError):
+            out.append(fn)
+            continue
+        if not any(isinstance(n, _ast.FunctionDef) and n.name in ("_selftest", "selftest") for n in tree.body):
+            out.append(fn)
+    return out
+
+
+def script_census(root=None) -> dict:
+    """ISA-0729 — the declared classification of the standalone script battery, read against disk.
+
+    -> {"rows": [census rows], "release": [...], "excluded": {path: class}, "unclassified": [...],
+        "absent": [...], "manifest_state": "OK"|"ABSENT"|"UNREADABLE"}
+    RELEASE rows are run by record_suite_status; UNCLASSIFIED/ABSENT/UNREADABLE rows can never be GREEN.
+    A declared exclusion needs a reason (R14.5 - 'not release' is evidence, not silence)."""
+    root = root or HERE
+    cands = _script_candidates(root)
+    mp = os.path.join(root, SCRIPT_CENSUS_FILE)
+    decl, mstate = {}, "OK"
+    if os.path.exists(mp):
+        try:
+            with open(mp, encoding="utf-8") as fh:
+                decl = (json.load(fh) or {}).get("scripts") or {}
+        except Exception:                                             # noqa: BLE001
+            decl, mstate = {}, "UNREADABLE"
+    else:
+        mstate = "ABSENT"
+    rows, release, excluded, unclassified = [], [], {}, []
+    if mstate == "UNREADABLE":
+        rows.append({"module": SCRIPT_ROW_PREFIX + SCRIPT_CENSUS_FILE, "fn": None, "kind": "script_manifest",
+                     "convention": None, "why": "the script classification is unreadable - UNKNOWN, never GREEN (R4.3)"})
+    for c in cands:
+        d = decl.get(c) or {}
+        cls = d.get("class")
+        if cls == "RELEASE":
+            release.append(c)
+            rows.append({"module": SCRIPT_ROW_PREFIX + c, "fn": None, "kind": "script", "path": c,
+                         "convention": "EXIT_CODE"})
+        elif cls in SCRIPT_CLASSES and str(d.get("reason") or "").strip():
+            excluded[c] = cls
+        else:
+            unclassified.append(c)
+            rows.append({"module": SCRIPT_ROW_PREFIX + c, "fn": None, "kind": "script_unclassified", "path": c,
+                         "convention": None,
+                         "why": ("ISA-0729: %s is on disk and not declared in %s (a class from %s, with a reason for "
+                                 "any non-RELEASE class) - an undeclared script is unobserved, never GREEN"
+                                 % (c, SCRIPT_CENSUS_FILE, "/".join(SCRIPT_CLASSES)))})
+    absent = sorted(p for p, d in decl.items() if (d or {}).get("class") == "RELEASE" and p not in cands)
+    for p in absent:
+        rows.append({"module": SCRIPT_ROW_PREFIX + p, "fn": None, "kind": "script_absent", "path": p,
+                     "convention": None,
+                     "why": "ISA-0729: declared RELEASE in %s but not on disk - a release test that vanished is RED"
+                            % SCRIPT_CENSUS_FILE})
+    return {"rows": rows, "release": release, "excluded": excluded, "unclassified": unclassified,
+            "absent": absent, "manifest_state": mstate, "n_candidates": len(cands)}
 
 
 _SUITE_CHILD = r"""
@@ -4966,6 +5585,54 @@ print("\\n@@SUITE@@" + json.dumps(res))
 """
 
 
+_SCRIPT_CHILD = r"""
+import sys, json, os, runpy, io, contextlib
+sys.path.insert(0, os.getcwd())
+path = sys.argv[1]
+res = {"module": "script:" + path}
+if os.environ.get("ISA_SUITE_GUARD") == "1":
+    import tempfile as _tf
+    sys.path.insert(1, os.environ.get("ISA_GUARD_PATH", ""))
+    import isa_write_guard as _wg
+    _wg.install([os.getcwd()] + [x for x in os.environ.get("ISA_SUITE_PROTECT", "").split(os.pathsep) if x],
+                [_tf.gettempdir()])
+full = os.path.join(os.getcwd(), path)
+sys.argv = [full]
+sys.path.insert(0, os.path.dirname(full))
+rc = 0
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        try:
+            runpy.run_path(full, run_name="__main__")
+        except SystemExit as e:
+            c = e.code
+            rc = 0 if c in (None, 0) else (c if isinstance(c, int) else 1)
+    res.update(rc=rc, state="GREEN" if rc == 0 else "RED")
+    if rc:
+        res["why"] = ("exit %s; tail: %s" % (rc, " | ".join(buf.getvalue().strip().splitlines()[-3:])))[:300]
+except ModuleNotFoundError as e:
+    missing = (e.name or "").split(".")[0]
+    local = os.path.exists(os.path.join(os.getcwd(), missing + ".py"))
+    res.update(rc=1, state=("RAISED" if local or not missing else "ENVIRONMENT_UNKNOWN"),
+               why=("ModuleNotFoundError: %s" % e)[:200])
+except BaseException as e:
+    res.update(rc=1, state="RAISED", why=("%s: %s | %s" % (type(e).__name__, e,
+               " | ".join(buf.getvalue().strip().splitlines()[-2:])))[:300])
+if os.environ.get("ISA_SUITE_GUARD") == "1":
+    try:
+        _m = _wg.manifest()
+        if _m["n_blocked"]:
+            res["write_escapes_blocked"] = [b["path"] for b in _m["blocked"]][:10]
+            if res.get("state") == "GREEN":
+                res.update(state="WRITE_ESCAPE_BLOCKED",
+                           why="ISA-0704/0729: the script attempted %d write(s) into its own tree (refused)" % _m["n_blocked"])
+    except Exception:
+        pass
+sys.__stdout__.write("\n@@SUITE@@" + json.dumps(res) + "\n")
+"""
+
+
 def _run_one_suite(row, root, timeout_s):
     import subprocess, sys as _sys, time as _time
     t0 = _time.time()
@@ -4979,9 +5646,14 @@ def _run_one_suite(row, root, timeout_s):
     except Exception:                                                   # noqa: BLE001
         _wg, _snap0 = None, None
     try:
-        p = subprocess.run([_sys.executable, "-c", _SUITE_CHILD, row["module"], row["fn"],
-                            row["convention"]], cwd=root, capture_output=True, text=True,
-                           timeout=timeout_s, env=dict(os.environ, ISA_SUITE_GUARD="1", ISA_GUARD_PATH=HERE))
+        if row.get("kind") == "script":
+            # ISA-0729: a standalone script, run as __main__ under the same guard; its exit code is the verdict.
+            _argv = [_sys.executable, "-c", _SCRIPT_CHILD, row["path"]]
+        else:
+            _argv = [_sys.executable, "-c", _SUITE_CHILD, row["module"], row["fn"], row["convention"]]
+        p = subprocess.run(_argv, cwd=root, capture_output=True, text=True, timeout=timeout_s,
+                           env=dict(os.environ, ISA_SUITE_GUARD="1", ISA_GUARD_PATH=HERE, ISA_SUITE_CENSUS="1",
+                                    MPLBACKEND=os.environ.get("MPLBACKEND", "Agg")))
         tag = p.stdout.rsplit("@@SUITE@@", 1)
         if len(tag) == 2:
             out = json.loads(tag[1].strip().splitlines()[0])
@@ -5023,6 +5695,26 @@ def _source_roll(root):
 SUITE_STATUS_CADENCE_DAYS = 7            # ISA-0696: the weekly census cadence (next_due)
 _DATA_EXTS = (".json", ".jsonl", ".csv", ".xlsx", ".pdf", ".md", ".txt")
 _DATA_EXCLUDE = ("suite_status.json", "suite_census_history.jsonl")
+
+
+def _census_identity(root):
+    """ISA-0746: release_gate.census_roll - {"roll", "components"}; roll None when unavailable."""
+    try:
+        import release_gate as _rg
+        return _rg.census_roll(root)
+    except Exception as exc:                                         # noqa: BLE001
+        return {"roll": None, "components": {}, "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _reusable_prior(old_doc, source_roll, census_roll):
+    """ISA-0746 — rows of a previous record may be RE-USED only when it was recorded against the
+    same source AND the same full census identity (every signed surface a selftest reads). A
+    record made under the source-only binding (no census_roll) is never re-used."""
+    if not isinstance(old_doc, dict) or source_roll is None or census_roll is None:
+        return {}
+    if old_doc.get("source_roll") != source_roll or old_doc.get("census_roll") != census_roll:
+        return {}
+    return {r["module"]: r for r in old_doc.get("rows", []) if isinstance(r, dict) and r.get("module")}
 
 
 def _config_roll(root):
@@ -5107,6 +5799,7 @@ def suite_status_state(root=None, *, now=None, status=None, census=None, live=No
         except Exception as e:                                        # noqa: BLE001
             return dict(out, state="ABSENT", why="suite status unreadable (%s) - UNKNOWN, never usable" % e)
     live = live if live is not None else {"source_roll": _source_roll(root), "config_roll": _config_roll(root),
+                                          "census_roll": _census_identity(root).get("roll"),
                                           "build_id": _trusted_build_id(root), "data_snapshot": data_snapshot(root)}
     ts = status.get("as_of_ts") or ((status.get("as_of") or "") + "T00:00:00")
     try:
@@ -5124,7 +5817,9 @@ def suite_status_state(root=None, *, now=None, status=None, census=None, live=No
     mism = []
     # build_id is recorded but not compared: a certification census is recorded in the Candidate BEFORE
     # promotion stamps the new id, and the receipt signs exactly these two rolls (verify_live owns the id).
-    for key in ("source_roll", "config_roll"):
+    # ISA-0746: census_roll is compared whenever the caller's view of the tree carries it (always,
+    #   on the real path); a status without it was recorded under the source-only binding.
+    for key in ("source_roll", "config_roll") + (("census_roll",) if "census_roll" in live else ()):
         if status.get(key) is None or live.get(key) is None or status.get(key) != live.get(key):
             mism.append({"field": key, "recorded": str(status.get(key))[:16], "live": str(live.get(key))[:16]})
     iso = status.get("isolation") or {}
@@ -5186,13 +5881,13 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
     by_mod = {r["module"]: r for r in census}
     want = list(modules) if modules is not None else [r["module"] for r in census]
     roll = _source_roll(root)
+    _cid = _census_identity(root)                     # ISA-0746: the full signed-surface identity
     out = os.path.join(root, SUITE_STATUS_REL)
     prior = {}
     if merge and os.path.exists(out):
         try:
             _old = json.load(open(out, encoding="utf-8"))
-            if _old.get("source_roll") == roll and roll is not None:
-                prior = {r["module"]: r for r in _old.get("rows", [])}
+            prior = _reusable_prior(_old, roll, _cid.get("roll"))
         except (OSError, ValueError):
             prior = {}
     rows = dict(prior)
@@ -5207,7 +5902,13 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
             rows[m] = {"module": m, "rc": None, "state": "ABSENT",
                        "why": "named but no top-level selftest found on disk"}
             continue
-        if not r.get("fn"):
+        if r.get("kind") == "script_unclassified":
+            rows[m] = {"module": m, "rc": None, "state": "UNCLASSIFIED", "why": r.get("why")}
+            continue
+        if r.get("kind") in ("script_absent", "script_manifest"):
+            rows[m] = {"module": m, "rc": None, "state": "ABSENT", "why": r.get("why")}
+            continue
+        if r.get("kind") != "script" and not r.get("fn"):
             rows[m] = {"module": m, "rc": None, "state": "RAISED", "why": r.get("parse_error")}
             continue
         rows[m] = _run_one_suite(r, root, timeout_s)
@@ -5221,6 +5922,9 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
            "as_of_ts": _dt.datetime.now().isoformat(timespec="seconds"),
            "n_red": sum(1 for r in ordered if r["state"] != "GREEN"),
            "source_roll": roll,
+           # ⚑ ISA-0746 (24-Sep-2026) — the census is bound to EVERY signed surface a selftest reads.
+           "census_roll": _cid.get("roll"),
+           "census_components": _cid.get("components"),
            # ⚑ ISA-0696 (17-Sep-2026) — the identity and provenance a capital preflight binds to.
            "config_roll": _config_roll(root),
            "build_id": _trusted_build_id(root),
@@ -5242,6 +5946,8 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
            "suite_secs_total": round(sum(float(r.get("secs") or 0) for r in ordered), 1),
            "census": {"n_on_disk": len(census), "n_recorded": len(ordered),
                       "complete": all(c["module"] in rows for c in census)},
+           # ISA-0729: what the script battery contributed, and what was DECLARED out of it (with why).
+           "script_census": {k: v for k, v in script_census(root).items() if k != "rows"},
            "basis": ("R5.7 - a red suite is an incident. ISA-0683: the denominator is every suite on "
                      "disk (suite_census), each run in its own process and read by its derived "
                      "convention, bound to source_roll. Recorded so the battery can assert it "
@@ -5417,6 +6123,20 @@ def pair_red_suite_is_an_incident(status=None, root=None, today=None, census=Non
             errs.append(f"R5.7/ISA-0696: the suite status was recorded against config "
                         f"{str(status.get('config_roll'))[:12]} and the tree's config is {str(_cr)[:12]}. "
                         f"A config change can move a data-dependent suite - re-record the census.")
+    # ⚑ ISA-0746 — the census must have been recorded against the SAME signed surfaces (source,
+    #   config, capability registry, rules, atlas, run surfaces), not only the same source.
+    if current_roll is None:
+        _cid = _census_identity(root)
+        if status.get("census_roll") is None:
+            errs.append("R5.7/ISA-0746: the suite status carries no census_roll - it was recorded under "
+                        "the source-only binding, which re-used GREEN rows across a registry-only change "
+                        "(TB-24-02). Re-record the census in the Candidate.")
+        elif _cid.get("roll") is None or status.get("census_roll") != _cid.get("roll"):
+            _rc, _nc = status.get("census_components") or {}, _cid.get("components") or {}
+            _chg = sorted(k for k in set(_rc) | set(_nc) if _rc.get(k) != _nc.get(k)) or ["UNAVAILABLE"]
+            errs.append("R5.7/ISA-0746: the suite status was recorded against other signed surfaces "
+                        "(changed since the census: %s). A selftest that reads them is not evidenced "
+                        "by rows recorded before the change - re-record the census." % ", ".join(_chg))
     roll = current_roll if current_roll is not None else _source_roll(root)
     if roll is not None and status.get("source_roll") != roll:
         errs.append(f"R5.7/ISA-0683: the suite status was recorded against source "
@@ -5447,6 +6167,15 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_return_store_identity_unique", pair_return_store_identity_unique())  # ISA-0549 (16-Sep-2026)
     errs += _tally("pair_deliverable_findings_registered", pair_deliverable_findings_registered())  # ISA-0473 (16-Sep-2026)
     errs += _tally("pair_retrospectives_ingested", pair_retrospectives_ingested())       # ISA-0229 / ISA-0231 (12-Aug-2026)
+    errs += _tally("pair_vci_decision_captured", pair_vci_decision_captured())   # ISA-0686 (20-Sep-2026)
+    errs += _tally("pair_held_issuer_coverage", pair_held_issuer_coverage())     # ISA-0713 (20-Sep-2026)
+    errs += _tally("pair_single_binary_budget_authority", pair_single_binary_budget_authority())  # ISA-0706
+    errs += _tally("pair_one_risk_share_authority", pair_one_risk_share_authority())          # ISA-0708
+    errs += _tally("pair_binary_fields_have_separate_consumers", pair_binary_fields_have_separate_consumers())  # ISA-0688
+    errs += _tally("pair_membership_gates_first_claims", pair_membership_gates_first_claims())  # ISA-0685
+    errs += _tally("pair_broker_dealable_destinations", pair_broker_dealable_destinations())  # ISA-0607
+    errs += _tally("pair_risk_window_single_basis", pair_risk_window_single_basis())      # ISA-0680
+    errs += _tally("pair_checkpoint_d_population", pair_checkpoint_d_population())  # ISA-0608
     errs += _tally("pair_rationale_ledger", pair_rationale_ledger())              # R12.3 / P2.5 (12-Aug-2026)
     errs += _tally("pair_archive_backlog", pair_archive_backlog())               # ageing policy (12-Aug-2026)
     errs += _tally("pair_run_surface_basis", pair_run_surface_basis())             # ISA-0211 (12-Aug-2026)
@@ -5475,6 +6204,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_discussion_preflight_wired", pair_discussion_preflight_wired())             # R12.4 - ISA-0630
     errs += _tally("pair_orientation_fields", pair_orientation_fields())                     # R12.1 / R4.4 - ISA-0630
     errs += _tally("pair_one_register", pair_one_register())                           # R7.1 - ISA-0627
+    errs += _tally("pair_score_definition_declared", pair_score_definition_declared())  # ISA-0619/0616 (24-Sep-2026)
     errs += _tally("pair_red_suite_is_an_incident", pair_red_suite_is_an_incident())               # R5.7 - ISA-0627 / ISA-0625
     errs += _tally("pair_email_absent_notice_contradicts_run_context", pair_email_absent_notice_contradicts_run_context())  # ISA-0618
     errs += _tally("pair_framework_integrity_preflight_reaches_run_context", pair_framework_integrity_preflight_reaches_run_context())  # ISA-0596
@@ -6291,7 +7021,83 @@ def _selftest():
         "`out` still returned - so this change is additive, never a behaviour change (R4.7)"
 
     _suite_census_controls()
+    _script_census_controls()
+    _risk_window_pair_controls()
     print("consistency_check SELF-TEST OK (growth pairs + 10 monthly pairs + register pairs)")
+
+
+def _risk_window_pair_controls():
+    """ISA-0680 — the single-basis pair, shown able to fire and able to pass."""
+    import isa_policy as _pol
+    W = int(_pol.RISK_WINDOW_WEEKS)
+    w = {"A": 0.5, "B": 0.5}
+    auth = {"window": {"weeks_declared": W, "n_weeks": W, "first": "x", "last": "y"},
+            "sleeve_sigma_ann": 0.30 * (((1 + 0.5) / 2.0) ** 0.5) * ((W / (W - 1.0)) ** 0.5)}
+    mx = {"weeks_used_max": W, "sigma_ann": {"A": 0.30, "B": 0.30}, "rho": {"A|B": 0.5}}
+    assert pair_risk_window_single_basis(auth=auth, mx=mx, ce_window=W, weights=w) == [], \
+        "ISA-0680 POSITIVE CONTROL: one window, agreeing sigma -> the pair is silent"
+    bad = pair_risk_window_single_basis(auth=dict(auth, window=dict(auth["window"], n_weeks=158)),
+                                        mx=mx, ce_window=W, weights=w)
+    assert bad and "two covariance windows" in str(bad[0]), \
+        "ISA-0680 MUST-FIRE / NEGATIVE CONTROL: a 158-week sleeve_risk window beside a %d-week matrix is an ERROR" % W
+    assert pair_risk_window_single_basis(auth=auth, mx=mx, ce_window=157, weights=w), \
+        "ISA-0680 NEGATIVE CONTROL: correlation_engine on another window is an ERROR"
+    drift = pair_risk_window_single_basis(auth=dict(auth, sleeve_sigma_ann=0.40), mx=mx, ce_window=W, weights=w)
+    assert drift and _norm(drift[0])["severity"] == WARN, \
+        "ISA-0680: same window, disagreeing sigma -> published as WARN, never blended"
+
+
+def _script_census_controls():
+    """ISA-0729 — the script battery in the denominator, each state shown able to fire, with a positive
+    comparator beside every negative (a census that is always RED would pass a negative-only test)."""
+    import tempfile
+    td = tempfile.mkdtemp()
+    os.makedirs(os.path.join(td, "tests_jul2026"))
+    scripts = {
+        "tests_jul2026/s_ok.py": "import sys\nprint('PASS x')\nsys.exit(0)\n",
+        "tests_jul2026/s_bad.py": "import sys\nprint('FAIL x')\nsys.exit(1)\n",
+        "tests_jul2026/s_raise.py": "assert False, 'boom'\n",
+        "tests_jul2026/s_undeclared.py": "print('ok')\n",
+        "tests_jul2026/s_hist.py": "import sys\nsys.exit(1)\n",
+        "tests_jul2026/s_writer.py": ("import os\nopen(os.path.join(os.path.dirname(os.path.dirname("
+                                     "os.path.abspath(__file__))), 'leak.json'), 'w').write('x')\n"),
+        "test_root_script.py": "print('PASS root')\n",
+        "test_has_selftest.py": "def _selftest():\n    return 0\n",
+    }
+    for p, src in scripts.items():
+        open(os.path.join(td, p), "w", encoding="utf-8").write(src)
+    decl = {p: {"class": "RELEASE", "reason": "fixture"} for p in
+            ("tests_jul2026/s_ok.py", "tests_jul2026/s_bad.py", "tests_jul2026/s_raise.py",
+             "tests_jul2026/s_writer.py", "test_root_script.py", "tests_jul2026/s_gone.py")}
+    decl["tests_jul2026/s_hist.py"] = {"class": "HISTORICAL_SUPERSEDED", "reason": "re-homed"}
+    json.dump({"scripts": decl}, open(os.path.join(td, SCRIPT_CENSUS_FILE), "w", encoding="utf-8"))
+    sc = script_census(td)
+    assert "test_has_selftest.py" not in _script_candidates(td), \
+        "ISA-0729: a root test_*.py WITH a selftest is a module row, never also a script row"
+    assert sc["excluded"] == {"tests_jul2026/s_hist.py": "HISTORICAL_SUPERSEDED"}, \
+        "ISA-0729 POSITIVE CONTROL: a declared, reasoned exclusion leaves the denominator - got %s" % sc["excluded"]
+    assert sc["unclassified"] == ["tests_jul2026/s_undeclared.py"] and sc["absent"] == ["tests_jul2026/s_gone.py"], \
+        "ISA-0729 NEGATIVE CONTROL: an undeclared script and a vanished RELEASE entry are named - got %s / %s" \
+        % (sc["unclassified"], sc["absent"])
+    doc = record_suite_status(root=td, timeout_s=60)
+    st = {r["module"]: r["state"] for r in doc["rows"]}
+    P = SCRIPT_ROW_PREFIX
+    assert st[P + "tests_jul2026/s_ok.py"] == "GREEN" and st[P + "test_root_script.py"] == "GREEN", \
+        "ISA-0729 POSITIVE CONTROL: a clean RELEASE script (tests dir or root) is GREEN - got %s" % st
+    assert st[P + "tests_jul2026/s_bad.py"] == "RED" and st[P + "tests_jul2026/s_raise.py"] in ("RED", "RAISED"), \
+        "ISA-0729 NEGATIVE CONTROL: a failing RELEASE script is not GREEN - got %s" % st
+    assert st[P + "tests_jul2026/s_undeclared.py"] == "UNCLASSIFIED" and st[P + "tests_jul2026/s_gone.py"] == "ABSENT", \
+        "ISA-0729 MUST-FIRE: omission (undeclared or vanished) is a non-GREEN row - got %s" % st
+    assert st[P + "tests_jul2026/s_writer.py"] != "GREEN" and not os.path.exists(os.path.join(td, "leak.json")), \
+        "ISA-0729 MUST-FIRE: a RELEASE script writing its own tree is refused and not GREEN - got %s" \
+        % st[P + "tests_jul2026/s_writer.py"]
+    assert P + "tests_jul2026/s_hist.py" not in st, "ISA-0729: a declared exclusion is not run"
+    _state = suite_status_state(td, status=doc, census=suite_census(td),
+                                live={"source_roll": doc["source_roll"], "config_roll": doc["config_roll"],
+                                      "build_id": None, "data_snapshot": doc["data_snapshot"]})
+    assert _state["state"] == "FRESH_RED", \
+        "ISA-0729 MUST-FIRE: the capital-preflight reading of a census with an undeclared script is FRESH_RED - got %s" \
+        % _state["state"]
 
 
 def _suite_census_controls():
@@ -6354,6 +7160,49 @@ def _suite_census_controls():
                                              current_roll=roll or "1" * 64)), \
         "ISA-0683 NEGATIVE CONTROL: a status recorded against other source FAILS the pair"
 
+    # ── ISA-0746: the census is bound to every signed surface, not source alone ──────────────
+    _old = {"source_roll": "S" * 64, "census_roll": "K" * 64, "rows": [{"module": "capability_registry",
+                                                                       "state": "GREEN"}]}
+    assert _reusable_prior(_old, "S" * 64, "K" * 64) == {"capability_registry": _old["rows"][0]}, \
+        "ISA-0746 NEGATIVE CONTROL: same source AND same signed surfaces -> the prior rows are re-used"
+    assert _reusable_prior(_old, "S" * 64, "R" * 64) == {}, \
+        "ISA-0746 MUST-FIRE: a registry-only change (source roll unchanged) re-runs every suite"
+    assert _reusable_prior(dict(_old, census_roll=None), "S" * 64, "K" * 64) == {} and \
+        _reusable_prior(_old, "S" * 64, None) == {}, \
+        "ISA-0746 MUST-FIRE: a source-only-binding record, or an unavailable identity, is never re-used"
+    import release_gate as _rg746
+    _fp = {k: {"roll": "x"} for k in _rg746.CENSUS_SURFACES}
+    _r0 = _rg746.census_roll(fps=_fp)["roll"]
+    _r1 = _rg746.census_roll(fps=dict(_fp, capabilities={"roll": "y"}))["roll"]
+    assert _r0 and _r1 and _r0 != _r1, "ISA-0746 MUST-FIRE: a capability-registry change moves the census roll"
+    _ru = _rg746.census_roll(fps=dict(_fp, run_surfaces={"roll": None}))
+    assert _ru["roll"] and _ru["roll"] != _r0 and _ru["unavailable"] == ["run_surfaces"] and \
+        _ru["roll"] == _rg746.census_roll(fps=dict(_fp, run_surfaces={"roll": None}))["roll"], \
+        "ISA-0746: an unavailable surface is an explicit, deterministic UNAVAILABLE token - a change in " \
+        "availability changes the identity, and the census is not voided on such a host"
+    _g746 = dict(green, census_roll="K" * 64, census_components={"capabilities": "old"})
+    _saved_cid = globals()["_census_identity"]
+    try:
+        globals()["_census_identity"] = lambda _r: {"roll": "Q" * 64, "components": {"capabilities": "new"}}
+        _e746 = pair_red_suite_is_an_incident(status=_g746, root=td, today=today)
+        assert any("ISA-0746" in e and "capabilities" in e for e in _e746), \
+            "ISA-0746 MUST-FIRE: the build gate names the signed surface that changed since the census %r" % _e746
+        globals()["_census_identity"] = lambda _r: {"roll": "K" * 64, "components": {"capabilities": "old"}}
+        assert not any("ISA-0746" in e for e in pair_red_suite_is_an_incident(status=_g746, root=td, today=today)), \
+            "ISA-0746 NEGATIVE CONTROL: an unchanged signed-surface identity passes the binding"
+        assert any("source-only binding" in e for e in pair_red_suite_is_an_incident(status=green, root=td, today=today)), \
+            "ISA-0746 MUST-FIRE: a status with no census_roll (source-only binding) fails the gate"
+    finally:
+        globals()["_census_identity"] = _saved_cid
+    _st746 = dict(_g746, config_roll="C" * 64, as_of_ts=_dt.datetime.now().isoformat(timespec="seconds"))
+    _lv746 = {"source_roll": roll, "config_roll": "C" * 64, "census_roll": "K" * 64, "data_snapshot": {}}
+    _ok746 = suite_status_state(root=td, status=_st746, census=[{"module": m} for m in cen], live=_lv746)
+    _bad746 = suite_status_state(root=td, status=_st746, census=[{"module": m} for m in cen],
+                                 live=dict(_lv746, census_roll="Z" * 64))
+    assert _bad746["state"] == "IDENTITY_MISMATCH" and _ok746["state"] != "IDENTITY_MISMATCH", \
+        "ISA-0746 MUST-FIRE / NEGATIVE CONTROL: the capital preflight refuses ONLY a census recorded " \
+        "against other signed surfaces (%s / %s)" % (_bad746["state"], _ok746["state"])
+
     # ── ISA-0696: the capital-preflight reading of the census (BS-0696 §15, A1) ──────────────
     _now = _dt.datetime(2026, 10, 3, 9, 0, 0)
     _cen = [{"module": m} for m in ("a", "b")]
@@ -6397,6 +7246,163 @@ def _suite_census_controls():
     assert doc.get("config_roll") is not None or _config_roll(td) is None, "ISA-0696: the record carries config_roll"
     assert isinstance(doc.get("isolation"), dict) and isinstance(doc.get("counts"), dict) and doc.get("as_of_ts"), \
         "ISA-0696: the record carries isolation, counts and a timestamp for hour-level age"
+
+    # ── ISA-0688 / ISA-0685 — Session 4 controls ────────────────────────────────────
+    assert pair_binary_fields_have_separate_consumers() == [], \
+        "ISA-0688 POSITIVE CONTROL: the delivered tree routes each binary field to its own consumer"
+    _collapsed = ("def budget_available(positions, budget_pct, max_concurrent=1):\n"
+                  "    recs = [binary_commitment(p) for p in positions]\n"
+                  "    live = [r for r in recs if r['commits_budget']]\n"
+                  "    return {'count_cap_breached': len(live) > max_concurrent}\n")
+    _o688 = pair_binary_fields_have_separate_consumers(src=_collapsed)
+    assert _o688 and any("consumes_concurrent_event_slot" in x for x in _o688), \
+        ("⚑ ISA-0688 MUST-FIRE: a budget_available that counts the CAP on the expected-loss "
+         "population has collapsed the two questions back into one flag, and the control says "
+         "so (%s)" % _o688)
+    assert pair_binary_fields_have_separate_consumers(
+        src="def other(): pass\n")[0].startswith("pair_binary"), \
+        ("ISA-0688 NEGATIVE CONTROL: a missing consumer function is reported, not passed - "
+         "nothing to measure is not the same as clean (R2.10)")
+
+    # ── ISA-0607 — broker dealability over the run's ranked stack and capital plan ──────────
+    import broker_dealability as _bd_t
+    _rs_t = _bd_t.Resolver(declaration={"venues": {"NMS": {"routing": "ONLINE"},
+                                                   "WSE": {"routing": "NON_ONLINE"}}},
+                           verified={"by_symbol": {"ZAB.WA": {"exchange": "WSE"},
+                                                   "HALO": {"exchange": "NMS"}}}, aliases={})
+    _s9_post = {"_meta": {"month_label": "fx", "broker_dealability": {"state": "OK"}},
+                "deployable_stack": [{"ticker": "HALO"}]}
+    _plan_ok = {"sleeve_split": {"allocation": {"rows": [{"ticker": "HALO", "allocated_gbp": 500.0}]}}}
+    assert pair_broker_dealable_destinations(step9_pre=_s9_post, plan=_plan_ok, resolver=_rs_t) == [], \
+        "ISA-0607 NEGATIVE CONTROL: a dealable ranked stack and plan must be clean"
+    _plan_bad = {"sleeve_split": {"allocation": {"rows": [{"ticker": "ZAB.WA", "allocated_gbp": 6578.53}]}}}
+    _o607 = pair_broker_dealable_destinations(step9_pre=_s9_post, plan=_plan_bad, resolver=_rs_t)
+    assert _o607 and _norm(_o607[0])["severity"] == ERROR, \
+        "⚑ ISA-0607 MUST-FIRE: a post-control plan funding a WSE name must be an ERROR (%s)" % _o607
+    _o607b = pair_broker_dealable_destinations(step9_pre={"_meta": {"month_label": "old"},
+                                                          "deployable_stack": [{"ticker": "ZAB.WA"}]},
+                                               plan=_plan_bad, resolver=_rs_t)
+    assert _o607b and _norm(_o607b[0])["severity"] == WARN, \
+        "ISA-0607: a PRE-control artefact is reported as history (WARN), never silently passed (%s)" % _o607b
+
+    # ── ISA-0608 — the recorded Checkpoint-D top-5 against the run's feasible population ─────
+    _s9f = {"_meta": {"month_label": "fx"}, "deployable_stack": [
+        {"ticker": t, "t1_qualified": True} for t in ("A", "B", "C", "D", "E")]}
+    _rcf = {"summary": {"capital_destination": {"pipeline": {"opportunity_set": {
+        "opportunity_set_id": "OPS-fx", "checkpoint_d_top5": ["A", "B", "C", "D", "E"]}}}}}
+    assert pair_checkpoint_d_population(checkpoint={"top5": ["E", "D", "C", "B", "A"]}, run_ctx=_rcf,
+                                        step9_pre=_s9f) == [], \
+        "ISA-0608 NEGATIVE CONTROL: the published feasible top-5 (any order) is clean"
+    _o608 = pair_checkpoint_d_population(checkpoint={"top5": ["A", "B", "C", "D", "ZAB.WA"]},
+                                         run_ctx=_rcf, step9_pre=_s9f)
+    assert _o608 and _norm(_o608[0])["severity"] == ERROR, \
+        "⚑ ISA-0608 MUST-FIRE: a post-control top-5 differing from the feasible top-5 is an ERROR (%s)" % _o608
+    _o608b = pair_checkpoint_d_population(checkpoint={"top5": ["A", "ZZZ"]}, run_ctx={}, step9_pre=_s9f,
+                                          resolver=lambda t: {"admissible_for_new_capital": True})
+    assert _o608b and _norm(_o608b[0])["severity"] == WARN and "ZZZ" in _norm(_o608b[0])["message"], \
+        "ISA-0608: a pre-control top-5 holding an infeasible name is reported as history (%s)" % _o608b
+
+    _rev_ok = {"summary": {"membership": {"n_expected": 6, "n_classified": 6,
+                                          "admitted_undecided": [], "admitted_undecided_gbp": 0.0}}}
+    assert pair_membership_gates_first_claims(review=_rev_ok) == [], \
+        "ISA-0685 POSITIVE CONTROL: a fully-admitted book is clean"
+    _rev_gap = {"summary": {"membership": {"n_expected": 6, "n_classified": 5,
+                                           "admitted_undecided": [], "admitted_undecided_gbp": 0.0}}}
+    _o685 = pair_membership_gates_first_claims(review=_rev_gap)
+    assert _o685 and _norm(_o685[0])["severity"] == ERROR, \
+        ("⚑ ISA-0685 MUST-FIRE: a held name with NO membership verdict is an ERROR - 'admitted "
+         "by default' is the inference the item exists to remove (%s)" % _o685)
+    _rev_und = {"summary": {"membership": {"n_expected": 6, "n_classified": 6,
+                                           "admitted_undecided": ["ABCL"],
+                                           "admitted_undecided_gbp": 1775.39}}}
+    _o685b = pair_membership_gates_first_claims(review=_rev_und)
+    assert _o685b and _norm(_o685b[0])["severity"] == WARN \
+        and "ABCL" in _norm(_o685b[0])["message"], \
+        ("ISA-0685: an ADMITTED_UNDECIDED holding is NAMED with its GBP as a WARN - it is a "
+         "decision Raj has not made, not a defect in the framework (%s)" % _o685b)
+    _rev_none = {"summary": {}}
+    assert _norm(pair_membership_gates_first_claims(review=_rev_none)[0])["severity"] == ERROR, \
+        ("ISA-0685 NEGATIVE CONTROL: no membership verdict at all is an ERROR - otherwise "
+         "'held' is silently the membership test again")
+
+    # ── ISA-0708 — one risk-share authority ─────────────────────────────────────────
+    _ctx_ok = {"summary": {"v2_1": {"risk_contribution": {
+        "risk_share_calc_id": "RSHR-abc123abc123", "risk_share_divergence": []}}}}
+    assert pair_one_risk_share_authority(ctx=_ctx_ok) == [], \
+        "ISA-0708 POSITIVE CONTROL: one id and no divergence is clean"
+    _ctx_noid = {"summary": {"v2_1": {"risk_contribution": {
+        "risk_share_calc_id": None, "risk_share_authority_unavailable": "boom"}}}}
+    _o708 = pair_one_risk_share_authority(ctx=_ctx_noid)
+    assert _o708 and _norm(_o708[0])["severity"] == ERROR, \
+        ("ISA-0708 MUST-FIRE: a review flag published with NO risk_share_calc_id means the "
+         "two consumers are on different calculations again (%s)" % _o708)
+    _ctx_div = {"summary": {"v2_1": {"risk_contribution": {
+        "risk_share_calc_id": "RSHR-abc123abc123",
+        "risk_share_divergence": [{"ticker": "AVGO", "authoritative": 0.28244,
+                                   "locally_computed": 0.252498, "delta": 0.029942}]}}}}
+    _d708 = pair_one_risk_share_authority(ctx=_ctx_div)
+    assert _d708 and _norm(_d708[0])["severity"] == WARN \
+        and "AVGO" in _norm(_d708[0])["message"], \
+        ("ISA-0708: a measured disagreement is PUBLISHED by name and magnitude, not blended "
+         "and not hidden (R6.2) (%s)" % _d708)
+    _o708b = pair_one_risk_share_authority(ctx={"summary": {}})
+    assert _o708b and _norm(_o708b[0])["severity"] == WARN, \
+        ("ISA-0708 NEGATIVE CONTROL: an artefact with no risk_contribution block is 'nothing "
+         "was checked', reported as such rather than passing silently (R2.10)")
+
+    # ── ISA-0706 — one binary-budget authority, enforced by AST ─────────────────────
+    import tempfile as _tf706, ast as _ast706, os as _os706
+    _td706 = _tf706.mkdtemp()
+    with open(_os706.path.join(_td706, "rogue_authority.py"), "w", encoding="utf-8") as _fh:
+        _fh.write("import position_sizing as ps\n"
+                  "def decide(rows):\n"
+                  "    return ps.budget_available_reported(rows, budget_pct=1.5)\n")
+    with open(_os706.path.join(_td706, "fixture_only.py"), "w", encoding="utf-8") as _fh:
+        _fh.write("import position_sizing as ps\n"
+                  "def _selftest():\n"
+                  "    return ps.budget_available_reported([], budget_pct=1.5)\n")
+    import framework_integrity as _fi706
+    _real706 = _fi706.source_files
+    _fi706.source_files = lambda root: [_os706.path.join(_td706, "rogue_authority.py"),
+                                        _os706.path.join(_td706, "fixture_only.py")]
+    try:
+        _o706 = pair_single_binary_budget_authority(root=_td706)
+    finally:
+        _fi706.source_files = _real706
+    assert len(_o706) == 1 and "rogue_authority" in _o706[0], \
+        ("ISA-0706 MUST-FIRE: a PRODUCTION caller of the L1 budget primitive outside "
+         "position_sizing is a second sizing authority and must be named (%s)" % _o706)
+    assert all("fixture_only" not in x for x in _o706), \
+        ("ISA-0706 NEGATIVE CONTROL: a fixture proving the primitive is NOT a second "
+         "authority - a control that cannot tell a test from a decision gets waived")
+    assert pair_single_binary_budget_authority() == [], \
+        ("ISA-0706 POSITIVE CONTROL: the delivered tree has exactly one binary-budget "
+         "authority, so the control can pass as well as fire")
+
+    # ── ISA-0713 — held-stock issuer coverage, both severities ──────────────────────
+    _inc = {"month": "sep_2026", "state": "INCOMPLETE",
+            "coverage": {"n_produced": 5, "n_expected": 6, "missing": ["QBTS"],
+                         "missing_gbp": 863.82}}
+    _out = pair_held_issuer_coverage(report_fn=lambda m, r: _inc)
+    assert _out and _norm(_out[0])["severity"] == ERROR and "QBTS" in _norm(_out[0])["message"] \
+        and "863.82" in _norm(_out[0])["message"], \
+        ("ISA-0713 MUST-FIRE: an EXISTING coverage artefact short of the broker book is an "
+         "ERROR naming the missing issuer and its GBP - a missing name is never 'no news'")
+    _abs = pair_held_issuer_coverage(report_fn=lambda m, r: {"month": "sep_2026",
+                                                             "state": "NO_REVIEWS",
+                                                             "why": "not written"})
+    assert _abs and _norm(_abs[0])["severity"] == WARN and "ISA-0713" in _norm(_abs[0])["message"], \
+        ("ISA-0713: an ABSENT artefact is a WARN naming the owner - a contract that never had "
+         "the chance to run has not been breached, and a habitually red control is unread")
+    assert pair_held_issuer_coverage(report_fn=lambda m, r: {"month": "sep_2026",
+                                                             "state": "COMPLETE"}) == [], \
+        "ISA-0713 POSITIVE CONTROL: N -> N is clean, so the pair can pass as well as fire"
+    _nop = pair_held_issuer_coverage(report_fn=lambda m, r: {"month": "sep_2026",
+                                                             "state": "NO_PORTFOLIO",
+                                                             "why": "no portfolio_data"})
+    assert _nop and _norm(_nop[0])["severity"] == ERROR, \
+        ("ISA-0713 NEGATIVE CONTROL: with no broker book the population is UNKNOWN and that "
+         "blocks - an unestablished denominator must not read as full coverage (R4.3)")
 
 
 if __name__ == "__main__":

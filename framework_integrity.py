@@ -399,12 +399,69 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     #   position_sizing.allocate via capital_destination (SHADOW until Raj's LIVE decision).
     # --- ISA-0699 (16-Sep-2026): the capability-registry producers that carried NO observation ---
     ("correlation_engine", "candidate_correlation", "live_run", "CAP-rho_sleeve producer (A2.1 rho vs sleeve)"),
+    # --- ISA-0685 (20-Sep-2026): a holding is not an admission ---------------------------
+    ("sleeve_membership", "classify", "live_run",
+     "CAP-sleeve_membership producer — binds a holding to an admission DECISION so that being "
+     "owned no longer confers new-capital rights. Pre-first-run REACHABLE_NOT_LIVE means 'no "
+     "scheduled run has yet acted on a verdict', not 'not instrumented'"),
+    # --- ISA-0705/0706/0708 (20-Sep-2026): the shared final capital-authorisation receipt --
+    ("capital_authorisation", "authorise", "live_run",
+     "CAP-capital_authorisation_receipt producer - the single final receipt. SHADOW by design: "
+     "it is produced on the real router path and authorises nothing until the risk-share and "
+     "VCI-budget identities reach it, so REACHABLE_NOT_LIVE here means 'not yet given "
+     "authority', not 'not instrumented'"),
+    # --- ISA-0713 (20-Sep-2026): issuer/event evidence freshness -------------------------
+    ("issuer_freshness", "coverage_verdict", "live_run",
+     "CAP-issuer_evidence_coverage producer — proves every held direct stock carries a current "
+     "issuer-specific disposition before any capital decision. Pre-first-run this reports "
+     "REACHABLE_NOT_LIVE: the retrieval stage is declared on three Run Contexts and has never "
+     "executed, so the instrument distinguishes 'not yet run' from 'not instrumented'"),
     ("position_sizing", "vci_size_pct", "live_run", "CAP-vci_size_pct producer (VCI binary sizing)"),
     ("position_sizing", "binary_budget_report", "live_run", "CAP-vci_binary_risk_committed producer"),
     ("position_sizing", "min_hold_ok", "live_run", "CAP-min_hold_verdict producer (D24 position clock)"),
     ("position_sizing", "activate_from_executions", "live_run",
      "CAP-underfilled_obligation_gbp producer: the ONLY creator of an ACTIVE D17 obligation (ISA-0701)"),
     ("retention", "graduation_disposition", "live_run", "CAP-graduation_disposition producer"),
+    # --- ISA-0716 (23-Sep-2026): the ONE post-event lifecycle engine ------------------------
+    ("vci_lifecycle", "assess", "live_run",
+     "CAP-vci_lifecycle producer - graduation trigger -> successor VCI -> Path A -> EXIT in one "
+     "invocation, shared by the pre-run, the VCI run and the intramonth review"),
+    ("vci_lifecycle", "record", "live_run",
+     "CAP-vci_lifecycle canonical-decision writer (NEW / SUPERSEDED / REVALIDATED)"),
+    # --- ISA-0720/0721/0722 (23-Sep-2026): forecast & underwriting integrity -------------------
+    ("underwriting", "capture_month", "live_run",
+     "CAP-held_underwriting producer - N of N held current cases + T1 candidate cases, pre-run Step 8u"),
+    ("underwriting", "append", "live_run", "CAP-held_underwriting append-only store writer"),
+    # --- ISA-0722 (24-Sep-2026): point-in-time evidence capture (capture-only) -------------------
+    ("pit_capture", "capture", "live_run",
+     "CAP-pit_capture producer - full pre-run population PIT vintage, riding the Step 6 fetch"),
+    # --- ISA-0743/0699 (24-Sep-2026): the E[r] row adapter, so CAP-expected_return is observable --
+    ("expected_return", "expected_return_for_row", "live_run",
+     "CAP-expected_return producer - the one row adapter every E[r] stamp goes through"),
+    # --- ISA-0740 (24-Sep-2026): approval-preserving execution ceiling, SHADOW -----------------
+    ("execution_ceiling", "shadow_month", "live_run",
+     "CAP-execution_ceiling producer - one ceiling per case captured this month, pre-run Step 8x (SHADOW)"),
+    # --- ISA-0744 (24-Sep-2026): 12-month horizon-value E[r], SHADOW ----------------------------
+    ("horizon_value", "shadow_month", "live_run",
+     "CAP-horizon_value producer - one horizon-value case per PIT-captured name, pre-run Step 8h (SHADOW)"),
+    ("horizon_value", "case", "live_run", "CAP-horizon_value case builder (typed state, routes, sensitivities)"),
+    # --- ISA-0197 FX closure (24-Sep-2026): canonical ECB PIT FX producer, SHADOW input to 8h ---
+    ("ecb_fx", "produce", "live_run",
+     "ECB SDMX PIT FX artefact fx_pit_[month].json, pre-run Step 6f (SHADOW input to CAP-horizon_value)"),
+    # --- ISA-0619/0616 (24-Sep-2026): score-definition identity + canonical C-1 ------------------
+    ("score_definition", "stamp", "live_run",
+     "CAP-score_definition_identity producer - stamps the executable scoring identity on every "
+     "row AT scoring (fetch + score_panel logger); historical writes stay unstamped"),
+    ("step9_pre_builder", "build_current_admissibility", "live_run",
+     "CAP-current_admissibility producer - THE one C-1 verdict per scored name, pre-run Step 8; "
+     "read by T1, stock_candidates (entry + top-up), Checkpoint-D tick 9 and the email"),
+    # --- ISA-0607 (23-Sep-2026): broker dealability ------------------------------------------
+    ("step9_pre_builder", "build_opportunity_set", "live_run",
+     "CAP-feasible_opportunity_set producer (ISA-0608) - the ONE feasible population + identity, "
+     "pre-run Step 8"),
+    ("step9_pre_builder", "apply_broker_dealability", "live_run",
+     "CAP-broker_dealability producer - stamps the ONE broker verdict on every ranked row before "
+     "the deployable stack is split (pre-run Step 8)"),
     ("retention", "route_attribution", "live_run", "CAP-ratchet_route producer (marked, was undeclared)"),
     ("held_position_review", "review", "live_run", "CAP-held_position_review producer (Step 6.5)"),
     ("thesis_state", "apply", "live_run", "CAP-thesis_state producer (marked, was undeclared)"),

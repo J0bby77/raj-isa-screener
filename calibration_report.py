@@ -27,6 +27,27 @@ SIGNALS = ["forward_axis_score", "revisions_score", "source_score", "score_f_pri
            "revision_runway", "score_f_margin_traj", "part_a_score", "part_b_score", "total_score"]
 
 
+def definition_stratum(panel, which="current"):
+    """ISA-0619: restrict the panel to ONE scoring-definition stratum. -> (panel, info)."""
+    import score_definition as _sd
+    cur = _sd.current_identity()
+    reg, prov = _sd.registry(), _sd.provenance_table()
+    recs = panel.assign(run_date=panel["run_date"].astype(str).str[:10]).to_dict("records")
+    hashes = [_sd.row_definition(r, prov=prov)["hash"] for r in recs]
+    states = [_sd.row_state(r, current=cur, reg=reg, prov=prov)["state"] for r in recs]
+    by = {}
+    for st in states:
+        by[st] = by.get(st, 0) + 1
+    panel = panel.assign(_definition_hash=hashes, _definition_state=states)
+    if which == "pooled-labelled":
+        return panel, {"stratum": "CROSS_DEFINITION_POOLED (NOT like-for-like)", "by_state": by}
+    if which == "current":
+        return (panel[panel["_definition_state"] == _sd.COMPARABLE].copy(),
+                {"stratum": "CURRENT %s" % cur.get("id"), "by_state": by})
+    return (panel[[_sd.compatible(h, which, reg) for h in hashes]].copy(),
+            {"stratum": "DEFINITION %s" % which, "by_state": by})
+
+
 def _rank_ic(a, b):
     import pandas as pd
     d = pd.DataFrame({"a": a, "b": b}).dropna()
@@ -149,6 +170,43 @@ def _assert_growth(store, state_path):
     return grew, n, last
 
 
+def _selftest() -> int:
+    """ISA-0619: the definition stratum never pools scores from different definitions silently."""
+    import pandas as pd
+    import score_definition as _sd
+    fails = []
+
+    def ok(name, cond):
+        print(("  PASS " if cond else "  FAIL ") + name)
+        if not cond:
+            fails.append(name)
+    cur = _sd.current_identity()["hash"]
+    today = datetime.date.today().isoformat()
+    panel = pd.DataFrame([
+        {"run_date": today, "ticker": "CUR", "score_definition_hash": cur,
+         "score_definition_basis": "STAMPED_AT_SCORING"},
+        {"run_date": "2026-09-05", "group": "WATCHLIST_RERANK", "ticker": "OLD", "score_definition_hash": "",
+         "score_definition_basis": ""},
+        {"run_date": today, "ticker": "LIE", "score_definition_hash": cur,
+         "score_definition_basis": "HISTORICAL_WRITE_UNSTAMPED"}])
+    cp, info = definition_stratum(panel, "current")
+    ok("MUST-FIRE (ISA-0619): a historical-definition row is EXCLUDED from the current stratum",
+       "OLD" not in set(cp["ticker"]))
+    ok("MUST-FIRE (ISA-0619): a row claiming the current hash without STAMPED_AT_SCORING is excluded",
+       "LIE" not in set(cp["ticker"]))
+    ok("POSITIVE CONTROL: a row stamped at scoring under the current definition is kept",
+       list(cp["ticker"]) == ["CUR"])
+    pp, pinfo = definition_stratum(panel, "pooled-labelled")
+    ok("NEGATIVE CONTROL: pooled-labelled keeps every row but LABELS it (never unlabelled pooling)",
+       len(pp) == 3 and "NOT like-for-like" in pinfo["stratum"]
+       and pp["_definition_state"].notna().all())
+    hp, _ = definition_stratum(panel, "680b67139d457657")
+    ok("MUST-FIRE: the Aug/Sep-2026 historical stratum holds the Sep row and not the current one",
+       set(hp["ticker"]) == {"OLD"})
+    print("calibration_report selftest: %d FAIL(s)" % len(fails))
+    return 1 if fails else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", default="score_panel.csv")
@@ -162,6 +220,10 @@ def main():
     ap.add_argument("--price_cache", default="calibration_prices.csv",
                     help="resumable price cache; delete to force a full refetch")
     ap.add_argument("--chunk", type=int, default=400, help="tickers per download call")
+    ap.add_argument("--definition", default="current",
+                    help="ISA-0619 stratum: 'current' (rows produced under the CURRENT declared scoring "
+                         "definition), a definition hash (one historical definition), or "
+                         "'pooled-labelled' (all rows, reported as CROSS_DEFINITION_POOLED - not like-for-like)")
     ap.add_argument("--period", default="2y", help="price history window")
     a = ap.parse_args()
     if a.shm and os.path.isdir(a.shm):
@@ -178,6 +240,14 @@ def main():
                   "A screen is not logging (score_panel_logger). Investigate before trusting this report.")
     panel = pd.read_csv(a.store, parse_dates=["run_date"])
     asof = pd.Timestamp(a.asof)
+    # ⚑ ISA-0619 (24-Sep-2026): an IC pooled across scoring definitions is not a measurement of any
+    #   one signal - the 17-Jul revisions split and ISA-0720 changed what the scores MEAN. The report
+    #   is computed on ONE declared stratum; pooling is only available explicitly and labelled.
+    panel, _stratum = definition_stratum(panel, a.definition)
+    print("DEFINITION_STRATUM %s rows=%d %s" % (_stratum["stratum"], len(panel), _stratum["by_state"]))
+    if panel.empty:
+        print("NO_ROWS_IN_STRATUM - no matured observation exists for this scoring definition yet; "
+              "weights stay frozen (the pre-registered rule cannot be evaluated).")
 
     # ---- price panel: ONE batched download + resumable on-disk cache -------------------
     # The original per-ticker 5y history call ran ~1s/ticker: a 3,000-row panel took far longer
@@ -267,7 +337,9 @@ def main():
     lines = ["# CALIBRATION REPORT - as at %s" % asof.date(),
              "_source: %s | %d logged rows | %d run dates (%s -> %s) | matured observations only_"
              % (a.store, len(panel), panel["run_date"].nunique(),
-                panel["run_date"].min().date(), panel["run_date"].max().date()), "",
+                panel["run_date"].min().date(), panel["run_date"].max().date()),
+             "_scoring-definition stratum (ISA-0619): %s | whole panel by state: %s_"
+             % (_stratum["stratum"], _stratum["by_state"]), "",
              "%-20s" % "Signal" + "".join("%9s" % ("IC@" + h) for h in HORIZONS) + "  verdict",
              "-" * 92]
     for sig in SIGNALS:
@@ -299,4 +371,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     sys.exit(main() or 0)

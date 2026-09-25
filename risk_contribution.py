@@ -75,8 +75,19 @@ M3_MIN_PAIRS = 5
 
 
 def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
-                  starter_pct: float, matrix: Optional[Dict[str, float]] = None) -> dict:
+                  starter_pct: float, matrix: Optional[Dict[str, float]] = None,
+                  authority: Optional[dict] = None) -> dict:
     """rc_i and risk_weight_i for every name with BOTH a weight and a measured sigma.
+
+    ⚑⚑ ISA-0708 (20-Sep-2026) — `authority` IS THE SINGLE RISK-SHARE CALCULATION.
+    Pass `sleeve_risk.risk_share_authority(store, portfolio)` and `rc_share` is CONSUMED from
+    it rather than recomputed here, and every row carries its `risk_share_calc_id`. Without it,
+    this function and the D27 ceiling were two implementations of one quantity — one deciding a
+    capital REFUSAL, the other the REVIEW FLAG — with nothing asserting they agree and a
+    disagreement invisible to Raj. The `risk_weight_i` ladder statistic is this module's own
+    quantity and is still computed here; only the SHARE is taken from the authority.
+    `authority=None` reproduces the previous behaviour exactly and stamps
+    `risk_share_calc_id: None`, which is what the consistency pair looks for.
 
     ⚑ A name with no measured sigma is EXCLUDED AND NAMED, never given a default. Defaulting a
     missing sigma would decide its risk share by the default, and the whole point of this
@@ -146,14 +157,34 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
     # the FIRST figure and every exclusion named with its weight — the concentration_clusters
     # precedent, which reports 77.5% rather than refusing.
     unmeasured_for = {a for (a, b) in missing_pairs} | {b for (a, b) in missing_pairs}
+    # ── ISA-0708 — ONE risk-share calculation, consumed rather than recomputed ─────────
+    auth_shares = (authority or {}).get("shares") or {}
+    auth_id = (authority or {}).get("risk_share_calc_id")
+    share_divergence = []
     rows = {}
     for k in names:
         s, w, m = usable[k], float(weights[k]), mctr[k]
         flag_suppressed = k in unmeasured_for and matrix is not None
+        own_share = round(w * m / sigma_p, 6)
+        if auth_id and k in auth_shares:
+            share = round(float(auth_shares[k]), 6)
+            # ⚑ R6.2 — PUBLISH the disagreement, never blend it. The authoritative figure is
+            #   what this row USES; the local one is retained beside it so a reader can see
+            #   how far the two implementations were apart rather than being told they agree.
+            if abs(share - own_share) > 0.0005:
+                share_divergence.append({"ticker": k, "authoritative": share,
+                                         "locally_computed": own_share,
+                                         "delta": round(share - own_share, 6)})
+        else:
+            share = own_share
         rows[k] = {
             "weight_pct": round(w, 4), "sigma": round(s, 6),
             "mctr": round(m, 6),
-            "rc_share": round(w * m / sigma_p, 6),
+            "rc_share": share,
+            "rc_share_locally_computed": own_share,
+            "risk_share_calc_id": auth_id,
+            "risk_share_source": ("sleeve_risk.risk_share_authority" if auth_id
+                                  else "risk_contribution.contributions (UNAUTHORITATIVE)"),
             "fair_share": round(1.0 / n, 6),
             "risk_weight_pct": round(mean_risk / m, 4) if m > 0 else None,
             "below_tolerance": (bool((mean_risk / m) < thr) if (m > 0 and not flag_suppressed)
@@ -171,6 +202,16 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
             "unmeasured_pairs": ["%s|%s" % p for p in sorted(missing_pairs)],
             "flags_suppressed_for": sorted(unmeasured_for) if matrix is not None else [],
             "rc_basis": basis, "sigma_p": round(sigma_p, 6),
+            # ISA-0708: the id both consumers must quote, and the measured gap between the two
+            # implementations when they were computed side by side.
+            "risk_share_calc_id": auth_id,
+            "risk_share_authority": (authority or {}).get("authority"),
+            "risk_share_window": (authority or {}).get("window"),
+            "risk_share_divergence": share_divergence,
+            "risk_share_basis": ("CONSUMED from the declared authority (ISA-0708)" if auth_id
+                                 else ("UNAUTHORITATIVE: no authority was supplied, so this "
+                                       "share is this module's own computation and must not "
+                                       "decide capital (ISA-0708)")),
             "n_eff": round(1.0 / sum(r["rc_share"] ** 2 for r in rows.values()), 4)
                      if rows else None,
             "rows": rows, "excluded": excluded,
@@ -476,7 +517,50 @@ def _selftest():
         {"run": "r", "incumbent": "I", "challenger": "C", "swapped": True, "arm": "treatment",
          "marks": {"3m": -2.0, "6m": None, "12m": None}} for _ in range(5)]}
     assert evaluate(d4)["M3"]["verdict"] == "STOP_ACTING"
-    print("risk_contribution selftest OK (20 assertions)")
+
+    # ══ ISA-0708 — the single risk-share authority ═══════════════════════════════════
+    _w = {"A": 40.0, "B": 60.0}
+    _s = {"A": 0.30, "B": 0.20}
+    _own = contributions(_w, _s, starter_pct=3.5)
+    _auth = {"risk_share_calc_id": "RSHR-testtesttes",
+             "shares": {"A": 0.70, "B": 0.30},
+             "authority": "sleeve_risk.risk_share_authority",
+             "window": {"n_weeks": 158}}
+    _con = contributions(_w, _s, starter_pct=3.5, authority=_auth)
+    assert _con["rows"]["A"]["rc_share"] == 0.70 and _con["risk_share_calc_id"] == "RSHR-testtesttes", \
+        ("ISA-0708 MUST-FIRE: with an authority supplied, rc_share is CONSUMED from it and the "
+         "row names the calculation it came from - it is not recomputed here (%s)"
+         % _con["rows"]["A"])
+    assert _con["rows"]["A"]["rc_share_locally_computed"] == _own["rows"]["A"]["rc_share"], \
+        ("ISA-0708: the local figure is RETAINED beside the authoritative one, so a reader can "
+         "see how far the two implementations are apart (R6.2)")
+    assert any(d["ticker"] == "A" for d in _con["risk_share_divergence"]), \
+        ("ISA-0708 MUST-FIRE: a disagreement between the two implementations is PUBLISHED by "
+         "name and magnitude, never blended away (R6.2)")
+
+    # ⚑ NEGATIVE CONTROL (R5.5): a BROKEN input must still fail. With NO authority the share is
+    #   this module's own and the row says so in data, carrying no calc_id - which is exactly
+    #   what capital_authorisation refuses to authorise on and what
+    #   consistency_check.pair_one_risk_share_authority reports as an ERROR. Without this
+    #   control the suite above would pass just as well against a version that silently
+    #   stamped an id it never received, which would replace a visible gap with a false green.
+    assert _own["risk_share_calc_id"] is None \
+        and _own["rows"]["A"]["risk_share_calc_id"] is None \
+        and "UNAUTHORITATIVE" in _own["risk_share_basis"] \
+        and _own["risk_share_divergence"] == [], \
+        ("ISA-0708 NEGATIVE CONTROL: with no authority supplied the share is UNAUTHORITATIVE, "
+         "carries NO calc_id, and claims no divergence it did not measure (%s)"
+         % _own["risk_share_basis"])
+    # ⚑ NEGATIVE CONTROL: an authority that names no id is not an authority. A dict is not
+    #   evidence; the id is.
+    _noid = contributions(_w, _s, starter_pct=3.5,
+                          authority={"shares": {"A": 0.70, "B": 0.30}})
+    assert _noid["risk_share_calc_id"] is None \
+        and _noid["rows"]["A"]["rc_share"] == _own["rows"]["A"]["rc_share"], \
+        ("ISA-0708 NEGATIVE CONTROL: an authority blob with no risk_share_calc_id must NOT be "
+         "consumed - an unnamed calculation cannot be the one both consumers quote")
+
+    print("risk_contribution selftest OK (25 assertions, incl. ISA-0708 negative controls)")
 
 
 if __name__ == "__main__":

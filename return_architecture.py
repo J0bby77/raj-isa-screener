@@ -528,7 +528,8 @@ def stock_inputs(stocks, metrics_tickers, total_value, anchor_pct):
                 basis_str = e.get("er_basis")
                 # D-24: er_status is now FIRST-CLASS. Previously the only signal that every term
                 # was missing was er_confidence == 0 — a confident zero where a refusal belonged.
-                if e.get("er_status") == "unmeasured":
+                # ISA-0721: a MISSING_REQUIRED_INPUT E[r] carries no scalar - absent, not zero.
+                if e.get("er_status") == "unmeasured" or e.get("expected_return_12_24m") is None:
                     zero_conf.append(tkr)
                 elif conf_raw is not None and float(conf_raw) > 0:
                     fwd = float(e.get("expected_return_12_24m"))

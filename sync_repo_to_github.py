@@ -148,6 +148,38 @@ FALLBACK_EXCLUDED = {
                                   "(step 6.5), not by the weekly screen fallback. PERSONAL: "
                                   "not on the RUNTIME_JSON allow-list, so not pushed; if ever "
                                   "needed by the fallback it goes to ONEDRIVE_BOOTSTRAP"),
+    # ISA-0685 build (20-Sep-2026). Both names enter the fallback's STATIC import closure
+    # through a new edge only: build_email -> t1_gates -> position_sizing -> sleeve_membership
+    # -> decision_ledger. position_sizing was already in the closure; sleeve_membership (the
+    # ISA-0685 membership contract) is what pulls decision_ledger in with it. NOTHING on the
+    # weekly screen path CALLS sleeve_membership.classify or decision_ledger.current_decision —
+    # the membership gate fires on the MONTHLY pre-run/capital path (position_sizing.allocate,
+    # activate_from_executions, held_position_review, capital_destination). The closure scan is
+    # a static floor (see fallback_input_gaps' stated LIMIT), so a name reachable by import but
+    # never read on the path is classified here WITH a reason rather than left silent (R14.5).
+    # ⚑ BOTH ARE PERSONAL and the repo is PUBLIC. decision_ledger.json is Raj's actual capital
+    #   decision history (ticker, route, £ and supersession chain); vci_deploy_aug_2026.json is
+    #   a dated VCI deployment record. Safe because RUNTIME_JSON is an ALLOW-LIST and neither is
+    #   on it. If either is ever genuinely needed on the fallback path it goes to
+    #   ONEDRIVE_BOOTSTRAP (which also adds it to NEVER) and NEVER to RUNTIME_JSON.
+    "decision_ledger.json": ("ISA-0686/ISA-0685 canonical capital-decision ledger, read and "
+                             "written on the MONTHLY path (decision_ledger.record/"
+                             "current_decision, sleeve_membership.classify). Reachable from the "
+                             "weekly fallback only as a static import edge; never read there. "
+                             "PERSONAL — not on the allow-list, not pushed"),
+    "vci_deploy_aug_2026.json": ("dated VCI deployment record named by decision_ledger for "
+                                 "historical backfill provenance; monthly/VCI path only, never "
+                                 "the weekly screen fallback. PERSONAL — not pushed"),
+    # ⚑ ISA-0722 (23-Sep-2026): decision_ledger now imports `underwriting` (the decision binds
+    #   its case at write time), which widens the weekly fallback's STATIC closure again. Both
+    #   files below are named only by underwriting's selftest fixture on the MONTHLY path; the
+    #   weekly screen never reads them. The portfolio book is PERSONAL — never RUNTIME_JSON.
+    "portfolio_data_sep_2026.json": ("ISA-0722 underwriting selftest fixture (the frozen Sep-2026 "
+                                     "broker book); monthly path only, never the weekly fallback. "
+                                     "PERSONAL - not on the allow-list, not pushed"),
+    "watchlist_scored_sep_2026.json": ("ISA-0722 underwriting selftest fixture (the Sep-2026 scored "
+                                       "watchlist); monthly pre-run artefact, never read by the "
+                                       "weekly screen fallback"),
 }
 
 # Public, non-personal inputs the fallback reads that were missing from RUNTIME_JSON on

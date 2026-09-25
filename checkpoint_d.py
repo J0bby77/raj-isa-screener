@@ -53,7 +53,7 @@ def _norm_set(xs):
 
 
 def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
-                          step9_records=None, factor_state=None):
+                          step9_records=None, factor_state=None, opportunity_set=None):
     """Return {passed, blocks, chosen, top5}.
       top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
                           cases capped at 5 by the deploy-Source tiebreak — this is that list)
@@ -81,8 +81,26 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         chosen_set = set()
     pairwise = {str(k).strip().upper(): v for k, v in (decision.get("pairwise") or {}).items()}
 
-    if len(top5) < REQUIRED_TOP:
-        blocks.append(f"need {REQUIRED_TOP} top-T1 names for Checkpoint-D, got {len(top5)}")
+    # (8) ISA-0608 (23-Sep-2026): when the run's feasible population is supplied (the router's
+    #     `opportunity_set` view), the contest IS that population's first five in capital order -
+    #     not a hand-built list. Fewer than five feasible names is a complete contest, so the
+    #     only deployable name can never be blocked for want of four infeasible companions.
+    _req = REQUIRED_TOP
+    if opportunity_set is not None:
+        _pub = [str(t).strip().upper() for t in (opportunity_set.get("checkpoint_d_top5") or [])]
+        if opportunity_set.get("checkpoint_d_top5") is None:
+            blocks.append("ISA-0608: the supplied opportunity set carries no Checkpoint-D population "
+                          f"(state={opportunity_set.get('state')}) - re-run the pre-run router")
+        else:
+            _req = min(REQUIRED_TOP, len(_pub))
+            if set(top5) != set(_pub):
+                blocks.append(f"ISA-0608: top-5 {top5} is not the run's feasible top-5 {_pub} "
+                              f"(opportunity_set_id={opportunity_set.get('opportunity_set_id')})")
+        if opportunity_set.get("state") == "PARITY_BREACH":
+            blocks.append("ISA-0608: the router would fund main-route names outside the feasible "
+                          f"population {opportunity_set.get('router_qualifying_not_feasible')}")
+    if len(top5) < _req:
+        blocks.append(f"need {_req} top-T1 names for Checkpoint-D, got {len(top5)}")
 
     # (1) full comparative case for every top-5 name
     for t in top5:
@@ -182,6 +200,42 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
                               f"decision['falsification_addresses_flags']['{c}']=True with the reason "
                               f"stated in the case (tick 6)")
 
+    # (7) ISA-0607 (23-Sep-2026): the contest is between names capital can actually reach. A
+    #     top-5 member the broker cannot deal ONLINE (its step9_pre record carries the ONE broker
+    #     verdict) occupies a place that belongs to a feasible name - in Sep-2026 ZAB.WA took the
+    #     fourth place. Only enforced where the record is supplied; an absent verdict on a
+    #     supplied record is refused, never read as dealable.
+    if _s9:
+        for t in top5:
+            rec = _s9.get(t)
+            if rec is None:
+                continue
+            st = rec.get("broker_dealability")
+            if st != "DEALABLE_ONLINE":
+                blocks.append(f"{t} is not an executable destination (broker_dealability={st}, "
+                              f"venue={rec.get('broker_venue')}) - draw the top-5 from "
+                              f"step9_pre.deployable_stack (ISA-0607)")
+
+    # (9) ISA-0616 (24-Sep-2026): C-1 CURRENT ADMISSIBILITY. A chosen name that adds capital (new
+    #     entry OR top-up) must carry the ONE canonical verdict step9_pre stamped on its record
+    #     (`c1_admissibility`, built by t1_gates.current_admissibility on its current snapshot).
+    #     This replaces the manual Step 10.1(d) authority: the review STATES the verdict, it never
+    #     computes one. Only enforced where records are supplied; a supplied record with no verdict
+    #     is refused. A reduction (SELL/TRIM/REDUCE/EXIT) is never blocked by C-1.
+    _REDUCE = {"SELL", "TRIM", "REDUCE", "EXIT"}
+    _acts = {str(k).strip().upper(): str(v).strip().upper()
+             for k, v in (decision.get("chosen_actions") or {}).items()}
+    _gact = str(decision.get("chosen_action") or "").strip().upper()
+    if _s9:
+        for c in chosen_set:
+            if (_acts.get(c) or _gact) in _REDUCE:
+                continue
+            _c1 = (_s9.get(c) or {}).get("c1_admissibility")
+            if not isinstance(_c1, dict) or _c1.get("admissible") is not True:
+                _vv = _c1.get("verdict") if isinstance(_c1, dict) else "ABSENT"
+                blocks.append(f"{c} has no ADMISSIBLE current C-1 verdict (c1_admissibility={_vv}) - "
+                              f"new capital refused (ISA-0616); the holding itself is unaffected")
+
     # (3) log all N (incl passes) — at minimum every top-5 name must be logged
     not_logged = [t for t in top5 if t not in logged]
     if not_logged:
@@ -232,7 +286,94 @@ def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG
     return logged
 
 
+def _step9_records(spec):
+    """ISA-0607: the CLI previously called the validator WITHOUT step9 records, so ticks 4, 6 and
+    7 could never fire from the command line. A spec may carry `step9_records` directly or name
+    the run's `step9_pre` file; records are then keyed by ticker from deployment_priority_rank."""
+    if spec.get("step9_records"):
+        return spec["step9_records"]
+    p = spec.get("step9_pre")
+    if not p:
+        return None
+    with open(p, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return {r.get("ticker"): r for r in (doc.get("deployment_priority_rank") or [])
+            if isinstance(r, dict) and r.get("ticker")}
+
+
+def _opportunity_set(spec):
+    """ISA-0608: the router's feasible-population view, from the spec or the run's run_context."""
+    if spec.get("opportunity_set") is not None:
+        return spec["opportunity_set"]
+    p = spec.get("run_context")
+    if not p:
+        return None
+    with open(p, encoding="utf-8") as fh:
+        rc = json.load(fh)
+    return ((((rc.get("summary") or {}).get("capital_destination") or {}).get("pipeline") or {})
+            .get("opportunity_set"))
+
+
+def _selftest() -> int:
+    """ISA-0607 tick 7 through the REAL validator."""
+    cases = {t: "case text" for t in ("HRMY", "HALO", "ABNB", "ZAB.WA", "NTAP", "ENX.PA")}
+    dec = {"chosen_tickers": ["NTAP"], "pairwise": {t: "why" for t in cases},
+           "falsification": {"NTAP": "x" * 200}}
+    recs = {t: {"broker_dealability": "DEALABLE_ONLINE", "broker_venue": "NMS"} for t in cases}
+    recs["ZAB.WA"] = {"broker_dealability": "NOT_DEALABLE_ONLINE", "broker_venue": "WSE"}
+    sep = ["HRMY", "HALO", "ABNB", "ZAB.WA", "NTAP"]
+    r = validate_checkpoint_d(sep, dec, cases, sep, step9_records=recs)
+    assert any("ZAB.WA is not an executable destination" in b for b in r["blocks"]), \
+        "MUST-FIRE (ISA-0607): the Sep-2026 top-5 containing ZAB.WA (WSE) must be blocked"
+    feas = ["HRMY", "HALO", "ABNB", "ENX.PA", "NTAP"]
+    r2 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=recs)
+    assert not any("not an executable destination" in b for b in r2["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0607): a fully dealable top-5 must not be blocked by tick 7 %r" % r2
+    recs2 = dict(recs, HALO={"broker_venue": None})
+    r3 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=recs2)
+    assert any("HALO is not an executable destination" in b for b in r3["blocks"]), \
+        "MUST-FIRE (ISA-0607): a supplied record with NO verdict must refuse, never read as dealable"
+    assert _step9_records({"step9_records": {"A": {}}}) == {"A": {}} and _step9_records({}) is None
+    # ISA-0608 tick 8 — the Sep-2026 hand-built top-5 against the run's feasible population
+    ops = {"opportunity_set_id": "OPS-fx", "state": "OK",
+           "checkpoint_d_top5": ["HALO", "HRMY", "ABNB", "ENX.PA", "NTAP"]}
+    r4 = validate_checkpoint_d(sep, dec, cases, sep, step9_records=recs, opportunity_set=ops)
+    assert any("not the run's feasible top-5" in b for b in r4["blocks"]), \
+        "MUST-FIRE (ISA-0608): a hand-built top-5 that differs from the feasible top-5 must be blocked"
+    r5 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=recs,
+                               opportunity_set=dict(ops, checkpoint_d_top5=feas))
+    assert not any("ISA-0608" in b for b in r5["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0608): the published feasible top-5 must pass tick 8 %r" % r5["blocks"]
+    one = {"opportunity_set_id": "OPS-1", "state": "OK", "checkpoint_d_top5": ["NTAP"]}
+    r6 = validate_checkpoint_d(["NTAP"], dec, cases, ["NTAP"], step9_records=recs, opportunity_set=one)
+    assert not any("need" in b or "ISA-0608" in b for b in r6["blocks"]), \
+        "MUST-FIRE (ISA-0608 historical shape): the ONLY feasible name must not be blocked for want of 5 %r" % r6["blocks"]
+    # ISA-0616 tick 9 — canonical C-1 on the chosen name(s)
+    _A = {"verdict": "ADMISSIBLE", "admissible": True}
+    rc = {t: dict(v, c1_admissibility=_A) for t, v in recs.items()}
+    r7 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc)
+    assert not any("ISA-0616" in b for b in r7["blocks"]), \
+        "POSITIVE CONTROL (ISA-0616): an ADMISSIBLE chosen name passes tick 9 %r" % r7["blocks"]
+    rs = dict(rc, NTAP=dict(rc["NTAP"], c1_admissibility={"verdict": "STALE", "admissible": False}))
+    r8 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rs)
+    assert any("NTAP has no ADMISSIBLE current C-1" in b for b in r8["blocks"]), \
+        "MUST-FIRE (ISA-0616): a STALE chosen BUY is blocked"
+    r9 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=recs)
+    assert any("c1_admissibility=ABSENT" in b for b in r9["blocks"]), \
+        "MUST-FIRE (ISA-0616): a supplied record with no C-1 verdict is refused, never admitted"
+    r10 = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TRIM"}), cases, feas, step9_records=rs)
+    assert not any("ISA-0616" in b for b in r10["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0616): C-1 never blocks a risk/thesis REDUCTION"
+    r11 = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TOP_UP"}), cases, feas, step9_records=rs)
+    assert any("NTAP has no ADMISSIBLE" in b for b in r11["blocks"]), \
+        "MUST-FIRE (ISA-0616): the SAME verdict blocks a TOP-UP"
+    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9: must-fire, negative control, absent verdict)")
+    return 0
+
+
 def main():
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     ap = argparse.ArgumentParser(description="Step-10 BLOCKING Checkpoint-D gate (E5).")
     ap.add_argument("--spec", required=True,
                     help="JSON: {top5:[...], decision:{chosen_ticker, chosen_action, pairwise:{}}, "
@@ -241,7 +382,9 @@ def main():
     with open(a.spec, encoding="utf-8") as fh:
         s = json.load(fh)
     res = validate_checkpoint_d(s.get("top5"), s.get("decision"),
-                                s.get("comparative_cases"), s.get("logged_tickers"))
+                                s.get("comparative_cases"), s.get("logged_tickers"),
+                                step9_records=_step9_records(s),
+                                opportunity_set=_opportunity_set(s))
     print(json.dumps(res, indent=2))
     if not res["passed"]:
         print("\nBLOCKED — resolve the above before finalising the Step-10 decision.", file=sys.stderr)

@@ -555,6 +555,12 @@ NOT_IN_SCOPE = "NOT_IN_SCOPE"
 UNPRICEABLE_BY_NATURE = "UNPRICEABLE_BY_NATURE"
 UNMEASURED_BY_DEFECT = "UNMEASURED_BY_DEFECT"
 
+# ⚑ ISA-0716 (23-Sep-2026): the resolved-binary vocabulary has ONE home, here, and the lifecycle
+#   engine (vci_lifecycle) reads it. It used to be a tuple local to graduation_disposition, which
+#   is how ISA-0655's successor state once fell out of scope silently (R4.7).
+RESOLVED_STATUSES = ("RESOLVED_POSITIVE", "RESOLVED_NEGATIVE",
+                     "RESOLVED_POSITIVE_SUCCESSOR_PENDING")
+
 
 def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
                            realisation=None, giveback=None, size_gbp=None,
@@ -579,8 +585,7 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
     #   orchestrated review caught it returning NOT_IN_SCOPE for ABCL, the case it was built
     #   to decide. A new enum value that silently falls out of a downstream membership test is
     #   the R4.7 shape: a contract change must fail an un-updated caller, not skip it.
-    RESOLVED = ("RESOLVED_POSITIVE", "RESOLVED_NEGATIVE",
-                "RESOLVED_POSITIVE_SUCCESSOR_PENDING")
+    RESOLVED = RESOLVED_STATUSES
     if catalyst_status not in RESOLVED:
         out.update(state=NOT_IN_SCOPE,
                    why=("the binary has not resolved; this rule governs post-resolution names "
@@ -658,6 +663,25 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
                         "is not." % (kind or "UNPRICEABLE")))
 
     # ── (b) EXECUTABILITY — D5's min-hold exemption, kept separate ─────────────────────
+    #    ISA-0716: ONE home, `exit_executability`, shared with the lifecycle engine's EXIT route.
+    return exit_executability(out, in_profit=in_profit, realisation=realisation,
+                              giveback=giveback,
+                              by_nature=((fc.get("refusal_kind") == UNPRICEABLE_BY_NATURE)
+                                         or bool(priceable)),
+                              min_hold_until=min_hold_until, today=today)
+
+
+def exit_executability(out, *, in_profit, realisation=None, giveback=None, by_nature,
+                       min_hold_until=None, today=None) -> dict:
+    """D5 — may a DECIDED exit execute now? Mutates and returns `out` (which already carries the
+    disposition and its `why`). Route authority is NOT decided here: this answers only whether
+    the 182-day min-hold, the C-1 loss block and the thesis_realised exemption permit the sale.
+
+    ⚑ ISA-0716: shared by graduation_disposition and vci_lifecycle's EXIT route, so the two can
+    never disagree about when a decided sale may happen (R4.4)."""
+    import datetime as _dt
+    today = today or _dt.date.today().isoformat()
+    out.setdefault("why", "")
     if not in_profit:
         out.update(state=BLOCKED_AT_A_LOSS,
                    why=out["why"] + " ⚑ C-1 blocks a full exit at a loss inside the min-hold "
@@ -669,7 +693,6 @@ def graduation_disposition(*, ticker, catalyst_status, forward_case, in_profit,
     r_fired = bool((realisation or {}).get("fired"))
     r_role = (realisation or {}).get("role")
     g_fired = bool((giveback or {}).get("fired"))
-    by_nature = (fc.get("refusal_kind") == UNPRICEABLE_BY_NATURE) or bool(priceable)
     inside = bool(min_hold_until and today < min_hold_until)
     exemption = {
         "available": bool(r_fired or g_fired) and by_nature,

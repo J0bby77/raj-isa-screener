@@ -636,6 +636,245 @@ def _policy_derived(_name, _cfg_override=None):
     import isa_policy as _pol
     return _pol.derived(_name, cfg=_cfg_override)
 
+
+# ── ISA-0607 — BROKER DEALABILITY, CONSUMED (never decided) HERE ────────────────────────────
+def apply_broker_dealability(rows, resolver=None) -> dict:
+    """Stamp every row with the ONE broker verdict (broker_dealability.verdict).
+
+    ⚑ Reads the TICKER only. The row's own `exchange` field is never consulted: it is the
+    'NASDAQ' default on every candidate_pool row (ISA-0582). A resolver failure refuses every
+    row by name (UNKNOWN_VENUE) rather than admitting any."""
+    try:
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark("step9_pre_builder", "apply_broker_dealability")
+    except Exception:                                                   # noqa: BLE001
+        pass
+    try:
+        import broker_dealability as _bd
+        rs = resolver if resolver is not None else _bd.Resolver()
+        meta = rs.meta() if hasattr(rs, "meta") else {}
+        meta["state"] = "OK" if not meta.get("load_error") else "INPUTS_UNAVAILABLE"
+    except Exception as exc:                                            # noqa: BLE001
+        rs, meta = None, {"state": "UNAVAILABLE", "load_error": "%s: %s" % (type(exc).__name__, exc)}
+    n_ok = 0
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        if rs is None:
+            v = {"state": "UNKNOWN_VENUE", "venue": None, "admissible_for_new_capital": False,
+                 "why": "broker_dealability unavailable (%s) - refused" % meta.get("load_error")}
+        else:
+            v = rs(r.get("ticker"))
+        r["broker_venue"] = v.get("venue")
+        r["broker_dealability"] = v.get("state")
+        r["broker_dealability_why"] = v.get("why")
+        if v.get("admissible_for_new_capital"):
+            n_ok += 1
+        else:
+            r["deployable_as_addition"] = False
+            r["deployable_as_switch"] = False
+    meta["n_rows"] = len([r for r in rows or [] if isinstance(r, dict)])
+    meta["n_dealable_online"] = n_ok
+    meta["rule"] = ("ISA-0607: only a verified venue declared ONLINE (broker_venues.json) may "
+                    "rank as a capital destination; WSE, undeclared, unverified or unknown venues "
+                    "refuse automated new capital")
+    return meta
+
+
+OPPORTUNITY_SET_BASIS = ("ISA-0608: main-route FEASIBLE population = deployable_stack (forward-eligible, "
+                         "broker DEALABLE_ONLINE, not sleeve-gate BLOCKED) AND t1_qualified is True "
+                         "(which already requires a VALID E[r] at or above the floor, or a catalyst "
+                         "with a valid E[r]); ordered by deployable_rank. VCI and held top-ups are "
+                         "separate routes adjudicated in stock_candidates.")
+
+
+def build_opportunity_set(month_label, deployment_priority_rank, deployable_stack) -> dict:
+    """ONE canonical feasible population and its identity (ISA-0608). Every infeasible name stays
+    visible with the FIRST stage that refused it; nothing here re-scores or re-orders."""
+    try:
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark("step9_pre_builder", "build_opportunity_set")
+    except Exception:                                                   # noqa: BLE001
+        pass
+    import hashlib as _hl
+    members, infeasible = [], []
+    on_stack = {r.get("ticker") for r in deployable_stack}
+    for r in deployable_stack:
+        if r.get("t1_qualified") is True:
+            members.append({"ticker": r.get("ticker"), "feasible_rank": len(members) + 1,
+                            "deployable_rank": r.get("deployable_rank"),
+                            "deployment_rank": r.get("deployment_rank"),
+                            "source_score": r.get("source_score"),
+                            "expected_return_12_24m": r.get("expected_return_12_24m"),
+                            "broker_venue": r.get("broker_venue")})
+        else:
+            infeasible.append({"ticker": r.get("ticker"), "stage": "T1_NOT_QUALIFIED",
+                               "reason": r.get("t1_gate_failed") or (
+                                   "t1_qualified=%r" % (r.get("t1_qualified"),)),
+                               "deployment_rank": r.get("deployment_rank")})
+    for r in deployment_priority_rank:
+        t = r.get("ticker")
+        if t in on_stack:
+            continue
+        if r.get("rank_basis") != "source_score":
+            st, why = "FORWARD_INELIGIBLE", r.get("forward_ineligible_reason")
+        elif r.get("broker_dealability") != "DEALABLE_ONLINE":
+            st, why = "NOT_DEALABLE", r.get("broker_dealability_why")
+        elif r.get("sleeve_gate") == "BLOCKED":
+            st, why = "SLEEVE_GATE_BLOCKED", r.get("sleeve_gate_reason")
+        else:
+            st, why = "NOT_ON_DEPLOYABLE_STACK", "absent from deployable_stack"
+        infeasible.append({"ticker": t, "stage": st, "reason": why,
+                           "deployment_rank": r.get("deployment_rank")})
+    canon = json.dumps({"month_label": month_label, "basis": OPPORTUNITY_SET_BASIS,
+                        "members": [(m["ticker"], m["source_score"]) for m in members],
+                        "infeasible": sorted((x["ticker"] or "", x["stage"]) for x in infeasible)},
+                       sort_keys=True, default=str)
+    osid = "OPS-%s-%s" % (month_label, _hl.sha256(canon.encode()).hexdigest()[:12])
+    return {"opportunity_set_id": osid, "basis": OPPORTUNITY_SET_BASIS,
+            "n_feasible": len(members), "n_infeasible": len(infeasible),
+            "members": members, "infeasible": infeasible,
+            # ⚑ Membership only. The ORDER capital reaches these names is the router's
+            #   (deployment_sequencer inside capital_destination), so the Checkpoint-D top-5 is
+            #   published there, over THIS membership - never re-ranked here (one home, R4.4).
+            "case_skeleton_population": [m["ticker"] for m in members],
+            "state": "OK" if members else "EMPTY_FEASIBLE_SET",
+            "why_empty": (None if members else
+                          "no main-route name is feasible this month - capital goes to the "
+                          "remaining routes (held top-up, VCI, funds, reserve) or stays retained")}
+
+
+def build_current_admissibility(tickers_scored: dict, ref_date=None, pipelines=None) -> dict:
+    """ISA-0616 (24-Sep-2026): THE canonical C-1 verdict for EVERY name scored in this run (watchlist,
+    pool, sleeve/held), from t1_gates.current_admissibility on the name's own snapshot. Every
+    capital consumer - T1, stock_candidates (main AND held top-up), Checkpoint-D, the email - reads
+    THIS map; nothing recomputes C-1 by hand. VCI binaries are NOT_APPLICABLE (their capital is
+    governed by ACS / p_thesis / the binary budget)."""
+    try:
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark("step9_pre_builder", "build_current_admissibility")
+    except Exception:                                                   # noqa: BLE001
+        pass
+    import t1_gates as _t1g
+    out, counts = {}, {}
+    for tk, row in (tickers_scored or {}).items():
+        _pl = ((pipelines or {}).get(tk) or (row or {}).get("_source_pipeline")
+               or (row or {}).get("source_pipeline") or (row or {}).get("_pipeline") or "")
+        if str(_pl).lower() in ("vci", "vci_binary"):
+            v = {"verdict": "NOT_APPLICABLE_VCI", "admissible": None,
+                 "why": "VCI binary: C-1 is a Path A control; ACS/p_thesis/binary budget govern"}
+        else:
+            v = _t1g.current_admissibility(row, ref_date)
+        out[tk] = v
+        counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
+    return {"verdicts": out, "counts": counts, "basis": getattr(_t1g, "C1_BASIS", None),
+            "evaluated_at": (ref_date or datetime.now().date()).isoformat()
+            if hasattr(ref_date or datetime.now().date(), "isoformat") else str(ref_date)}
+
+
+def split_deployable(deployment_priority_rank):
+    """-> (deployable_stack, forward_ineligible_queue, broker_refused). The production split."""
+    deployable, fwd_inel, refused = [], [], []
+    for _r in deployment_priority_rank:
+        if _r.get("rank_basis") != "source_score":
+            fwd_inel.append({**_r, "queue_rank": len(fwd_inel) + 1})
+        elif _r.get("broker_dealability") != "DEALABLE_ONLINE":
+            refused.append({**_r, "broker_refused_rank": len(refused) + 1})
+        else:
+            deployable.append({**_r, "deployable_rank": len(deployable) + 1})
+    return deployable, fwd_inel, refused
+
+
+def _selftest() -> int:
+    fails = []
+
+    def ok(name, cond, detail=""):
+        print(("  PASS " if cond else "  FAIL ") + name +
+              (("  -- " + str(detail)[:200]) if detail and not cond else ""))
+        if not cond:
+            fails.append(name)
+
+    import broker_dealability as _bd
+    rs = _bd.Resolver(declaration={"declared_on": "fixture", "venues": {
+        "NMS": {"routing": "ONLINE"}, "PAR": {"routing": "ONLINE"},
+        "WSE": {"routing": "NON_ONLINE", "mechanism": "RSP"}}},
+        verified={"as_of": "fixture", "by_symbol": {
+            "ZAB.WA": {"ticker": "ZAB.WA", "exchange": "WSE"},
+            "HALO": {"ticker": "HALO", "exchange": "NMS"},
+            "ENX.PA": {"ticker": "ENX.PA", "exchange": "PAR"}}}, aliases={})
+    rows = [{"ticker": "ZAB.WA", "rank_basis": "source_score", "source_score": 90.0,
+             "deployment_rank": 1, "exchange": "NASDAQ"},
+            {"ticker": "HALO", "rank_basis": "source_score", "source_score": 80.0, "deployment_rank": 2},
+            {"ticker": "FRO", "rank_basis": "source_score", "source_score": 79.0,
+             "deployment_rank": 3, "exchange": "NASDAQ"},
+            {"ticker": "ENX.PA", "rank_basis": "source_score", "source_score": 70.0, "deployment_rank": 4},
+            {"ticker": "LOWQ", "rank_basis": "normalised_score_fallback", "deployment_rank": 5}]
+    meta = apply_broker_dealability(rows, resolver=rs)
+    dep, fwd, ref = split_deployable(rows)
+    ok("MUST-FIRE: a rank-1 WSE name (Sep-2026 ZAB.WA shape) must not enter deployable_stack",
+       [r["ticker"] for r in dep] == ["HALO", "ENX.PA"] and dep[0]["deployable_rank"] == 1, dep)
+    ok("MUST-FIRE: a name labelled exchange='NASDAQ' but unverified (FRO) must be refused, not admitted",
+       any(r["ticker"] == "FRO" and r["broker_dealability"] == "UNKNOWN_VENUE" for r in ref), ref)
+    ok("POSITIVE CONTROL: the dealable comparators keep their order and are re-ranked from 1",
+       [r["deployable_rank"] for r in dep] == [1, 2])
+    ok("refused rows are visible with the reason and can never be added or switched into",
+       all(r["deployable_as_addition"] is False and r["deployable_as_switch"] is False
+           and r["broker_dealability_why"] for r in ref) and meta["n_dealable_online"] == 2, ref)
+    ok("NEGATIVE CONTROL: a forward-ineligible row must not be relabelled as broker-refused",
+       [r["ticker"] for r in fwd] == ["LOWQ"])
+    # REPLAY — the recorded Sep-2026 step9_pre population through the REAL declaration/map.
+    import json as _json
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "step9_pre_sep_2026.json")
+    if os.path.exists(_p):
+        _rows = [dict(r) for r in _json.load(open(_p, encoding="utf-8"))["deployment_priority_rank"]]
+        apply_broker_dealability(_rows)
+        _dep, _fwd, _ref = split_deployable(_rows)
+        _dt = [r["ticker"] for r in _dep]
+        ok("HISTORICAL MUST-FIRE: Sep-2026 replay - ZAB.WA and BFT.WA are refused before ranking",
+           "ZAB.WA" not in _dt and "BFT.WA" not in _dt
+           and {"ZAB.WA", "BFT.WA"} <= {r["ticker"] for r in _ref}, [r["ticker"] for r in _ref])
+        ok("HISTORICAL POSITIVE CONTROL: Sep-2026 dealable names (ENX.PA, HALO, NTAP) still rank",
+           {"ENX.PA", "HALO", "NTAP"} <= set(_dt), _dt[:10])
+    # ── ISA-0608 — the feasible population and its identity ────────────────────────────
+    _dpr = [{"ticker": "BIG", "rank_basis": "source_score", "source_score": 95, "deployment_rank": 1,
+             "t1_qualified": False, "t1_gate_failed": "t1_gate_failed:er=BLOCKED_MISSING_ER"},
+            {"ticker": "WAW", "rank_basis": "source_score", "source_score": 90, "deployment_rank": 2,
+             "broker_dealability": "NOT_DEALABLE_ONLINE", "broker_dealability_why": "WSE"},
+            {"ticker": "BETA", "rank_basis": "source_score", "source_score": 88, "deployment_rank": 3,
+             "broker_dealability": "DEALABLE_ONLINE", "sleeve_gate": "BLOCKED", "sleeve_gate_reason": "beta"},
+            {"ticker": "ONLY", "rank_basis": "source_score", "source_score": 60, "deployment_rank": 4,
+             "t1_qualified": True, "broker_dealability": "DEALABLE_ONLINE"},
+            {"ticker": "Q", "rank_basis": "normalised_score_fallback", "deployment_rank": 5}]
+    _stack = [dict(_dpr[0], deployable_rank=1), dict(_dpr[3], deployable_rank=2)]
+    _o = build_opportunity_set("fx", _dpr, _stack)
+    ok("MUST-FIRE (ISA-0608 historical shape): higher-ranked infeasible names are not members - "
+       "the only feasible name is the whole feasible population",
+       [m["ticker"] for m in _o["members"]] == ["ONLY"] and _o["case_skeleton_population"] == ["ONLY"],
+       _o["members"])
+    _stg = {x["ticker"]: x["stage"] for x in _o["infeasible"]}
+    ok("every infeasible name stays visible with the stage that refused it",
+       _stg == {"BIG": "T1_NOT_QUALIFIED", "WAW": "NOT_DEALABLE", "BETA": "SLEEVE_GATE_BLOCKED",
+                "Q": "FORWARD_INELIGIBLE"}, _stg)
+    _o2 = build_opportunity_set("fx", _dpr, _stack)
+    _o3 = build_opportunity_set("fx", _dpr, [dict(_dpr[3], deployable_rank=1)])
+    ok("the opportunity_set_id is deterministic and changes when the population changes",
+       _o["opportunity_set_id"] == _o2["opportunity_set_id"]
+       and _o["opportunity_set_id"] != _o3["opportunity_set_id"])
+    _o4 = build_opportunity_set("fx", _dpr, [])
+    ok("NEGATIVE CONTROL: an empty feasible set is a stated state, never an error or a fake top-5",
+       _o4["state"] == "EMPTY_FEASIBLE_SET" and _o4["members"] == [] and _o4["why_empty"])
+    # ISA-0616: the canonical C-1 map - VCI names are NOT_APPLICABLE by DECLARED pipeline, others evaluated
+    _c1t = build_current_admissibility({"V1": {"forward_axis_score": 90}, "G1": {}},
+                                       pipelines={"V1": "vci", "G1": "growth_stock"})
+    if _c1t["verdicts"]["V1"]["verdict"] != "NOT_APPLICABLE_VCI":
+        fails.append("MUST-FIRE (ISA-0616): a declared VCI name must be NOT_APPLICABLE_VCI")
+    if _c1t["verdicts"]["G1"]["verdict"] != "NO_SNAPSHOT" or _c1t["verdicts"]["G1"]["admissible"]:
+        fails.append("MUST-FIRE (ISA-0616): a growth name with no snapshot must be NO_SNAPSHOT, not admitted")
+    print("step9_pre_builder selftest: %d FAIL(s)" % len(fails))
+    assert not fails, "step9_pre_builder negative controls must not fail: %s" % fails
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Step 9 pre-scored conviction output from watchlist_scored JSON."
@@ -707,6 +946,14 @@ def main():
     vci_t1a, vci_t2a, vci_t3a = [], [], []
     pool_t1, pool_t2, pool_t3  = [], [], []    # candidate_pool tiers
 
+    # ISA-0616: the ONE C-1 verdict set for this run, computed before any record is built.
+    try:
+        _c1 = build_current_admissibility(
+            tickers_scored, pipelines={t: (wt_lookup.get(t) or {}).get("source_pipeline")
+                                       for t in tickers_scored})
+    except Exception as _c1e:                                           # noqa: BLE001
+        _c1 = {"verdicts": {}, "counts": {}, "error": "%s: %s" % (type(_c1e).__name__, _c1e)}
+    _c1_map = _c1["verdicts"]
     for ticker, ts in tickers_scored.items():
         wt_entry = wt_lookup.get(ticker, {})
         pipeline = wt_entry.get("source_pipeline", ts.get("_pipeline", "growth_stock"))
@@ -859,6 +1106,15 @@ def main():
                 "screen_sightings":   _t1_detail.get("screen_sightings"),
                 "t1_gate_detail":  _t1_detail,
             })
+        # ISA-0616: the canonical C-1 verdict travels on the record (read, never re-derived). If the
+        # T1 detail carried a different C-1 verdict (a stale rerank stamp), the canonical one wins
+        # and the name cannot qualify on the stale one.
+        _c1v = _c1_map.get(ticker) or {"verdict": "NO_SNAPSHOT", "admissible": False,
+                                       "why": "no canonical C-1 verdict for this name"}
+        base_record["c1_admissibility"] = _c1v
+        if base_record.get("t1_qualified") and _c1v.get("admissible") is False:
+            base_record["t1_qualified"] = False
+            base_record["t1_gate_failed"] = "c1:%s" % _c1v.get("verdict")
 
         # Determine kind from scored data
         scored_kind = ts.get("_kind", "unknown")
@@ -1158,13 +1414,20 @@ def main():
         gate that actually decided. Returns None when the name PASSED or when no detail was
         stored — and `None` here never means "passed", because `t1_qualified` carries that."""
         det = entry.get("t1_gate_detail") or {}
-        failed = [g for g in ("ns_floor", "stage", "er", "clean_flags")
+        failed = [g for g in ("ns_floor", "stage", "er", "clean_flags", "c1")
                   if isinstance(det.get(g), dict) and det[g].get("pass") is False]
+        # ISA-0616: the canonical C-1 verdict on the record is the authority (a stale detail cannot
+        # hide it), so its failure is named even when the stored detail predates it.
+        _c1r = entry.get("c1_admissibility") or {}
+        if _c1r.get("admissible") is False and "c1" not in failed:
+            return "t1_gate_failed:" + ",".join(
+                ["%s%s" % (g, "=%s" % (det[g].get("state") or det[g].get("value"))) for g in failed]
+                + ["c1=%s" % _c1r.get("verdict")])
         if not failed:
             return None
         parts = []
         for g in failed:
-            st = det[g].get("state") or det[g].get("value")
+            st = det[g].get("state") or det[g].get("value") or det[g].get("verdict")
             parts.append("%s%s" % (g, "" if st is None else "=%s" % st))
         return "t1_gate_failed:" + ",".join(parts)
 
@@ -1246,6 +1509,7 @@ def main():
             # from a measured rejection (R2.10). That coercion is the defect, not the fix.
             "t1_qualified":               entry.get("t1_qualified"),
             "t1_gate_failed":             _t1_gate_failed(entry),
+            "c1_admissibility":           entry.get("c1_admissibility"),   # ISA-0616 canonical verdict
             "stage_gate":                 entry.get("stage_gate"),
             "evidence_confirmed":         entry.get("evidence_confirmed"),
             "pct_vs_entry":               entry.get("pct_vs_entry"),
@@ -1255,14 +1519,21 @@ def main():
     # re-ranked from 1 so that "rank 1" means "the best home for the next pound" with no
     # gap or ambiguity; each row keeps `deployment_rank` as its position in the combined
     # list so the two views can always be reconciled.
-    _deployable_stack = []
-    _forward_ineligible_queue = []
-    for _r in deployment_priority_rank:
-        if _r.get("rank_basis") == "source_score":
-            _deployable_stack.append({**_r, "deployable_rank": len(_deployable_stack) + 1})
-        else:
-            _forward_ineligible_queue.append(
-                {**_r, "queue_rank": len(_forward_ineligible_queue) + 1})
+    # ⚑ ISA-0607 (23-Sep-2026): the broker verdict is stamped on EVERY row first, and a name
+    #   whose venue is not positively DEALABLE_ONLINE never enters `deployable_stack` - so it
+    #   cannot take a rank, a sleeve-gate slot, a Checkpoint-D place or a capital pound from a
+    #   name that can actually be bought. It stays visible in `broker_refused` with the reason.
+    _broker_meta = apply_broker_dealability(deployment_priority_rank)
+    for _vl in (vci_t1a, vci_t2a, vci_t3a):
+        apply_broker_dealability(_vl)
+    _deployable_stack, _forward_ineligible_queue, _broker_refused = \
+        split_deployable(deployment_priority_rank)
+    _broker_meta["n_refused_from_deployable_stack"] = len(_broker_refused)
+    _broker_meta["refused_from_deployable_stack"] = [
+        {"ticker": r.get("ticker"), "deployment_rank": r.get("deployment_rank"),
+         "source_score": r.get("source_score"), "venue": r.get("broker_venue"),
+         "state": r.get("broker_dealability"), "why": r.get("broker_dealability_why")}
+        for r in _broker_refused]
 
     # ── ISA-0600 — THE SLEEVE COVARIANCE GATE, APPLIED TO THE MARGINAL POUND ────────────────
     # ⚑ THE RANKING SIGNAL IS UNPROVEN AND THE COVARIANCE IS MEASURED, so the deployable stack
@@ -1381,6 +1652,12 @@ def main():
                                         "beta constraint was applied — this is the pre-ISA-0600 "
                                         "behaviour, not a clean pass (R2.10)")}
 
+    # ── ISA-0608 — ONE feasible population, built AFTER every gate that removes names ───────
+    _opp = build_opportunity_set(args.month_label, deployment_priority_rank, _deployable_stack)
+    _feas = {m["ticker"]: m["feasible_rank"] for m in _opp["members"]}
+    for _r in deployment_priority_rank:
+        _r["feasible"] = _r.get("ticker") in _feas
+        _r["feasible_rank"] = _feas.get(_r.get("ticker"))
     # Produce output
     output = {
         "_meta": {
@@ -1404,6 +1681,8 @@ def main():
             "undeployable_unmeasured":     _undeployable_unmeasured,
             "deployable_count":            len(_deployable_stack),
             "sleeve_gate":                 _sleeve_gate,
+            "broker_dealability":          _broker_meta,
+            "opportunity_set_id":          _opp["opportunity_set_id"],
             "forward_ineligible_count":    len(_forward_ineligible_queue),
             "deployment_rank_basis_note": (
                 "deployment_priority_rank is PARTITIONED: ranks 1.."
@@ -1440,6 +1719,12 @@ def main():
         # for existing consumers (email_prefill, monthly_isa_prerun coverage assert).
         "deployable_stack":        _deployable_stack,
         "forward_ineligible_queue": _forward_ineligible_queue,
+        # ISA-0607: forward-eligible names the broker cannot deal ONLINE - visible, never ranked.
+        "broker_refused":          _broker_refused,
+        # ISA-0608: the ONE feasible population (identity + Checkpoint-D top-5 + skeleton set).
+        "opportunity_set":         _opp,
+        # ISA-0616: THE canonical C-1 (current admissibility) verdict for every name scored this run.
+        "current_admissibility":   _c1,
     }
 
     with open(args.out, "w", encoding="utf-8") as f:
@@ -1463,4 +1748,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

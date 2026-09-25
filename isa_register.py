@@ -879,6 +879,18 @@ def revalidate(item_id: str, *, disposition: str, validated_against_build_id: st
             "revalidate: SUPERSEDED requires `superseded_by`. An item superseded by nothing "
             "named is an item quietly dropped (R7.7: nothing is de-scoped by silence).")
     item = dict(get(item_id))
+    # ⚑ ISA-0718 (23-Sep-2026) — R2.13 applied to the register's own writer. This used to be a
+    #   bare assignment, so every revalidation DESTROYED the previous note - including the
+    #   finding-ownership text release_gate.waiver_check reads (ISA-0695). The superseded note is
+    #   now retained, marked with the revision and build it was written against.
+    if item.get("revalidation_note"):
+        hist = list(item.get("revalidation_history") or [])
+        hist.append({"revalidated_on": item.get("revalidated_on"),
+                     "disposition": item.get("revalidation_disposition"),
+                     "validated_against_build_id": item.get("validated_against_build_id"),
+                     "revision": item.get("revision"),
+                     "note": item.get("revalidation_note")})
+        item["revalidation_history"] = hist
     item["revalidation_disposition"] = disposition
     item["revalidation_note"] = note
     item["revalidated_on"] = kwargs.pop("revalidated_on", _today())
@@ -1402,6 +1414,18 @@ def selftest(verbose: bool = True) -> int:
        "...and a missing REQUIRED key inside an element is named with its index (R4.9: a "
        "reader that cannot match a row counts it and fails)")
 
+    # ⚑ ISA-0718 MUST-FIRE: two successive revalidations leave BOTH notes readable, and a finding
+    #   id named only in the first is still present on the item (what waiver_check requires).
+    revalidate(b["id"], disposition="STILL_VALID", validated_against_build_id="TB-TEST-1",
+               note="first note owns FINDING-XYZ-0718")
+    rv2 = revalidate(b["id"], disposition="PARTLY_VALID", validated_against_build_id="TB-TEST-2",
+                     note="second note")
+    ok(rv2["revalidation_note"] == "second note"
+       and any("FINDING-XYZ-0718" in h["note"] for h in rv2.get("revalidation_history") or [])
+       and "FINDING-XYZ-0718" in json.dumps(get(b["id"])),
+       "ISA-0718: revalidate() must RETAIN the superseded note, not destroy it")
+    ok(rv2["revalidation_history"][-1]["validated_against_build_id"] == "TB-TEST-1",
+       "ISA-0718: the retained note is marked with the build it was written against (R2.13)")
     shutil.rmtree(tmp, ignore_errors=True)
     os.environ.pop("ISA_REGISTER_STORE", None)
     _schema_cache.clear()

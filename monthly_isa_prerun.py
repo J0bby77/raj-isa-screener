@@ -2004,6 +2004,100 @@ def main():
                 summary["watchlist_tickers_scored"] = n_scored
                 summary["in_window_names"] = in_window
                 print("  Scored " + str(n_scored) + " tickers | In-window: " + str(in_window))
+                # ISA-0722 (24-Sep-2026): the PIT capture rode this fetch. CAPTURE ONLY - its state
+                # is published and a failure/degradation is escalated, never fatal to the run.
+                _pitm = (wm_data.get("_meta", {}) or {}).get("pit_capture")
+                summary["pit_capture"] = _pitm or {"state": "ABSENT",
+                                                   "why": "fetch _meta carries no pit_capture"}
+                if not _pitm or _pitm.get("state") != "OK":
+                    warnings.append("ISA-0722 PIT CAPTURE %s: %s - the October evidence vintage is "
+                                    "NOT preserved for the affected names (capture-only; no "
+                                    "capital effect)" % ((_pitm or {}).get("state", "ABSENT"),
+                                                         (_pitm or {}).get("why", "no _meta.pit_capture")))
+                else:
+                    print("  [6] PIT capture: %s/%s captured, %s fetch-failed, %s capture-failed"
+                          % (_pitm.get("n_captured"), _pitm.get("n_population"),
+                             _pitm.get("n_fetch_failed"), _pitm.get("n_capture_failed")))
+                    if (_pitm.get("n_capture_failed") or 0) > 0:
+                        warnings.append("ISA-0722 PIT CAPTURE partial: %d name(s) CAPTURE_FAILED %s"
+                                        % (_pitm["n_capture_failed"],
+                                           sorted((_pitm.get("capture_errors") or {}))[:10]))
+
+    # ── Step 6f — ECB PIT FX (ISA-0197 / ISA-0744 FX closure, 24-Sep-2026) ─────────────────────
+    # ⚑ ONE canonical FX acquisition per run: ECB Data Portal SDMX REST (EXR D.<CCY>.EUR.SP00.A,
+    #   csvdata) for exactly the currencies this month's PIT vintage needs (census from Step 6's
+    #   pit_capture). Writes fx_pit_[month].json (immutable request contract, PIT as-of, raw EUR
+    #   rates, GBP crosses, 1y/3y weekly realised vol). ECB static zip is the only contingency (same
+    #   authority, typed route). No yfinance FX, no scraping, never 1.0. Idempotent: a re-run reuses a
+    #   valid artefact for the same as_of. SHADOW-only consumer (Step 8h); a failure here is published
+    #   and warned, NEVER fatal and never touches the LIVE capital path (R4.12).
+    print("\n[6f] ECB PIT FX (ecb_fx.produce)...")
+    _mf_begin("6f", "ecb_fx")
+    try:
+        import isa_policy as _pol6f
+        if not _pol6f.flag("horizon_value_shadow"):
+            summary["fx_pit"] = {"state": "DISABLED", "why": "sole consumer horizon_value_shadow is off"}
+            _mf_measure(status="OK", note="DISABLED - consumer flag off")
+        else:
+            import ecb_fx as _ef6f
+            import horizon_value as _hv6f
+            _pp6f = os.path.join(SCRIPT_DIR, "pit_capture_%s.jsonl" % month_label)
+            _recs6f = {}
+            if os.path.exists(_pp6f):
+                for _l in open(_pp6f, encoding="utf-8"):
+                    try:
+                        _r6 = json.loads(_l)
+                    except ValueError:
+                        continue
+                    if _r6.get("state") == "CAPTURED":
+                        _recs6f[_r6.get("ticker")] = _r6
+            if not _recs6f:
+                summary["fx_pit"] = {"state": "NO_INPUT", "why": "no PIT vintage - no currency census"}
+                _mf_measure(status="OK", note="NO_INPUT - no pit_capture this month")
+            else:
+                _ccy6f = _hv6f.fx_currencies(list(_recs6f.values()))
+                _fx6f = _ef6f.produce(_ccy6f, run_date.isoformat(), month_label=month_label, root=SCRIPT_DIR,
+                                      timeout_s=8.0, max_attempts=2, static_max_attempts=1)
+                # ⚑ RUNTIME: worst case (ECB down) 8+1+8 s API + 8 s static ~= 25 s; normal ~2 s. Sep-2026
+                #   measured total 117.8 s vs HOST_SHELL_CEILING_S 175 s. Fires only when this month's PIT
+                #   vintage exists (the Step-4 pass); the Step-1 pass is NO_INPUT at zero cost.
+                _cur6f = _fx6f.get("currencies") or {}
+                summary["fx_pit"] = {
+                    "state": _fx6f.get("state"), "why": _fx6f.get("why"), "reused": bool(_fx6f.get("reused")),
+                    "route": _fx6f.get("acquisition_route"), "fingerprint": _fx6f.get("fingerprint"),
+                    "fx_observation_date": (_fx6f.get("asof") or {}).get("fx_observation_date"),
+                    "currencies_requested": _ccy6f,
+                    "not_ok": sorted(c for c, r in _cur6f.items() if r.get("state") != "OK"),
+                    "vol_unavailable": sorted(c for c, r in _cur6f.items()
+                                              if (r.get("vol_1y") or {}).get("state") != "OK"
+                                              or (r.get("vol_3y") or {}).get("state") != "OK"),
+                    "capital_authority": False}
+                if _fx6f.get("state") == "OK":
+                    _mf_measure(rows_in=len(_ccy6f), rows_out=len(_cur6f), status="OK",
+                                note="ECB %s obs %s" % (_fx6f.get("acquisition_route"),
+                                                        summary["fx_pit"]["fx_observation_date"]))
+                    print("  [6f] ECB FX %s via %s, obs %s, %d currencies%s"
+                          % (_fx6f.get("state"), _fx6f.get("acquisition_route"),
+                             summary["fx_pit"]["fx_observation_date"], len(_cur6f),
+                             " (reused)" if _fx6f.get("reused") else ""))
+                    if _fx6f.get("acquisition_route") != "ECB_SDMX_REST_API":
+                        warnings.append("Step 6f ECB FX came from the typed CONTINGENCY route %s (API failure %s) - "
+                                        "same authority; persistent API failure must be investigated"
+                                        % (_fx6f.get("acquisition_route"),
+                                           ((_fx6f.get("request") or {}).get("contingency") or {}).get("api_failure")))
+                    if summary["fx_pit"]["not_ok"] or summary["fx_pit"]["vol_unavailable"]:
+                        warnings.append("Step 6f ECB FX typed gaps: not_ok=%s vol_unavailable=%s (SHADOW; the "
+                                        "affected cross-currency cases read FX_UNAVAILABLE / FX_VOL_UNAVAILABLE)"
+                                        % (summary["fx_pit"]["not_ok"], summary["fx_pit"]["vol_unavailable"]))
+                else:
+                    _mf_measure(status="DEGRADED", note="ECB FX %s" % _fx6f.get("state"))
+                    warnings.append("Step 6f (ISA-0197) ECB FX %s - %s. SHADOW only: Step 8h types every "
+                                    "cross-currency case FX_UNAVAILABLE; no capital effect"
+                                    % (_fx6f.get("state"), _fx6f.get("why")))
+    except Exception as _e6f:                                           # noqa: BLE001
+        summary["fx_pit"] = {"state": "FAILED", "why": "%s: %s" % (type(_e6f).__name__, _e6f)}
+        warnings.append("Step 6f (ISA-0197) ECB FX RAISED (%s: %s) - SHADOW only, no capital effect"
+                        % (type(_e6f).__name__, _e6f))
 
     # ---------------------------------------------------------------------------
     # Step 6.5: VCI forward-led re-price (§11.3 / §14.2)
@@ -2173,7 +2267,12 @@ def main():
                 # `held_position_review` is their one consumer and this is its orchestrator.
                 try:
                     import held_position_review as _hpr
-                    _hp = _hpr.review(portfolio_path, dry_run=bool(args.dry_run))
+                    # ISA-0716: the lifecycle decision is issued only under the run's own
+                    # capital authority (R18.5), stamped at Step 0a.
+                    _hp = _hpr.review(portfolio_path, dry_run=bool(args.dry_run),
+                                      lifecycle_observer="monthly_prerun",
+                                      capital_authority=(summary.get("trusted_build") or {})
+                                      .get("authority"))
                     summary["held_position_review"] = _hp["summary"]
                     warnings.extend(_hp.get("warnings") or [])
                     if _hp["state"] != "OK":
@@ -2839,12 +2938,37 @@ def main():
                     continue
                 _wts_rc[_key] = float(_val) / _nav_rc * 100.0
             _starter = float(_ps_rc.ladder()["STARTER"])
+            # ⚑ ISA-0708 (20-Sep-2026) — ONE RISK-SHARE AUTHORITY. `contributions()` used to
+            #   compute its own share from its own sigma/rho inputs while the D27 sleeve-risk
+            #   ceiling computed a different one from the return store, and nothing asserted
+            #   they agreed: the same held name could be simultaneously inside and outside its
+            #   intended risk treatment. The authority is `sleeve_risk.risk_share_authority`
+            #   because the ceiling is the CAPITAL consumer — it refuses entries. An authority
+            #   that cannot be built is UNAVAILABLE and named, never silently skipped (R2.10).
+            _rs_auth, _rs_auth_why = None, None
+            try:
+                import sleeve_risk as _sr_rc, stock_return_store as _srs_rc
+                _rs_auth = _sr_rc.risk_share_authority(_srs_rc.load(), _pd_doc)
+            except Exception as _ae:                               # noqa: BLE001
+                _rs_auth_why = "%s: %s" % (type(_ae).__name__, _ae)
+                warnings.append("Step 6.12e (ISA-0708): the authoritative sleeve risk-share "
+                                "could NOT be built (%s), so the review flag is computed on "
+                                "risk_contribution's own share and carries NO "
+                                "risk_share_calc_id. Reported, not silently substituted."
+                                % _rs_auth_why)
             _contrib = _rc.contributions(_wts_rc, _sig, starter_pct=_starter,
-                                         matrix=_mx.get("rho"))
+                                         matrix=_mx.get("rho"), authority=_rs_auth)
             _rc.record_run(_contrib, run_date=(run_date.isoformat()
                                               if isinstance(run_date, dt_date) else None))
             _v21["risk_contribution"] = {
                 "rc_basis": _contrib.get("rc_basis"),
+                # ISA-0708: the id the D27 ceiling must also quote, and the measured gap
+                # between the two implementations on THIS book.
+                "risk_share_calc_id": _contrib.get("risk_share_calc_id"),
+                "risk_share_authority": _contrib.get("risk_share_authority"),
+                "risk_share_window": _contrib.get("risk_share_window"),
+                "risk_share_divergence": _contrib.get("risk_share_divergence"),
+                "risk_share_authority_unavailable": _rs_auth_why,
                 "sigma_p": _contrib.get("sigma_p"),
                 "n_eff": _contrib.get("n_eff"),
                 "pair_coverage": _contrib.get("pair_coverage"),
@@ -3342,6 +3466,94 @@ def main():
             })
     except Exception as _r4e:
         warnings.append(f"R4 revisions crosstab skipped: {_r4e}")
+    # ── Step 8u — UNDERWRITING CASES: ORIGINAL / CURRENT E[r] (ISA-0722, 23-Sep-2026) ─────────
+    # ⚑ Runs AFTER step9_pre (the T1 candidates) and BEFORE the router, so every capital receipt
+    #   and every Step-10 decision can bind a case id that already exists. A CURRENT case for N of
+    #   N held direct stocks (denominated by the broker book) + one per T1 candidate, appended to
+    #   underwriting_cases.jsonl; the ORIGINAL is read from the ledger. Capture is a property of
+    #   the run (R4.11), and a failure is RECORDED, never swallowed (R4.12).
+    try:
+        import underwriting as _uw
+        try:
+            import position_alerts as _pa_uw
+            _mh_uw = _pa_uw.min_hold_state(root=SCRIPT_DIR)
+        except Exception as _mhe:                                       # noqa: BLE001
+            _mh_uw = {}
+            warnings.append("Step 8u (ISA-0722): min-hold state unavailable (%s) - ORIGINAL E[r] "
+                            "is resolved without the position's first-entry date" % _mhe)
+        _uwc = _uw.capture_month(
+            portfolio_path=portfolio_path, scored_path=watchlist_scored_path,
+            step9_path=step9_pre_path, as_of=run_date.isoformat(), root=SCRIPT_DIR,
+            lifecycle=((summary.get("held_position_review") or {}).get("lifecycle")),
+            min_hold=_mh_uw, dry_run=bool(args.dry_run))
+        summary["held_underwriting"] = _uwc
+        if _uwc.get("state") == "OK":
+            print("  [8u] underwriting: %d/%d held cases (%s), %d candidate case(s); written %s"
+                  % (_uwc["n_cases_held"], _uwc["n_expected"],
+                     ", ".join("%s %d" % (k, len(v)) for k, v in sorted(_uwc["by_state"].items())),
+                     _uwc["n_candidate_cases"], _uwc["write"]["n_written"]))
+            if not _uwc.get("complete"):
+                warnings.append("Step 8u (ISA-0722): %d of %d held direct stocks carry a case - "
+                                "the population is INCOMPLETE" % (_uwc["n_cases_held"], _uwc["n_expected"]))
+            for _r in _uwc.get("rows") or []:
+                if not _r.get("admissible_for_positive_size"):
+                    warnings.append("Step 8u (ISA-0722) %s: current E[r] %s - no positive new size "
+                                    "from this case (a hold is NOT a sale; risk/thesis reductions "
+                                    "are unaffected)." % (_r["ticker"], _r["current_state"]))
+        else:
+            warnings.append("Step 8u (ISA-0722): underwriting capture %s - %s"
+                            % (_uwc.get("state"), _uwc.get("why")))
+    except Exception as _uwe:                                           # noqa: BLE001
+        summary["held_underwriting"] = {"state": "FAILED",
+                                        "why": "%s: %s" % (type(_uwe).__name__, _uwe)}
+        warnings.append("Step 8u (ISA-0722): underwriting capture RAISED (%s: %s). No case was "
+                        "written; ORIGINAL E[r] for this month's decisions will be NOT_CAPTURED."
+                        % (type(_uwe).__name__, _uwe))
+    # ── Step 8x — EXECUTION CEILING, SHADOW (ISA-0740, 24-Sep-2026) ─────────────────────────
+    # ⚑ An approval-preserving execution ceiling per case captured this month: W_T frozen on the
+    #   case, Pmax against the CURRENT authorised hurdle, identities asserted. SHADOW: published,
+    #   consumed by nothing, necessary-only (never a BUY). Never raises into the run (R4.12).
+    try:
+        import execution_ceiling as _xc
+        import underwriting as _uw_x
+        _xcs = _xc.shadow_month(root=SCRIPT_DIR, as_of=run_date.isoformat(),
+                                cases=(getattr(_uw_x, "_LAST_CAPTURE", {}) or {}).get("cases"))
+        summary["execution_ceiling"] = _xcs
+        if _xcs.get("state") == "OK":
+            print("  [8x] execution ceiling (SHADOW): %d case(s) %s"
+                  % (_xcs["n_cases"], ", ".join("%s %d" % (k, len(v))
+                                                for k, v in sorted(_xcs["by_state"].items()))))
+            for _r in _xcs.get("rows") or []:
+                if _r.get("state") == "ERROR_IDENTITY":
+                    warnings.append("Step 8x (ISA-0740) %s: execution-ceiling IDENTITY BROKEN - "
+                                    "no ceiling published" % _r.get("ticker"))
+        else:
+            warnings.append("Step 8x (ISA-0740): execution ceiling %s - %s"
+                            % (_xcs.get("state"), _xcs.get("why")))
+    except Exception as _xce:                                           # noqa: BLE001
+        summary["execution_ceiling"] = {"state": "FAILED", "why": "%s: %s" % (type(_xce).__name__, _xce)}
+        warnings.append("Step 8x (ISA-0740): execution ceiling RAISED (%s: %s) - SHADOW only, no "
+                        "capital effect" % (type(_xce).__name__, _xce))
+    # ── Step 8h — HORIZON-VALUE E[r], SHADOW (ISA-0744, 24-Sep-2026) ───────────────────────
+    # ⚑ One 12-month horizon-value case (P/E or EV/EBITDA route, typed state, sensitivities) per
+    #   name in THIS month's PIT vintage (pit_capture_[month].jsonl, Step 6), compared with the
+    #   repaired additive E[r] stamped on the same record. SHADOW: published, consumed by nothing
+    #   that moves capital, never a BUY. Never raises into the run (R4.12).
+    try:
+        import horizon_value as _hv
+        _hvs = _hv.shadow_month(month_label, root=SCRIPT_DIR, as_of=run_date.isoformat())
+        summary["horizon_value"] = _hvs
+        if _hvs.get("state") == "OK":
+            print("  [8h] horizon-value E[r] (SHADOW): %d case(s) %s; %d hurdle flip(s) vs additive"
+                  % (_hvs["n_cases"], ", ".join("%s %d" % (k, v) for k, v in sorted(_hvs["by_state"].items())),
+                     _hvs.get("hurdle_flips", 0)))
+        else:
+            warnings.append("Step 8h (ISA-0744): horizon-value E[r] %s - %s"
+                            % (_hvs.get("state"), _hvs.get("why")))
+    except Exception as _hve:                                           # noqa: BLE001
+        summary["horizon_value"] = {"state": "FAILED", "why": "%s: %s" % (type(_hve).__name__, _hve)}
+        warnings.append("Step 8h (ISA-0744): horizon-value E[r] RAISED (%s: %s) - SHADOW only, no "
+                        "capital effect" % (type(_hve).__name__, _hve))
     # ── Step 6.10 — THE MARGINAL-POUND ROUTER (20-Aug-2026) ───────────────────────────────────
     # ⚑ WHY THIS STEP EXISTS. `capital_destination` was built 16-Aug-2026, closed five register
     # items, carried 22 green assertions — and was called by NOTHING. Same shape as the three

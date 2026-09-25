@@ -29,6 +29,10 @@ PANEL_COLS = [
     # Fix Pack A8 (12-Jul-2026): stage + return-side columns so stage-exclusion and upside/E[r]
     # doctrine become measurable; door reserved for B7 regime doors. Old CSVs simply carry NaN.
     "revision_stage", "implied_upside", "expected_return_12_24m", "summary_flag", "door",
+    # ISA-0619 (24-Sep-2026): the scoring-definition identity the row was PRODUCED under (additive;
+    # pre-stamp rows stay blank and resolve through scoring_config.SCORE_PANEL_PROVENANCE).
+    "score_definition_hash", "score_definition_id", "score_definition_basis",
+    "calibration_fingerprint", "score_panel_schema_version", "snapshot_as_of",
 ]
 
 
@@ -105,9 +109,26 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
     # what the 07-Aug SP500 screen did.
     try:
         import calibration_guard as _cg
-        _cg.record_calibration_stamp(_rd, group)
+        # ⚑ ISA-0729 (23-Sep-2026): the stamp store was the RELATIVE default, i.e. the CWD, so a
+        #   caller logging to a private/temporary panel still stamped the canonical history (a
+        #   test run on LIVE re-stamped 2026-08-08|F250-SPI). The stamp lives BESIDE the panel it
+        #   describes whenever that panel is NOT the canonical one beside this module; the
+        #   canonical/production call keeps the exact previous behaviour (its readers use the
+        #   same relative default), so production stamping is unchanged.
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _pdir = os.path.dirname(os.path.abspath(store))
+        if os.path.normcase(_pdir) == os.path.normcase(_here):
+            _cg.record_calibration_stamp(_rd, group)
+        else:
+            _cg.record_calibration_stamp(_rd, group, store=os.path.join(_pdir, _cg.STAMP_STORE_DEFAULT))
     except Exception as _e:            # a stamp failure must never block a screen
         print(f"  [score_panel] calibration stamp NOT recorded ({_e}) - pool guard degraded")
+    try:
+        import score_definition as _sd
+        _stamp = _sd.stamp(_rd)
+    except Exception as _sde:          # a stamp failure must never block a screen; it is visible
+        print(f"  [score_panel] score-definition stamp NOT recorded ({_sde}) - rows UNSTAMPED")
+        _stamp = {"score_definition_basis": "STAMP_FAILED"}
     rows = []
     for _, r in df.iterrows():
         tk = r.get("ticker")
@@ -125,6 +146,9 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
         rec["run_date"] = _rd
         rec["group"] = group
         rec["ticker"] = tk
+        # ISA-0619: stamp the identity of the code scoring this row NOW; a historical run_date
+        # (backfill / re-log) is stamped HISTORICAL_WRITE_UNSTAMPED, never the current identity.
+        rec.update(_stamp)
         if rec.get("source_score") in (None, "") or (isinstance(rec.get("source_score"), float) and pd.isna(rec.get("source_score"))):
             rec["source_score"] = _src_score(r, part_a_max, part_b_max)
         # A8: derive implied_upside from target/current when not supplied by the row
@@ -172,6 +196,44 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
     merged.to_csv(store, index=False)
     return len(new), len(merged)
 
+
+
+def _selftest(verbose=True) -> int:
+    """ISA-0729 — the calibration stamp follows the panel it describes; the canonical path is unchanged."""
+    import tempfile, hashlib, pandas as pd
+    fails = []
+
+    def ck(name, cond):
+        if not cond:
+            fails.append(name)
+        if verbose:
+            print(("  ok  " if cond else "  FAIL ") + name)
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    canon = os.path.join(here, "calibration_stamp_history.json")
+
+    def _h(p):
+        return hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else None
+    before = _h(canon)
+    td = tempfile.mkdtemp(prefix="spl_selftest_")
+    store = os.path.join(td, "panel.csv")
+    df = pd.DataFrame({"ticker": ["AAA", "BBB"], "part_a_score": [20, 14], "part_b_score": [18, 16],
+                       "total_score": [38, 30], "forward_axis_score": [80, 100], "revisions_score": [70, 60]})
+    n1 = log_from_full_data(df, "SELFTEST", "2026-06-26", store)
+    n2 = log_from_full_data(df, "SELFTEST", "20260626", store)
+    ck("idempotent per (run_date, group, ticker) across two date spellings", n1[1] == 2 and n2[1] == 2)
+    ck("MUST-FIRE: a private panel's calibration stamp is written BESIDE that panel",
+       os.path.exists(os.path.join(td, "calibration_stamp_history.json")))
+    ck("NEGATIVE CONTROL: a private panel must not stamp the canonical history (the 23-Sep LIVE leak)",
+       _h(canon) == before)
+    try:
+        norm_run_date("8 Aug 2026")
+        ck("NEGATIVE CONTROL: an unrecognised date spelling is refused, never coerced", False)
+    except Exception:
+        ck("NEGATIVE CONTROL: an unrecognised date spelling is refused, never coerced", True)
+    if verbose:
+        print("score_panel_logger selftest: %d FAIL(s)" % len(fails))
+    return 1 if fails else 0
 
 def main():
     ap = argparse.ArgumentParser()

@@ -2865,26 +2865,23 @@ def score_part_b(ticker_sym, info, income_stmt, cashflow, balance_sheet,
         out["div_payout_label"] = "Dividend on negative/zero FCF"
     out["div_payout_fcf"] = div_payout_fcf
 
-    # ── Metric 9: Forward EPS Growth Proxy ───────────────────────────────
-    fwd_eps_growth = None
+    # ── Metric 9: Forward EPS Growth (ISA-0720, 23-Sep-2026) ─────────────
+    # ⚑ The old parser matched 'next year' / '+1 year' / '1y' and yfinance labels the row '+1y',
+    #   so it NEVER matched and fell back to info['earningsGrowth'] - TRAILING QUARTERLY y/y
+    #   growth - under a forward name. It also took columns[0] rather than the STOCK column by
+    #   name (columns are ['stockTrend', 'indexTrend']). One typed observation now, no fallback.
     ge = info.get("growth_estimates")
-    try:
-        if ge is not None and not (hasattr(ge, "empty") and ge.empty):
-            df = ge if isinstance(ge, pd.DataFrame) else pd.DataFrame(ge)
-            for idx in df.index:
-                lbl = str(idx).lower()
-                if "next year" in lbl or "+1 year" in lbl or "1y" == lbl:
-                    col = df.columns[0] if len(df.columns) > 0 else None
-                    if col is not None:
-                        val = safe_float(df.at[idx, col])
-                        if val is not None:
-                            fwd_eps_growth = val
-                            break
-    except Exception:
-        pass
-    if fwd_eps_growth is None:
-        fwd_eps_growth = safe_float(info.get("earningsGrowth"))
+    _obs = forward_growth_observation(ge, period="+1y")
+    fwd_eps_growth = _obs["value"]
     out["fwd_eps_growth"] = fwd_eps_growth
+    out["fwd_eps_growth_basis"] = _obs["basis"]
+    out["fwd_eps_growth_period"] = _obs["period"]
+    out["fwd_eps_growth_source"] = _obs["source_field"]
+    # the trailing quantity, kept SEPARATELY and labelled — never a substitute (R6.1/R6.4)
+    out["eps_growth_trailing_q"] = safe_float(info.get("earningsGrowth"))
+    # R6.2 SHADOW COMPARISON for one cycle: what the defective parser would have published.
+    #   The old parser never matched, so its output was ALWAYS the trailing earningsGrowth.
+    out["fwd_eps_growth_legacy"] = safe_float(info.get("earningsGrowth"))
     if fwd_eps_growth is None:
         out["score_b_fwd_eps"] = 0
     elif fwd_eps_growth > 0.12:
@@ -3612,6 +3609,10 @@ FIELD_MAP = [
     "score_b_book_to_bill", "score_b_backlog_ev",
     "fwd_pe", "ev_ebitda", "price_fcf", "fcf_yield", "earnings_yield",
     "position_52wk", "div_payout_fcf", "fwd_eps_growth", "target_upside",
+    # ISA-0720 (23-Sep-2026): the forward observation's provenance, the trailing quantity kept
+    # SEPARATELY, and the defective parser's value published once for comparison (R6.2).
+    "fwd_eps_growth_basis", "fwd_eps_growth_period", "fwd_eps_growth_source",
+    "eps_growth_trailing_q", "fwd_eps_growth_legacy",
     "stress_nd_ebitda", "stress_int_cov", "current_price", "target_price_mean",
     "analyst_rating", "num_analysts", "next_earnings", "currency",
     "score_b_fwd_pe", "score_b_ev_ebitda", "score_b_price_fcf", "score_b_fcf_yield",
@@ -3662,6 +3663,9 @@ FIELD_MAP = [
     "src_deploy_raw", "src_deploy_w", "src_qual_raw", "src_qual_w", "src_analyst_raw", "src_analyst_w",
     "implied_upside_fv", "display_target_gap", "fv_basis", "fv_conf", "source_input_missing",
     "expected_return_12_24m", "er_growth", "er_rerate", "er_yield", "er_confidence", "er_basis",
+    "er_sharecount_sensitivity_pp",   # ISA-0745: the removed buyback term, kept as a sensitivity
+    # ISA-0721/0722 (23-Sep-2026): the typed E[r] state and the case identity fields.
+    "er_state", "er_horizon_months", "er_quantity_basis", "er_method_id",
     # D-24 (09-Aug-2026) — the anchor evidence travels WITH the number it produced. Without these
     # columns the re-rate is once again a bare figure nobody can audit after the fact.
     "er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own", "er_anchor_operative",
@@ -4104,21 +4108,52 @@ def _margin_trajectory_score(quarterly_income_stmt):
         return None, None
 
 
-def _rev_estimate_score(growth_estimates, info):
-    """Forward revenue growth consensus % + 0/1/2. growth_estimates (already fetched) or info fallback."""
+def forward_growth_observation(growth_estimates, *, period="+1y", column="stockTrend"):
+    """ISA-0720 — THE one typed reader of yfinance's `growth_estimates` (an EPS-growth table).
+
+    Returns {value (fraction), period, basis, source_field, state}. `basis` is CONSENSUS_FORWARD
+    when the named row AND the STOCK column exist, else MISSING_FORWARD with value None. There is
+    NO fallback: a trailing quantity is a different quantity, and substituting it under a forward
+    name is the defect this function exists to end (R4.1, FC-B). The stock column is selected
+    by NAME ('stockTrend', legacy 'stock'), never by position, so a reordered table cannot hand
+    back the index trend."""
+    out = {"value": None, "period": period, "basis": "MISSING_FORWARD",
+           "source_field": None, "state": "MISSING_FORWARD",
+           "source": "yfinance.Ticker.growth_estimates (EPS growth estimates)"}
     try:
-        g = None
-        if growth_estimates is not None and hasattr(growth_estimates, "index") and "+1y" in list(growth_estimates.index):
-            r = growth_estimates.loc["+1y"]
-            for col in ("stockTrend", "growth", "revenueGrowth"):
-                try:
-                    v = safe_float(r.get(col))
-                except Exception:
-                    v = None
-                if v is not None:
-                    g = v; break
-        if g is None and info is not None:
-            g = safe_float(info.get("revenueGrowth"))
+        if growth_estimates is None or (hasattr(growth_estimates, "empty") and growth_estimates.empty):
+            out["why"] = "no growth_estimates table"
+            return out
+        df = growth_estimates if isinstance(growth_estimates, pd.DataFrame) \
+            else pd.DataFrame(growth_estimates)
+        if period not in [str(i) for i in df.index]:
+            out["why"] = "row %r absent (rows: %s)" % (period, [str(i) for i in df.index])
+            return out
+        col = next((c for c in (column, "stock") if c in list(df.columns)), None)
+        if col is None:
+            out["why"] = "no STOCK column by name (columns: %s)" % list(df.columns)
+            return out
+        v = safe_float(df.loc[period, col])
+        if v is None:
+            out["why"] = "the %s/%s cell is empty" % (period, col)
+            return out
+        out.update(value=v, basis="CONSENSUS_FORWARD", state="VALID",
+                   source_field="growth_estimates[%s].%s" % (period, col))
+    except Exception as exc:                                            # noqa: BLE001
+        out.update(state="UNPARSEABLE", why="%s: %s" % (type(exc).__name__, exc))
+    return out
+
+
+def _rev_estimate_score(growth_estimates, info):
+    """Forward consensus growth % + 0/1/2 from `growth_estimates`.
+
+    ⚑ ISA-0720 LABEL NOTE: `growth_estimates` is yfinance's EPS-growth table, so the value this
+    returns (published as `rev_est_fwd_pct`) is consensus +1y EPS growth, NOT revenue. The
+    Forward-score methodology is deliberately unchanged here (the momentum/forward package owns
+    it); what changed is that it no longer falls back to trailing `info.revenueGrowth` when the
+    forward row is absent — a forward field that silently becomes a historical one."""
+    try:
+        g = forward_growth_observation(growth_estimates, period="+1y")["value"]
         if g is None:
             return None, None
         gp = g * 100.0 if abs(g) < 3 else g
@@ -4903,6 +4938,32 @@ def main():
             parser.error("--group required for scheduled mode")
         run_scheduled(args.group, run_date, args.outputs, args.inv_dir)
 
+
+
+def _selftest():
+    """ISA-0720 (23-Sep-2026) — the forward-growth observation contract, on the COCO shapes."""
+    ge = pd.DataFrame({"stockTrend": [0.10, 0.20, 0.30, 0.1527],
+                       "indexTrend": [-0.4548] * 4}, index=["0q", "+1q", "0y", "+1y"])
+    o = forward_growth_observation(ge)
+    assert o["value"] == 0.1527 and o["basis"] == "CONSENSUS_FORWARD" and o["period"] == "+1y", (
+        "⚑ MUST-FIRE: the '+1y' STOCK value must be consumed (the old parser never matched it)", o)
+    ro = forward_growth_observation(ge[["indexTrend", "stockTrend"]])
+    assert ro["value"] == 0.1527, ("⚑ MUST-FIRE: reordered columns must NOT substitute the index "
+                                   "trend - the stock column is selected by NAME", ro)
+    lg = forward_growth_observation(pd.DataFrame({"stock": [0.12]}, index=["+1y"]))
+    assert lg["value"] == 0.12, ("the legacy 'stock' column name is still read", lg)
+    no = forward_growth_observation(ge.drop(index="+1y"))
+    assert no["value"] is None and no["basis"] == "MISSING_FORWARD", (
+        "NEGATIVE CONTROL: a missing forward row is MISSING, never a fallback", no)
+    assert forward_growth_observation(None)["value"] is None
+    rv, rs = _rev_estimate_score(None, {"revenueGrowth": 0.28})
+    assert rv is None and rs is None, (
+        "⚑ MUST-FIRE: with no forward table the forward score must NOT fall back to trailing "
+        "info.revenueGrowth", rv)
+    rv2, _ = _rev_estimate_score(ge, {"revenueGrowth": 0.99})
+    assert rv2 == 15.3, ("the forward score reads the same +1y row (labelled EPS, not revenue)", rv2)
+    print("screener_core selftest OK (ISA-0720 forward-growth observation)")
+    return 0
 
 if __name__ == "__main__":
     main()

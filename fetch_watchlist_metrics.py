@@ -140,6 +140,27 @@ def _fetch_all_for_ticker(ticker_sym: str) -> tuple[str, dict, str | None]:
             "upgrades_downgrades":     tk.upgrades_downgrades,
             "recommendations_summary": tk.recommendations_summary,
         }
+        # ISA-0722 PIT capture (24-Sep-2026): direct FY0/FY1 revenue estimates. Served from the SAME
+        # cached quoteSummary earningsTrend payload as earnings_estimate above (yfinance 1.7.0) -
+        # MEASURED 0 extra provider calls. Fail-soft: a failure here never fails the ticker.
+        try:
+            data["revenue_estimate"] = tk.revenue_estimate
+        except Exception:                                                # noqa: BLE001
+            data["revenue_estimate"] = None
+        # ISA-0747 (24-Sep-2026 FX/data closure): the provider TTM income statement (EBITDA, revenue,
+        # diluted average shares) for the ISA-0744 period contract - waterfall step 1 in
+        # horizon_value.flow_ttm (then 4 consecutive quarters, then FY + YTD - prior YTD, then typed).
+        # MEASURED ~0.2 s/ticker, one extra provider call. Flag-gated (isa_policy ttm_provider_fetch,
+        # SHADOW-only consumer) and fail-soft: a failure leaves it None and NEVER fails the ticker;
+        # no LIVE scoring input reads it (pit_capture -> Step 8h only).
+        data["ttm_income_stmt"] = None
+        try:
+            import isa_policy as _pol_ttm
+            if _pol_ttm.flag("ttm_provider_fetch"):
+                data["ttm_income_stmt"] = tk.ttm_income_stmt
+        except Exception:                                                # noqa: BLE001
+            data["ttm_income_stmt"] = None
+        data["_fetched_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
         # Price history (5yr for overlays)
         try:
@@ -274,7 +295,10 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
     pa = sc.score_part_a(ticker_sym, info, inc, cf, bal, inc_q)
 
     # Part B
-    pb = sc.score_part_b(ticker_sym, info, inc, cf, bal, inc_q)
+    # ISA-0720 (23-Sep-2026): Part B metric 9 reads the forward EPS row from `growth_estimates`.
+    #   This path used to call it WITHOUT that table, so it could only ever fall back.
+    pb = sc.score_part_b(ticker_sym, {**info, "growth_estimates": data.get("growth_estimates")},
+                         inc, cf, bal, inc_q)
 
     # Merge (pb overrides pa on key conflicts — matches screener_core behaviour)
     scored = {**pa, **pb}
@@ -616,6 +640,15 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
     # ---------------------------------------------------------------------------
     scored_results: dict[str, dict] = {}
     scoring_errors: dict[str, str] = {}
+    # ISA-0619 (24-Sep-2026): every row scored in THIS run carries the identity of the scoring code
+    # that produced it and its snapshot time - the fields ISA-0616's current-admissibility verdict
+    # reads. A stamp failure is visible on the row (STAMP_FAILED), never silently absent.
+    try:
+        import score_definition as _sd
+        _sd_stamp = _sd.stamp(date.today().isoformat(),
+                              as_of=datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    except Exception as _sde:                                           # noqa: BLE001
+        _sd_stamp = {"score_definition_basis": "STAMP_FAILED", "score_definition_error": str(_sde)[:200]}
 
     for ticker in all_tickers:
         data = raw_data.get(ticker)
@@ -663,6 +696,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             scored["_pct_above_entry"] = window.get("pct_above_entry")
             scored["_in_window_note"]  = window.get("in_window_note", "")
             scored["ticker"] = ticker
+            scored.update(_sd_stamp)
             # Volatility / ATR technical-anchor inputs (history already pulled at fetch;
             # zero extra network calls). Consumed by entry_level_builder.py (Step 7.25).
             try:
@@ -722,8 +756,26 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
     # ---------------------------------------------------------------------------
     # Build output
     # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # ISA-0722 (24-Sep-2026): IRREVERSIBLE point-in-time capture of the FULL fetched population
+    # (incl. rejected/deferred names), riding this fetch. CAPTURE ONLY, FAIL-SOFT, OBSERVABLE:
+    # its state is published in _meta.pit_capture and never raises into the pre-run.
+    # ---------------------------------------------------------------------------
+    try:
+        import pit_capture as _pit
+        _pitc = _pit.capture(raw_data=raw_data, fetch_errors=fetch_errors, population=all_tickers,
+                             ticker_meta=ticker_meta, scored_results=scored_results,
+                             month_label=month_label, root=SCRIPT_DIR,
+                             out_path=os.path.join(os.path.dirname(os.path.abspath(out_path)),
+                                                   f"pit_capture_{month_label}.jsonl"))
+    except Exception as _pite:                                          # noqa: BLE001
+        _pitc = {"state": "FAILED", "why": f"{type(_pite).__name__}: {_pite}"}
+    log.info(f"PIT capture (ISA-0722): {_pitc.get('state')} "
+             f"{_pitc.get('n_captured')}/{_pitc.get('n_population')} captured")
+
     output = {
         "_meta": {
+            "pit_capture": {k: v for k, v in _pitc.items() if k != "identity"},
             "month_label":               month_label,
             "produced_at":               datetime.now().strftime("%Y-%m-%d %H:%M"),
             "tickers_requested":         all_tickers,
@@ -838,6 +890,28 @@ def main():
 
     run(watchlist_path, out_path, month_label)
 
+
+
+def _selftest():
+    """ISA-0720 (23-Sep-2026) — the PRE-RUN path scores Part B metric 9 from the forward table."""
+    import pandas as _pd
+    ge = _pd.DataFrame({"stockTrend": [0.10, 0.20, 0.30, 0.153], "indexTrend": [-0.4548] * 4},
+                       index=["0q", "+1q", "0y", "+1y"])
+    info = {"earningsGrowth": 1.158, "revenueGrowth": 0.28, "currentPrice": 70.0,
+            "marketCap": 3e9, "sector": "Consumer Defensive", "forwardPE": 25, "currency": "USD"}
+    r = score_ticker_growth("FIXCOCO", {"info": info, "growth_estimates": ge})
+    assert r.get("fwd_eps_growth") == 0.153 and r.get("fwd_eps_growth_basis") == "CONSENSUS_FORWARD", (
+        "⚑ MUST-FIRE: the pre-run path must consume +1y consensus (it used to pass no table to "
+        "Part B and fall back to trailing earningsGrowth 115.8%)", r.get("fwd_eps_growth"))
+    assert r.get("eps_growth_trailing_q") == 1.158 and r.get("fwd_eps_growth_legacy") == 1.158, (
+        "the trailing quantity and the legacy parser value are RETAINED and LABELLED (R6.2/R6.4)")
+    r2 = score_ticker_growth("FIXNONE", {"info": info, "growth_estimates": None})
+    assert r2.get("fwd_eps_growth") is None and r2.get("expected_return_12_24m") is None \
+        and r2.get("er_state") == "MISSING_REQUIRED_INPUT", (
+        "NEGATIVE CONTROL: with no forward table the E[r] is MISSING, never computed on the "
+        "trailing figure", r2.get("er_state"))
+    print("fetch_watchlist_metrics selftest OK (ISA-0720 pre-run forward path)")
+    return 0
 
 if __name__ == "__main__":
     main()

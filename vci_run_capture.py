@@ -256,8 +256,23 @@ def validate(run):
     return (not errs), errs
 
 
-def write(run, here=None, month_label=None):
-    """Atomic write of vci_run_[mmm]_[yyyy].json. Refuses to write an invalid document."""
+def write(run, here=None, month_label=None, *, ledger_path=None, capture_decisions=True,
+          held=None):
+    """Atomic write of vci_run_[mmm]_[yyyy].json. Refuses to write an invalid document.
+
+    ⚑ ISA-0686 (20-Sep-2026): AT THE MOMENT THE ARTEFACT IS PERSISTED, every scored candidate
+    is also written into `decision_ledger.json` through `decision_ledger.log_decision` — the
+    same function the growth route reaches via `checkpoint_d.log_top10` (R4.5: two paths call
+    one function, or they are one function). Before this, the VCI route wrote its decisions to
+    an artefact nothing copied, so the sleeve's first ever deployment (QBTS, 09-Aug-2026)
+    reconciled as `bought_outside_framework` — a standing accusation against the operator for
+    following the framework's own instruction at the size it specified.
+
+    The ledger write is NOT best-effort. A persisted deploy artefact whose capital-effective
+    names are absent from the ledger is precisely the breach, so a capture failure RAISES and
+    the boundary contract `decision_ledger.assert_vci_captured` is re-checked afterwards.
+    `capture_decisions=False` is the R4.13 rollback and must be stated by the caller.
+    """
     here = here or HERE
     month_label = month_label or run.get("month_label")
     ok, errs = validate(run)
@@ -272,7 +287,43 @@ def write(run, here=None, month_label=None):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+    if capture_decisions:
+        run["decision_capture"] = _capture_to_ledger(run, path, here, ledger_path, held)
+        # ── ISA-0716 (§5.9) — the VCI run is one of the THREE lifecycle observers. It runs the
+        #    SAME held review as the pre-run (obligations untouched) at the moment the artefact
+        #    is persisted, so a resolution first seen by this run is decided by this run, and an
+        #    unchanged one revalidates the pre-run's decision rather than minting a second. A
+        #    failure is RECORDED on the run document and never swallowed (R4.12).
+        try:
+            import vci_lifecycle as _lc
+            import decision_ledger as _dl_lc
+            run["lifecycle_observation"] = _lc.observe(
+                "vci_run", root=here, ledger_path=ledger_path or _dl_lc.default_path(here),
+                capital_authority=(run.get("trusted_build") or {}).get("authority") or "UNKNOWN")
+        except Exception as exc:                                        # noqa: BLE001
+            run["lifecycle_observation"] = {"state": "FAILED",
+                                            "why": "%s: %s" % (type(exc).__name__, exc)}
     return path
+
+
+def _capture_to_ledger(run, path, here, ledger_path, held):
+    """ISA-0686 — the one capture point. Raises rather than writing a silent half-record."""
+    import decision_ledger as _dl
+    ledger_path = ledger_path or _dl.default_path(here)
+    tb = run.get("trusted_build") or {}
+    res = _dl.capture_vci_decisions(
+        ledger_path, run, source_path=path,
+        date=run.get("run_date"),
+        build_id=tb.get("build_id"),
+        authority=tb.get("authority") or "UNKNOWN",   # R4.3: unknown is never AUTHORISED
+        held=held)
+    chk = _dl.assert_vci_captured(ledger_path, run, source_path=path,
+                                  authority=tb.get("authority") or "UNKNOWN")
+    if not chk["ok"]:
+        raise RuntimeError("ISA-0686 VERIFY FAILED after writing %s: %s" % (path, chk["why"]))
+    res["contract"] = chk
+    res["ledger_path"] = ledger_path
+    return res
 
 
 # ── selftest ─────────────────────────────────────────────────────────────────────────────
@@ -401,6 +452,78 @@ def _selftest():
        _run_with("AUTHORISED", "DEPLOY 0.75% starter")[0])
     ok("VRC20 POSITIVE CONTROL: REFUSED + an explicit 'REFUSED — UNTRUSTED_LIVE_STATE' decision validates",
        _run_with("REFUSED", "REFUSED — UNTRUSTED_LIVE_STATE")[0])
+
+
+    # ══ ISA-0686 — the capture point is IN write(), not beside it ═══════════════════
+    import decision_ledger as _dl
+    with _tf.TemporaryDirectory() as td2:
+        _lp = os.path.join(td2, "decision_ledger.json")
+        _elig = _run_with("AUTHORISED", "DEPLOY 0.75% starter")[2] \
+            if len(_run_with("AUTHORISED", "DEPLOY 0.75% starter")) > 2 else None
+        r = new_run("oct_2026", run_date="2026-10-11",
+                    trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"})
+        add_candidate(r, ticker="TSTA", theme="T", layer="Layer 3", market_cap=1e9,
+                      part_a_score=12, part_a_threshold_verdict="pass",
+                      acs_dimensions={"a": 1}, acs_total=80, acs_ex_acs8=75,
+                      fv_inputs={"x": 1},
+                      verdict={"bottleneck_fv_per_share": 20.0, "fv_asymmetry": 2.6,
+                               "fv_asymmetry_p25": 2.4, "fv_source": "modeled",
+                               "fv_floor": 2.0, "deploy_eligible": True,
+                               "require_manual_confirm": False, "vci_source_score": 60.0,
+                               "size_pct": 0.75},
+                      signals=["s1"], catalyst="named catalyst",
+                      decision="DEPLOY 0.75% starter")
+        path = write(r, here=td2, month_label="oct_2026", ledger_path=_lp)
+        _cur = _dl.current_decision(_lp, "TSTA", "vci")
+        ok("⚑ ISA-0686 MUST-FIRE THROUGH THE REAL WRITE POINT: persisting the VCI run "
+           "artefact writes the deploy decision into decision_ledger.json in the same call - "
+           "the artefact and the ledger can no longer diverge",
+           _cur is not None and _cur["decision"] == "buy", _cur)
+        ok("ISA-0686: the captured decision names the BUILD and the INPUT SNAPSHOT of the "
+           "artefact it came from (R4.2: a value with no source is not evidence)",
+           _cur and _cur["build_id"] == "TB-TEST-99"
+           and str(_cur["input_snapshot_id"]).startswith("vci_run_oct_2026.json@"))
+        _lo = r.get("lifecycle_observation") or {}
+        ok("⚑ ISA-0716 (§5.9): the VCI run is a LIFECYCLE OBSERVER at its own write point - "
+           "write() runs vci_lifecycle.observe('vci_run') and publishes the result; in a "
+           "scratch tree with no broker book it observes NOTHING and writes nothing (never "
+           "another tree's ledger)",
+           _lo.get("observed_by") == "vci_run" and _lo.get("state") == "NO_BOOK", _lo)
+        ok("ISA-0686: write() publishes its own capture receipt and the boundary contract "
+           "verdict on the run document",
+           r["decision_capture"]["contract"]["ok"]
+           and r["decision_capture"]["ledger_path"] == _lp)
+        _n = len(_dl.load_ledger(_lp)["entries"])
+        write(r, here=td2, month_label="oct_2026", ledger_path=_lp)
+        ok("ISA-0686: re-writing the same run is idempotent in the ledger",
+           len(_dl.load_ledger(_lp)["entries"]) == _n)
+
+    with _tf.TemporaryDirectory() as td3:
+        _lp3 = os.path.join(td3, "decision_ledger.json")
+        r2 = new_run("oct_2026", run_date="2026-10-11",
+                     trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"})
+        add_candidate(r2, ticker="TSTB", theme="T", layer="Layer 3", market_cap=1e9,
+                      part_a_score=12, part_a_threshold_verdict="pass",
+                      acs_dimensions={"a": 1}, acs_total=80, acs_ex_acs8=75,
+                      fv_inputs={"x": 1},
+                      verdict={"bottleneck_fv_per_share": 20.0, "fv_asymmetry": 2.6,
+                               "fv_asymmetry_p25": 2.4, "fv_source": "modeled",
+                               "fv_floor": 2.0, "deploy_eligible": True,
+                               "require_manual_confirm": False, "vci_source_score": 60.0,
+                               "size_pct": 0.75},
+                      signals=["s1"], catalyst="c", decision="DEPLOY 0.75% starter")
+        write(r2, here=td3, month_label="oct_2026", ledger_path=_lp3,
+              capture_decisions=False)
+        ok("ISA-0686 ROLLBACK (R4.13): capture_decisions=False restores the previous "
+           "behaviour exactly - the artefact is written and the ledger is untouched",
+           not os.path.exists(_lp3) and "decision_capture" not in r2)
+
+    ok("⚑ ISA-0686 NEGATIVE CONTROL: the boundary contract still FAILS on a real artefact "
+       "whose capital-effective name was never captured - the control is not self-satisfying",
+       not _dl.assert_vci_captured(
+           os.path.join(_tf.mkdtemp(), "empty_ledger.json"),
+           {"ZZZ": {"ticker": "ZZZ", "deploy_eligible": True,
+                    "require_manual_confirm": False}})["ok"])
 
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)}) {fails}")
     return 0 if not fails else 1

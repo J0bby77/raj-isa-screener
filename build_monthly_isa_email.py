@@ -472,10 +472,10 @@ def _render_capital_router(d):
         return h3("Marginal-pound router") + para(se(v["absent_line"]))
     out = h3("Marginal-pound router &mdash; where this month&#39;s capital is routed")
     for k in ("split_line", "split_reason_line", "executability_line", "freeze_line",
-              "ranking_line"):
+              "ranking_line", "c1_line"):
         if v.get(k):
             out += para(se(v[k]), small=(k in ("split_reason_line", "freeze_line",
-                                               "ranking_line")))
+                                               "ranking_line", "c1_line")))
     rows = v.get("allocation_rows") or []
     if v.get("allocation_line"):
         out += para(f'<strong>{se(v["allocation_line"])}</strong>')
@@ -894,6 +894,20 @@ def build_s7(data):
                 se(h.get("weight_pct", "—")),
                 f'{pill(h.get("status","—"), pill_map.get(st,"grey"))} {status_label}',
             ], last=(i == len(holdings) - 1))
+        inner += table_end()
+
+    # ISA-0722 — Original | Current | delta E[r], rendered from the canonical case ids (R20.2)
+    _hu = d.get("held_underwriting") or {}
+    if _hu.get("line"):
+        inner += para("<strong>" + se(_hu["line"]) + "</strong>")
+    if _hu.get("rows"):
+        inner += table_start(["Stock", "Original E[r]", "Current E[r]", "\u0394E[r]", "Horizon",
+                              "Validity", "Current case"])
+        for i, r in enumerate(_hu["rows"]):
+            inner += table_row([f'<strong>{se(r.get("ticker",""))}</strong>', se(r.get("original")),
+                                se(r.get("current")), se(r.get("delta")), se(r.get("horizon")),
+                                se(r.get("validity")), se(r.get("case"))],
+                               last=(i == len(_hu["rows"]) - 1))
         inner += table_end()
 
     if d.get("notes"):
@@ -1649,6 +1663,36 @@ def build_email_body(data, lean=False, budget=LEAN_DEFAULT_BUDGET, full_path=Non
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def approval_gate(rc: dict, current_state_fn=None) -> tuple:
+    """ISA-0727 (M14) - is the capital plan in run_context still the plan for the CURRENT state?
+
+    -> (validity dict, blocking message or None). The plan's `approval_binding` is compared with
+    the state re-derived NOW by the SAME function the router used (capital_authorisation.
+    input_state): a different build, config, broker book, feasible population, underwriting store,
+    broker inputs or capital amount makes it STALE, and a STALE plan is not rendered as current.
+    A plan with no binding (pre-control) is UNBOUND: reported, not blocked. A binding that cannot
+    be re-checked is UNKNOWN and blocks (R4.3)."""
+    import capital_authorisation as _ca_m14
+    ab = (((rc or {}).get("summary") or {}).get("capital_destination") or {}).get("approval_binding")
+    if not ab:
+        return _ca_m14.approval_validity(None, {}), None
+    try:
+        if current_state_fn is None:
+            import capital_destination as _cd_m14
+            _s9m, _ = _cd_m14._latest_step9_pre()
+            cur = _ca_m14.input_state(portfolio_path=_cd_m14.latest_portfolio_path(), step9=_s9m,
+                                      amount_gbp=(ab.get("components") or {}).get("capital_amount_gbp"))
+        else:
+            cur = current_state_fn(ab)
+        v = _ca_m14.approval_validity(ab, cur)
+    except Exception as exc:                                            # noqa: BLE001
+        v = {"state": "UNKNOWN", "changed": [], "why": "%s: %s" % (type(exc).__name__, exc)}
+    if v["state"] == "VALID":
+        return v, None
+    return v, ("ISA-0727: the capital plan's approval is %s - %s. Re-run the pre-run router "
+               "(Step 6.10) so the plan is formed on the current state." % (v["state"], v.get("why")))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Monthly ISA Portfolio Review HTML email body from JSON data file."
@@ -1718,6 +1762,10 @@ def main():
             with open(_rcpath, encoding="utf-8") as _rf:
                 _rc = json.load(_rf)
             _jg = ((_rc.get("summary") or {}).get("capital_destination") or {}).get("judgement_gate")
+            # ISA-0722: the held-underwriting table, on EVERY path (renderer only, R20.2)
+            import email_prefill as _ep_uw
+            data.setdefault("s7_stock_sleeve", {})["held_underwriting"] = \
+                _ep_uw.build_held_underwriting_block((_rc.get("summary") or {}).get("held_underwriting"))
         except FileNotFoundError:
             _errs.append(f"run_context_{_month}.json does not exist — the router plan and its "
                          f"judgement scope cannot be read")
@@ -1730,6 +1778,13 @@ def main():
             _craw = None
             _errs.append(f"step9_conviction_{_month}.json does not exist — the Step 9 judgement "
                          f"record was never written")
+        if _rc is not None:
+            _av, _am = approval_gate(_rc)
+            data.setdefault("meta", {})["approval_validity"] = _av
+            print(f"  ISA-0727 approval binding: {_av.get('state')} "
+                  f"{('changed: ' + ', '.join(_av.get('changed') or [])) if _av.get('changed') else ''}")
+            if _am:
+                _errs.append(_am)
         if _craw is not None and _rc is not None:
             if not _jg:
                 _errs.append("ISA-0698: the judgement pass has not been applied to run_context. "
@@ -1851,6 +1906,40 @@ def main():
     print("  is_html:         true   (MANDATORY -- always pass is_html=true)")
     print("=" * 65)
 
+
+
+def _selftest():
+    """ISA-0722 — section 7 renders the held-underwriting table from the prefill block."""
+    import email_prefill as _ep
+    blk = _ep.build_held_underwriting_block({
+        "state": "OK", "n_cases_held": 1, "n_expected": 1, "by_state": {"MISSING_ROW": ["ZZZ"]},
+        "not_captured_original": ["ZZZ"],
+        "rows": [{"ticker": "ZZZ", "original_state": "NOT_CAPTURED_CONTEMPORANEOUSLY",
+                  "current_state": "MISSING_ROW", "admissible_for_positive_size": False,
+                  "delta": {"comparable": False}, "current_case_id": "UWC-z"}]})
+    html = build_s7({"s7_stock_sleeve": {"held_underwriting": blk}})
+    assert "NOT_CAPTURED_CONTEMPORANEOUSLY" in html and "MISSING_ROW" in html and "UWC-z" in html, (
+        "⚑ MUST-FIRE: every held row reaches section 7 with its STATE", html[:300])
+    none = build_s7({"s7_stock_sleeve": {}})
+    assert "Original E[r]" not in none, (
+        "NEGATIVE CONTROL: no block -> no table (an empty table would read as 'all clean')")
+    # ISA-0727 (M14) - the renderer refuses a stale plan
+    _ab = {"input_snapshot_id": "ISN-a", "components": {"build_id": "TB-A", "config_roll": "c",
+           "portfolio_snapshot": "p", "opportunity_set_id": "OPS-1", "underwriting_store": "u",
+           "broker_inputs": "b", "capital_amount_gbp": 100.0}}
+    _rc = {"summary": {"capital_destination": {"approval_binding": _ab}}}
+    v, m = approval_gate(_rc, current_state_fn=lambda ab: ab)
+    assert v["state"] == "VALID" and m is None, "NEGATIVE CONTROL ISA-0727: an unchanged state renders"
+    v, m = approval_gate(_rc, current_state_fn=lambda ab: {"input_snapshot_id": "ISN-b", "components": dict(
+        ab["components"], opportunity_set_id="OPS-2")})
+    assert v["state"] == "STALE" and m and "opportunity_set_id" in m, \
+        "⚑ MUST-FIRE ISA-0727: a plan formed on a different feasible population must not render as current"
+    v, m = approval_gate(_rc, current_state_fn=lambda ab: 1 / 0)
+    assert v["state"] == "UNKNOWN" and m, "MUST-FIRE ISA-0727: an un-checkable binding blocks, never passes"
+    v, m = approval_gate({"summary": {"capital_destination": {}}})
+    assert v["state"] == "UNBOUND" and m is None, "ISA-0727: a pre-control plan is UNBOUND - reported, not blocked"
+    print("build_monthly_isa_email selftest OK (ISA-0722 section 7 table + ISA-0727 approval gate)")
+    return 0
 
 if __name__ == "__main__":
     main()

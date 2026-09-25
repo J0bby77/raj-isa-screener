@@ -11,7 +11,7 @@
       "fetch_failure",
       "UNKNOWN"
     ],
-    "updated": "2026-09-18T08:21:29+00:00"
+    "updated": "2026-09-19T08:15:38+00:00"
   },
   "names": {
     "F250-SPI|AAS.L": {
@@ -3333,7 +3333,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AVB"
@@ -3347,7 +3347,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EQR"

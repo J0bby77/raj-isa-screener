@@ -80,7 +80,8 @@ def _write_atomic(p: str, doc) -> None:
 def _rolls(root: str) -> dict:
     import release_gate as rg
     return {"source_roll": rg.source_fingerprint(root).get("roll"),
-            "config_roll": rg.config_fingerprint(root).get("roll")}
+            "config_roll": rg.config_fingerprint(root).get("roll"),
+            "census_roll": rg.census_roll(root).get("roll")}          # ISA-0746
 
 
 def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
@@ -99,6 +100,18 @@ def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
     def ignore(d, names):
         return [n for n in names if any(n == x or n.startswith(x) for x in IGNORE_PREFIXES)]
     shutil.copytree(live, tree, ignore=ignore, symlinks=True)
+    # ⚑ ISA-0729 (23-Sep-2026) — R5.12 CANDIDATE PARITY. Several release scripts read the monthly
+    #   inputs Raj saves in the PARENT folder (Cash Statement, AJ Bell portfolio/X-Ray, Transaction
+    #   History; extract_cash_statement.parse defaults to dirname(HERE)). A sandbox holding only the
+    #   tree read those as ABSENT and turned a data read into a false RED. The parent's top-level
+    #   FILES (not its folders) are copied beside the sandbox tree, read-only inputs.
+    _parent = os.path.dirname(os.path.realpath(live))
+    _n_parent = 0
+    for _fn in sorted(os.listdir(_parent)):
+        _src = os.path.join(_parent, _fn)
+        if os.path.isfile(_src) and not os.path.islink(_src):
+            shutil.copy2(_src, os.path.join(sandbox, _fn))
+            _n_parent += 1
     for stale in (STATUS_REL, HISTORY_REL):
         if os.path.exists(os.path.join(tree, stale)):
             os.remove(os.path.join(tree, stale))
@@ -107,7 +120,7 @@ def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
         return {"state": "REFUSED", "why": "sandbox rolls %s differ from LIVE %s - the copy is not the Trusted "
                                            "tree" % (sr, lr)}
     meta = {"prepared_at": _now().isoformat(timespec="seconds"), "live_root": os.path.realpath(live),
-            "build_id": v.get("build_id"), **lr}
+            "build_id": v.get("build_id"), "parent_inputs_copied": _n_parent, **lr}
     _write_atomic(os.path.join(sandbox, META), meta)
     _write_atomic(os.path.join(sandbox, "live_snapshot_before.json"), wg.snapshot(live))
     return dict(meta, state="PREPARED")
@@ -118,7 +131,8 @@ def _needs_prepare(live: str, sandbox: str) -> bool:
     if not meta or not os.path.isdir(_tree(sandbox)):
         return True
     if meta.get("live_root") != os.path.realpath(live) or _rolls(live) != {
-            "source_roll": meta.get("source_roll"), "config_roll": meta.get("config_roll")}:
+            "source_roll": meta.get("source_roll"), "config_roll": meta.get("config_roll"),
+            "census_roll": meta.get("census_roll")}:
         return True
     try:
         age_h = (_now() - datetime.datetime.fromisoformat(meta["prepared_at"])).total_seconds() / 3600
@@ -178,8 +192,9 @@ def publish(live: str, sandbox: str, runner_write_escapes: int = 0) -> dict:
     if not doc or not (doc.get("census") or {}).get("complete"):
         return {"state": "REFUSED", "why": "no complete census in the sandbox"}
     lr = _rolls(live)
-    if doc.get("source_roll") != lr["source_roll"] or doc.get("config_roll") != lr["config_roll"]:
-        return {"state": "REFUSED", "why": "LIVE source/config changed while the census ran - not published; "
+    if (doc.get("source_roll") != lr["source_roll"] or doc.get("config_roll") != lr["config_roll"]
+            or doc.get("census_roll") != lr["census_roll"]):
+        return {"state": "REFUSED", "why": "LIVE source/config/signed surfaces changed while the census ran - not published; "
                                            "the next --step re-prepares"}
     before = _read(os.path.join(sandbox, "live_snapshot_before.json"), {}) or {}
     after = wg.snapshot(live)

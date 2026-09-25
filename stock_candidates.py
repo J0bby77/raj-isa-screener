@@ -166,8 +166,12 @@ def build(*, portfolio_data: Optional[dict] = None, step9_pre: Optional[dict] = 
           underfilled: Optional[Dict[str, dict]] = None,
           held_topups: Optional[Sequence[dict]] = None,
           deploy_floor_pct: Optional[float] = None,
-          today: Optional[str] = None) -> dict:
-    """THE candidate list. Every field states where it came from and refuses where it cannot."""
+          today: Optional[str] = None, dealability=None) -> dict:
+    """THE candidate list. Every field states where it came from and refuses where it cannot.
+
+    `dealability=` (ISA-0607) injects the broker verdict resolver: callable(ticker) -> verdict
+    dict. Omitted, the live `broker_dealability.Resolver()` decides from the verified symbol map
+    and Raj's declared venue table."""
     _fi_mark("stock_candidates", "build")
     if not _flag():
         return {"state": "DISABLED", "candidates": [], "qualifying": [],
@@ -283,6 +287,75 @@ def build(*, portfolio_data: Optional[dict] = None, step9_pre: Optional[dict] = 
             "_source": "action_stack.held_axis=add_worthy",
         })
 
+    # ── ISA-0607 (23-Sep-2026) — NO NEW CAPITAL TO A VENUE THE BROKER CANNOT DEAL ONLINE ────
+    # ⚑ One verdict, read here for EVERY capital route (main, VCI, held top-up): this list is the
+    #   only population the router sizes, so a refusal here means no pound can reach the name.
+    #   The verdict comes from the verified listing, never from a row's `exchange` field.
+    #   A non-admissible venue does not delete or sell anything: the candidate stays in the
+    #   list as REJECTED with the broker reason, so the refusal is visible and countable.
+    if dealability is None:
+        try:
+            import broker_dealability as _bd
+            dealability = _bd.Resolver()
+        except Exception as _bde:                                       # noqa: BLE001
+            _bderr = "%s: %s" % (type(_bde).__name__, _bde)
+            dealability = (lambda _t, _e=_bderr: {
+                "state": "UNKNOWN_VENUE", "venue": None, "admissible_for_new_capital": False,
+                "why": "broker_dealability unavailable (%s) - refused" % _e})
+    for c in cands:
+        try:
+            _v = dealability(c["ticker"]) or {}
+        except Exception as _ve:                                        # noqa: BLE001
+            _v = {"state": "UNKNOWN_VENUE", "venue": None, "admissible_for_new_capital": False,
+                  "why": "verdict raised %s: %s - refused" % (type(_ve).__name__, _ve)}
+        c["broker_dealability"] = {"state": _v.get("state"), "venue": _v.get("venue"),
+                                   "admissible_for_new_capital": bool(_v.get("admissible_for_new_capital")),
+                                   "why": _v.get("why")}
+        if c["qualifies"] and not _v.get("admissible_for_new_capital"):
+            c["qualifies"] = False
+            c["disqualified_reason"] = ("BROKER_NOT_DEALABLE_ONLINE (ISA-0607): %s - %s"
+                                        % (_v.get("state"), _v.get("why")))
+
+    # ── ISA-0616 (24-Sep-2026) — C-1 CURRENT ADMISSIBILITY, ONE VERDICT FOR EVERY NEW-CAPITAL ROUTE ──
+    # ⚑ Read from step9_pre['current_admissibility'] (built once per run by
+    #   t1_gates.current_admissibility on each name's own current snapshot) - never recomputed here.
+    #   New positions (main) and top-ups (held_topup) consume the SAME verdict. An absent or
+    #   non-admissible verdict REMOVES THE NEW-CAPITAL ROUTE ONLY: the candidate stays visible as
+    #   REJECTED with its reason, a held position is untouched (no SELL, no thesis change), and any
+    #   independently authorised risk/thesis reduction route is unaffected. VCI binaries are outside
+    #   C-1 (ACS / p_thesis / binary budget govern them).
+    _c1map = ((step9_pre or {}).get("current_admissibility") or {}).get("verdicts")
+    _c1_aliases = None
+    for c in cands:
+        if c["route"] == "vci":
+            c["c1_admissibility"] = {"verdict": "NOT_APPLICABLE_VCI"}
+            continue
+        try:
+            from t1_gates import c1_lookup as _c1l
+            if _c1_aliases is None:
+                try:
+                    import broker_dealability as _bda
+                    _c1_aliases = _bda._aliases()               # the ONE declared alias map
+                except Exception:                                   # noqa: BLE001
+                    _c1_aliases = {}
+            _v1, _k1 = _c1l(_c1map, c["ticker"], aliases=_c1_aliases)
+        except Exception:                                               # noqa: BLE001
+            _v1, _k1 = ((_c1map or {}).get(c["ticker"]), c["ticker"]) if _c1map is not None else (None, None)
+        if _v1 is None:
+            _v1 = {"verdict": ("C1_VERDICT_ABSENT" if _c1map is not None else "C1_UNAVAILABLE"),
+                   "admissible": False,
+                   "why": ("no canonical C-1 verdict for this name in this run's step9_pre"
+                           if _c1map is not None else
+                           "step9_pre carries no current_admissibility map (pre-ISA-0616 artefact)")}
+        c["c1_admissibility"] = {"verdict": _v1.get("verdict"), "admissible": _v1.get("admissible"),
+                                 "why": _v1.get("why"),
+                                 "score_definition_id": _v1.get("score_definition_id"),
+                                 "snapshot_as_of": _v1.get("snapshot_as_of")}
+        if c["qualifies"] and _v1.get("admissible") is not True:
+            c["qualifies"] = False
+            c["disqualified_reason"] = ("C1_NOT_ADMISSIBLE (ISA-0616): %s - %s"
+                                        % (_v1.get("verdict"), _v1.get("why")))
+
     # ⚑ P3.4 — the ranking key is DECLARED and every candidate must carry it.
     missing_key = [c["ticker"] for c in cands if c.get(RANKING_BASIS) is None]
     if missing_key:
@@ -324,6 +397,8 @@ def build(*, portfolio_data: Optional[dict] = None, step9_pre: Optional[dict] = 
         "off_fetch_universe": off_universe,
         "containment_ok": not off_universe,
         "rejected_reasons": {c["ticker"]: c["disqualified_reason"] for c in rejected},
+        # ISA-0616: the canonical C-1 verdict per candidate, as consumed (renderers READ this)
+        "c1_verdicts": {c["ticker"]: (c.get("c1_admissibility") or {}).get("verdict") for c in cands},
         "detail": ("P3. `qualifies` is READ from the gate that computed it and is NEVER "
                    "defaulted; a False without a named reason REFUSES. current_value_gbp is "
                    "broker truth. correlation is never None. er_ca_margin_pp is None, never "
@@ -331,7 +406,16 @@ def build(*, portfolio_data: Optional[dict] = None, step9_pre: Optional[dict] = 
     }
 
 
+def _selftest_admit_all(t):
+    """Selftest-only: every fixture ticker is dealable online, so the pre-existing fixtures keep
+    testing what they were written to test. The ISA-0607 gate is exercised explicitly below."""
+    return {"state": "DEALABLE_ONLINE", "venue": "FIXTURE", "admissible_for_new_capital": True,
+            "why": "selftest fixture"}
+
+
 def _selftest() -> int:
+    _real_build = globals()["build"]
+    build = (lambda **k: _real_build(**{"dealability": _selftest_admit_all, **k}))  # noqa: E731
     fails = []
 
     def ok(name, cond, detail=""):
@@ -348,8 +432,13 @@ def _selftest() -> int:
                                    "rho_max_pairwise": 0.33, "rho_basis": "MEASURED_SHRUNK"}},
             "holdings": {}}
 
-    def s9(rows):
-        return {"deployable_stack": rows}
+    _ADM = {"verdict": "ADMISSIBLE", "admissible": True, "why": "selftest current snapshot"}
+
+    def s9(rows, c1=None):
+        # ISA-0616: a run's step9_pre carries THE canonical C-1 map; fixtures default to admissible.
+        tick = [r.get("ticker") for r in rows] + ["ONT", "ONT.L", "NOPE9", "HELD1"]
+        return {"deployable_stack": rows,
+                "current_admissibility": {"verdicts": c1 if c1 is not None else {t: _ADM for t in tick}}}
 
     good = {"ticker": "NEW", "t1_qualified": True, "source_score": 71.2,
             "expected_return_12_24m": 18.4, "decision_bucket": "DEPLOY"}
@@ -444,6 +533,81 @@ def _selftest() -> int:
         _p.V2_FLAGS.pop("stock_candidate_pipeline", None)
     else:
         _p.V2_FLAGS["stock_candidate_pipeline"] = prev
+
+    # ── ISA-0607 — broker dealability through the REAL build() and the REAL resolver ──────
+    import broker_dealability as _bdx
+    _live = _bdx.Resolver()                       # verified symbol map + declared venue table
+    _zab = dict(good, ticker="ZAB.WA", source_score=69.2, exchange="NASDAQ")
+    _halo = dict(good, ticker="HALO", source_score=68.0)
+    _r7 = _real_build(portfolio_data=PD, step9_pre=s9([_zab, _halo]), correlation_assessment=CORR,
+                      deploy_floor_pct=15.8, dealability=_live)
+    _c7 = {c["ticker"]: c for c in _r7["candidates"]}
+    ok("MUST-FIRE (ISA-0607, Sep-2026 shape): a T1-qualified WSE name must not qualify for capital",
+       _c7["ZAB.WA"]["qualifies"] is False
+       and "BROKER_NOT_DEALABLE_ONLINE" in (_c7["ZAB.WA"]["disqualified_reason"] or "")
+       and _c7["ZAB.WA"]["broker_dealability"]["venue"] == "WSE", _c7["ZAB.WA"])
+    ok("POSITIVE CONTROL (ISA-0607): a verified NMS comparator still qualifies through the same build",
+       _c7["HALO"]["qualifies"] is True and _r7["n_qualifying"] == 1
+       and [q["ticker"] for q in _r7["qualifying"]] == ["HALO"], _r7["n_qualifying"])
+    _r8 = _real_build(portfolio_data=PD, step9_pre=s9([dict(good, ticker="NOPE9", exchange="NASDAQ")]),
+                      correlation_assessment=CORR, deploy_floor_pct=15.8, dealability=_live)
+    ok("MUST-FIRE (ISA-0607): an unmapped name labelled exchange='NASDAQ' must refuse, not default clean",
+       _r8["candidates"][0]["qualifies"] is False
+       and _r8["candidates"][0]["broker_dealability"]["state"] == "UNKNOWN_VENUE")
+    _r9 = _real_build(portfolio_data=PD, step9_pre=s9([]), correlation_assessment=CORR,
+                      held_topups=[{"ticker": "NOPE9", "held_axis": "add_worthy",
+                                    "evidence_state": "T1", "source_score": 70.0}],
+                      dealability=_live)
+    ok("MUST-FIRE (ISA-0607): a held top-up with no verified venue gets no new capital",
+       _r9["n_qualifying"] == 0 and _r9["candidates"][0]["route"] == "held_topup", _r9["candidates"])
+    _r10 = _real_build(portfolio_data=PD, step9_pre=s9([]), correlation_assessment=CORR,
+                       held_topups=[{"ticker": "ONT", "held_axis": "add_worthy",
+                                     "evidence_state": "T1", "source_score": 70.0}],
+                       dealability=_live)
+    ok("NEGATIVE CONTROL (ISA-0607): a held LSE name via its declared alias (ONT -> ONT.L) must not be refused",
+       _r10["n_qualifying"] == 1 and _r10["candidates"][0]["broker_dealability"]["venue"] == "LSE",
+       _r10["candidates"])
+    _r11 = _real_build(portfolio_data=PD, step9_pre=s9([_halo]), correlation_assessment=CORR,
+                       deploy_floor_pct=15.8, dealability=lambda t: 1 / 0)
+    ok("MUST-FIRE (ISA-0607): a resolver that raises refuses the name rather than admitting it",
+       _r11["n_qualifying"] == 0 and _r11["candidates"][0]["broker_dealability"]["state"] == "UNKNOWN_VENUE")
+
+    # ── ISA-0616 C-1: one canonical verdict for new entry AND top-up; never a SELL ─────────────
+    _stale = {"verdict": "STALE", "admissible": False, "why": "snapshot 12 day(s) old"}
+    _r12 = build(portfolio_data=PD, step9_pre=s9([good], c1={"NEW": _stale, "ONT.L": _stale}),
+                 correlation_assessment=CORR, deploy_floor_pct=15.8,
+                 held_topups=[{"ticker": "ONT.L", "held_axis": "add_worthy", "evidence_state": "T1",
+                               "source_score": 70.0}])
+    _c12 = {c["ticker"]: c for c in _r12["candidates"]}
+    ok("MUST-FIRE (ISA-0616): a STALE snapshot authorises no NEW entry",
+       _c12["NEW"]["qualifies"] is False and "C1_NOT_ADMISSIBLE" in _c12["NEW"]["disqualified_reason"])
+    ok("MUST-FIRE (ISA-0616): the SAME stale verdict blocks the held TOP-UP (one verdict, both routes)",
+       _c12["ONT.L"]["qualifies"] is False and _c12["ONT.L"]["route"] == "held_topup"
+       and _c12["ONT.L"]["c1_admissibility"]["verdict"] == "STALE")
+    ok("NEGATIVE CONTROL (ISA-0616): an unavailable C-1 never manufactures a SELL - the holding stays "
+       "visible at its broker value and no sell/exit field is emitted",
+       _c12["ONT.L"]["current_value_gbp"] == 997.92
+       and not any(k in _c12["ONT.L"] for k in ("sell", "exit", "action_sell")) and _r12["n_qualifying"] == 0)
+    _r13 = build(portfolio_data=PD, step9_pre={"deployable_stack": [good]}, correlation_assessment=CORR,
+                 deploy_floor_pct=15.8)
+    ok("MUST-FIRE (ISA-0616): a step9_pre with NO canonical C-1 map admits nothing (fail-closed)",
+       _r13["n_qualifying"] == 0
+       and _r13["candidates"][0]["c1_admissibility"]["verdict"] == "C1_UNAVAILABLE")
+    _r14 = build(portfolio_data=PD, step9_pre=s9([good, dict(good, ticker="VCIX")],
+                                                 c1={"NEW": _ADM}),
+                 correlation_assessment=CORR, deploy_floor_pct=15.8)
+    ok("POSITIVE CONTROL (ISA-0616): ONE valid current sighting still reaches the remaining gates",
+       {c["ticker"]: c["qualifies"] for c in _r14["candidates"]}.get("NEW") is True)
+    _r15 = build(portfolio_data=PD, step9_pre=s9([], c1={"ONT.L": _ADM}), correlation_assessment=CORR,
+                 deploy_floor_pct=15.8,
+                 held_topups=[{"ticker": "ONT", "held_axis": "add_worthy", "evidence_state": "T1",
+                               "source_score": 70.0}])
+    ok("NEGATIVE CONTROL (ISA-0616): a held broker-form ticker (ONT) reads its scored-form verdict "
+       "(ONT.L) through the DECLARED alias - not falsely blocked as absent",
+       _r15["candidates"][0]["c1_admissibility"]["verdict"] == "ADMISSIBLE")
+    ok("MUST-FIRE (ISA-0616): a name with no verdict in a PRESENT map is C1_VERDICT_ABSENT, not admitted",
+       {c["ticker"]: c["c1_admissibility"]["verdict"] for c in _r14["candidates"]}.get("VCIX")
+       == "C1_VERDICT_ABSENT")
 
     print("\nstock_candidates selftest: %d assertion(s), %d FAIL(s)%s"
           % (_ASSERTS[0], len(fails), (": " + ", ".join(fails)) if fails else ""))

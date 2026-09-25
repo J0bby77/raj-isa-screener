@@ -354,6 +354,9 @@ ER_CALLSITE_MANIFEST = {
     # saturation on retained frames that were already scored. No anchor table, by decision --
     # re-anchoring a retained frame would change the very quantity it is measuring.
     "er_clamp_diagnostic.py":     "OBSERVER — reads the clamp constants; computes no E[r], takes no anchor table",
+    # ISA-0740 (24-Sep-2026): reads method_id() only, to detect an E[r] method change against a
+    # frozen underwriting case. Computes no E[r], takes no anchor table.
+    "execution_ceiling.py":       "OBSERVER — reads expected_return.method_id(); computes no E[r]",
 }
 # ⚑ THREE MODULES THE SPEC LISTED THAT DO **NOT** IMPORT `expected_return`, verified by AST
 # 09-Aug-2026 — and the manifest records the truth, not the spec:
@@ -844,6 +847,12 @@ ENTRY_STABILITY_LOOKBACK_DAYS = 182
 ENTRY_STABILITY_FLOOR = 50.0     # reuse exit-floor level: check mirrors the rule policing the position
 ENTRY_STABILITY_MIN_SIGHTINGS = 2
 ENTRY_STABILITY_MIN_SPAN_DAYS = 60
+# ⚑ ISA-0616/0619 (Raj 24-Sep-2026): LOOKBACK / MIN_SIGHTINGS / MIN_SPAN above are RETIRED as capital
+#   authority - read only by t1_gates._entry_stability_superseded (uncalled, kept for audit). C-1 is
+#   now t1_gates.current_admissibility on ONE current snapshot; ENTRY_STABILITY_FLOOR (50) remains its
+#   floor (the existing authorised level). Freshness = this run's own snapshot: produced by the
+#   pre-run Step 6 fetch, tolerant only of a run that crosses midnight. Not a persistence window.
+C1_SNAPSHOT_MAX_AGE_DAYS = 1
 # ⚑ The MMF / cash-sweep tickers. Declared so the 182-day STOCK min-hold cannot attach to the
 #   B2 waiting room: CSH2 is dealt like a stock and the ledger classifies it as asset_class
 #   "stock", so without this it would inherit an anti-churn hold and BLOCK ITS OWN RECALL LEG —
@@ -960,3 +969,106 @@ SEMIS_WATCH_PCT = 18.0   # report-only WATCH marker; hard cap is a Raj decision 
 # ONE line per issuer — the most liquid. Set False to revert to the pre-05-Aug behaviour
 # in which GOOGM, SMCIP and NOVTU were all independently rankable.
 LISTING_POLICY_ACTIVE = True
+
+# ── ISA-0619 (24-Sep-2026): SCORING-DEFINITION IDENTITY — THE REGISTRY (one home) ─────────────
+# score_definition.current_identity() hashes the NORMALISED AST of the scoring call graph
+# (screener_core + source_score roots) and the scoring_config constants that graph references.
+# A code-semantic change moves it; a comment/docstring change does not. The CURRENT identity must
+# be declared here or consistency_check.pair_score_definition_declared FAILS. A pre-existing
+# definition is comparable with another ONLY if its entry lists it in `compatible_with` (a governed
+# declaration with a reason) - never by inference. Not referenced by any scoring function, so this
+# block does not move the identity it records.
+SCORE_DEFINITIONS = {
+    "fb755e66c700ac43": {"id": "SD-2026-09-23", "status": "CURRENT", "since": "2026-09-23",
+                         "basis": "ISA-0720 (TB-2026-09-23-02): Part B metric 9 and the +1y growth read via forward_growth_observation; _rev_estimate_score no longer falls back to trailing revenueGrowth",
+                         "compatible_with": []},
+    "680b67139d457657": {"id": "SD-2026-08-21", "status": "HISTORICAL", "since": "2026-08-21", "until": "2026-09-22",
+                         "basis": "mirror 7580eb1397..23b880be4f; Part B metric 9 / growth fallback to trailing-quarter earningsGrowth (the ISA-0720 defect)",
+                         "compatible_with": []},
+    "436d3d3ccaba479c": {"id": "SD-2026-08-07", "status": "HISTORICAL", "compatible_with": []},
+    "bab6171bb71611df": {"id": "SD-2026-07-31", "status": "HISTORICAL", "compatible_with": []},
+    "ecb29eed68f4893a": {"id": "SD-2026-07-18", "status": "HISTORICAL", "compatible_with": []},
+    "65fab637c6d9b8c1": {"id": "SD-2026-07-04", "status": "HISTORICAL", "compatible_with": []},
+}
+SCORE_PANEL_SCHEMA_VERSION = "2.0"   # 2.0 = rows carry score_definition_* stamps (ISA-0619)
+# The provenance of every (run_date|group) population written BEFORE the stamps existed, from the
+# GitHub fallback mirror (J0bby77/raj-isa-screener) bracketing each run date, corroborated from
+# TB-2026-09-09-01 by the Trusted-receipt sha256s. PROVEN_HISTORICAL = the generating identity is
+# established (and differs from CURRENT); UNKNOWN_DEFINITION = the identity changed on the run date
+# or no identity is computable. The ORIGINAL SCORES ARE NEVER EDITED; this is lineage only.
+SCORE_PANEL_PROVENANCE = {
+    "2026-06-25|MIDCAP400": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 112,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-06-25 (mirror f6d1e0126c / f434b66195)"},
+    "2026-06-26|NASDAQ": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 217,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-06-26 (mirror f434b66195 / 21f21682b1)"},
+    "2026-06-27|STOXX600": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 273,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-06-27 (mirror 21f21682b1 / 21f21682b1)"},
+    "2026-06-28|F250SPI": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 136,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-06-28 (mirror 21f21682b1 / b01163092c)"},
+    "2026-06-28|SP500": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 309,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-06-28 (mirror 21f21682b1 / b01163092c)"},
+    "2026-07-01|ADHOC": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 4,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-07-01 (mirror b01163092c / fbc590bf7c)"},
+    "2026-07-01|WATCHLIST_RERANK": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 2,
+        "evidence": "no scoring-definition identity computable for the code live on 2026-07-01 (mirror b01163092c / fbc590bf7c)"},
+    "2026-07-04|SP500": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 236,
+        "evidence": "identity changed on the run date (6a02aee91e94773b~partial -> 65fab637c6d9b8c1~partial at 2026-07-04T20:00:32Z); intraday order vs the screen is unproven"},
+    "2026-07-04|WATCHLIST_RERANK": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 23,
+        "evidence": "identity changed on the run date (6a02aee91e94773b~partial -> 65fab637c6d9b8c1~partial at 2026-07-04T20:00:32Z); intraday order vs the screen is unproven"},
+    "2026-07-10|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "65fab637c6d9b8c1", "rows": 435,
+        "evidence": "mirror-bracketed: identity 65fab637c6d9b8c1~partial at 2026-07-04T20:00:32Z (3cae3d523c) and at end of 2026-07-10 (3cae3d523c)"},
+    "2026-07-11|F250SPI": {"state": "PROVEN_HISTORICAL", "definition_hash": "65fab637c6d9b8c1", "rows": 138,
+        "evidence": "mirror-bracketed: identity 65fab637c6d9b8c1~partial at 2026-07-04T20:00:32Z (3cae3d523c) and at end of 2026-07-11 (3cae3d523c)"},
+    "2026-07-17|MIDCAP400": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 214,
+        "evidence": "identity changed on the run date (c8ef21146d0574e6~partial -> 303376e7c3af1621~partial at 2026-07-17T08:07:04Z); intraday order vs the screen is unproven"},
+    "2026-07-18|SP500": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 309,
+        "evidence": "identity changed on the run date (303376e7c3af1621~partial -> ecb29eed68f4893a~partial at 2026-07-18T13:41:39Z); intraday order vs the screen is unproven"},
+    "2026-07-24|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "ecb29eed68f4893a", "rows": 423,
+        "evidence": "mirror-bracketed: identity ecb29eed68f4893a~partial at 2026-07-18T13:41:39Z (7d7283d12a) and at end of 2026-07-24 (7d7283d12a)"},
+    "2026-07-25|STOXX600": {"state": "PROVEN_HISTORICAL", "definition_hash": "ecb29eed68f4893a", "rows": 271,
+        "evidence": "mirror-bracketed: identity ecb29eed68f4893a~partial at 2026-07-18T13:41:39Z (7d7283d12a) and at end of 2026-07-25 (7d7283d12a)"},
+    "2026-08-01|WATCHLIST_RERANK": {"state": "PROVEN_HISTORICAL", "definition_hash": "bab6171bb71611df", "rows": 6,
+        "evidence": "mirror-bracketed: identity bab6171bb71611df~partial at 2026-07-31T10:36:17Z (b9084f907c) and at end of 2026-08-01 (b9084f907c)"},
+    "2026-08-02|WATCHLIST_RERANK": {"state": "PROVEN_HISTORICAL", "definition_hash": "bab6171bb71611df", "rows": 36,
+        "evidence": "mirror-bracketed: identity bab6171bb71611df~partial at 2026-07-31T10:36:17Z (b9084f907c) and at end of 2026-08-02 (b9084f907c)"},
+    "2026-08-07|SP500": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 312,
+        "evidence": "identity changed on the run date (bab6171bb71611df~partial -> 436d3d3ccaba479c~partial at 2026-08-07T09:13:17Z); intraday order vs the screen is unproven"},
+    "2026-08-08|F250-SPI": {"state": "PROVEN_HISTORICAL", "definition_hash": "436d3d3ccaba479c", "rows": 140,
+        "evidence": "mirror-bracketed: identity 436d3d3ccaba479c~partial at 2026-08-07T09:13:17Z (675849e14b) and at end of 2026-08-08 (675849e14b)"},
+    "2026-08-14|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "436d3d3ccaba479c", "rows": 439,
+        "evidence": "mirror-bracketed: identity 436d3d3ccaba479c~partial at 2026-08-07T09:13:17Z (675849e14b) and at end of 2026-08-14 (6eb9c0b200)"},
+    "2026-08-15|SP500": {"state": "PROVEN_HISTORICAL", "definition_hash": "436d3d3ccaba479c", "rows": 315,
+        "evidence": "mirror-bracketed: identity 436d3d3ccaba479c~partial at 2026-08-14T08:02:58Z (6eb9c0b200) and at end of 2026-08-15 (6eb9c0b200)"},
+    "2026-08-21|MIDCAP400": {"state": "UNKNOWN_DEFINITION", "definition_hash": None, "rows": 213,
+        "evidence": "identity changed on the run date (436d3d3ccaba479c~partial -> 680b67139d457657 at 2026-08-21T08:13:58Z); intraday order vs the screen is unproven"},
+    "2026-08-22|STOXX600": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 263,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-21T08:13:58Z (7580eb1397) and at end of 2026-08-22 (7580eb1397)"},
+    "2026-08-27|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 446,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-21T08:13:58Z (7580eb1397) and at end of 2026-08-27 (61467a0133)"},
+    "2026-08-27|STOXX600": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 273,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-21T08:13:58Z (7580eb1397) and at end of 2026-08-27 (61467a0133)"},
+    "2026-08-28|F250-SPI": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 139,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-27T08:04:40Z (61467a0133) and at end of 2026-08-28 (61467a0133)"},
+    "2026-08-28|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 444,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-27T08:04:40Z (61467a0133) and at end of 2026-08-28 (61467a0133)"},
+    "2026-09-04|SP500": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 315,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-08-27T08:04:40Z (61467a0133) and at end of 2026-09-04 (133f6db50c)"},
+    "2026-09-05|WATCHLIST_RERANK": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 76,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-09-04T08:03:46Z (133f6db50c) and at end of 2026-09-05 (133f6db50c)"},
+    "2026-09-11|NASDAQ": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 435,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-09-04T08:03:46Z (133f6db50c) and at end of 2026-09-11 (133f6db50c)"},
+    "2026-09-12|F250-SPI": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 137,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-09-04T08:03:46Z (133f6db50c) and at end of 2026-09-12 (133f6db50c)"},
+    "2026-09-18|MIDCAP400": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 216,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-09-13T08:38:56Z (74546a543e) and at end of 2026-09-18 (23b880be4f)"},
+    "2026-09-19|SP500": {"state": "PROVEN_HISTORICAL", "definition_hash": "680b67139d457657", "rows": 318,
+        "evidence": "mirror-bracketed: identity 680b67139d457657 at 2026-09-18T08:07:21Z (23b880be4f) and at end of 2026-09-19 (23b880be4f)"},
+}
+
+
+# ISA-0745 (24-Sep-2026) — R4.13 ROLLBACK FLAG for the share-count double-count fix. False (the
+# decided rule, BuildSpec v2 §10.5): per-share EPS growth already embeds the share-count change,
+# so E[r]'s cash-return term is dividends only and the 3y share-count trend is a published
+# sensitivity. True restores the pre-ISA-0745 additive buyback yield EXACTLY (used by the D-24
+# historical acceptance replays, which were recorded under that method).
+ER_SHARECOUNT_IN_BASE = False

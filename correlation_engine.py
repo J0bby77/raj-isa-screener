@@ -27,7 +27,9 @@ False. Nothing here quietly returns 0.0 (R4.3, R2.10).
 ═══════════════════════════════════════════════════════════════════════════════════════════
 ESTIMATION (A2.2)
 ═══════════════════════════════════════════════════════════════════════════════════════════
-104 weeks Friday-to-Friday GBP total return, minimum 52.
+Friday-to-Friday GBP total return over the ONE declared risk window, isa_policy.RISK_WINDOW_WEEKS
+(ISA-0680, 23-Sep-2026; 156 retained by Raj, ISA-0737; A2.2's text said 104 and was never implemented -
+the code used the full pairwise history), minimum isa_policy.RISK_MIN_WEEKS (52).
 Shrinkage: rho_used = 0.7 * rho_sample + 0.3 * rho_bar_sleeve  (constant-correlation target).
 At n = 5 names one noisy pair must not drive a capital decision, and the shrinkage constant is
 DECLARED rather than fitted (R3.9).
@@ -61,7 +63,12 @@ SHRINK_W_TARGET = 0.30
 RHO_UNMEASURED_FLOOR = 0.70          # A2.3 adverse default
 RHO_MAX_PAIRWISE_GATE = 0.70         # A2.1 admission gate
 RHO_SLEEVE_GATE = 0.60               # A2.1 admission gate
-MIN_WEEKS = 52
+# ⚑ ISA-0680 (23-Sep-2026): the window and its minimum are READ from the one home (isa_policy). Until
+#   today MIN_WEEKS was a local 52 and NO window was applied at all - every pair used its FULL common
+#   history (157 weeks on the Sep book) although A2.2 and Run_Context 6.12b both say 104.
+import isa_policy as _pol_0680                          # noqa: E402 - R4.7: unimportable policy fails
+MIN_WEEKS = int(_pol_0680.RISK_MIN_WEEKS)
+WINDOW_WEEKS = int(_pol_0680.RISK_WINDOW_WEEKS)
 RHO_BAR_FALLBACK = 0.70              # when the sleeve itself has no measured pair
 
 ADMIT_AS_ADDITION = "ADMIT_AS_ADDITION"
@@ -84,17 +91,23 @@ def _pearson(a: List[float], b: List[float]) -> Optional[float]:
 
 
 def _aligned(r1: Dict[str, float], r2: Dict[str, float]):
-    keys = sorted(set(r1) & set(r2))
+    """The pair's most recent WINDOW_WEEKS common weekly returns (ISA-0680). The inputs are
+    consecutive-Friday returns (stock_return_store.weekly_returns never bridges a gap)."""
+    keys = sorted(set(r1) & set(r2))[-WINDOW_WEEKS:]
     return [r1[k] for k in keys], [r2[k] for k in keys], keys
 
 
 def pairwise_matrix(returns_by_name: Dict[str, Dict[str, float]]) -> dict:
-    """Sample correlations on the COMMON window, plus rho_bar (the constant-correlation target).
+    """Sample correlations per pair, plus rho_bar (the constant-correlation target).
 
-    ⚑ Common window, not pairwise-maximum-overlap. Pairwise-max uses more data but need not
-    produce a positive semi-definite matrix, and a decomposition of a non-covariance is
-    arithmetic on an object that is not a risk model. `concentration_clusters` made the same
-    choice for funds and states the same reason."""
+    ⚑ CORRECTED 23-Sep-2026 (ISA-0680, R2.13). This docstring said "common window, not
+    pairwise-maximum-overlap"; the code has always been PAIRWISE over each pair's full overlap.
+    What it now does, stated as it is: each pair uses its most recent WINDOW_WEEKS common
+    consecutive-Friday returns (isa_policy.RISK_WINDOW_WEEKS). For names with complete recent
+    histories - every held name and every Sep-2026 candidate - that is the same joint window
+    sleeve_risk uses. A pair with a shorter overlap uses what it has (>= 8 weeks to be computed,
+    MIN_WEEKS to be MEASURED in candidate_correlation), so the matrix is not guaranteed PSD; it is
+    used pairwise (rho_max, weighted rho_sleeve), never decomposed."""
     names = sorted(returns_by_name)
     pairs, measured_vals, skipped = {}, [], []
     for i, a in enumerate(names):
@@ -246,6 +259,9 @@ def assess(returns_by_name, weights, sigmas=None, candidates=None) -> dict:
         "as_of": datetime.date.today().isoformat(),
         "policy_version": "ISA_V2_1", "shadow_only": True,
         "matrix": m, "n_eff": n_eff(weights, sig, m),
+        "risk_window": {"weeks_declared": WINDOW_WEEKS, "min_weeks": MIN_WEEKS,
+                        "basis": "ISA-0680: most recent WINDOW_WEEKS common consecutive-Friday GBP "
+                                 "total returns per pair (isa_policy.RISK_WINDOW_WEEKS)"},
         "candidates": {}, "holdings": {},
     }
     for h in sorted(returns_by_name):
@@ -313,7 +329,22 @@ def _selftest():
     assert abs(ne3["n_eff"] - 1.0) < 0.05, ne3
     a = assess(rets2, {**w, "NEW": 0.0}, candidates=["NEW"])
     assert a["shadow_only"] is True and a["summary"]["n_unmeasured"] >= 1
-    print("correlation_engine selftest OK (16 assertions)")
+    # ISA-0680 MUST-FIRE: only the most recent WINDOW_WEEKS enter a pair. Old weeks co-move
+    # perfectly, recent weeks are independent -> the windowed rho is LOW; the full-history rho the
+    # module used before 23-Sep would be HIGH (the NEGATIVE CONTROL shows the difference is real).
+    random.seed(11)
+    kk = [(datetime.date(2022, 1, 7) + datetime.timedelta(weeks=i)).isoformat()
+          for i in range(WINDOW_WEEKS + 150)]
+    old_f = [random.gauss(0, 0.05) for _ in range(150)]
+    X = {k: (old_f[i] if i < 150 else random.gauss(0, 0.02)) for i, k in enumerate(kk)}
+    Y = {k: (old_f[i] if i < 150 else random.gauss(0, 0.02)) for i, k in enumerate(kk)}
+    r_win = pairwise_matrix({"X": X, "Y": Y})["pairs"]["X|Y"]
+    r_full = _pearson([X[k] for k in kk], [Y[k] for k in kk])
+    assert r_win["weeks"] == WINDOW_WEEKS and abs(r_win["rho"]) < 0.35, \
+        ("ISA-0680 MUST-FIRE: the pair must use exactly the declared window", r_win)
+    assert r_full > 0.6, ("ISA-0680 NEGATIVE CONTROL: the full-history rho is high, so the "
+                          "window is what moved the answer", r_full)
+    print("correlation_engine selftest OK (18 assertions)")
 
 
 if __name__ == "__main__":

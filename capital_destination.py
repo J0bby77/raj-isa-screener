@@ -353,6 +353,32 @@ def regime_coverage(rows: dict, multiplier: float = None) -> dict:
 # ROLLBACK (R4.13): `RANKING_ENABLED = False` -> _rank_key falls back to _deviation_key exactly,
 # i.e. the 16-Aug behaviour, and every emitted document says so.
 
+def fund_eligibility_states(rc: dict, unmatched, eligible, refused) -> dict:
+    """ISA-0728 (M08) - a held fund whose eligibility evidence is missing is UNKNOWN by name.
+
+    Before this, a fund with no NAV series (or unmeasurable statistics) reached neither `eligible`
+    nor `refused`: it left the contest silently, and 'not eligible' read the same for a measured
+    refusal and for a fund nobody could measure (R2.10). UNKNOWN blocks only THAT fund's new
+    capital; every other fund keeps its own verdict. No freshness state is emitted because no
+    freshness threshold is declared (stated, not invented)."""
+    states, unknown = {}, {}
+    for s_ in sorted(eligible):
+        states[s_] = "VALID_PASS"
+    for s_ in sorted(refused):
+        states[s_] = "VALID_FAIL"
+    for s_ in sorted(unmatched or []):
+        if s_ in states:
+            continue
+        states[s_] = "UNKNOWN_MISSING_EVIDENCE"
+        unknown[s_] = ("no NAV series or unmeasurable drawdown statistics in nav_cache, so the "
+                       "regime-coverage criterion was never evaluated - UNKNOWN is neither PASS nor "
+                       "FAIL; this fund receives no new capital until it is measured")
+    return {"criterion_states": states, "unknown": unknown,
+            "criterion": "regime_coverage (drawdown lived-through floor)",
+            "coverage_state": ("COMPLETE" if not unknown else "PARTIAL_UNKNOWN"),
+            "regime_coverage_state": (rc or {}).get("state")}
+
+
 RANKING_ENABLED = True
 
 EXPOSURE_VECTORS_FILE = "fund_exposure_vectors.json"
@@ -639,7 +665,7 @@ def _rank_key(candidate: dict) -> tuple:
             ) + _deviation_key(candidate)
 
 
-def _load_portfolio(path=None) -> dict:
+def _load_portfolio(path=None, _return_path=False, root=None) -> dict:
     """-> the most recent `portfolio_data_*.json`, chosen by its OWN declared `_meta.data_date`.
 
     ⚑ NOT by filename and NOT by mtime. The month label in the filename is the RUN month, not the
@@ -648,9 +674,10 @@ def _load_portfolio(path=None) -> dict:
     cannot be read is COUNTED and named, never silently skipped (R4.9).
     """
     if path is not None:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        return (Path(path), doc) if _return_path else doc
     cands, unreadable = [], []
-    for p in sorted(HERE.glob("portfolio_data_*.json")):
+    for p in sorted((Path(root) if root else HERE).glob("portfolio_data_*.json")):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
             ds = ((d.get("_meta") or {}).get("data_date") or "").strip()
@@ -669,7 +696,13 @@ def _load_portfolio(path=None) -> dict:
         "_load_portfolio: newest of %d by declared data_date (%s -> %s)%s"
         % (len(cands), p.name, when.isoformat(),
            ("; UNREADABLE AND COUNTED: " + ", ".join(unreadable)) if unreadable else ""))
-    return d
+    return (p, d) if _return_path else d
+
+
+def latest_portfolio_path(root=None) -> Path:
+    """ISA-0716 — the PATH of the newest broker book by declared data_date under `root` (default:
+    this tree). The selection is `_load_portfolio`'s own (R4.4)."""
+    return _load_portfolio(_return_path=True, root=root)[0]
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1433,7 +1466,8 @@ def concentration_impact(split, fa, residual, *, amount_gbp, portfolio, universe
 def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                  new_subscription_gbp: float = 0.0,
                  candidates: Optional[list] = None,
-                 sequence: Optional[dict] = None) -> dict:
+                 sequence: Optional[dict] = None,
+                 membership=None, underwriting=None, input_state=None) -> dict:
     """Decide how much of the marginal pound may reach the stock sleeve.
 
     R2.14 — where the verdict turns on an unmade choice, state the choice. There is still no
@@ -1562,8 +1596,15 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             # of 29 for want of an SE looked identical to one working perfectly. The inputs and
             # the fire rate are now part of the artefact: an instrument nobody can see working
             # is indistinguishable from one that is not (R4.9).
+            # ⚑ ISA-0705 — THE VERDICT RECORDS NOW TRAVEL WITH THE ARTEFACT. Before this the
+            #   block published state/order/displacement only, so `capital_destination_[mmm].json`
+            #   carried no trace of WHICH names the correlation gate had classified
+            #   REPLACEMENT_ONLY — and a September replay could not even establish the realised
+            #   exposure, because the records were never persisted (verified false, 17-Sep-2026).
             out["sequencer"] = {"state": sequence.get("state"),
                                 "order": sequence.get("order"),
+                                "replacement_only": sequence.get("replacement_only") or [],
+                                "records": sequence.get("records") or [],
                                 "displacement": sequence.get("displacement"),
                                 "method": sequence.get("banding", {}).get("method"),
                                 "declared_order": sequence.get("declared_order"),
@@ -1582,7 +1623,23 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
         # rather than stopping at a printed list.
         if stock_max > 0:
             try:
-                _order = (sequence or {}).get("order") or None
+                # ⚑ R2.10 at the seam: "the sequencer did not run" (None) and "the sequencer
+                #   ran and admitted NOBODY" ([]) are different facts, and with ISA-0705 the
+                #   second is now reachable — every qualifying name can be REPLACEMENT_ONLY.
+                #   `or None` collapsed them, which would send an admitted-nobody run down the
+                #   no-sequencer branch and order the queue by a basis the sequencer had
+                #   already declined to use.
+                _seq_ran = bool(sequence) and (sequence or {}).get("state") == "OK"
+                _order = ((sequence or {}).get("order") if _seq_ran
+                          else ((sequence or {}).get("order") or None))
+                # ⚑ ISA-0705 — the funding verdict, not just the order. A name the sequencer
+                #   classified REPLACEMENT_ONLY is absent from `_order`; before this it was
+                #   merely sorted last by `pos.get(ticker, 10_000)` and then funded IN FULL as
+                #   an addition (MEASURED: GBP 6,794.48 on the aug-2026 fixture book). Passing
+                #   the verdict is what makes the correlation admission gate decision-effective
+                #   on capital rather than a printed list.
+                _repl = (sequence or {}).get("replacement_only") or []
+                _donors = (policy.get("stock_sleeve") or {}).get("donor_releases") or None
                 # ⚑ `allocate()` RETURNS the obligation store and does NOT persist it, which
                 # is what makes it safe to call from a REPORTING run. Do not add a
                 # `save_fill_obligations()` call here: the pre-run would then record a FIRST
@@ -1616,6 +1673,13 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                     # ISA-0701 containment: the reporting run passes the store READ-ONLY; allocate()
                     # returns proposed_obligations and never writes (activation is Step 1.5's).
                     obligations=_ps.load_fill_obligations(),
+                    replacement_only=_repl, donor_releases=_donors,
+                    # ISA-0685: omitted in production, so the live canonical ledger decides;
+                    # a fixture injects the admission it is asserting.
+                    membership=membership,
+                    # ISA-0721 (Raj D17, 23-Sep-2026): omitted in production, so a held fill/top-up
+                    # reads THIS month's case from the underwriting store; a fixture injects it.
+                    underwriting=underwriting,
                     concentration=(_hook["fn"] if _cmode == "LIVE" else None))
                 if _cmode == "LIVE":
                     out["concentration"] = _concentration_record(
@@ -1664,6 +1728,160 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
         # Falls back to the cap only when the allocation could not be computed — a refusal is
         # not a spend of zero, and offering the funds money the stock sleeve may still take
         # would double-count it (R2.10).
+        # ── Wave 2 §5.2 — ONE FINAL CAPITAL-AUTHORISATION RECEIPT, in SHADOW ────────────
+        # ⚑ SHADOW, AND SAID SO (R18.2). The receipt is PRODUCED on the real path and
+        #   published on the artefact so the report and the execution path can read one
+        #   decision identity per name — but nothing here consumes it to move capital yet.
+        #   The ISA-0705 correction that actually stops a replacement-only name being funded
+        #   as an addition is LIVE one layer down, in `position_sizing.allocate`; this receipt
+        #   is the boundary that will later carry it, and it must earn authority through a
+        #   run, not through being written (R4.14).
+        try:
+            import capital_authorisation as _ca
+            _alloc_now = out.get("allocation") or {}
+            # ── Wave 2 Session 4 — the AUTHORITATIVE IDENTITIES reach the receipt ────────
+            # Each is built from the module that owns it, best-effort with a NAMED reason on
+            # failure (R2.10). `operational_readiness` then MEASURES which are present; the
+            # boundary leaves SHADOW on that measurement, never on the fact that the wiring
+            # exists (R4.14).
+            _ids, _id_why = {}, {}
+            try:
+                import sleeve_risk as _sr_ca, stock_return_store as _srs_ca
+                _ids["risk_share_calc_id"] = _sr_ca.risk_share_authority(
+                    _srs_ca.load(), portfolio)["risk_share_calc_id"]
+            except Exception as _e1:                                    # noqa: BLE001
+                _id_why["risk_share_calc_id"] = "%s: %s" % (type(_e1).__name__, _e1)
+            try:
+                import position_sizing as _ps_ca
+                _held_ca = [{"ticker": x.get("ticker"),
+                             "size_pct": 100.0 * float(x.get("value_gbp") or 0.0) / float(total1)}
+                            for x in (portfolio.get("stocks") or [])]
+                _ids["vci_budget_calc_id"] = _ps_ca.held_binary_budget(_held_ca)["calc_id"]
+            except Exception as _e2:                                    # noqa: BLE001
+                _id_why["vci_budget_calc_id"] = "%s: %s" % (type(_e2).__name__, _e2)
+            try:
+                import issuer_freshness as _if_ca
+                _rep_ca = _if_ca.report(None, HERE)
+                _ids["event_review_by_ticker"] = {
+                    r["ticker"]: r.get("review_id")
+                    for r in ((_if_ca.load(_rep_ca.get("month"), HERE) or {}).get("reviews") or [])}
+                if not _ids["event_review_by_ticker"]:
+                    _id_why["event_review_id"] = (
+                        "ISA-0713: %s — no issuer review artefact exists for this month, so no "
+                        "name can carry an event_review_id. The first real production is the "
+                        "04-Oct-2026 monthly review." % _rep_ca.get("why", "not written"))
+            except Exception as _e3:                                    # noqa: BLE001
+                _id_why["event_review_id"] = "%s: %s" % (type(_e3).__name__, _e3)
+            _repl_set = {str(t).upper() for t in ((sequence or {}).get("replacement_only") or [])}
+            _seq_verdicts = {r.get("ticker"): r.get("verdict")
+                             for r in ((sequence or {}).get("records") or [])}
+            _receipts = []
+            # `allocate()` already extends `rows` with the replacement-only rows, so the
+            # replacement block is a VIEW of the same rows, not extra ones. Iterating both
+            # would emit two receipts for one decision — two decision identities for one
+            # name is the duplicate-truth defect this receipt exists to remove.
+            try:
+                import sleeve_membership as _sm_ca
+                _memb_ca = {m["ticker"]: m for m in
+                            _sm_ca.population(portfolio)["rows"]}
+            except Exception as _e4:                                    # noqa: BLE001
+                _memb_ca = {}
+                _id_why["membership"] = "%s: %s" % (type(_e4).__name__, _e4)
+            _seen_tk = set()
+            _bd_ca = {str(c.get("ticker") or "").upper(): c.get("broker_dealability")
+                      for c in (candidates or []) if isinstance(c, dict)}
+            # ISA-0722 — the underwriting case each receipt sits on (this month's, from the store).
+            try:
+                import underwriting as _uw_ca
+                import datetime as _dt_uw
+                _uw_month = _dt_uw.date.today().isoformat()[:7]
+            except Exception as _e6:                                    # noqa: BLE001
+                _uw_ca, _uw_month = None, None
+                _id_why["underwriting_case_id"] = "%s: %s" % (type(_e6).__name__, _e6)
+            # ISA-0717 — the canonical decision in force per name, read from the ONE ledger.
+            try:
+                import decision_ledger as _dl_ca
+                _ledp_ca = _dl_ca.default_path(str(HERE))
+            except Exception as _e5:                                    # noqa: BLE001
+                _dl_ca, _ledp_ca = None, None
+                _id_why["ledger_decision_id"] = "%s: %s" % (type(_e5).__name__, _e5)
+            for _row in (_alloc_now.get("rows") or []):
+                _tk = str(_row.get("ticker") or "").upper()
+                if not _tk or _tk in _seen_tk:
+                    continue
+                _seen_tk.add(_tk)
+                _route = (_ca.ROUTE_REPLACEMENT_ONLY if _tk in _repl_set
+                          else _ca.ROUTE_ADDITION)
+                _st = str(_row.get("state") or "")
+                _receipts.append(_ca.authorise(
+                    ticker=_tk, route=_route,
+                    # ISA-0727 (M14): the state this approval is formed on.
+                    build_id=((input_state or {}).get("components") or {}).get("build_id"),
+                    input_snapshot_id=(input_state or {}).get("input_snapshot_id"),
+                    eligibility={"status": ("ELIGIBLE" if _tk not in _repl_set else
+                                            "REPLACEMENT_ONLY"),
+                                 "sequencer_verdict": _seq_verdicts.get(_tk),
+                                 # ISA-0607: the broker verdict the candidate list applied,
+                                 # carried (never re-derived) so the receipt shows it.
+                                 "broker_dealability": _bd_ca.get(_tk)},
+                    sizing={"status": ("SIZED" if _row.get("allocated_gbp") is not None
+                                       else "UNEVALUATED"),
+                            "target_gbp": _row.get("gap_gbp"),
+                            "target_weight": _row.get("target_pct"),
+                            "budget_calc_id": _ids.get("vci_budget_calc_id")},
+                    risk={"status": ("WITHIN" if _ids.get("risk_share_calc_id")
+                                     else "UNMEASURED"),
+                          "risk_share_calc_id": _ids.get("risk_share_calc_id"),
+                          "why": (_id_why.get("risk_share_calc_id")
+                                  or ("the authoritative sleeve risk-share (ISA-0708). The D27 "
+                                      "ceiling verdict itself is applied at its own boundary; "
+                                      "what this receipt asserts is that it and the review flag "
+                                      "quote THIS calculation."))},
+                    funding={"status": ("FUNDED" if float(_row.get("allocated_gbp") or 0) > 0
+                                        else str(_row.get("state") or "NOT_FUNDED")),
+                             "donor": _row.get("donor"),
+                             "donor_state": _row.get("donor_state"),
+                             "released_gbp": _row.get("donor_released_gbp"),
+                             "why": _row.get("skip_reason")},
+                    permission={"status": "NOT_ASSESSED_AT_THIS_BOUNDARY"},
+                    membership=_memb_ca.get(_tk),
+                    underwriting=(_uw_ca.latest_case(_tk, root=str(HERE), month=_uw_month) or {})
+                    if _uw_ca is not None else None,
+                    ledger_decision_id=(
+                        ((_dl_ca.current_decisions(_ledp_ca, _tk) or [{}])[-1].get("decision_id"))
+                        if _dl_ca is not None else None),
+                    event_review_id=(_ids.get("event_review_by_ticker") or {}).get(_tk),
+                    current_exposure_gbp=0.0,
+                    execution_status="NOT_EXECUTED"))
+            for _rc_ in _receipts:
+                if isinstance(_rc_, dict) and _rc_.get("state") != "DISABLED":
+                    _rc_["approval_reference"] = _ca.approval_reference(_rc_)
+            _readiness = _ca.operational_readiness(_receipts)
+            out["authorisation"] = {
+                # ⚑ The mode is MEASURED, not declared: the boundary leaves SHADOW only when
+                #   every required identity is present on every receipt (R4.14).
+                "mode": ("OPERATIONAL_READY" if _readiness["ready_to_leave_shadow"]
+                         else "SHADOW"),
+                "readiness": _readiness,
+                "identity_sources": _ids,
+                "identity_gaps": _id_why,
+                "receipts": _receipts,
+                # ISA-0727: what the plan decided ON. The report re-derives this with the same
+                # function (capital_authorisation.input_state) and refuses a STALE plan.
+                "approval_binding": ({"input_snapshot_id": input_state.get("input_snapshot_id"),
+                                      "components": input_state.get("components"),
+                                      "materiality": input_state.get("materiality")}
+                                     if input_state else None),
+                "invariants": _ca.check_invariants(_receipts),
+                "basis": ("Wave 2 §5.2: one final capital-authorisation receipt per name, "
+                          "consuming module-owned economics and never recomputing them. "
+                          "SHADOW until it carries the risk-share and VCI-budget calculation "
+                          "ids from their own boundaries; R18.2 - material new capital logic "
+                          "runs in SHADOW before authority.")}
+        except Exception as _ae:                                        # noqa: BLE001
+            out["authorisation"] = {"mode": "SHADOW", "state": "UNAVAILABLE",
+                                    "reason": "%s: %s" % (type(_ae).__name__, _ae)}
+
         _alloc_block = out.get("allocation") or {}
         if _alloc_block.get("state") == "OK":
             _stock_spent = float(_alloc_block.get("allocated_gbp") or 0.0)
@@ -2340,10 +2558,58 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
         "channel_report": chan,
         "correlation": (corr or {}).get("summary"),
         "step9_pre_source": s9_name,
+        # ISA-0608: step9_pre's ONE feasible population, carried (never rebuilt) for the view below.
+        "step9_opportunity_set": (s9 or {}).get("opportunity_set"),
         "notes": notes,
         "detail": ("P3 -> P6 -> P4, wired 29-Aug-2026 (ISA-0490). `candidates` is the QUALIFYING "
                    "subset; `all_candidates.binding` states WHY the list is the length it is."),
     }
+
+
+CHECKPOINT_D_N = 5
+
+
+def opportunity_set_view(ops, candidates, sequence) -> dict:
+    """ISA-0608 — the feasible population as the ROUTER sees it, and the Checkpoint-D top-5.
+
+    Membership is step9_pre's (`opportunity_set`, one home). The top-5 ORDER is the DECLARED
+    Checkpoint-D basis (Run_Context Step 10.2 tick 1, Fix Pack A4: "cap 5 by deploy-Source
+    tiebreak") - source_score descending over feasible members that STILL qualify after every
+    router-side refusal (judgement, broker, thesis). The sequencer's capital order is published
+    beside it for reference, never substituted for the declared basis. Parity is published: a
+    main-route name the router would fund that is NOT a feasible member is a breach (two
+    populations), never absorbed."""
+    if not ops:
+        return {"state": "ABSENT_PRE_CONTROL", "opportunity_set_id": None, "checkpoint_d_top5": None,
+                "why": "step9_pre carries no opportunity_set (it pre-dates ISA-0608); the "
+                       "Checkpoint-D population is UNKNOWN, not the old hand-built top-5"}
+    members = [m.get("ticker") for m in (ops.get("members") or [])]
+    mset = set(members)
+    q_main = [c.get("ticker") for c in (candidates or [])
+              if c.get("route") == "main" and c.get("qualifies")]
+    qset = set(q_main)
+    order = [t for t in ((sequence or {}).get("order") or []) if t in mset and t in qset]
+    # names the sequencer did not order (e.g. it failed) keep the feasible order after the rest
+    order += [t for t in members if t in qset and t not in order]
+    _ss = {m.get("ticker"): m.get("source_score") for m in (ops.get("members") or [])}
+    _pos = {t: i for i, t in enumerate(members)}
+    contest = sorted((t for t in members if t in qset),
+                     key=lambda t: (-(_ss.get(t) if _ss.get(t) is not None else float("-inf")), _pos[t]))
+    top = contest[:CHECKPOINT_D_N]
+    only_router = sorted(qset - mset)
+    only_step9 = sorted(mset - qset)
+    return {"state": "OK" if not only_router else "PARITY_BREACH",
+            "opportunity_set_id": ops.get("opportunity_set_id"),
+            "n_feasible": len(members), "n_router_qualifying_main": len(q_main),
+            "router_order_over_feasible": order,
+            "checkpoint_d_top5": top,
+            "checkpoint_d_required_n": min(CHECKPOINT_D_N, len(contest)),
+            "checkpoint_d_basis": "source_score desc over feasible, still-qualifying main-route members (A4)",
+            "router_qualifying_not_feasible": only_router,
+            "feasible_refused_by_router": only_step9,
+            "basis": ("membership = step9_pre.opportunity_set (ISA-0608); order = "
+                      "deployment_sequencer.sequence; a feasible name the router later refuses "
+                      "(judgement, thesis, broker) is listed, never silently dropped")}
 
 
 def _suffix(ticker, portfolio):
@@ -2483,10 +2749,21 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
     # ── ISA-0490 — P3 -> P6 -> P4. The router now ASKS who qualifies before sizing. ───────
     pipe = capital_pipeline(portfolio, policy, as_of=as_of)
     _jr_applied = _apply_judgement_refusals(pipe, judgement_refusals, judgement_scope_doc)
+    # ISA-0727 (M14): the material state this plan is formed on, ONE function shared with the report.
+    try:
+        import capital_authorisation as _ca_is
+        _pf_is = Path(portfolio_path) if portfolio_path else latest_portfolio_path()
+        _istate = _ca_is.input_state(str(HERE), portfolio_path=_pf_is,
+                                     step9={"opportunity_set": pipe.get("step9_opportunity_set")},
+                                     amount_gbp=amount_gbp)
+    except Exception as _ise:                                           # noqa: BLE001
+        _istate = {"input_snapshot_id": None, "components": None,
+                   "error": "%s: %s" % (type(_ise).__name__, _ise)}
     split = sleeve_split(amount_gbp, portfolio, policy, new_subscription_gbp,
                          candidates=pipe.get("candidates"),
                          sequence=dict(pipe.get("sequence") or {},
-                                       population_binding=pipe.get("population_binding")))
+                                       population_binding=pipe.get("population_binding")),
+                         input_state=_istate)
     split["pipeline"] = {k: pipe.get(k) for k in
                          ("state", "step9_pre_source", "notes", "detail", "correlation")}
     _ac = pipe.get("all_candidates") or {}
@@ -2495,6 +2772,7 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
     split["pipeline"]["n_qualifying"] = _ac.get("n_qualifying")
     split["pipeline"]["n_rejected"] = _ac.get("n_rejected")
     split["pipeline"]["n_refused"] = _ac.get("n_refused")
+    split["pipeline"]["c1_verdicts"] = _ac.get("c1_verdicts")          # ISA-0616 canonical, read-only
     split["pipeline"]["channel_report"] = pipe.get("channel_report")
     split["pipeline"]["evidence_states"] = pipe.get("evidence_states")
     # ISA-0698 — routes of EVERY assessed candidate, so the scope can be derived from this doc
@@ -2503,6 +2781,11 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
         for c in ((pipe.get("all_candidates") or {}).get("candidates") or pipe.get("candidates") or [])
         if c.get("ticker")}
     split["pipeline"]["judgement_refusals_applied"] = _jr_applied
+    # ⚑ ISA-0608 — the Checkpoint-D top-5 is the ROUTER's order over the ONE feasible population.
+    split["pipeline"]["opportunity_set"] = opportunity_set_view(
+        pipe.get("step9_opportunity_set"),
+        (pipe.get("all_candidates") or {}).get("candidates") or pipe.get("candidates") or [],
+        pipe.get("sequence"))
     fund_amount = split["fund_max_gbp"]
     # ⚑ ISA-0386. Built ONCE and passed down, so every call site — the allocation and all four
     # negative controls — orders on the SAME table. Recomputing it per call would let the parity
@@ -2644,7 +2927,9 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
         "precision_ladder": ladder,
         "regime_coverage": rc,
         "eligibility": {"eligible": sorted(eligible),
-                        "refused": {k: v["reason"] for k, v in refused.items()}},
+                        "refused": {k: v["reason"] for k, v in refused.items()},
+                        # ISA-0728 (M08): every held fund carries exactly ONE typed state.
+                        **fund_eligibility_states(rc, unmatched, eligible, refused)},
         "sleeve_split": split,
         "ranking": ranking,
         "fund_allocation": fa,
@@ -3428,6 +3713,8 @@ def summary_for_run_context(doc: dict) -> dict:
     # WHICH positions open — publishing the cap without them would hand Raj a ceiling and no
     # instruction, which is the number he cannot act on.
     "pipeline": _sl.get("pipeline") or {},
+    # ISA-0727: the approval binding travels with the plan into run_context (renderer re-checks it)
+    "approval_binding": ((_sl.get("authorisation") or {}).get("approval_binding")),
     "allocation": _sl.get("allocation") or {},
     "post_deployment": _sl.get("post_deployment") or {},
     "sequencer": _sl.get("sequencer") or {},
@@ -3442,6 +3729,7 @@ def summary_for_run_context(doc: dict) -> dict:
     "phase_allocation": _fa.get("phase_allocation"),
     "blocked": _fa.get("blocked"),
     "eligibility_refused": (_cdr.get("eligibility") or {}).get("refused"),
+    "eligibility_unknown": (_cdr.get("eligibility") or {}).get("unknown"),
     "band_weights": {r["sedol"]: {"before": r.get("weight_before_pct"),
                                   "after": r.get("weight_after_pct"),
                                   "low": r.get("band_low_pct"),
@@ -3827,6 +4115,39 @@ def _selftest(verbose=True) -> int:
     # R4.3 negative control: an empty sleeve BLOCKS, never PASSes
     ck("empty sleeve returns UNKNOWN and blocks", evidence_dispersion({})["state"] == "UNKNOWN")
     ck("regime_coverage on empty sleeve blocks", regime_coverage({})["state"] == "UNKNOWN")
+    # ── ISA-0728 (M08) — typed fund eligibility states ──────────────────────────────────
+    _fe = fund_eligibility_states({"state": "MEASURED"}, ["F_NONAV"], {"F_OK"}, {"F_BAD": {}})
+    ck("MUST-FIRE ISA-0728: a held fund with no evidence is UNKNOWN by name, not silently absent",
+       _fe["criterion_states"].get("F_NONAV") == "UNKNOWN_MISSING_EVIDENCE" and "F_NONAV" in _fe["unknown"]
+       and _fe["coverage_state"] == "PARTIAL_UNKNOWN")
+    ck("NEGATIVE CONTROL ISA-0728: an UNKNOWN fund does not change any other fund's verdict",
+       _fe["criterion_states"]["F_OK"] == "VALID_PASS" and _fe["criterion_states"]["F_BAD"] == "VALID_FAIL")
+    ck("ISA-0728: a complete measurement is COMPLETE with no unknowns",
+       fund_eligibility_states({"state": "MEASURED"}, [], {"A"}, {})["coverage_state"] == "COMPLETE")
+    ck("ISA-0728: build() publishes the typed states in eligibility (wired, not a helper only)",
+       "**fund_eligibility_states(rc, unmatched, eligible, refused)" in open(__file__, encoding="utf-8").read())
+    # ── ISA-0608 — the Checkpoint-D population is the router's order over the feasible set ──
+    _ops = {"opportunity_set_id": "OPS-fx", "members": [{"ticker": t, "source_score": sc} for t, sc in
+                                                        (("A", 90), ("B", 80), ("C", 99), ("D", 70), ("E", 60), ("F", 50))]}
+    _cands = [{"ticker": t, "route": "main", "qualifies": t != "C"} for t in ("A", "B", "C", "D", "E", "F")] + \
+             [{"ticker": "ZAB.WA", "route": "main", "qualifies": False},
+              {"ticker": "MU", "route": "held_topup", "qualifies": True}]
+    _v = opportunity_set_view(_ops, _cands, {"order": ["ZAB.WA", "F", "MU", "E", "D", "C", "B", "A"]})
+    ck("MUST-FIRE ISA-0608: the Checkpoint-D top-5 is source-score order (A4) over feasible, still-"
+       "qualifying main-route names (ZAB.WA, a refused C and the held top-up take no place)",
+       _v["checkpoint_d_top5"] == ["A", "B", "D", "E", "F"] and _v["state"] == "OK"
+       and _v["feasible_refused_by_router"] == ["C"] and _v["router_order_over_feasible"][0] == "F")
+    _vb = opportunity_set_view(_ops, _cands + [{"ticker": "ROGUE", "route": "main", "qualifies": True}],
+                               {"order": ["ROGUE", "A"]})
+    ck("MUST-FIRE ISA-0608: a main-route name the router would fund that is NOT a feasible member is "
+       "a PARITY_BREACH, never absorbed",
+       _vb["state"] == "PARITY_BREACH" and _vb["router_qualifying_not_feasible"] == ["ROGUE"])
+    _v1 = opportunity_set_view({"opportunity_set_id": "OPS-1", "members": [{"ticker": "ONLY"}]},
+                               [{"ticker": "ONLY", "route": "main", "qualifies": True}], {"order": ["ONLY"]})
+    ck("NEGATIVE CONTROL ISA-0608: a single feasible name is a complete Checkpoint-D population (required n = 1)",
+       _v1["checkpoint_d_top5"] == ["ONLY"] and _v1["checkpoint_d_required_n"] == 1)
+    ck("ISA-0608: a pre-control step9_pre yields ABSENT_PRE_CONTROL, never a fabricated top-5",
+       opportunity_set_view(None, _cands, {})["checkpoint_d_top5"] is None)
     print(f"\ncapital_destination selftest: {len(fails)} failure(s)"
           + (" -> " + ", ".join(fails) if fails else " — all assertions green"))
     OUTPUT_DIR = _saved_output_dir

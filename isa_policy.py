@@ -144,6 +144,25 @@ V2_FLAGS: Dict[str, bool] = {
     # over a call that does not happen is FC-E wearing a green light. This flag governs the
     # CALL, not the capability — turning it off makes sleeve_split REFUSE, never fall back.
     "capital_pipeline_wired":     True,   # P3->P6->P4 reached from capital_destination.build
+    # ISA-0716 (23-Sep-2026): the ONE post-event lifecycle engine (graduation -> successor VCI ->
+    # Path A -> EXIT, same invocation). False: vci_lifecycle.assess returns UNKNOWN_DISABLED and
+    # record writes nothing — UNKNOWN, never ACTIVE (R4.3). MOVES CAPITAL (it issues decisions).
+    "vci_lifecycle":              True,
+    # ISA-0722 (23-Sep-2026): the append-only underwriting-case store and the E[r] lifecycle.
+    # False: capture writes nothing and reports DISABLED (UNKNOWN, never "all underwritten").
+    "underwriting_cases":         True,
+    # ISA-0740 (24-Sep-2026): the approval-preserving EXECUTION CEILING, SHADOW only (published in
+    # the pre-run summary; no consumer gates on it). False: execution_ceiling returns DISABLED
+    # (UNKNOWN), never a ceiling (R4.3). Moves NO capital while SHADOW.
+    "execution_ceiling_shadow":   True,
+    # ISA-0744 (24-Sep-2026): the 12-month HORIZON-VALUE E[r] (P/E + EV/EBITDA routes, typed states,
+    # sensitivities), SHADOW only: published beside the repaired additive E[r], consumed by nothing
+    # that moves capital. False: horizon_value.shadow_month returns DISABLED (UNKNOWN), never a case.
+    "horizon_value_shadow":       True,
+    # ISA-0747 (24-Sep-2026): Step 6 also fetches the provider TTM income statement for the
+    # horizon-value period contract (PIT-captured, read only by Step 8h). False: not fetched ->
+    # flow_ttm falls through to 4Q / FY+YTD / typed MISSING. Moves NO capital.
+    "ttm_provider_fetch":         True,
 
     "execution_ledger":           True,   # P0.1 reachable is not live
     "quantity_register":          True,   # P0.2 one quantity, one computer, one surface
@@ -159,6 +178,12 @@ V2_SHADOW_ONLY = frozenset({
     # BUILD and it can fail a RUN — which is not the same thing as moving capital, and the
     # distinction is declared here so a reader never has to infer it.
     "execution_ledger", "quantity_register", "threshold_register", "negative_claim_expiry",
+    # ISA-0740: the execution ceiling is published, never consumed, until Raj promotes it.
+    "execution_ceiling_shadow",
+    # ISA-0744: the horizon-value E[r] is published beside the additive E[r], never consumed.
+    "horizon_value_shadow",
+    # ISA-0747: provider TTM fetch feeds only the SHADOW horizon-value case via pit_capture.
+    "ttm_provider_fetch",
 })
 
 # NOTE: the strict-accessor rollback is the V2_FLAGS entry "policy_strict_accessor", read via
@@ -283,6 +308,7 @@ DECLARED_CONSTANTS = frozenset({
     "MIN_HOLD_DAYS", "VCI_SLEEVE_BINARY_RISK_BUDGET", "ER_FRICTION_BUFFER",
     "FUND_MIN_COVERAGE", "VCI_FLOOR_MAX", "SLEEVE_PROBATION_PP",
     "SLEEVE_BETA_MAX", "SLEEVE_BETA_DIMSON_LAGS", "SLEEVE_STALE_ZERO_RETURN_MAX",
+    "RISK_WINDOW_WEEKS", "RISK_MIN_WEEKS",
 })
 
 
@@ -301,6 +327,32 @@ DECLARED_CONSTANTS = frozenset({
 # and is judged on the net change in sleeve risk instead (sleeve_risk.delta_sigma_switch), so a
 # high-beta name is never blocked as a REPLACEMENT candidate — if a held name clears its
 # min-hold and the pound is better deployed elsewhere, beta must not veto that.
+# ── ISA-0680 (23-Sep-2026) — ONE RISK WINDOW FOR EVERY COVARIANCE-SIDE QUANTITY ─────────────
+# ⚑ Three producers measured risk on three windows: sleeve_risk on the WHOLE store history (158
+#   weeks on 23-Sep and growing every Friday, levels, gaps bridged), stock_price_fetch.matrix on the
+#   last 104 weeks pairwise, correlation_engine on the FULL pairwise history although its own spec
+#   (A2.2) and Run_Context say 104. A GBP ceiling or an admission verdict computed on an undeclared
+#   window is a window choice wearing a verdict (R2.6). These two constants are the one home:
+#   every producer READS them, none carries its own.
+# ⚑ DECIDED BY RAJ 23/24-Sep-2026 (ISA-0737): 156 weeks is RETAINED as the institutional baseline.
+#   Origin (historical, NOT the justification): the return store held ~3y of weekly history because
+#   stock_price_fetch uses range=3y; every gate ran on that. A2.2's written 104 was never implemented.
+#   Why it is kept: covariance/beta/risk-share estimation is more STABLE on the larger sample - holding
+#   other things equal, sqrt(104/156) = 0.816, i.e. ~18% lower nominal sampling error (approximation:
+#   weekly returns are not IID) - while 3 years remains a reasonable medium-term risk window; and it
+#   keeps continuity with the risk estimates and the 0.60 beta ceiling now evaluated on this basis.
+#   Accepted trade-off: estimation stability over regime responsiveness. NOT justified by which
+#   candidates it admits or blocks (outcomes are consequences, not calibration evidence). Not declared
+#   optimal: revisit on evidence of material regime lag, systematic risk misclassification, or a
+#   demonstrably better-calibrated window (falsifiers in the RISK_WINDOW_WEEKS rationale declaration).
+RISK_WINDOW_WEEKS = 156         # Raj decision ISA-0737 (23/24-Sep-2026): retained - stability over responsiveness
+RISK_MIN_WEEKS = 52             # A2.2 minimum: below this a covariance quantity is REFUSED, never estimated
+RISK_WINDOW_BASIS = (
+    "ISA-0680 / ISA-0737 (156 retained by Raj; A2.2 text 104 superseded): the most recent RISK_WINDOW_WEEKS consecutive Friday-to-Friday GBP total "
+    "returns (a gap is never bridged), joint across the names being decided for sleeve_risk and "
+    "pairwise-truncated to the same length for the correlation matrices; fewer than "
+    "RISK_MIN_WEEKS -> refused. Sample covariance (n-1)."
+)
 SLEEVE_BETA_MAX = 0.60          # Dimson beta to the held sleeve, self-excluded
 SLEEVE_BETA_DIMSON_LAGS = 1     # non-synchronous-trading correction
 SLEEVE_STALE_ZERO_RETURN_MAX = 0.30   # share of exactly-zero weekly returns tolerated
@@ -381,8 +433,42 @@ def policy_stamp(cfg=None) -> dict:
     return out
 
 
+def _selftest(verbose: bool = True) -> int:
+    """ISA-0716 (23-Sep-2026): the flag table's own contract, which until now had no selftest.
+
+    Asserts that every declared flag is a bool (or the declared tri-state string), that the
+    Session-5 lifecycle flag is declared, and - NEGATIVE CONTROL - that an undeclared flag
+    RAISES rather than reading as False (FC-A: a typo must not silently disable a capability)."""
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        if not cond:
+            raise AssertionError(msg)
+
+    tri = {"OFF", "SHADOW", "LIVE"}
+    for k, v in V2_FLAGS.items():
+        ok(isinstance(v, bool) or (isinstance(v, str) and v in tri),
+           "V2_FLAGS[%r] = %r is neither a bool nor a declared tri-state" % (k, v))
+    ok(flag("vci_lifecycle") is True, "ISA-0716: the lifecycle flag must be declared ON")
+    try:
+        flag("vci_lifecycle_TYPO")
+        ok(False, "NEGATIVE CONTROL: an undeclared flag must RAISE, never read as False")
+    except KeyError:
+        ok(True, "")
+    ok(set(V2_SHADOW_ONLY) <= set(V2_FLAGS),
+       "every SHADOW-ONLY flag must be a declared flag (a shadow list naming nothing is decorative)")
+    if verbose:
+        print("isa_policy selftest: %d assertions, 0 failed" % n)
+    return n
+
+
 if __name__ == "__main__":
     import sys
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     print(json.dumps(policy_stamp(), indent=1))
     for n in sorted(DERIVED_THRESHOLDS):
         try:

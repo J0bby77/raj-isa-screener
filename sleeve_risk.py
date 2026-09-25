@@ -38,7 +38,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 WEEKS_PER_YEAR = 52.0
 DIMSON_LAGS = 1
-MIN_OVERLAP_WEEKS = 52
+# ISA-0680: the window and its minimum live in isa_policy (RISK_WINDOW_WEEKS / RISK_MIN_WEEKS) and are
+# read through _window_policy(); the former module-local MIN_OVERLAP_WEEKS = 52 was a second home.
 
 
 class RiskRefused(RuntimeError):
@@ -71,10 +72,70 @@ def _levels(store: dict, ticker: str) -> Dict[str, float]:
     return out
 
 
+def _window_policy() -> Tuple[int, int]:
+    """ISA-0680 — the ONE declared risk window (isa_policy, R4.4). Unimportable -> REFUSED: a
+    silently defaulted window is the defect this item exists to remove."""
+    try:
+        import isa_policy as _pol
+        return int(_pol.RISK_WINDOW_WEEKS), int(_pol.RISK_MIN_WEEKS)
+    except Exception as exc:                                            # noqa: BLE001
+        raise RiskRefused("isa_policy.RISK_WINDOW_WEEKS/RISK_MIN_WEEKS unavailable (%s: %s) - the "
+                          "risk window is declared there and nowhere else (ISA-0680)"
+                          % (type(exc).__name__, exc))
+
+
+def _is_week(d0: str, d1: str) -> bool:
+    import datetime as _dt
+    return (_dt.date.fromisoformat(str(d1)[:10]) - _dt.date.fromisoformat(str(d0)[:10])).days == 7
+
+
+def n_returns(dates: Sequence[str]) -> int:
+    """Consecutive-Friday returns a level-date sequence yields (a gap is never bridged)."""
+    return sum(1 for i in range(1, len(dates)) if _is_week(dates[i - 1], dates[i]))
+
+
+def window_dates(store: dict, names: Iterable[str], weeks: Optional[int] = None) -> List[str]:
+    """ISA-0680 — THE risk window: the level dates yielding the most recent `weeks` (default
+    isa_policy.RISK_WINDOW_WEEKS) CONSECUTIVE-Friday returns common to every name in `names`.
+
+    ⚑ Replaces the old default (every common date in the store), which grew by one week every
+    Friday and was declared nowhere, so a GBP ceiling moved with the age of the store."""
+    W, _ = _window_policy()
+    W = int(weeks or W)
+    d = common_dates(store, names)
+    keep, n = [], 0
+    for i in range(len(d) - 1, 0, -1):
+        if n >= W:
+            break
+        if _is_week(d[i - 1], d[i]):
+            if not keep or keep[0] != d[i]:
+                keep.insert(0, d[i])
+            keep.insert(0, d[i - 1])
+            n += 1
+    return keep
+
+
+def window_of(dates: Sequence[str]) -> dict:
+    """The identity every risk figure carries (R4.2): basis, declared and used weeks, span."""
+    W, M = _window_policy()
+    return {"weeks_declared": W, "min_weeks": M, "n_weeks": n_returns(dates),
+            "first": (dates[0] if dates else None), "last": (dates[-1] if dates else None),
+            "basis": "ISA-0680: consecutive Friday-to-Friday GBP total returns, joint window, never gap-bridged"}
+
+
 def returns_on(store: dict, ticker: str, dates: Sequence[str]) -> List[float]:
+    """Weekly returns over `dates`, CONSECUTIVE Fridays only (ISA-0680): a pair of dates more than
+    7 days apart is SKIPPED, never bridged into a one-week return - bridging deflates volatility
+    and inflates apparent diversification, the direction that moves capital toward risk."""
     lv = _levels(store, ticker)
-    v = [lv[d] for d in dates]
-    return [v[i] / v[i - 1] - 1.0 for i in range(1, len(v)) if v[i - 1]]
+    out = []
+    for i in range(1, len(dates)):
+        if not _is_week(dates[i - 1], dates[i]):
+            continue
+        a, b = lv[dates[i - 1]], lv[dates[i]]
+        if a:
+            out.append(b / a - 1.0)
+    return out
 
 
 def common_dates(store: dict, tickers: Iterable[str]) -> List[str]:
@@ -103,11 +164,12 @@ def staleness(store: dict, ticker: str) -> Optional[float]:
     A name that does not move cannot be shown to be uncorrelated; it can only be shown to be
     unpriced. This is the liquidity control that stops a low-beta preference from becoming an
     illiquidity preference."""
-    lv = _levels(store, ticker)
-    ds = sorted(lv)
-    if len(ds) < MIN_OVERLAP_WEEKS:
+    # ISA-0680: measured on the SAME declared window as every other risk quantity, never bridged.
+    _, _min = _window_policy()
+    ds = window_dates(store, [ticker])
+    if n_returns(ds) < _min:
         return None
-    r = [lv[ds[i]] / lv[ds[i - 1]] - 1.0 for i in range(1, len(ds)) if lv[ds[i - 1]]]
+    r = returns_on(store, ticker, ds)
     return (sum(1 for x in r if x == 0.0) / len(r)) if r else None
 
 
@@ -132,10 +194,11 @@ def sigma(store: dict, weights: Dict[str, float], dates: Optional[Sequence[str]]
     names = [t for t, w in weights.items() if w]
     if not names:
         raise RiskRefused("no names to measure")
-    dates = dates or common_dates(store, names)
-    if len(dates) - 1 < MIN_OVERLAP_WEEKS:
-        raise RiskRefused("only %d overlapping weeks, %d required"
-                          % (max(len(dates) - 1, 0), MIN_OVERLAP_WEEKS))
+    dates = dates or window_dates(store, names)
+    _, _min = _window_policy()
+    if n_returns(dates) < _min:
+        raise RiskRefused("only %d consecutive overlapping weeks, %d required"
+                          % (n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
     var = sum(weights[a] * weights[b] * _cov(R[a], R[b]) for a in names for b in names)
     return math.sqrt(max(var, 0.0) * WEEKS_PER_YEAR)
@@ -149,10 +212,11 @@ def beta_to_sleeve(store: dict, ticker: str, weights: Dict[str, float],
     Returns the components too, so "this name looks uncorrelated" and "this name trades out of
     phase" are distinguishable rather than one number."""
     names = [t for t, w in weights.items() if w]
-    dates = common_dates(store, list(names) + [ticker])
-    if len(dates) - 1 < MIN_OVERLAP_WEEKS:
-        raise RiskRefused("%s: only %d overlapping weeks with the sleeve, %d required"
-                          % (ticker, max(len(dates) - 1, 0), MIN_OVERLAP_WEEKS))
+    dates = window_dates(store, list(names) + [ticker])
+    _, _min = _window_policy()
+    if n_returns(dates) < _min:
+        raise RiskRefused("%s: only %d consecutive overlapping weeks with the sleeve, %d required"
+                          % (ticker, n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
     n = len(next(iter(R.values())))
     p = [sum(weights[t] * R[t][i] for t in names) for i in range(n)]
@@ -186,7 +250,7 @@ def beta_to_sleeve(store: dict, ticker: str, weights: Dict[str, float],
     sd_c = math.sqrt(max(_cov(c, c), 0.0))
     rho = (_cov(c, p) / (math.sqrt(var_p) * sd_c)) if sd_c > 0 else None
     res = math.sqrt(max(_cov(c, c) - bsum ** 2 * var_p, 0.0) * WEEKS_PER_YEAR)
-    return {"ticker": ticker, "beta": bsum, "beta_contemporaneous": b0,
+    return {"ticker": ticker, "risk_window": window_of(dates), "beta": bsum, "beta_contemporaneous": b0,
             "beta_dimson_sum": sum(betas), "beta_uplift": bsum - b0, "lags": lags, "rho": rho,
             "residual_vol_annual": res, "weeks": n,
             "sleeve_autocorr_lag1": ac1,
@@ -345,10 +409,11 @@ def risk_shares(store: dict, portfolio: dict, dates=None) -> dict:
             "the denominator would silently exclude %.2f%% of the sleeve and every share would "
             "be overstated (R4.9)."
             % (", ".join(sorted(missing)), 100.0 * sum(w[t] for t in missing)))
-    dates = dates or common_dates(store, names)
-    if len(dates) - 1 < MIN_OVERLAP_WEEKS:
-        raise RiskRefused("only %d overlapping weeks, %d required"
-                          % (max(len(dates) - 1, 0), MIN_OVERLAP_WEEKS))
+    dates = dates or window_dates(store, names)
+    _, _min = _window_policy()
+    if n_returns(dates) < _min:
+        raise RiskRefused("only %d consecutive overlapping weeks, %d required"
+                          % (n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
     S = sigma(store, w, dates)
     out = {}
@@ -356,8 +421,51 @@ def risk_shares(store: dict, portfolio: dict, dates=None) -> dict:
         mctr = sum(w[b] * _cov(R[a], R[b]) for b in names) * WEEKS_PER_YEAR / S
         out[a] = w[a] * mctr / S
     return {"shares": out, "sleeve_sigma_ann": S, "weights": dict(w),
-            "n_names": len(names), "n_weeks": len(dates) - 1,
-            "coverage_pct": 100.0}
+            "n_names": len(names), "n_weeks": n_returns(dates), "dates": list(dates),
+            "risk_window": window_of(dates), "coverage_pct": 100.0}
+
+
+def risk_share_authority(store: dict, portfolio: dict, dates=None) -> dict:
+    """ISA-0708 — **THE** sleeve risk-share calculation, with an identity.
+
+    ⚑ WHY. Two implementations computed each held stock's share of direct-stock sleeve risk:
+    `risk_contribution.contributions` (the registered `mctr` computer, which drives the REVIEW
+    FLAG) and `sleeve_risk.risk_shares` / `weight_at_ceiling` (which drive the D27 ceiling that
+    REFUSES entries and holdings). Neither was declared authoritative, so the same held name
+    could be simultaneously inside its intended risk treatment and outside it — and the
+    disagreement was invisible.
+
+    This is the declared authority, because the D27 ceiling is the CAPITAL consumer: it refuses
+    entries. It returns the shares together with the exact basis they were measured on — data
+    window, holdings snapshot and timestamp — and a `risk_share_calc_id` over all of them. A
+    consumer that quotes a risk share WITHOUT that id has computed its own, which is the defect.
+
+    ⚑ ISA-0680 IS A DIFFERENT ITEM AND IS NOT RESOLVED HERE. That item is about two covariance
+    WINDOWS producing two ceilings, neither declared. This one is about two IMPLEMENTATIONS of
+    one quantity. The window question survives intact, so the window is PUBLISHED on every
+    result rather than assumed (R4.2) — a figure that does not carry its window cannot be
+    reconciled with the other one later.
+    """
+    import hashlib as _hl
+    import json as _json
+    rs = risk_shares(store, portfolio, dates)
+    d = rs["dates"]
+    # ISA-0680: the window is the DECLARED one (isa_policy.RISK_WINDOW_WEEKS), and it is part of the id.
+    window = dict(rs["risk_window"], min_overlap_weeks=rs["risk_window"]["min_weeks"])
+    snapshot = _json.dumps({"weights": rs["weights"], "window": window}, sort_keys=True,
+                           default=str)
+    calc_id = "RSHR-%s" % _hl.sha256(snapshot.encode("utf-8")).hexdigest()[:12]
+    return {"risk_share_calc_id": calc_id,
+            "shares": rs["shares"], "weights": rs["weights"],
+            "sleeve_sigma_ann": rs["sleeve_sigma_ann"],
+            "n_names": rs["n_names"], "coverage_pct": rs["coverage_pct"],
+            "window": window, "dates": d,
+            "authority": "sleeve_risk.risk_share_authority",
+            "basis": ("ISA-0708: ONE risk-share primitive, one data window, one holdings "
+                      "snapshot. The D27 ceiling and the review flag must both quote this "
+                      "risk_share_calc_id; a share quoted without it was computed elsewhere. "
+                      "ISA-0680: the covariance window is the ONE declared risk window "
+                      "(isa_policy.RISK_WINDOW_WEEKS), carried in `window` and in the id.")}
 
 
 def weight_at_ceiling(store: dict, portfolio: dict, ticker: str, ceiling_pct: float,
@@ -369,21 +477,42 @@ def weight_at_ceiling(store: dict, portfolio: dict, ticker: str, ceiling_pct: fl
     the direction that matters (it would over-state the permitted size)."""
     tgt = float(ceiling_pct) / 100.0
     w0 = sleeve_weights(portfolio)
+    names = sorted(set([t for t, x in w0.items() if x]) | {ticker})
+    d = dates or window_dates(store, names)
+    R = {t: returns_on(store, t, d) for t in names}
+
+    def share(x: float) -> float:
+        w = dict(w0)
+        w[ticker] = x
+        S = sigma(store, w, d)
+        mctr = sum(w[b] * _cov(R[ticker], R[b]) for b in names if w.get(b)) * WEEKS_PER_YEAR / S
+        return w[ticker] * mctr / S
+
+    # ⚑ ISA-0736 (23-Sep-2026): the bracket was a FIXED [0, 0.30] of the sleeve, so a ceiling lying
+    #   above 30% sleeve weight converged on the bracket and was reported AS the ceiling (AVGO read
+    #   IN_BREACH, a false GBP 153.67 trim, at 28% of sleeve risk under a 35% ceiling). The share
+    #   tends to 100% as the weight grows, so a root always exists: widen until it is bracketed.
     lo = 0.0
+    for _ in range(40):
+        if share(hi) >= tgt:
+            break
+        lo, hi = hi, hi * 2.0
+    else:
+        raise RiskRefused("%s: the %.0f%% risk-share ceiling was not bracketed below %.1fx the sleeve"
+                          % (ticker, ceiling_pct, hi))
     for _ in range(70):
         mid = (lo + hi) / 2.0
-        w = dict(w0)
-        w[ticker] = mid
-        names = [t for t, x in w.items() if x]
-        d = dates or common_dates(store, names)
-        R = {t: returns_on(store, t, d) for t in names}
-        S = sigma(store, w, d)
-        mctr = sum(w[b] * _cov(R[ticker], R[b]) for b in names) * WEEKS_PER_YEAR / S
-        if (w[ticker] * mctr / S) < tgt:
+        if share(mid) < tgt:
             lo = mid
         else:
             hi = mid
-    return (lo + hi) / 2.0
+    root = (lo + hi) / 2.0
+    # R5.2 invariant: the weight returned must REPRODUCE the target share - a search that fails to
+    # converge must never return a plausible number (FC-A).
+    if abs(share(root) - tgt) > 1e-4:
+        raise RiskRefused("%s: ceiling search did not converge (share %.5f vs target %.5f)"
+                          % (ticker, share(root), tgt))
+    return root
 
 
 def ceiling_verdict(store: dict, portfolio: dict, ticker: str, *, sleeve_gbp: float,
@@ -412,11 +541,16 @@ def ceiling_verdict(store: dict, portfolio: dict, ticker: str, *, sleeve_gbp: fl
     w = sleeve_weights(portfolio)
     if ticker not in w:
         raise RiskRefused("%s is not in the sleeve" % ticker)
-    cap_w = weight_at_ceiling(store, portfolio, ticker, ceiling_pct, dates)
+    # ISA-0708: the ceiling and the share come from ONE authority call on ONE window and ONE
+    # snapshot, and the verdict carries its id so the review flag can be proved to agree.
+    auth = risk_share_authority(store, portfolio, dates)
+    cap_w = weight_at_ceiling(store, portfolio, ticker, ceiling_pct, auth["dates"], hi=0.30)
     cap_gbp = cap_w * float(sleeve_gbp)
     cur_gbp = w[ticker] * float(sleeve_gbp)
-    share = risk_shares(store, portfolio, dates)["shares"].get(ticker)
+    share = auth["shares"].get(ticker)
     out = {"ticker": ticker, "ceiling_pct": ceiling_pct,
+           "risk_share_calc_id": auth["risk_share_calc_id"],
+           "risk_share_window": auth["window"],
            "risk_share_pct": round((share or 0) * 100.0, 2),
            "current_gbp": round(cur_gbp, 2), "ceiling_gbp": round(cap_gbp, 2),
            "min_entry_gbp": round(float(min_entry_gbp), 2)}
@@ -531,6 +665,53 @@ def _selftest(verbose: bool = True) -> int:
         _ref = True
     ok(_ref, "⚑ NEGATIVE CONTROL: a name with no return series must make risk_shares REFUSE, "
              "not silently shrink the denominator")
+
+    # ── ISA-0680: ONE declared window, consecutive weeks only ───────────────────────────────
+    import datetime as _dt
+    W, M = _window_policy()
+    rsw = risk_shares(store, pf)
+    ok(rsw["n_weeks"] <= W and rsw["risk_window"]["weeks_declared"] == W,
+       "⚑ MUST-FIRE (ISA-0680): the risk shares are measured on the DECLARED window (<= %d weeks), "
+       "not on the whole store history: %r" % (W, rsw["risk_window"]))
+    _syn = {"names": {}}
+    for _t, _f in (("S1", 0.010), ("S2", -0.004)):
+        _obs, _lv = {}, 100.0
+        for _i in range(W + 60):
+            _d = _dt.date(2023, 1, 6) + _dt.timedelta(days=7 * _i)
+            _lv *= 1.0 + (_f if _i % 2 else -_f / 2.0)
+            _obs[_d.isoformat()] = {"gbp": _lv}
+        _syn["names"][_t] = {"observations": _obs}
+    _wd = window_dates(_syn, ["S1", "S2"])
+    ok(n_returns(_wd) == W,
+       "⚑ MUST-FIRE (ISA-0680): %d weeks of history give exactly the declared %d-week window, "
+       "got %d" % (W + 59, W, n_returns(_wd)))
+    _gap = {"names": {"G": {"observations": {
+        k: v for k, v in _syn["names"]["S1"]["observations"].items()
+        if k not in sorted(_syn["names"]["S1"]["observations"])[-10:-7]}}}}
+    _gd = sorted(_gap["names"]["G"]["observations"])[-12:]
+    ok(len(returns_on(_gap, "G", _gd)) == n_returns(_gd) == len(_gd) - 2,
+       "⚑ NEGATIVE CONTROL (ISA-0680): a 3-week hole is SKIPPED, never bridged into a one-week "
+       "return (%d returns from %d dates)" % (len(returns_on(_gap, "G", _gd)), len(_gd)))
+    # ── ISA-0736: the ceiling search brackets its root, and the verdict follows the SHARE ─────
+    for _t in val:
+        _v = ceiling_verdict(store, pf, _t, sleeve_gbp=sleeve, min_entry_gbp=1000.0)
+        ok(not (_v["verdict"] == "IN_BREACH" and _v["risk_share_pct"] < _v["ceiling_pct"]),
+           "⚑ MUST-FIRE (ISA-0736): %s carries %.2f%% of sleeve risk under a %.0f%% ceiling and "
+           "must not read IN_BREACH (the fixed-bracket artefact): %r"
+           % (_t, _v["risk_share_pct"], _v["ceiling_pct"], _v))
+    _ca = ceiling_verdict(store, pf, "AVGO", sleeve_gbp=sleeve, min_entry_gbp=1000.0)
+    ok(_ca["ceiling_gbp"] > 0.30 * sleeve + 1.0,
+       "⚑ MUST-FIRE (ISA-0736): AVGO's 35%% ceiling lies ABOVE 30%% of the sleeve and must be "
+       "reported there, not clipped to the old bracket (GBP %.2f): %r" % (0.30 * sleeve, _ca))
+    _wr = weight_at_ceiling(store, pf, "AVGO", 35.0)
+    _w = dict(sleeve_weights(pf)); _w["AVGO"] = _wr
+    _d = window_dates(store, list(_w))
+    _R = {t: returns_on(store, t, _d) for t in _w}
+    _S = sigma(store, _w, _d)
+    _sh = _w["AVGO"] * sum(_w[b] * _cov(_R["AVGO"], _R[b]) for b in _w) * WEEKS_PER_YEAR / _S / _S
+    ok(abs(_sh - 0.35) < 1e-3,
+       "⚑ NEGATIVE CONTROL (ISA-0736, R5.2): the returned weight must REPRODUCE the 35%% share "
+       "(independent recomputation gives %.4f)" % _sh)
 
     if verbose:
         print("sleeve_risk._selftest: %d assertions, 0 failed" % n)

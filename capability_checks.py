@@ -117,13 +117,21 @@ def _use(tk, ev="THIN", score=70.0, corr=None, qualifies=True, held_gbp=0.0):
             "correlation": copy.deepcopy(corr if corr is not None else _UNMEASURED)}
 
 
-def _split(uses, amount=20799.54, order=None, store=None):
+def _split(uses, amount=20799.54, order=None, store=None, sequence=None, membership=None,
+           underwriting=None):
+    """`sequence=` passes the REAL sequencer output through the real router (ISA-0705).
+
+    A hand-made {order, basis} dict is fine for fixtures that are not about admission, but it
+    cannot exercise a funding verdict it does not carry — which is precisely how the
+    REPLACEMENT_ONLY gap stayed invisible to every test that used it."""
     import capital_destination as _cd
     portfolio, policy = _book()
+    seq = sequence if sequence is not None else {
+        "order": [u["ticker"] for u in uses] if order is None else order,
+        "basis": "fixture_order"}
     with _TempFillStore(store):
         out = _cd.sleeve_split(amount, portfolio, policy, 11250.0, candidates=uses,
-                               sequence={"order": [u["ticker"] for u in uses] if order is None else order,
-                                         "basis": "fixture_order"})
+                               sequence=seq, membership=membership, underwriting=underwriting)
     al = out.get("allocation") or {}
     rows = {r["ticker"]: r for r in (al.get("rows") or [])}
     return out, al, rows
@@ -257,13 +265,18 @@ def check_rho_sleeve():
     seq = _ds.sequence({"qualifying": [row], "ranking_basis": "source_score"}, held=["H"], matrix=mtx,
                        ranking_basis="source_score")
     verdict = (seq.get("records") or [{}])[0].get("verdict")
+    # ⚑ ISA-0705 (20-Sep-2026) — THE MUST-FIRE THE WITNESS DEMANDED. The breach verdict is now
+    #   decision-effective on capital: `allocate()` consumes it, so the declaration asserts the
+    #   GBP outcome, not merely that the gate produced a string.
+    _w705 = witness_isa0705_replacement_only_funded()
     actual = {"measured_flag": corr["measured"], "short_flag": corr_short["measured"],
               "unmeasured_capped_below_measured": unmeasured["stock_max_gbp"] < measured["stock_max_gbp"],
-              "breach_verdict": verdict, "breach_in_order": "C" in (seq.get("order") or [])}
+              "breach_verdict": verdict, "breach_in_order": "C" in (seq.get("order") or []),
+              "breach_funded_gbp": _w705["C_allocated_gbp"],
+              "breach_net_incremental_gbp": _w705["net_incremental_gbp"]}
     expected = {"measured_flag": True, "short_flag": False, "unmeasured_capped_below_measured": True,
-                "breach_verdict": "REPLACEMENT_ONLY", "breach_in_order": False}
-    # ⚑ The breach is NOT claimed decision-effective on capital: allocate() does not consume the
-    #   verdict (ISA-0705). witness_isa0705_replacement_only_funded() proves that gap stays visible.
+                "breach_verdict": "REPLACEMENT_ONLY", "breach_in_order": False,
+                "breach_funded_gbp": 0.0, "breach_net_incremental_gbp": 0.0}
     return record("CAP-rho_sleeve", "70 vs 10 overlapping weeks; rho ~0.92 against the held name",
                   {"weeks": [70, 10], "seed": 1},
                   {"rho_sleeve": corr.get("rho_sleeve"), "rho_basis": [corr.get("rho_basis"), corr_short.get("rho_basis")]},
@@ -282,13 +295,28 @@ def witness_isa0705_replacement_only_funded() -> dict:
     a, corr = _assess(rets)
     mtx = {k: (v.get("rho") if isinstance(v, dict) else v) for k, v in a["matrix"]["pairs"].items()}
     c_row = dict(_use("C", "CONFIRMED", corr=corr), band="A")
-    seq = _ds.sequence({"qualifying": [c_row], "ranking_basis": "source_score"}, held=["H"], matrix=mtx,
-                       ranking_basis="source_score")
-    _, al, rows = _split([_use("D", "THIN"), c_row], order=["D"])
+    # ⚑ BOTH names go through the sequencer, which is what the real router does. Sequencing
+    #   only the breaching name and hand-writing the order for the other is how this fixture
+    #   managed to exercise a funding path without exercising the funding VERDICT.
+    d_row = dict(_use("D", "THIN"), band="A", source_score=80.0)
+    seq = _ds.sequence({"qualifying": [c_row, d_row], "ranking_basis": "source_score"},
+                       held=["H"], matrix=mtx, ranking_basis="source_score")
+    # ⚑ THE REAL SEQUENCER OUTPUT goes through the real router — not a hand-made {order}
+    #   dict. Feeding the router an order without the verdict is how this gap survived every
+    #   test that touched it.
+    _, al, rows = _split([d_row, c_row], sequence=seq)
     funded = float((rows.get("C") or {}).get("allocated_gbp") or 0.0)
-    return {"item": "ISA-0705", "sequencer_verdict": (seq.get("records") or [{}])[0].get("verdict"),
+    repl = (al.get("replacement_only") or {})
+    _c_rec = next((r for r in (seq.get("records") or []) if r.get("ticker") == "C"), {})
+    return {"item": "ISA-0705", "sequencer_verdict": _c_rec.get("verdict"),
             "sequencer_order": seq.get("order"), "C_allocated_gbp": funded,
             "C_state": (rows.get("C") or {}).get("state"),
+            "net_incremental_gbp": repl.get("net_incremental_gbp"),
+            "refused": repl.get("refused"),
+            # ⚑ NOT named fund_max_gbp: this is the run's RESIDUAL after the refusal, and
+            #   naming it after a registered quantity it is not would make this witness a
+            #   second computer of that quantity (framework_integrity Q1 flagged it).
+            "residual_gbp_after_refusal": al.get("residual_gbp"),
             "reproduces": funded > 0 and "C" not in (seq.get("order") or [])}
 
 
@@ -344,20 +372,50 @@ def check_underfilled_obligation_gbp():
              "executed_amount_gbp": executed, "executed_date": "2026-10-06", "executed_quantity": 10,
              "executed_reference": "FIXTURE-REF"}
     store = {"obligations": []}
-    act = _ps.activate_from_executions([entry], plans.get, doc=store, today="2026-10-06")
+    # ⚑ ISA-0685 (20-Sep-2026): this fixture asserts a VALID executed obligation, which
+    #   presupposes the name was admitted. Declare that instead of inheriting whatever the live
+    #   ledger says about a synthetic ticker — and prove the refusing case in the same check.
+    _ADM = {"state": "ADMITTED_DECIDED", "may_generate_fill_obligation": True,
+            "may_hold_new_capital_priority": True,
+            "why": "capability_checks fixture: DECLARED admitted (ISA-0685)"}
+    _UND = {"state": "ADMITTED_UNDECIDED", "may_generate_fill_obligation": False,
+            "may_hold_new_capital_priority": False,
+            "why": "capability_checks fixture: held, no admitting decision (ISA-0685)"}
+    act = _ps.activate_from_executions([entry], plans.get, doc=store, today="2026-10-06",
+                                       membership=lambda _t: _ADM)
+    # ⚑ ISA-0685 FALSE-POSITIVE COMPARATOR, on the identical confirmed execution: a name the
+    #   framework never admitted creates NO claim. Same trade, same plan, same execution — the
+    #   only difference is the admission, which is the whole contract.
+    _na_store = {"obligations": []}
+    _na = _ps.activate_from_executions([entry], plans.get, doc=_na_store, today="2026-10-06",
+                                       membership=lambda _t: _UND)
     nxt = [_use("NEWB", score=99.0), _use("FB", score=1.0, held_gbp=executed)]
-    _, al_with, rows_with = _split(nxt, amount=9700.0, order=["NEWB", "FB"], store=store)
+    # ISA-0721 (Raj D17, 23-Sep-2026): the fill is fresh positive capital - declare the admissible
+    #   CURRENT case it consumes, and prove the refusing case on the identical claim.
+    _UWC = lambda _t: {"case_id": "UWC-FIXTURE-%s" % _t, "er": {"state": "VALID_MECHANICAL"},
+                       "admissible_for_positive_size": True}
+    _, al_with, rows_with = _split(nxt, amount=9700.0, order=["NEWB", "FB"], store=store,
+                                   membership=lambda _t: _ADM, underwriting=_UWC)
+    _, _, rows_nocase = _split(nxt, amount=9700.0, order=["NEWB", "FB"], store=json.loads(json.dumps(store)),
+                               membership=lambda _t: _ADM, underwriting=lambda _t: None)
     unexec = {"obligations": []}
     _ps.activate_from_executions([dict(entry, execution_status="recommended")], plans.get, doc=unexec,
-                                 today="2026-10-06")
-    _, _, rows_without = _split(nxt, amount=9700.0, order=["NEWB", "FB"], store=unexec)
+                                 today="2026-10-06", membership=lambda _t: _ADM)
+    _, _, rows_without = _split(nxt, amount=9700.0, order=["NEWB", "FB"], store=unexec,
+                                membership=lambda _t: _ADM, underwriting=_UWC)
     actual = {"proposed": bool(prop) and prop[0].get("state") == "PROPOSED", "activated": act.get("activated"),
               "filled_first": (al_with.get("order") or [None])[0] == "FB"
               and rows_with.get("FB", {}).get("state") == "OBLIGATION_FILLED",
               "comparator_active": len(unexec["obligations"]),
-              "comparator_state": rows_without.get("FB", {}).get("state") != "OBLIGATION_FILLED"}
+              "comparator_state": rows_without.get("FB", {}).get("state") != "OBLIGATION_FILLED",
+              # ISA-0685: the same confirmed execution on an UNADMITTED name creates nothing
+              "unadmitted_active": len(_na_store["obligations"]),
+              "unadmitted_outcome": (_na.get("outcomes") or [{}])[0].get("outcome"),
+              # ISA-0721: the same ACTIVE claim with no admissible current case does not fill
+              "no_case_state": rows_nocase.get("FB", {}).get("state")}
     expected = {"proposed": True, "activated": ["FB"], "filled_first": True, "comparator_active": 0,
-                "comparator_state": True}
+                "comparator_state": True, "no_case_state": "OBLIGATION_FILL_BLOCKED_NO_ADMISSIBLE_ER",
+                "unadmitted_active": 0, "unadmitted_outcome": "BLOCKED_NOT_ADMITTED"}
     return record("CAP-underfilled_obligation_gbp", "propose -> confirmed execution -> next-run first claim",
                   {"amount": 9700.0, "executed": executed},
                   {"proposed_shortfall_gbp": prop[0].get("shortfall_gbp") if prop else None,
@@ -429,6 +487,197 @@ def check_graduation_disposition():
     return record("CAP-graduation_disposition", "frozen Sep-2026 book", {"portfolio": "portfolio_data_sep_2026.json"},
                   {"dispositions": disp}, {"warnings_n": len(r.get("warnings") or [])},
                   disp.get("ABCL"), expected, actual)
+
+
+def check_vci_lifecycle():
+    """ISA-0716 — vci_lifecycle through the REAL held review on the frozen Sep-2026 book: ABCL's
+    resolved binary triggers graduation, the successor is UNPRICEABLE_BY_NATURE and Path A is not
+    declared, so the route is EXIT; recorded under AUTHORISED into an isolated ledger copy, the
+    membership contract (a CONSUMER) then reads ABCL as EXIT_DECIDED from that decision."""
+    import shutil
+    import tempfile
+    import held_position_review as _h
+    import sleeve_membership as _sm
+    lp = os.path.join(tempfile.mkdtemp(), "decision_ledger.json")
+    shutil.copy(os.path.join(HERE, "decision_ledger.json"), lp)
+    pf = os.path.join(HERE, "portfolio_data_sep_2026.json")
+    r = _h.review(pf, dry_run=True, record_lifecycle=True, capital_authority="AUTHORISED",
+                  ledger_path=lp, lifecycle_observer="selftest", today="2026-10-03")
+    lc = (r["summary"].get("lifecycle") or {}).get("ABCL") or {}
+    with open(pf, encoding="utf-8") as fh:
+        mem = _sm.classify("ABCL", held=True, ledger_path=lp)
+    actual = {"ABCL": {"state": lc.get("state"), "decision": lc.get("decision"),
+                       "membership": mem.get("state"), "recorded": bool(lc.get("decision_id"))}}
+    expected = {"ABCL": {"state": "EXIT", "decision": "sell", "membership": "EXIT_DECIDED",
+                         "recorded": True}}
+    return record("CAP-vci_lifecycle", "frozen Sep-2026 book, isolated ledger copy",
+                  {"portfolio": "portfolio_data_sep_2026.json", "as_of": "2026-10-03"},
+                  {"lifecycle": lc}, {"membership": mem.get("state"),
+                                      "decision_id": lc.get("decision_id")},
+                  lc.get("state"), expected, actual)
+
+
+def check_held_underwriting():
+    """ISA-0722 — underwriting.capture_month through the real function on the frozen Sep-2026
+    book (dry run, isolated ledger copy): N held -> N named cases; the email renderer (a CONSUMER)
+    renders every row with its state; a BUY decision written to the ledger BINDS the case."""
+    import shutil
+    import tempfile
+    import underwriting as _uw
+    import email_prefill as _ep
+    import decision_ledger as _dl
+    td = tempfile.mkdtemp(prefix="cc_uw_")
+    lp = os.path.join(td, "decision_ledger.json")
+    shutil.copy(os.path.join(HERE, "decision_ledger.json"), lp)
+    cap = _uw.capture_month(portfolio_path=os.path.join(HERE, "portfolio_data_sep_2026.json"),
+                            scored_path=os.path.join(HERE, "watchlist_scored_sep_2026.json"),
+                            as_of="2026-10-03", root=HERE, ledger_path=lp, dry_run=True)
+    blk = _ep.build_held_underwriting_block(cap)
+    # binding: a case in the scratch store + a decision written beside it
+    c = _uw.case_from_row("CCUW", {"expected_return_12_24m": 18.0, "er_state": "VALID_MECHANICAL",
+                                   "er_horizon_months": 12, "er_method_id": "expected_return@cc"},
+                          as_of="2026-10-03", purpose="SELFTEST", route="growth")
+    _uw.append([c], root=td)
+    e = _dl.log_decision(lp, "CCUW", "growth", "buy", date="2026-10-04")
+    actual = {"complete": cap.get("complete"), "n_rows_rendered": len(blk.get("rows") or []),
+              "bound": e.get("underwriting_case_id") == c["case_id"]}
+    expected = {"complete": True, "n_rows_rendered": cap.get("n_expected"), "bound": True}
+    shutil.rmtree(td, ignore_errors=True)
+    return record("CAP-held_underwriting", "frozen Sep-2026 book, dry run, scratch ledger",
+                  {"portfolio": "portfolio_data_sep_2026.json", "as_of": "2026-10-03"},
+                  {"by_state": cap.get("by_state")}, {"rendered": len(blk.get("rows") or []),
+                                                      "decision_bound": actual["bound"]},
+                  "COMPLETE" if cap.get("complete") else "INCOMPLETE", expected, actual)
+
+
+def check_broker_dealability():
+    """ISA-0607 — the Sep-2026 Warsaw shape through the REAL candidate list and the REAL router:
+    a top-scored WSE name gets no capital and a verified NASDAQ comparator does; the SAME rows with
+    an admit-all resolver fund the WSE name, so the refusal is the broker gate's and nothing else."""
+    import stock_candidates as _sc
+    import broker_dealability as _bd
+    rows = [{"ticker": "ZAB.WA", "t1_qualified": True, "source_score": 69.2, "exchange": "NASDAQ",
+             "expected_return_12_24m": 20.0, "decision_bucket": "DEPLOY"},
+            {"ticker": "HALO", "t1_qualified": True, "source_score": 68.0,
+             "expected_return_12_24m": 20.0, "decision_bucket": "DEPLOY"}]
+    portfolio, _ = _book()
+
+    def _run(resolver):
+        c = _sc.build(portfolio_data=portfolio, step9_pre={"deployable_stack": [dict(r) for r in rows],
+                                                  # ISA-0616: C-1 admissible for both, so the
+                                                  # refusal measured here is the broker gate's alone
+                                                  "current_admissibility": {"verdicts": {
+                                                      r["ticker"]: {"verdict": "ADMISSIBLE", "admissible": True}
+                                                      for r in rows}}},
+                      correlation_assessment={"candidates": {}, "holdings": {}},
+                      deploy_floor_pct=15.8, dealability=resolver)
+        uses = []
+        for x in c["candidates"]:
+            u = _use(x["ticker"], ev="THIN", score=x["source_score"], qualifies=x["qualifies"])
+            u["disqualified_reason"] = x.get("disqualified_reason")
+            u["broker_dealability"] = x.get("broker_dealability")
+            uses.append(u)
+        _, al, rws = _split(uses, amount=9000.0, order=["ZAB.WA", "HALO"])
+        return c, rws
+    live_c, live_rows = _run(_bd.Resolver())
+    cmp_c, cmp_rows = _run(lambda t: {"state": "DEALABLE_ONLINE", "venue": "FIXTURE",
+                                      "admissible_for_new_capital": True, "why": "comparator"})
+    _g = lambda rws, t: float((rws.get(t) or {}).get("allocated_gbp") or 0.0)
+    actual = {"wse_funded_live": _g(live_rows, "ZAB.WA") > 0, "comparator_funded_live": _g(live_rows, "HALO") > 0,
+              "wse_state": ({x["ticker"]: x for x in live_c["candidates"]}["ZAB.WA"]["broker_dealability"] or {}).get("state"),
+              "wse_funded_when_gate_admits": _g(cmp_rows, "ZAB.WA") > 0}
+    expected = {"wse_funded_live": False, "comparator_funded_live": True,
+                "wse_state": "NOT_DEALABLE_ONLINE", "wse_funded_when_gate_admits": True}
+    return record("CAP-broker_dealability", "Sep-2026 Warsaw shape (ZAB.WA ranked first) + NMS comparator",
+                  {"rows": ["ZAB.WA", "HALO"], "amount": 9000.0},
+                  {"verdicts": {x["ticker"]: (x["broker_dealability"] or {}).get("state") for x in live_c["candidates"]}},
+                  {"allocated": {t: _g(live_rows, t) for t in ("ZAB.WA", "HALO")}},
+                  "REFUSED_NON_DEALABLE" if not actual["wse_funded_live"] else "FUNDED_NON_DEALABLE",
+                  expected, actual)
+
+
+def check_current_admissibility():
+    """ISA-0616 - the canonical C-1 verdict through the REAL producer (step9_pre_builder.
+    build_current_admissibility -> t1_gates.current_admissibility) and the REAL consumers
+    (stock_candidates.build -> the router split). Two T1 rows, same scores: one with THIS run's
+    current-definition snapshot, one with a snapshot under a different (historical) definition.
+    The current one is funded; the other receives nothing - and a held name whose C-1 is
+    unavailable stays a held_topup candidate with no SELL field emitted."""
+    import step9_pre_builder as _s9
+    import stock_candidates as _sc
+    import score_definition as _sd
+    from datetime import date as _date
+    ref = _date(2026, 9, 5)
+    cur = _sd.current_identity()
+    snap = {"forward_axis_score": 80.0, "revisions_score": 70.0, "part_a_score": 28,
+            "score_definition_basis": "STAMPED_AT_SCORING", "snapshot_as_of": ref.isoformat()}
+    scored = {"NTAP": dict(snap, score_definition_hash=cur["hash"]),
+              "HALO": dict(snap, score_definition_hash="680b67139d457657")}
+    c1 = _s9.build_current_admissibility(scored, ref_date=ref,
+                                         pipelines={"NTAP": "growth_stock", "HALO": "growth_stock"})
+    rows = [{"ticker": t, "t1_qualified": True, "source_score": 70.0,
+             "expected_return_12_24m": 20.0, "decision_bucket": "DEPLOY"} for t in ("HALO", "NTAP")]
+    portfolio, _ = _book()
+    c = _sc.build(portfolio_data=portfolio,
+                  step9_pre={"deployable_stack": rows, "current_admissibility": c1},
+                  correlation_assessment={"candidates": {}, "holdings": {}}, deploy_floor_pct=15.8,
+                  dealability=lambda t: {"state": "DEALABLE_ONLINE", "venue": "FIXTURE",
+                                         "admissible_for_new_capital": True, "why": "fixture"})
+    uses = []
+    for x in c["candidates"]:
+        u = _use(x["ticker"], ev="THIN", score=x["source_score"], qualifies=x["qualifies"])
+        u["disqualified_reason"] = x.get("disqualified_reason")
+        uses.append(u)
+    _, al, rws = _split(uses, amount=9000.0, order=["HALO", "NTAP"])
+    _g = lambda t: float((rws.get(t) or {}).get("allocated_gbp") or 0.0)
+    v = {t: c1["verdicts"][t]["verdict"] for t in scored}
+    actual = {"current_funded": _g("NTAP") > 0, "legacy_funded": _g("HALO") > 0,
+              "legacy_verdict": v["HALO"], "current_verdict": v["NTAP"],
+              "no_sell_field": not any(k in x for x in c["candidates"] for k in ("sell", "exit", "action_sell"))}
+    expected = {"current_funded": True, "legacy_funded": False,
+                "legacy_verdict": "INCOMPARABLE_LEGACY_DEFINITION", "current_verdict": "ADMISSIBLE",
+                "no_sell_field": True}
+    return record("CAP-current_admissibility", "same scores; current-definition vs historical-definition snapshot",
+                  {"scored": scored, "amount": 9000.0}, {"verdicts": v},
+                  {"allocated": {t: _g(t) for t in ("HALO", "NTAP")}},
+                  v["HALO"], expected, actual)
+
+
+def check_feasible_opportunity_set():
+    """ISA-0608 - the historical top-N failure through the REAL producers/consumers: step9's
+    build_opportunity_set -> capital_destination.opportunity_set_view -> checkpoint_d tick 8. A
+    higher-scored infeasible name cannot take a Checkpoint-D place; the lower-scored feasible name
+    can, and the hand-built population that includes the infeasible name is BLOCKED."""
+    import step9_pre_builder as _s9b
+    import capital_destination as _cd
+    import checkpoint_d as _ckd
+    dpr = [{"ticker": "ZAB.WA", "rank_basis": "source_score", "source_score": 69.2, "deployment_rank": 1,
+            "broker_dealability": "NOT_DEALABLE_ONLINE"},
+           {"ticker": "HRMY", "rank_basis": "source_score", "source_score": 75.3, "deployment_rank": 2,
+            "t1_qualified": True, "broker_dealability": "DEALABLE_ONLINE"},
+           {"ticker": "NTAP", "rank_basis": "source_score", "source_score": 66.0, "deployment_rank": 3,
+            "t1_qualified": True, "broker_dealability": "DEALABLE_ONLINE"}]
+    stack = [dict(dpr[1], deployable_rank=1), dict(dpr[2], deployable_rank=2)]
+    ops = _s9b.build_opportunity_set("cc", dpr, stack)
+    view = _cd.opportunity_set_view(ops, [{"ticker": t, "route": "main", "qualifies": True}
+                                          for t in ("HRMY", "NTAP")], {"order": ["NTAP", "HRMY"]})
+    dec = {"chosen_tickers": ["NTAP"], "pairwise": {"HRMY": "x", "ZAB.WA": "x"},
+           "falsification": {"NTAP": "y" * 60}}
+    cases = {t: "case" for t in ("HRMY", "NTAP", "ZAB.WA")}
+    ok_run = _ckd.validate_checkpoint_d(view["checkpoint_d_top5"], dec, cases, view["checkpoint_d_top5"],
+                                        opportunity_set=view)
+    bad_run = _ckd.validate_checkpoint_d(["HRMY", "ZAB.WA", "NTAP"], dec, cases, ["HRMY", "ZAB.WA", "NTAP"],
+                                         opportunity_set=view)
+    actual = {"top5": view["checkpoint_d_top5"], "tick8_clean": not any("ISA-0608" in b for b in ok_run["blocks"]),
+              "hand_built_blocked": any("ISA-0608" in b for b in bad_run["blocks"]),
+              "infeasible_stage": {x["ticker"]: x["stage"] for x in ops["infeasible"]}.get("ZAB.WA")}
+    expected = {"top5": ["HRMY", "NTAP"], "tick8_clean": True, "hand_built_blocked": True,
+                "infeasible_stage": "NOT_DEALABLE"}
+    return record("CAP-feasible_opportunity_set", "Sep-2026 top-N shape: ZAB.WA ranked above NTAP",
+                  {"deployment_priority_rank": [r["ticker"] for r in dpr]},
+                  {"opportunity_set_id": ops["opportunity_set_id"], "n_feasible": ops["n_feasible"]},
+                  {"checkpoint_d_top5": view["checkpoint_d_top5"]},
+                  "FEASIBLE_TOP5" if actual == expected else "MISMATCH", expected, actual)
 
 
 def check_thesis_state():
@@ -534,6 +783,11 @@ CHECKS = {
     "CAP-stock_sleeve_weight_now_pct": check_stock_sleeve_weight_now_pct,
     "CAP-held_position_review": check_held_position_review,
     "CAP-graduation_disposition": check_graduation_disposition,
+    "CAP-vci_lifecycle": check_vci_lifecycle,
+    "CAP-held_underwriting": check_held_underwriting,
+    "CAP-broker_dealability": check_broker_dealability,
+    "CAP-current_admissibility": check_current_admissibility,
+    "CAP-feasible_opportunity_set": check_feasible_opportunity_set,
     "CAP-thesis_state": check_thesis_state,
     "CAP-min_hold_verdict": check_min_hold_verdict,
     "CAP-mctr": check_mctr,
@@ -558,7 +812,8 @@ def _selftest(verbose: bool = True) -> int:
     # check_stock_max_gbp check_fund_max_gbp check_min_entry_gbp check_target_pct check_rho_sleeve
     # check_gbp check_evidence_state check_underfilled_obligation_gbp check_stock_sleeve_weight_now_pct
     # check_held_position_review check_graduation_disposition check_thesis_state check_min_hold_verdict
-    # check_mctr check_ratchet_route
+    # check_mctr check_ratchet_route check_vci_lifecycle check_held_underwriting
+    # check_broker_dealability check_feasible_opportunity_set
     recs = run_all()
     for cap, rec in recs.items():
         assert "error" not in rec, "%s: check raised %s" % (cap, rec.get("error"))
@@ -597,11 +852,48 @@ def _selftest(verbose: bool = True) -> int:
         raised = True
     assert raised, "NEGATIVE CONTROL: an unknown evidence_state must refuse, never size"
     n += 1
-    # DEFECT WITNESS: ISA-0705 must still reproduce, or the CAP-rho_sleeve declaration is stale
+    # ⚑ ISA-0705 MUST-FIRE (was a defect witness until 20-Sep-2026). The witness was built to
+    #   fail ON PURPOSE the day the defect was fixed, so the CAP-rho_sleeve declaration could
+    #   not go quietly stale. It has now flipped, and this is the assertion it demanded: a
+    #   REPLACEMENT_ONLY name reaches the real router and is funded GBP 0 as an addition.
     w = witness_isa0705_replacement_only_funded()
-    assert w["sequencer_verdict"] == "REPLACEMENT_ONLY" and w["reproduces"], (
-        "ISA-0705 no longer reproduces (%s). If it was FIXED, add the REPLACEMENT_ONLY must-fire to "
-        "CAP-rho_sleeve and retire this witness; otherwise the fixture drifted." % w)
+    assert w["sequencer_verdict"] == "REPLACEMENT_ONLY" and not w["reproduces"], (
+        "ISA-0705 REGRESSED (%s): a REPLACEMENT_ONLY name is being funded as an addition "
+        "again. A rollback must not silently re-enable this." % w)
+    n += 1
+    assert w["C_allocated_gbp"] == 0.0 and w["C_state"] == "REFUSED_REPLACEMENT_ONLY" \
+        and w["net_incremental_gbp"] == 0.0 and w["refused"] == ["C"], (
+        "ISA-0705 MUST-FIRE: the refusal must be NAMED and the net incremental exposure zero, "
+        "not merely a smaller number (%s)" % w)
+    n += 1
+    # POSITIVE COMPARATOR (ISA-0705 acceptance test 2): the same name with an admissible paired
+    # donor IS funded, from the donor, at zero net incremental exposure. A control that can only
+    # refuse is not a control.
+    import deployment_sequencer as _ds705
+    _, _rets705, _ = _returns_fixture()
+    _a705, _corr705 = _assess(_rets705)
+    _mtx705 = {k: (v.get("rho") if isinstance(v, dict) else v)
+               for k, v in _a705["matrix"]["pairs"].items()}
+    _c705 = dict(_use("C", "CONFIRMED", corr=_corr705), band="A")
+    _d705 = dict(_use("D", "THIN"), band="A", source_score=80.0)
+    _seq705 = _ds705.sequence({"qualifying": [_c705, _d705], "ranking_basis": "source_score"},
+                              held=["H"], matrix=_mtx705, ranking_basis="source_score")
+    _pf705, _pol705 = _book()
+    _pol705 = json.loads(json.dumps(_pol705))
+    _pol705.setdefault("stock_sleeve", {})["donor_releases"] = {
+        "C": {"donor": "H", "released_gbp": 3000.0, "state": "REALISED",
+              "provenance": "capability_checks fixture: realised donor reduction"}}
+    import capital_destination as _cd705
+    with _TempFillStore(None):
+        _o705 = _cd705.sleeve_split(20799.54, _pf705, _pol705, 11250.0,
+                                    candidates=[_d705, _c705], sequence=_seq705)
+    _r705 = {r["ticker"]: r for r in ((_o705.get("allocation") or {}).get("rows") or [])}
+    assert (_r705.get("C") or {}).get("state") == "REPLACEMENT_FILL" \
+        and (_r705["C"]["allocated_gbp"] == 3000.0) \
+        and _r705["C"]["net_incremental_gbp"] == 0.0 \
+        and _r705["C"]["funding_source"] == "DONOR_RELEASE", (
+        "ISA-0705 POSITIVE COMPARATOR: a paired REALISED donor release must fund the "
+        "replacement, capped at the release, at zero net incremental exposure (%s)" % _r705.get("C"))
     n += 1
     if verbose:
         print("capability_checks selftest: %d assertions over %d checks, 0 failed" % (n, len(recs)))

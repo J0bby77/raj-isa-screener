@@ -47,6 +47,25 @@ RECEIPT_REL = os.path.join("Dashboard", "state", "orientation_receipts")
 ORIENTED, UNVERIFIED = "ORIENTED", "UNVERIFIED"
 UNKNOWN = "UNKNOWN"
 
+# ── ISA-0666 (Raj 19-Sep-2026, Wave 2 BuildSpec §5.1) ───────────────────────────────────
+# Three ESTABLISHMENT states, because "I could not establish this field" and "I established
+# it and the answer is bad" were both rendering RED and both forcing UNVERIFIED. They are
+# different facts and they carry different permissions:
+#   ESTABLISHED_OK      — established, and the answer is clean.
+#   ESTABLISHED_ADVERSE — established, and the answer is bad. May coexist with ORIENTED ONLY
+#                         when every adverse finding is MECHANICALLY attributable to an item
+#                         id inside the exact authorised remediation scope. Not asserted, not
+#                         free-text, not "expected RED".
+#   UNKNOWN_UNVERIFIED  — not established. ALWAYS blocks (R4.3: a control fed nothing returns
+#                         UNKNOWN and blocks).
+ESTABLISHED_OK = "ESTABLISHED_OK"
+ESTABLISHED_ADVERSE = "ESTABLISHED_ADVERSE"
+UNKNOWN_UNVERIFIED = "UNKNOWN_UNVERIFIED"
+
+# A mandatory field whose adverse finding can never be scoped away, whatever the BuildSpec
+# says. R18.5: an unsigned LIVE state is reconciled, never worked around.
+UNSCOPEABLE_FIELDS = ("trusted_baseline",)
+
 # R12.1's fourteen fields, in the standard's own order. This tuple is the ONE home (R4.4);
 # `consistency_check.pair_orientation_fields` reads it rather than restating it.
 FOOTPRINT_FIELDS = (
@@ -97,6 +116,57 @@ def _flag() -> bool:
 
 def receipt_dir(root: str = HERE) -> str:
     return os.path.join(root, RECEIPT_REL)
+
+
+def establishment(field: dict) -> str:
+    """ISA-0666 — the three-state reading of one R12.1 field.
+
+    GREEN/PARTIAL -> ESTABLISHED_OK; RED -> ESTABLISHED_ADVERSE (a fact was established and it
+    is bad); UNKNOWN/ENVIRONMENT_UNKNOWN/anything else -> UNKNOWN_UNVERIFIED (nothing was
+    established). This is the ONE home for the mapping (R4.4) and `release_gate` reads it.
+    """
+    st = (field or {}).get("state")
+    if st in ("GREEN", "PARTIAL"):
+        return ESTABLISHED_OK
+    if st == "RED":
+        return ESTABLISHED_ADVERSE
+    return UNKNOWN_UNVERIFIED
+
+
+def adverse_owners(name: str, field: dict) -> dict:
+    """ISA-0666 — which register item ids OWN this field's adverse findings, read from the
+    finding itself, never from prose in a BuildSpec.
+
+    Returns {"owned": [ISA-xxxx...], "unowned": [reason strings]}. An adverse field with ANY
+    unowned finding can never be inside an authorised scope: if nothing in the register owns
+    it, no BuildSpec can claim to be remediating it.
+    """
+    val = (field or {}).get("value") or {}
+    owned, unowned = [], []
+    if name in UNSCOPEABLE_FIELDS:
+        unowned.append("%s is adverse: R18.5 requires reconciliation, not scoping" % name)
+        return {"owned": [], "unowned": unowned}
+    if name == "what_executes_and_consumes":
+        rows = val.get("not_live_owners")
+        if rows is None:
+            unowned.append("capability owners were not enumerated by this receipt")
+            return {"owned": [], "unowned": unowned}
+        for r in rows:
+            if r.get("owner"):
+                owned.append(r["owner"])
+            else:
+                unowned.append("capability %s has no registered not_live owner" % r.get("name"))
+    elif name == "register_state_and_currency":
+        ids = val.get("stale_ids")
+        if ids is None:
+            unowned.append("stale item ids were not enumerated by this receipt")
+        else:
+            # An item whose authority is stale OWNS its own staleness: revalidating it is
+            # exactly the remediation, so it is scopeable against itself and nothing else.
+            owned.extend(ids)
+    else:
+        unowned.append("%s is adverse and carries no mechanical owner attribution" % name)
+    return {"owned": sorted(set(owned)), "unowned": unowned}
 
 
 def _field(state, value, why=None, source=None):
@@ -256,11 +326,21 @@ def _f_executes_and_consumes(subject: str, root: str) -> dict:
         not_live = [{"name": r["name"], "blocked_at": r["live"]["blocked_at"],
                      "why": r["live"]["why"], "gbp_exposure": r["gbp_exposure"]}
                     for r in rows if not r["live"]["live"]]
+        # ISA-0666: the OWNER of each not-live capability, read from the registry's own
+        # not_live_reason rather than asserted, so an adverse finding can be checked
+        # mechanically against an authorised remediation scope. Not truncated: attribution
+        # must see every row, while `not_live` above stays short for the human summary.
+        not_live_owners = [
+            {"name": r["name"],
+             "owner": ((r.get("not_live_reason") or {}).get("item")
+                       if isinstance(r.get("not_live_reason"), dict) else None),
+             "blocked_at": r["live"]["blocked_at"], "gbp_exposure": r["gbp_exposure"]}
+            for r in rows if not r["live"]["live"]]
         return _field(
             "GREEN" if not not_live else "RED",
             {"scope": "subject", "subject": subject,
              "n_capabilities": len(rows), "n_live": len(rows) - len(not_live),
-             "not_live": not_live[:10]},
+             "not_live": not_live[:10], "not_live_owners": not_live_owners},
             None if not not_live else
             ("R4.14: %d of %d capability(ies) DECLARED FOR SUBJECT %r are not proven "
              "PRODUCED -> EXECUTED -> CONSUMED -> DECISION-EFFECTIVE. The Atlas answers only "
@@ -296,6 +376,7 @@ def _f_register_state(subject: str, root: str) -> dict:
                  "title": (i.get("title") or "")[:120]} for i in hits[:12]],
              "n_open": len(hits),
              "n_stale_authority": len(stale_here),
+             "stale_ids": sorted({s["id"] for s in stale_here}),   # ISA-0666 attribution
              "current_trusted_build": prev.get("build_id")},
             None if not stale_here else
             ("R7.8: %d of the open items touching this subject are not validated against the "
@@ -418,7 +499,8 @@ def model_route(*, capital_consequence: bool, architectural_breadth: bool,
 # ────────────────────────────────────────────────────────────────────────────────────────
 
 def preflight(subject: str, root: str = HERE, *, scope: str = "material",
-              write: bool = False) -> dict:
+              write: bool = False, authorised_scope_items=None,
+              scope_authority: Optional[str] = None) -> dict:
     """R12.4 — the mechanical discussion preflight. Emits a citable orientation receipt.
 
     `scope` is R12.2's scaling: "material" requires all fourteen fields to be ATTEMPTED and the
@@ -429,6 +511,7 @@ def preflight(subject: str, root: str = HERE, *, scope: str = "material",
         return {"state": "DISABLED", "verdict": UNVERIFIED,
                 "why": "isa_policy.V2_FLAGS['discussion_preflight'] is False. DISABLED reads as "
                        "UNKNOWN and never as ORIENTED (R4.3)"}
+    authorised = sorted({str(i).strip().upper() for i in (authorised_scope_items or [])})
     fields: Dict[str, dict] = {}
     fields["trusted_baseline"] = _f_trusted_baseline(root)
     fields.update(_f_atlas_footprint(subject, root))
@@ -442,7 +525,25 @@ def preflight(subject: str, root: str = HERE, *, scope: str = "material",
             "not established by this preflight. R12.1: an unknown is written UNKNOWN rather "
             "than omitted, so the reader can see what was not looked at (R2.10).", None))
 
-    unmet = [f for f in MANDATORY_FIELDS if fields[f]["state"] not in ("GREEN", "PARTIAL")]
+    # ── ISA-0666 (Raj 19-Sep-2026) — establishment, then scope ─────────────────────
+    est = {f: establishment(fields[f]) for f in MANDATORY_FIELDS}
+    unknown_mandatory = [f for f in MANDATORY_FIELDS if est[f] == UNKNOWN_UNVERIFIED]
+    adverse_mandatory = [f for f in MANDATORY_FIELDS if est[f] == ESTABLISHED_ADVERSE]
+
+    attribution, in_scope, out_of_scope = {}, [], []
+    for f in adverse_mandatory:
+        a = adverse_owners(f, fields[f])
+        outside = [o for o in a["owned"] if o not in authorised]
+        a["authorised"] = authorised
+        a["outside_authorised_scope"] = outside
+        a["in_scope"] = bool(authorised and a["owned"] and not outside and not a["unowned"])
+        attribution[f] = a
+        (in_scope if a["in_scope"] else out_of_scope).append(f)
+
+    # R12.4's floor, restated in ISA-0666's terms: an UNKNOWN mandatory field blocks
+    # unconditionally; an ADVERSE mandatory field blocks unless every one of its findings is
+    # owned by an item inside the authorised remediation scope.
+    unmet = sorted(set(unknown_mandatory) | set(out_of_scope))
     verdict = ORIENTED if not unmet else UNVERIFIED
     receipt = {
         "receipt_kind": "ORIENTATION_RECEIPT",
@@ -452,6 +553,27 @@ def preflight(subject: str, root: str = HERE, *, scope: str = "material",
         "scope": scope,
         "verdict": verdict,
         "unmet_mandatory_fields": unmet,
+        "establishment": est,
+        "unknown_mandatory_fields": unknown_mandatory,
+        "adverse_mandatory_fields": adverse_mandatory,
+        "adverse_attribution": attribution,
+        "adverse_inside_authorised_scope": in_scope,
+        "adverse_outside_authorised_scope": out_of_scope,
+        "authorised_scope_items": authorised,
+        "scope_authority": scope_authority,
+        "scope_allowance": {
+            "basis": ("ISA-0666 / Wave 2 BuildSpec §5.1 (Raj 19-Sep-2026): an ESTABLISHED_ADVERSE "
+                      "mandatory field may coexist with ORIENTED only where every finding is "
+                      "mechanically owned by an item id inside the authorised remediation scope. "
+                      "An UNKNOWN_UNVERIFIED mandatory field blocks unconditionally."),
+            "expires_with": authorised,
+            "grandfathering": ("NONE. No allowance is persisted anywhere: owners are re-read "
+                               "from the live registry/register on every call and the receipt is "
+                               "bound to `source_roll` below, so it dies with the next source "
+                               "change. A post-build preflight must be re-run."),
+            "post_build_reverify_required": bool(in_scope),
+        },
+        "source_roll": _source_roll(root),
         "fields": fields,
         "permissions": {
             "may_describe_hypotheses_and_next_inspection": True,
@@ -474,6 +596,62 @@ def preflight(subject: str, root: str = HERE, *, scope: str = "material",
     return receipt
 
 
+def _source_roll(root: str) -> Optional[str]:
+    """ISA-0666 — bind the receipt to the exact source it described.
+
+    An orientation receipt that outlives the source it read is the grandfathering the rule
+    forbids: the adverse state it scoped may have been replaced by a different one. The source
+    fingerprint is release_gate's, so one home computes it (R4.4)."""
+    try:
+        import release_gate as rg
+        return (rg.live_fingerprints(root).get("source") or {}).get("roll")
+    except Exception:                                                   # noqa: BLE001
+        return None
+
+
+def scoped_receipt_valid(receipt: dict, *, build_items, root: str = HERE,
+                         expected_source_roll: Optional[str] = None) -> dict:
+    """ISA-0666 — may THIS certification rely on THIS receipt's scoped-adverse allowance?
+
+    Three mechanical conditions, all of which must hold:
+      1. the receipt is ORIENTED;
+      2. its `source_roll` equals `expected_source_roll` — THE BASELINE THIS BUILD STARTED
+         FROM, i.e. the previous Trusted Build's signed source, not the Candidate's new
+         roll. A receipt is written against LIVE before the work begins (that is what R12.4
+         asks for and what makes `trusted_baseline` GREEN at all); it must not have been
+         written against some OTHER baseline. Omitting the argument falls back to `root`'s
+         current source, which is the right check outside a certification;
+      3. every item it scoped an adverse finding against is an item THIS build claims, so the
+         allowance expires with the remediation rather than becoming permanent.
+    A receipt that scoped nothing is trivially valid: there is no allowance to police.
+    """
+    items = {str(i).strip().upper() for i in (build_items or [])}
+    scoped = list(receipt.get("adverse_inside_authorised_scope") or [])
+    reasons = []
+    if not scoped:
+        return {"valid": True, "scoped_fields": [], "why": "no scoped-adverse allowance used",
+                "reasons": []}
+    if receipt.get("verdict") != ORIENTED:
+        reasons.append("receipt verdict is %s" % receipt.get("verdict"))
+    cur = expected_source_roll or _source_roll(root)
+    if not receipt.get("source_roll") or receipt.get("source_roll") != cur:
+        reasons.append("receipt source_roll %s != the baseline this build started from %s "
+                       "(R5.9: a receipt written against other code is not evidence about "
+                       "this one)"
+                       % (str(receipt.get("source_roll"))[:12], str(cur)[:12]))
+    claimed = set(receipt.get("authorised_scope_items") or [])
+    outside = sorted(claimed - items)
+    if outside:
+        reasons.append("scoped against %s, which this build does not claim — an allowance that "
+                       "outlives its remediation is grandfathering (ISA-0666)"
+                       % ", ".join(outside))
+    return {"valid": not reasons, "scoped_fields": scoped,
+            "expected_source_roll": cur,
+            "authorised_scope_items": sorted(claimed), "build_items": sorted(items),
+            "reasons": reasons,
+            "why": "scoped-adverse allowance accepted" if not reasons else "; ".join(reasons)}
+
+
 def summarise(receipt: dict) -> str:
     """One paragraph a person can read, and a machine can paste into a reply."""
     if receipt.get("state") == "DISABLED":
@@ -485,8 +663,15 @@ def summarise(receipt: dict) -> str:
                     tb.get("atlas_run_id"), tb.get("atlas_as_of")))
     for f in MANDATORY_FIELDS:
         v = receipt["fields"][f]
+        e = (receipt.get("establishment") or {}).get(f)
         if v["state"] not in ("GREEN", "PARTIAL"):
-            lines.append("  ⚑ %s: %s — %s" % (f, v["state"], (v["why"] or "")[:160]))
+            scoped = f in (receipt.get("adverse_inside_authorised_scope") or [])
+            lines.append("  %s %s: %s%s - %s"
+                         % ("[scoped]" if scoped else "[BLOCKS]", f, e or v["state"],
+                            (" (in authorised scope: %s)"
+                             % ", ".join((receipt.get("adverse_attribution") or {})
+                                         .get(f, {}).get("owned") or [])) if scoped else "",
+                            (v["why"] or "")[:150]))
     if receipt["verdict"] == UNVERIFIED:
         lines.append("  ⚑⚑ R12.5: may NOT approve a BuildSpec, recommend a capital-methodology "
                      "change, or state a capability is complete/live.")
@@ -575,6 +760,74 @@ def _selftest(verbose: bool = True) -> int:
        "stale scope, a contradicted spec, a failed acceptance test, an unestablished fact",
        len(m["escalation_triggers"]) == len(ESCALATION_TRIGGERS) and m["escalation_triggers"])
 
+    # ══ ISA-0666 (Raj 19-Sep-2026, Wave 2 BuildSpec §5.1) ══════════════════════════
+    ok("ISA-0666: the three establishment states are distinct and the mapping has ONE home",
+       (establishment({"state": "GREEN"}) == ESTABLISHED_OK
+        and establishment({"state": "PARTIAL"}) == ESTABLISHED_OK
+        and establishment({"state": "RED"}) == ESTABLISHED_ADVERSE
+        and establishment({"state": UNKNOWN}) == UNKNOWN_UNVERIFIED
+        and establishment({"state": "ENVIRONMENT_UNKNOWN"}) == UNKNOWN_UNVERIFIED
+        and establishment({}) == UNKNOWN_UNVERIFIED))
+    ok("⚑ ISA-0666: 'I could not establish this' and 'I established it and it is bad' no longer "
+       "render the same - the receipt publishes an establishment state per mandatory field",
+       set((r or {}).get("establishment") or {}) == set(MANDATORY_FIELDS)
+       and all(v in (ESTABLISHED_OK, ESTABLISHED_ADVERSE, UNKNOWN_UNVERIFIED)
+               for v in r["establishment"].values()), r.get("establishment"))
+
+    _adv = {"state": "RED", "value": {"not_live_owners": [
+        {"name": "cap_a", "owner": "ISA-9101"}, {"name": "cap_b", "owner": "ISA-9102"}]}}
+    ok("ISA-0666 MUST-FIRE: an adverse capability field is attributed to the OWNERS the "
+       "registry records, not to prose in a BuildSpec",
+       adverse_owners("what_executes_and_consumes", _adv)["owned"] == ["ISA-9101", "ISA-9102"])
+    _unowned = {"state": "RED", "value": {"not_live_owners": [{"name": "cap_c", "owner": None}]}}
+    ok("⚑ ISA-0666 NEGATIVE CONTROL: a finding NOTHING in the register owns can never be "
+       "inside an authorised scope - if no item owns it, no BuildSpec is remediating it",
+       adverse_owners("what_executes_and_consumes", _unowned)["unowned"]
+       and not adverse_owners("what_executes_and_consumes", _unowned)["owned"])
+    ok("⚑ ISA-0666 NEGATIVE CONTROL: trusted_baseline is UNSCOPEABLE - R18.5 is reconciled, "
+       "never scoped away, whatever item ids the BuildSpec names",
+       adverse_owners("trusted_baseline", {"state": "RED", "value": {}})["unowned"]
+       and not adverse_owners("trusted_baseline", {"state": "RED", "value": {}})["owned"])
+    ok("ISA-0666 NEGATIVE CONTROL: an adverse field with no attribution rule of its own is "
+       "unowned, so a new RED cannot silently inherit somebody else's allowance",
+       adverse_owners("run_surfaces_affected", {"state": "RED", "value": {}})["unowned"])
+
+    # the verdict rules themselves, on a synthetic receipt-shaped input
+    _mk = lambda est: {"establishment": est}                            # noqa: E731
+    _t = tempfile.mkdtemp()
+    os.makedirs(os.path.join(_t, "Dashboard", "state"), exist_ok=True)
+    _empty = preflight("anything", _t, authorised_scope_items=["ISA-9999"])
+    ok("⚑ ISA-0666 MUST-FIRE: an UNKNOWN_UNVERIFIED mandatory field blocks even when the "
+       "BuildSpec names a scope - unknown is not adverse and is never in scope (R4.3)",
+       _empty["verdict"] == UNVERIFIED
+       and set(_empty["unknown_mandatory_fields"]) & set(_empty["unmet_mandatory_fields"]),
+       _empty["unknown_mandatory_fields"])
+
+    # scoped-allowance policing — the anti-grandfathering half
+    _rc = {"verdict": ORIENTED, "adverse_inside_authorised_scope": ["what_executes_and_consumes"],
+           "authorised_scope_items": ["ISA-9101"], "source_roll": _source_roll(HERE)}
+    ok("ISA-0666 POSITIVE CONTROL: a fresh receipt scoped to an item this build claims is a "
+       "valid allowance",
+       scoped_receipt_valid(_rc, build_items=["ISA-9101", "ISA-9102"], root=HERE)["valid"],
+       scoped_receipt_valid(_rc, build_items=["ISA-9101"], root=HERE))
+    ok("⚑ ISA-0666 MUST-FIRE: an allowance scoped to an item the build does NOT claim is "
+       "refused - that is exactly the permanent grandfathering §5.1 forbids",
+       not scoped_receipt_valid(_rc, build_items=["ISA-9102"], root=HERE)["valid"])
+    ok("⚑ ISA-0666 MUST-FIRE: a receipt written against DIFFERENT source is refused - a "
+       "receipt that outlives the code it read is not evidence about this build (R5.9)",
+       not scoped_receipt_valid(dict(_rc, source_roll="deadbeef" * 8),
+                                build_items=["ISA-9101"], root=HERE)["valid"])
+    ok("ISA-0666 NEGATIVE CONTROL: an UNVERIFIED receipt cannot license an allowance",
+       not scoped_receipt_valid(dict(_rc, verdict=UNVERIFIED),
+                                build_items=["ISA-9101"], root=HERE)["valid"])
+    ok("ISA-0666: a receipt that scoped NOTHING needs no allowance and is trivially valid - "
+       "the control must not block ordinary clean builds",
+       scoped_receipt_valid({"verdict": ORIENTED}, build_items=[], root=HERE)["valid"])
+    ok("⚑ ISA-0666: NO allowance is persisted - the receipt records that owners are re-read "
+       "and a post-build preflight is required, so nothing can be grandfathered",
+       "NONE" in r["scope_allowance"]["grandfathering"]
+       and r["scope_allowance"]["expires_with"] == r["authorised_scope_items"])
+
     ok("summarise() renders the verdict and the unmet fields for a reply",
        r3["id"] in summarise(r3) and "R12.5" in summarise(r3))
 
@@ -589,10 +842,19 @@ def main(argv=None):
     if "--selftest" in argv:
         return _selftest()
     subject = "framework"
+    scope_items, scope_authority = [], None
     for i, a in enumerate(argv):
         if a == "--subject" and i + 1 < len(argv):
             subject = argv[i + 1]
-    r = preflight(subject, write="--write" in argv)
+        # ISA-0666: the authorised remediation scope is passed as EXPLICIT item ids and the
+        # document that authorises them. An adverse mandatory field is tolerated only where
+        # the register says one of these items owns it.
+        if a == "--scope-items" and i + 1 < len(argv):
+            scope_items = [x for x in re.split(r"[,\s]+", argv[i + 1]) if x]
+        if a == "--scope-authority" and i + 1 < len(argv):
+            scope_authority = argv[i + 1]
+    r = preflight(subject, write="--write" in argv, authorised_scope_items=scope_items,
+                  scope_authority=scope_authority)
     if "--json" in argv:
         print(json.dumps(r, indent=2))
     else:

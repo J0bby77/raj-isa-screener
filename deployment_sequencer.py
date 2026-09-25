@@ -121,21 +121,37 @@ def measure_score_se(panel_path: Optional[str] = None) -> dict:
     except Exception as exc:                                            # noqa: BLE001
         return {"measured": False, "se": None, "n": 0,
                 "reason": "score_panel.csv unreadable: %s" % str(exc)[:120]}
-    by: Dict[str, List[Tuple[str, float]]] = {}
+    # ⚑ ISA-0619 (24-Sep-2026): a run-to-run change is only a measurement of reading noise when
+    #   BOTH readings were produced under the SAME scoring definition. A change across a definition
+    #   cutover (17-Jul revisions split, ISA-0720 on 23-Sep) measures the definition change, so such
+    #   pairs - and pairs whose definition cannot be established - are EXCLUDED and counted.
+    try:
+        import score_definition as _sd
+        _reg, _prov = _sd.registry(), _sd.provenance_table()
+        _defn = lambda r: _sd.row_definition(r, prov=_prov)["hash"]                # noqa: E731
+        _same = lambda a, b: _sd.compatible(a, b, _reg)                              # noqa: E731
+    except Exception as exc:                                            # noqa: BLE001
+        return {"measured": False, "se": None, "n": 0,
+                "reason": "score_definition unavailable (%s) - cross-definition deltas cannot be "
+                          "excluded, so the SE is UNMEASURED (ISA-0619)" % str(exc)[:120]}
+    by: Dict[str, List[Tuple[str, float, object]]] = {}
     for r in rows:
         try:
             v = float(r.get("source_score"))
         except (TypeError, ValueError):
             continue
-        by.setdefault(r.get("ticker") or "", []).append((r.get("run_date") or "", v))
-    deltas = []
+        by.setdefault(r.get("ticker") or "", []).append((r.get("run_date") or "", v, _defn(r)))
+    deltas, n_cross = [], 0
     for series in by.values():
-        series.sort()
+        series.sort(key=lambda x: x[:2])
         for a, b in zip(series, series[1:]):
             if a[0] != b[0]:
-                deltas.append(b[1] - a[1])
+                if _same(a[2], b[2]):
+                    deltas.append(b[1] - a[1])
+                else:
+                    n_cross += 1
     if len(deltas) < 30:
-        return {"measured": False, "se": None, "n": len(deltas),
+        return {"measured": False, "se": None, "n": len(deltas), "n_cross_definition_excluded": n_cross,
                 "reason": ("only %d run-to-run observations — too few to measure the SE of a "
                            "reading. A width fitted to 30 points would be a width fitted to "
                            "the sample." % len(deltas))}
@@ -143,6 +159,7 @@ def measure_score_se(panel_path: Optional[str] = None) -> dict:
     se = sd_delta / (2 ** 0.5)          # SD of a DIFFERENCE of two readings -> SE of one
     return {"measured": True, "se": round(se, 4), "sd_of_change": round(sd_delta, 4),
             "n": len(deltas), "n_tickers": sum(1 for v in by.values() if len(v) >= 2),
+            "n_cross_definition_excluded": n_cross,
             "basis": ("SD of the run-to-run change in source_score across %d observations on "
                       "%d tickers, divided by sqrt(2) because a change is the difference of "
                       "two readings." % (len(deltas), sum(1 for v in by.values() if len(v) >= 2)))}

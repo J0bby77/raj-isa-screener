@@ -201,7 +201,13 @@ CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "targ
                 "degradation_bands.json", "concentration_theme_taxonomy.json",
                 # ISA-0473: the write-once grandfather baseline of the deliverable intake gate is
                 # signed - an unsigned edit could otherwise grandfather a violating deliverable.
-                os.path.join("Dashboard", "state", "deliverable_intake_baseline.json"))
+                os.path.join("Dashboard", "state", "deliverable_intake_baseline.json"),
+                # ISA-0607 (23-Sep-2026): Raj's broker venue declaration decides which venues may
+                # receive automated new capital - an unsigned edit to it would move capital.
+                "broker_venues.json",
+                # ISA-0729 (23-Sep-2026): the declared release denominator of the script battery - an
+                # unsigned edit could quietly move a failing release test out of the census.
+                "script_suite_census.json")
 
 
 def config_fingerprint(root: str = HERE) -> dict:
@@ -246,6 +252,28 @@ def live_fingerprints(root: str = HERE) -> dict:
         "atlas": atlas_fingerprint(root),
         "capabilities": capability_fingerprint(root),
     }
+
+
+# ISA-0746 (24-Sep-2026) — THE CENSUS IS BOUND TO EVERY SIGNED SURFACE, NOT TO SOURCE ALONE.
+# A selftest reads more than .py: capability_registry.json (the real-registry must-fire), the
+# config files, the Engineering Rules, the atlas manifest and the run surfaces. On 24-Sep-2026
+# TB-24-02 changed ONLY capability_registry.json, every suite row was re-used GREEN because the
+# source roll matched, and LIVE carried a failing must-fire. One home for the census identity;
+# record_suite_status (reuse), pair_red_suite_is_an_incident (build gate), suite_status_state
+# (capital preflight) and suite_census_runner (publish) all read it.
+CENSUS_SURFACES = ("source", "config", "capabilities", "rules", "atlas", "run_surfaces")
+
+
+def census_roll(root: str = HERE, fps: Optional[dict] = None) -> dict:
+    """-> {"roll": sha over every CENSUS_SURFACES roll, "components": {surface: roll}}.
+    ⚑ An UNAVAILABLE surface (e.g. run surfaces not enumerable on a host) enters the roll as the
+      explicit token "UNAVAILABLE" rather than voiding it: the roll stays deterministic, a change in
+      availability still changes it (so nothing is re-used across it), and a host that cannot
+      enumerate one surface does not lose its census - which would REFUSE the capital run."""
+    fps = fps if fps is not None else live_fingerprints(root)
+    comps = {k: ((fps.get(k) or {}).get("roll") or "UNAVAILABLE") for k in CENSUS_SURFACES}
+    return {"roll": _roll(comps), "components": comps,
+            "unavailable": sorted(k for k, v in comps.items() if v == "UNAVAILABLE")}
 
 
 # ────────────────────────────────────────────────────────────────────────────────────────
@@ -718,7 +746,8 @@ def waiver_check(gate: dict, waiver: dict, read_item=None) -> dict:
 def certify(root: str = HERE, *, build_id: str, items: List[str],
             changed_modules: List[str], spec: Optional[dict] = None,
             run_surfaces: Optional[dict] = None,
-            waivers: Optional[List[dict]] = None) -> dict:
+            waivers: Optional[List[dict]] = None,
+            orientation_receipts: Optional[List[dict]] = None) -> dict:
     """R18.3 — the only supported route to LIVE. Returns a receipt-shaped certification.
 
     Every gate is GREEN / RED / ENVIRONMENT_UNKNOWN / UNKNOWN. **Only GREEN counts**, and a
@@ -889,7 +918,39 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                            "R19.2: %d category gap(s); currency: %s"
                            % (len(gaps), cur["why"]), gaps=gaps))
 
-    # 11 — R5.12: the Candidate could reproduce the declared baseline at all.
+    # 11 — ISA-0666: any orientation receipt that leant on a SCOPED-ADVERSE allowance must
+    #      still be valid at certification. Three mechanical conditions (see
+    #      discussion_preflight.scoped_receipt_valid): the receipt is ORIENTED; it was written
+    #      against THIS source; and every item it scoped against is an item this build claims.
+    #      The third is the anti-grandfathering rule — an allowance expires with its
+    #      remediation, so it can never become a standing exemption. A build that used no
+    #      scoped allowance passes trivially; silence is not a pass, an absent receipt with a
+    #      claimed allowance is.
+    try:
+        import discussion_preflight as dpf
+        # The receipt was written against LIVE BEFORE the work started — that is what makes
+        # its `trusted_baseline` field GREEN and the receipt citable at all. So the roll it
+        # must match is the PREVIOUS Trusted Build's signed source, not the Candidate's new
+        # one. Matching the Candidate would make every allowance unusable by construction,
+        # which is a dead control, not a strict one.
+        base_roll = ((prev or {}).get("fingerprints", {}).get("source") or {}).get("roll")
+        checks = [dict(dpf.scoped_receipt_valid(rc, build_items=items, root=root,
+                                                expected_source_roll=base_roll),
+                       receipt=rc.get("id"), subject=rc.get("subject"))
+                  for rc in (orientation_receipts or [])]
+        bad = [c for c in checks if not c["valid"]]
+        gates.append(_gate("preflight_scope", GREEN if not bad else RED,
+                           ("ISA-0666: %d orientation receipt(s) checked, %d invalid "
+                            "scoped-adverse allowance(s)" % (len(checks), len(bad))),
+                           checks=checks,
+                           **({"findings": [{"id": "PS-%s" % (c.get("receipt") or "?"),
+                                             "text": c["why"][:300]} for c in bad]}
+                              if bad else {})))
+    except Exception as exc:                                            # noqa: BLE001
+        gates.append(_gate("preflight_scope", ENV_UNKNOWN,
+                           "discussion_preflight unavailable (%s) — R2.9" % exc))
+
+    # 12 — R5.12: the Candidate could reproduce the declared baseline at all.
     fps = live_fingerprints(root)
     envs = {k: v.get("why") for k, v in fps.items()
             if v.get("state") in (ENV_UNKNOWN, UNKNOWN)}
@@ -961,6 +1022,148 @@ def promote(certification: dict, root: str = HERE, *, promoted_by: str,
               "w", encoding="utf-8") as fh:
         json.dump(receipt, fh, indent=1, sort_keys=True)
     return receipt
+
+
+# ────────────────────────────────────────────────────────────────────────────────────────
+# R18.4 — THE PROMOTION FOOTPRINT (ISA-0729 / ISA-0629, 23-Sep-2026)
+# ────────────────────────────────────────────────────────────────────────────────────────
+# ⚑ WHY. `promote()` signs a receipt; it never moved a file. Every promotion since TB-2026-09-09-01
+#   copied files by hand from a diff of Candidate against LIVE, so anything a Candidate test had
+#   rewritten looked like part of the build. TB-2026-09-23-04 promoted a Candidate-mutated
+#   disagreement_log.json and implied_m_history.json (an M* PREDICTION appended by a replay, not by
+#   a run), and the "restore" re-used a backup that already held the mutated copies. The footprint is
+#   now COMPUTED: only fingerprinted (signed) surfaces move by default; any other changed file is
+#   RUNTIME STATE and is REFUSED unless the build declares it by name with a reason.
+PROMOTION_NEVER = ("suite_status_sandbox", ".isa_census_sandbox")
+
+
+def signed_paths(root: str = HERE) -> set:
+    """Every file a Trusted receipt fingerprints, tree-relative (R18.3 surfaces)."""
+    out = set(source_fingerprint(root)["files"])
+    if os.path.exists(os.path.join(root, "ISA_Engineering_Rules.md")):
+        out.add("ISA_Engineering_Rules.md")
+    out |= {n for n in CONFIG_FILES if os.path.exists(os.path.join(root, n))}
+    for rel in (os.path.join(STATE_REL, "framework_atlas_manifest.json"),
+                os.path.join(STATE_REL, "capability_registry.json")):
+        if os.path.exists(os.path.join(root, rel)):
+            out.add(rel)
+    # run surfaces: the ONE enumeration (framework_atlas.RUN_SURFACE_GLOBS), resolved to tree files
+    try:
+        sys.path.insert(0, root)
+        import framework_atlas as _fa
+        from pathlib import Path as _P
+        for _pat in _fa.RUN_SURFACE_GLOBS:
+            for _f in _P(root).glob(_pat):
+                _rel = os.path.relpath(str(_f), root)
+                if _f.is_file() and not any(x in _f.as_posix() for x in ("archive", "_bak", "_baseline")):
+                    out.add(os.path.normpath(_rel))
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return out
+
+
+def _tree_shas(root: str) -> Dict[str, str]:
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not any(d == x or d.startswith(x) for x in EXCLUDE_PARTS)
+                       and d not in PROMOTION_NEVER]
+        for fn in filenames:
+            if fn.endswith((".pyc", ".tmp")):
+                continue
+            p = os.path.join(dirpath, fn)
+            try:
+                with open(p, "rb") as fh:
+                    out[os.path.relpath(p, root)] = _sha(fh.read())
+            except OSError:
+                continue
+    return out
+
+
+def promotion_plan(candidate_root: str, live_root: str = HERE, declared_data: Optional[dict] = None) -> dict:
+    """R18.4 — the exact file footprint a promotion may copy, computed, never hand-picked.
+
+    -> {"state": "READY"|"REFUSED", "copy": [{path, kind, sha, reason?}], "refused_runtime_state": [...],
+        "live_only": [...], ...}. kind is SIGNED (a fingerprinted surface) or DECLARED_DATA (named by the
+    build with a reason). Anything else that differs is UNDECLARED RUNTIME STATE and REFUSES the plan:
+    mutable Candidate state never reaches LIVE as an incidental consequence of a source promotion."""
+    declared_data = {os.path.normpath(k): v for k, v in (declared_data or {}).items()}
+    bad_decl = sorted(k for k, v in declared_data.items() if not str(v or "").strip())
+    cand, live = _tree_shas(candidate_root), _tree_shas(live_root)
+    signed = signed_paths(candidate_root) | signed_paths(live_root)
+    copy, refused = [], []
+    for rel in sorted(cand):
+        if live.get(rel) == cand[rel]:
+            continue
+        if rel in signed:
+            copy.append({"path": rel, "kind": "SIGNED", "sha": cand[rel], "new": rel not in live})
+        elif rel in declared_data and rel not in bad_decl:
+            copy.append({"path": rel, "kind": "DECLARED_DATA", "sha": cand[rel], "new": rel not in live,
+                         "reason": declared_data[rel]})
+        else:
+            refused.append(rel)
+    undeclared_missing = sorted(k for k in declared_data if k not in cand)
+    state = "READY" if (copy and not refused and not bad_decl and not undeclared_missing) else "REFUSED"
+    why = ("%d signed + %d declared data file(s) to copy" % (sum(1 for c in copy if c["kind"] == "SIGNED"),
+                                                             sum(1 for c in copy if c["kind"] == "DECLARED_DATA"))
+           if state == "READY" else
+           "REFUSED: %s" % "; ".join(x for x in (
+               ("%d undeclared runtime-state file(s) differ: %s" % (len(refused), ", ".join(refused[:8]))) if refused else "",
+               ("declared data without a reason: %s" % bad_decl) if bad_decl else "",
+               ("declared data not in the Candidate: %s" % undeclared_missing) if undeclared_missing else "",
+               "nothing to promote" if not copy else "") if x))
+    return {"state": state, "why": why, "copy": copy, "refused_runtime_state": refused,
+            "live_only": sorted(k for k in live if k not in cand)[:50],
+            "candidate_root": os.path.realpath(candidate_root), "live_root": os.path.realpath(live_root),
+            "basis": "R18.4/ISA-0729: only SIGNED surfaces move by default; runtime state moves only when declared."}
+
+
+def apply_promotion(plan: dict, backup_dir: str, *, candidate_root: Optional[str] = None,
+                    live_root: Optional[str] = None) -> dict:
+    """Copy EXACTLY the plan, backing up every LIVE file it overwrites FIRST, then sha-verify, then
+    prove no other LIVE data file moved while it ran. Refuses a plan that is not READY (R18.3)."""
+    if plan.get("state") != "READY":
+        raise ReleaseRefused("promotion plan is %s - %s" % (plan.get("state"), plan.get("why")))
+    cand = candidate_root or plan["candidate_root"]
+    live = live_root or plan["live_root"]
+    import shutil as _sh
+    try:
+        import consistency_check as _cc
+        snap0 = _cc.data_snapshot(live)["files"]
+    except Exception:                                                   # noqa: BLE001
+        _cc, snap0 = None, None
+    os.makedirs(backup_dir, exist_ok=True)
+    done = []
+    for c in plan["copy"]:
+        src, dst = os.path.join(cand, c["path"]), os.path.join(live, c["path"])
+        with open(src, "rb") as fh:
+            if _sha(fh.read()) != c["sha"]:
+                raise ReleaseRefused("%s changed in the Candidate after the plan was made" % c["path"])
+        if os.path.exists(dst):
+            b = os.path.join(backup_dir, c["path"])
+            os.makedirs(os.path.dirname(b), exist_ok=True)
+            _sh.copy2(dst, b)
+        os.makedirs(os.path.dirname(dst) or live, exist_ok=True)
+        tmp = dst + ".promote.tmp"
+        _sh.copy2(src, tmp)
+        os.replace(tmp, dst)
+        with open(dst, "rb") as fh:
+            ok_sha = _sha(fh.read()) == c["sha"]
+        done.append(dict(c, verified=ok_sha))
+    drift = None
+    if _cc is not None:
+        snap1 = _cc.data_snapshot(live)["files"]
+        moved = {c["path"] for c in plan["copy"]}
+        drift = sorted(k for k in set(snap0) | set(snap1) if snap0.get(k) != snap1.get(k) and k not in moved)
+    manifest = {"applied_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "n_copied": len(done), "all_verified": all(d["verified"] for d in done),
+                "copied": done, "backup_dir": os.path.realpath(backup_dir),
+                "undeclared_live_data_drift": drift,
+                "state": ("APPLIED" if all(d["verified"] for d in done) and not drift else
+                          "APPLIED_WITH_DRIFT" if all(d["verified"] for d in done) else "VERIFY_FAILED"),
+                "rollback": "copy every file under backup_dir back over LIVE (new files: delete) - R4.13"}
+    with open(os.path.join(backup_dir, "_promotion_manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=1, sort_keys=True)
+    return manifest
 
 
 def post_promotion_verify(root: str = HERE) -> dict:
@@ -1075,6 +1278,7 @@ def _selftest(verbose: bool = True) -> int:
     _fresh = {"as_of": _dtf.date.today().isoformat(),
               "as_of_ts": _dtf.datetime.now().isoformat(timespec="seconds"),
               "source_roll": source_fingerprint(tmp)["roll"], "config_roll": config_fingerprint(tmp)["roll"],
+              "census_roll": census_roll(tmp)["roll"],
               "rows": [{"module": r["module"], "state": "GREEN", "write_isolation": "CLEAN"}
                        for r in _ccf.suite_census(tmp)],
               "isolation": {"all_clean": True}, "data_snapshot": _ccf.data_snapshot(tmp)}
@@ -1288,6 +1492,65 @@ def _selftest(verbose: bool = True) -> int:
     ok("ISA-0695 NEGATIVE CONTROL: different defects get different ids",
        text_finding_id("CP", "ISA-0596: key ABSENT from run_context") != text_finding_id("CP", "ISA-0229: retrospective has ZERO findings"))
 
+    # ══ ISA-0666 — the scoped-adverse allowance is policed at the release gate ═══════
+    import discussion_preflight as _dpf
+    _roll = (live_fingerprints(HERE).get("source") or {}).get("roll")   # stands in for the baseline roll
+    _good = {"id": "OR-TEST-A", "subject": "x", "verdict": "ORIENTED",
+             "adverse_inside_authorised_scope": ["what_executes_and_consumes"],
+             "authorised_scope_items": ["ISA-9101"], "source_roll": _roll}
+    ok("ISA-0666 POSITIVE CONTROL: a build claiming ISA-9101 may rely on a fresh receipt "
+       "scoped to ISA-9101",
+       _dpf.scoped_receipt_valid(_good, build_items=["ISA-9101"], root=HERE)["valid"])
+    ok("⚑ ISA-0666 MUST-FIRE at the RELEASE GATE: an allowance scoped to an item this build "
+       "does not claim is refused - a scoped adverse state must expire with its remediation, "
+       "not become a standing exemption (Wave 2 BuildSpec §5.1)",
+       not _dpf.scoped_receipt_valid(_good, build_items=["ISA-0001"], root=HERE)["valid"])
+    ok("⚑ ISA-0666 NEGATIVE CONTROL: a receipt written against other source cannot license "
+       "this certification",
+       not _dpf.scoped_receipt_valid(dict(_good, source_roll="0" * 64),
+                                     build_items=["ISA-9101"], root=HERE)["valid"])
+    ok("ISA-0666: a certification that used NO scoped allowance is not blocked by the new gate",
+       _dpf.scoped_receipt_valid({"id": "OR-TEST-B", "verdict": "ORIENTED"},
+                                 build_items=["ISA-9101"], root=HERE)["valid"])
+
+    # ── ISA-0729 / R18.4: the computed promotion footprint ─────────────────────────────────
+    import tempfile as _tfp, shutil as _shp
+    _pl, _pc = _tfp.mkdtemp(prefix="rg_live_"), _tfp.mkdtemp(prefix="rg_cand_")
+    for _r in (_pl, _pc):
+        open(os.path.join(_r, "mod_a.py"), "w").write("X = 1\n")
+        open(os.path.join(_r, "runtime_log.json"), "w").write('{"n": 1}')
+        open(os.path.join(_r, "ISA_Engineering_Rules.md"), "w").write("# rules\n")
+    open(os.path.join(_pc, "mod_a.py"), "w").write("X = 2\n")
+    _p0 = promotion_plan(_pc, _pl)
+    ok("ISA-0729 POSITIVE CONTROL: a source-only Candidate diff is READY and moves exactly the signed file",
+       _p0["state"] == "READY" and [c["path"] for c in _p0["copy"]] == ["mod_a.py"]
+       and _p0["copy"][0]["kind"] == "SIGNED", _p0)
+    open(os.path.join(_pc, "runtime_log.json"), "w").write('{"n": 2}')
+    _p1 = promotion_plan(_pc, _pl)
+    ok("ISA-0729 MUST-FIRE / NEGATIVE CONTROL: a Candidate-mutated runtime state file REFUSES the plan "
+       "(the TB-2026-09-23-04 leak), naming the file",
+       _p1["state"] == "REFUSED" and _p1["refused_runtime_state"] == ["runtime_log.json"], _p1)
+    _p2 = promotion_plan(_pc, _pl, declared_data={"runtime_log.json": ""})
+    ok("ISA-0729 NEGATIVE CONTROL: a declaration with no reason is not a declaration",
+       _p2["state"] == "REFUSED", _p2)
+    _p3 = promotion_plan(_pc, _pl, declared_data={"runtime_log.json": "certification census, deliberately promoted"})
+    ok("ISA-0729 POSITIVE CONTROL: a named, reasoned data file is carried as DECLARED_DATA",
+       _p3["state"] == "READY" and {c["kind"] for c in _p3["copy"]} == {"SIGNED", "DECLARED_DATA"}, _p3)
+    _bk = _tfp.mkdtemp(prefix="rg_bak_")
+    _m = apply_promotion(_p0 if False else promotion_plan(_pc, _pl, declared_data={
+        "runtime_log.json": "fixture"}), _bk)
+    ok("ISA-0729: apply_promotion copies, sha-verifies and backs up the overwritten LIVE file FIRST",
+       _m["all_verified"] and open(os.path.join(_pl, "mod_a.py")).read() == "X = 2\n"
+       and open(os.path.join(_bk, "mod_a.py")).read() == "X = 1\n", _m)
+    try:
+        apply_promotion(_p1, _bk)
+        _refused = False
+    except ReleaseRefused:
+        _refused = True
+    ok("ISA-0729 NEGATIVE CONTROL: a REFUSED plan cannot be applied", _refused)
+    for _r in (_pl, _pc, _bk):
+        _shp.rmtree(_r, ignore_errors=True)
+
     if verbose:
         print("\nrelease_gate selftest: %d assertion(s), %d FAIL(s)%s"
               % (_ASSERTS[0], len(fails), (": " + ", ".join(fails)) if fails else ""))
@@ -1308,6 +1571,17 @@ def main(argv=None):
         v = verify_live()
         print(json.dumps(v, indent=2))
         return 0 if v["state"] == "TRUSTED" else 1
+    if "--promotion-plan" in argv:
+        # python3 release_gate.py --promotion-plan <candidate_root> [--declare path=reason ...]
+        i = argv.index("--promotion-plan")
+        decl = {}
+        for j, a in enumerate(argv):
+            if a == "--declare" and j + 1 < len(argv) and "=" in argv[j + 1]:
+                k, v = argv[j + 1].split("=", 1)
+                decl[k] = v
+        p = promotion_plan(argv[i + 1], HERE, declared_data=decl)
+        print(json.dumps(p, indent=1))
+        return 0 if p["state"] == "READY" else 1
     if "--fingerprint" in argv:
         fp = live_fingerprints()
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk != "files"

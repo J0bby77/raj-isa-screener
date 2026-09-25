@@ -167,6 +167,16 @@ def screen_sightings_from_panel(ticker, panel_path=None, ref_date=None):
 
 
 def entry_stability(ticker, panel_path=None, ref_date=None):
+    """RETIRED (ISA-0616/0619, Raj 24-Sep-2026). C-1 is CURRENT_ADMISSIBILITY on the latest valid
+    current snapshot - see `current_admissibility`. The 182-day / >=2-sightings / >=60-day
+    persistence rule is NOT capital authority and must not be resurrected under this name; the
+    superseded implementation is kept, uncalled, as `_entry_stability_superseded` for audit only."""
+    return {"verdict": "RETIRED_ISA0616", "sightings": None, "min_score": None,
+            "detail": ("C-1 is t1_gates.current_admissibility (one latest valid current snapshot); "
+                       "historical persistence is not capital authority (ISA-0616/0619)")}
+
+
+def _entry_stability_superseded(ticker, panel_path=None, ref_date=None):
     """C-1 fix (WP-3, audit #3, 26-Jul-26) - entry-time Forward-Axis stability check for
     Path A. Reads score_panel.csv sightings within ENTRY_STABILITY_LOOKBACK_DAYS.
     PASS = >= ENTRY_STABILITY_MIN_SIGHTINGS sightings spanning >= MIN_SPAN days, ALL with
@@ -244,6 +254,117 @@ def entry_stability(ticker, panel_path=None, ref_date=None):
     return {"verdict": "UNVERIFIED", "sightings": n, "min_score": min_score,
             "detail": ("insufficient history (%d sightings, span %dd; need >= %d over >= %dd)"
                        " - starter size per A5v3" % (n, span, min_n, min_span))}
+
+
+# ── ISA-0616 / ISA-0619 (Raj 24-Sep-2026): C-1 = CURRENT_ADMISSIBILITY / ENTRY_INTEGRITY ─────────
+C1_ADMISSIBLE = "ADMISSIBLE"
+C1_STATES = ("ADMISSIBLE", "BELOW_FLOOR", "NO_SNAPSHOT", "INCOMPLETE", "STALE", "INVALID_PIT",
+             "INCONSISTENT", "INCOMPARABLE_LEGACY_DEFINITION", "INCOMPARABLE_UNKNOWN_DEFINITION",
+             "UNDECLARED_CURRENT_DEFINITION", "EVENT_INVALIDATED")
+C1_BASIS = ("CURRENT_SNAPSHOT (ISA-0616/0619, Raj 24-Sep-2026): ONE latest valid current sighting - "
+            "PIT-valid, complete, fresh, produced under the declared CURRENT scoring definition, "
+            "internally consistent, both Forward-Axis and Source >= ENTRY_STABILITY_FLOOR. No "
+            "persistence, sighting-count or duration requirement; no STARTER cap from this verdict. "
+            "Governs POSITIVE NEW EXPOSURE only (new positions and top-ups); it never creates a SELL.")
+
+
+def _as_date(v):
+    try:
+        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def c1_lookup(verdicts, ticker, aliases=None):
+    """ISA-0616: THE one way a consumer reads a name's canonical C-1 verdict from the step9_pre map.
+
+    Exact key first; then the caller-supplied DECLARED broker->Yahoo alias map in either
+    direction - never a guessed suffix. Returns (verdict_dict_or_None, key_used). None map ->
+    (None, None): the caller states C1_UNAVAILABLE. Present map without the name -> (None, None)
+    with the caller stating C1_VERDICT_ABSENT. Both fail closed for new capital only."""
+    if verdicts is None or not ticker:
+        return None, None
+    if ticker in verdicts:
+        return verdicts[ticker], ticker
+    # ⚑ The DECLARED alias map is supplied by the caller (stock_candidates passes
+    #   broker_dealability's), so t1_gates does not pull stock_price_fetch into the weekly-screen
+    #   fallback's import closure (A18/ISA-0498). None -> exact key only (fail-closed).
+    aliases = aliases or {}
+    fwd = aliases.get(ticker)
+    if fwd and fwd in verdicts:
+        return verdicts[fwd], fwd
+    for broker, yahoo in aliases.items():
+        if yahoo == ticker and broker in verdicts:
+            return verdicts[broker], broker
+    return None, None
+
+
+def current_admissibility(row, ref_date=None, *, event_state=None, current=None):
+    """THE C-1 verdict from the latest current snapshot (a scored row of THIS run).
+
+    Reads only the snapshot: the scores it carries, its score-definition stamp and its snapshot
+    time. History is never consulted, so no persistence duration can re-enter by this route.
+    `event_state`: optional {"material": bool, "ref": ...} from issuer/event review; when not
+    supplied the verdict says so (the downstream issuer-freshness control still binds)."""
+    r = row or {}
+    ref = ref_date or date.today()
+    if isinstance(ref, str):
+        ref = _as_date(ref) or date.today()
+    out = {"basis": C1_BASIS, "evaluated_at": ref.isoformat(), "floor": float(_c("ENTRY_STABILITY_FLOOR", 50.0)),
+           "snapshot_as_of": r.get("snapshot_as_of"),
+           "score_definition_hash": r.get("score_definition_hash"),
+           "score_definition_id": r.get("score_definition_id"),
+           "event_state": ("NOT_SUPPLIED - issuer_freshness binds downstream" if event_state is None
+                           else event_state)}
+
+    def done(verdict, why, **kw):
+        out.update(kw)
+        out.update(verdict=verdict, admissible=(verdict == C1_ADMISSIBLE), why=why)
+        return out
+
+    if not r:
+        return done("NO_SNAPSHOT", "no current scored row for this name in this run")
+    try:
+        import score_definition as _sd
+        ds = _sd.row_state(r, current=current)
+    except Exception as exc:                                            # noqa: BLE001
+        return done("UNDECLARED_CURRENT_DEFINITION", "score_definition unavailable (%s)" % exc)
+    if ds["state"] != _sd.COMPARABLE:
+        return done(ds["state"] if ds["state"] in C1_STATES else "INCOMPARABLE_UNKNOWN_DEFINITION",
+                    "the snapshot was not produced under the declared current scoring definition "
+                    "(%s)" % ds.get("basis", ds.get("why")), definition_state=ds)
+    as_of = _as_date(r.get("snapshot_as_of"))
+    if as_of is None:
+        return done("STALE", "snapshot carries no as_of - freshness cannot be established")
+    age = (ref - as_of).days
+    out["age_days"] = age
+    if age < 0:
+        return done("INVALID_PIT", "snapshot is dated after the evaluation date")
+    if age > int(_c("C1_SNAPSHOT_MAX_AGE_DAYS", 1)):
+        return done("STALE", "snapshot is %d day(s) old; C-1 admits only this run's own snapshot" % age)
+    fa = _num(r.get("forward_axis_score"))
+    try:                                        # the ONE Source Score definition, from the snapshot
+        import source_score as _ss
+        src = _num(_ss.source_score_for_row(r))
+    except Exception:                                                   # noqa: BLE001
+        src = None
+    rev = r.get("revisions_score")
+    missing = [k for k, v in (("forward_axis_score", fa), ("source_score", src)) if v is None]
+    if rev is None or (isinstance(rev, float) and rev != rev) or str(rev).strip() in ("", "nan", "None"):
+        missing.append("revisions_score")
+    out.update(forward_axis_score=fa, source_score=src)
+    if missing:
+        return done("INCOMPLETE", "required snapshot field(s) absent: %s" % ", ".join(missing))
+    if not (0.0 <= fa <= 100.0 and 0.0 <= src <= 100.0):
+        return done("INCONSISTENT", "score outside 0..100 (forward %s, source %s)" % (fa, src))
+    if isinstance(event_state, dict) and event_state.get("material"):
+        return done("EVENT_INVALIDATED", "a material issuer event invalidates the snapshot (%s)"
+                    % event_state.get("ref"))
+    if min(fa, src) < out["floor"]:
+        return done("BELOW_FLOOR", "current snapshot below floor %g (forward %.1f, source %.1f)"
+                    % (out["floor"], fa, src))
+    return done(C1_ADMISSIBLE, "current snapshot valid: forward %.1f, source %.1f >= %g under %s"
+                % (fa, src, out["floor"], r.get("score_definition_id")))
 
 
 _PANEL_START_CACHE = {}
@@ -377,28 +498,45 @@ def evaluate(entry, scored_row=None, ref_date=None):
     er_floor = _policy_derived("ER_DEPLOY_FLOOR")   # ISA-0432: no literal fallback
     er_status = str(g("er_status") or "")
     er_unmeasured = (er_status == "unmeasured")
+    # ⚑ ISA-0721 (23-Sep-2026) — ADMISSION, NOT SCREENING. This gate feeds t1_qualified ->
+    #   stock_candidates -> position_sizing, i.e. POSITIVE NEW SIZE. "No gate blocks on data it
+    #   didn't see" is right for a screen and wrong for an admission: absence of an expected
+    #   return became permission. A missing or partial E[r] now BLOCKS positive size; it never
+    #   triggers a sale (this gate governs additions only), and a catalyst override needs a
+    #   VALID E[r] to override.
+    er_state = str(g("er_state") or "")
+    if not er_state:
+        er_state = ("MISSING_REQUIRED_INPUT" if er is None else
+                    "PARTIAL_UNMEASURED_RERATE" if er_unmeasured else "VALID_LEGACY_UNTYPED")
+    er_valid = (er is not None and not er_unmeasured
+                and er_state in ("VALID_MECHANICAL", "VALID_MECHANICAL_PROXY",
+                                 "VALID_STRUCTURED_JUDGEMENT", "VALID_LEGACY_UNTYPED"))
 
     detail = {
         "ns_floor": {"pass": ns is not None and ns >= NS_FLOOR, "value": ns},
         "stage": {"pass": (not st_blocked) or bool(overrides.get("stage")),
                   "state": st_state, "value": stage, "override": overrides.get("stage")},
-        # er: missing E[r] = NO_DATA -> pass + flagged (never block on unseen data).
-        # D-24 (09-Aug-2026): er_status == "unmeasured" means the RE-RATE term was refused rather
-        # than silently scored 0, so the total is a partial figure. Doctrine is unchanged — "no
-        # gate blocks on data it didn't see" — so it is NO_DATA (pass + flagged), NOT a pass on a
-        # fabricated number. `evidence()` additionally denies it `full` size.
-        "er": {"pass": (er is None) or er_unmeasured or (er >= er_floor) or catalyst,
-               "state": ("NO_DATA" if er is None else
-                         "NO_DATA_UNMEASURED" if er_unmeasured else
+        # er (ISA-0721): only a VALID E[r] can admit. Missing -> BLOCKED_MISSING_ER; a partial
+        # figure (re-rate refused) -> BLOCKED_PARTIAL_ER. Superseded doctrine, retained and marked
+        # (R2.13): D-24 read both as NO_DATA and PASSED them ("never block on unseen data").
+        "er": {"pass": er_valid and ((er >= er_floor) or catalyst),
+               "state": ("BLOCKED_MISSING_ER" if er is None else
+                         "BLOCKED_PARTIAL_ER" if not er_valid else
                          "OK" if (er >= er_floor or catalyst) else "BELOW_FLOOR"),
                "value": er, "floor": er_floor, "catalyst": catalyst,
-               "er_status": er_status, "er_rerate_status": g("er_rerate_status"),
+               "er_status": er_status, "er_state": er_state,
+               "er_rerate_status": g("er_rerate_status"),
                "partial": er_unmeasured},
         "clean_flags": {"pass": (not dq) and (not reversal) and ((not late) or bool(overrides.get("late_cycle"))),
                         "disqualifiers": dq, "reversal_unresolved": reversal,
                         "late_cycle_flag": late, "override": overrides.get("late_cycle")},
     }
-    gates = ("ns_floor", "stage", "er", "clean_flags")
+    # ⚑ ISA-0616 (24-Sep-2026): C-1 current admissibility from THIS run's snapshot (the scored
+    #   row). A qualification gate for POSITIVE NEW EXPOSURE only - it never creates a sale.
+    _snap = dict(s) if s else {}
+    detail["c1"] = current_admissibility(_snap, ref_date)
+    detail["c1"]["pass"] = bool(detail["c1"]["admissible"])
+    gates = ("ns_floor", "stage", "er", "clean_flags", "c1")
     detail["t1_qualified"] = all(detail[k]["pass"] for k in gates)
     detail["stage_gate"] = st_state
     detail["late_cycle_flag"] = late
@@ -427,8 +565,19 @@ def tier_for(entry, scored_row=None, ref_date=None, detail=None):
     return "T2" if (ns is not None and ns >= NS_FLOOR) else "T3"
 
 
-if __name__ == "__main__":
+def _selftest():
     ref = date(2026, 7, 15)
+    # ISA-0616: every positive case needs THIS run's valid snapshot (the scored row). SNAP is a
+    # synthetic current snapshot under the declared CURRENT scoring definition, dated `ref`.
+    import score_definition as _sd
+    _cur = _sd.current_identity()
+    SNAP = {"forward_axis_score": 90.0, "revisions_score": 90.0, "part_a_score": 28,
+            "score_definition_hash": _cur["hash"], "score_definition_id": _cur.get("id"),
+            "score_definition_basis": "STAMPED_AT_SCORING", "snapshot_as_of": ref.isoformat()}
+    _evaluate = globals()["evaluate"]
+
+    def evaluate(e, scored_row=None, ref_date=None):                   # noqa: F811
+        return _evaluate(e, {**SNAP, **(scored_row or {})}, ref_date)
     base = {"normalised_score": 72, "revision_stage": "Sustained", "expected_return_12_24m": 18.0,
             "disqualifier_flags": [], "review_flags": []}
     # 1. clean qualifier
@@ -444,7 +593,18 @@ if __name__ == "__main__":
     assert not evaluate(lo, ref_date=ref)["t1_qualified"]
     assert evaluate(dict(lo, confirmed_catalyst=True), ref_date=ref)["t1_qualified"]
     nd = evaluate(dict(base, expected_return_12_24m=None), ref_date=ref)
-    assert nd["er"]["state"] == "NO_DATA" and nd["t1_qualified"]
+    # ⚑ ISA-0721 MUST-FIRE: a MISSING E[r] no longer admits (was: NO_DATA -> pass).
+    assert nd["er"]["state"] == "BLOCKED_MISSING_ER" and not nd["t1_qualified"], nd["er"]
+    # ⚑ ISA-0721 MUST-FIRE: a catalyst cannot override an E[r] that does not exist.
+    ndc = evaluate(dict(base, expected_return_12_24m=None, confirmed_catalyst=True), ref_date=ref)
+    assert not ndc["t1_qualified"], ndc["er"]
+    # ISA-0721 NEGATIVE CONTROL: a typed VALID E[r] above the floor still qualifies.
+    assert evaluate(dict(base, er_state="VALID_MECHANICAL"), ref_date=ref)["t1_qualified"], \
+        "ISA-0721 NEGATIVE CONTROL: a typed VALID E[r] above the floor must still qualify"
+    # ISA-0721 MUST-FIRE: a typed MISSING_REQUIRED_INPUT blocks even if a stale scalar lingers.
+    assert not evaluate(dict(base, er_state="MISSING_REQUIRED_INPUT"), ref_date=ref)["t1_qualified"], \
+        "ISA-0721 MUST-FIRE: a typed MISSING_REQUIRED_INPUT must not admit on a stale scalar"
+    assert not nd["t1_qualified"], "ISA-0721 negative control: a missing E[r] must fail the T1 gate"
     # 4. A5 v3: tenure NEVER gates — first-sighting name with confirmed evidence qualifies FULL
     fresh = dict(base, cycles_seen=1, er_confidence=0.9, est_rev_direction="improving",
                  eps_trend_mom_pct=4.2)
@@ -474,8 +634,8 @@ if __name__ == "__main__":
     lc["t1_gate_overrides"]["late_cycle"] = "multiple re-based post-divestment"
     assert evaluate(lc, ref_date=ref)["t1_qualified"]
     # 8. tiers — tenure absent from the decision
-    assert tier_for(dict(base, cycles_seen=1), ref_date=ref) == "T1"
-    assert tier_for(dict(base, cycles_seen=1, normalised_score=55), ref_date=ref) == "T3"
+    assert tier_for(dict(base, cycles_seen=1), SNAP, ref_date=ref) == "T1"
+    assert tier_for(dict(base, cycles_seen=1, normalised_score=55), SNAP, ref_date=ref) == "T3"
     # 9. scored_row fallback supplies stage + premium + evidence inputs
     d = evaluate({"normalised_score": 75, "expected_return_12_24m": 20},
                  {"revision_stage": "Accelerating", "val_hist_pe_premium_disc": 10,
@@ -497,12 +657,52 @@ if __name__ == "__main__":
     um = evaluate(dict(base, expected_return_12_24m=4.0, er_status="unmeasured",
                        er_rerate_status="UNMEASURED", er_confidence=1.0,
                        est_rev_direction="improving", eps_trend_mom_pct=6.0), ref_date=ref)
-    assert um["er"]["state"] == "NO_DATA_UNMEASURED" and um["er"]["pass"], um["er"]
-    assert um["t1_qualified"] and um["evidence_confirmed"] is False, um
+    # ⚑ ISA-0721 MUST-FIRE: a PARTIAL E[r] (re-rate refused) no longer admits (was: pass).
+    assert um["er"]["state"] == "BLOCKED_PARTIAL_ER" and not um["er"]["pass"], um["er"]
+    assert not um["t1_qualified"] and um["evidence_confirmed"] is False, um
     assert um["evidence"]["basis"]["route"] == "unconfirmed_er_unmeasured", um["evidence"]
+    # ── ISA-0616/0619 C-1 CURRENT ADMISSIBILITY ──────────────────────────────────────────────
+    ca = current_admissibility
+    ok_ = ca(SNAP, ref)
+    assert ok_["verdict"] == "ADMISSIBLE" and ok_["admissible"], ok_
+    assert _evaluate(dict(base), SNAP, ref)["t1_qualified"] is True     # POSITIVE: one sighting passes
+    # MUST-FIRE: no snapshot / stale / future / incomplete / legacy / unknown / undeclared / event
+    assert ca({}, ref)["verdict"] == "NO_SNAPSHOT"
+    assert not _evaluate(dict(base), None, ref)["t1_qualified"], "no snapshot must not admit"
+    assert ca(dict(SNAP, snapshot_as_of="2026-07-12"), ref)["verdict"] == "STALE"
+    assert ca(dict(SNAP, snapshot_as_of=None), ref)["verdict"] == "STALE"
+    assert ca(dict(SNAP, snapshot_as_of="2026-07-16"), ref)["verdict"] == "INVALID_PIT"
+    assert ca(dict(SNAP, revisions_score=None), ref)["verdict"] == "INCOMPLETE"
+    assert ca(dict(SNAP, forward_axis_score=None), ref)["verdict"] == "INCOMPLETE"
+    assert ca(dict(SNAP, score_definition_hash="0" * 16), ref)["verdict"] == "INCOMPARABLE_LEGACY_DEFINITION"
+    assert ca(dict(SNAP, score_definition_basis="HISTORICAL_WRITE_UNSTAMPED",
+                   score_definition_hash=None), ref)["verdict"] == "INCOMPARABLE_UNKNOWN_DEFINITION"
+    assert ca(SNAP, ref, current={"hash": _cur["hash"], "declared": False})["verdict"] == \
+        "UNDECLARED_CURRENT_DEFINITION"
+    assert ca(SNAP, ref, event_state={"material": True, "ref": "profit warning"})["verdict"] == "EVENT_INVALIDATED"
+    assert ca(dict(SNAP, forward_axis_score=40.0), ref)["verdict"] == "BELOW_FLOOR"
+    assert ca(dict(SNAP, forward_axis_score=140.0), ref)["verdict"] == "INCONSISTENT"
+    # NEGATIVE CONTROLS: a measured-zero revisions score is present (not missing); the midnight
+    # tolerance admits yesterday's run snapshot; a non-material event does not block
+    assert ca(dict(SNAP, revisions_score=0.0, forward_axis_score=95.0), ref)["verdict"] in ("ADMISSIBLE", "BELOW_FLOOR")
+    assert ca(dict(SNAP, snapshot_as_of="2026-07-14"), ref)["verdict"] == "ADMISSIBLE"
+    assert ca(SNAP, ref, event_state={"material": False})["verdict"] == "ADMISSIBLE"
+    # NO PERSISTENCE: the verdict has no history input at all - a panel full of FAIL sightings is
+    # irrelevant, and the retired persistence rule cannot answer
+    import inspect as _insp
+    assert "panel" not in str(_insp.signature(current_admissibility)), "C-1 must not read history"
+    assert entry_stability("ANY")["verdict"] == "RETIRED_ISA0616"
+    # ISA-0616 c1_lookup: exact key; declared alias both directions; no map / no alias -> None
+    _m = {"ONT.L": {"verdict": "ADMISSIBLE"}, "AVGO": {"verdict": "STALE"}}
+    assert c1_lookup(_m, "AVGO") == ({"verdict": "STALE"}, "AVGO")
+    assert c1_lookup(_m, "ONT", aliases={"ONT": "ONT.L"})[1] == "ONT.L"
+    assert c1_lookup({"ONT": {"verdict": "X"}}, "ONT.L", aliases={"ONT": "ONT.L"})[1] == "ONT"
+    assert c1_lookup(_m, "ONT") == (None, None), "no declared alias -> never a guessed suffix"
+    assert c1_lookup(None, "AVGO") == (None, None)
     # (gate_status_for_screen_row is defined below this self-test block — its D-24 label
     #  assertion lives in tests_jul2026/test_d24_expected_return.py)
-    print("t1_gates SELF-TEST OK (A5 v3 — evidence sizing, tenure gate removed; + D-24 er_status)")
+    print("t1_gates SELF-TEST OK (A5 v3 — evidence sizing, tenure gate removed; + D-24 er_status; + ISA-0721 admission)")
+    return 0
 
 
 def gate_status_for_screen_row(row, get=None):
@@ -523,7 +723,12 @@ def gate_status_for_screen_row(row, get=None):
     # D-24: an UNMEASURED re-rate makes E[r] partial — it must not BLOCK on a number it did not
     # fully see, and it must not read as a clean PASS either. It is flagged, exactly like NO_DATA.
     er_unmeasured = str(g(row, "er_status") or "") == "unmeasured"
-    if er is not None and er < er_floor and not er_unmeasured:
+    # ISA-0721: missing / partial E[r] cannot admit; the screen label says so rather than PASS.
+    if er is None:
+        reasons.append("E[r] missing")
+    elif er_unmeasured:
+        reasons.append("E[r] partial")
+    elif er < er_floor:
         reasons.append(f"E[r]<{er_floor:g}")
     if late:
         reasons.append("late-cycle")
@@ -538,3 +743,7 @@ def gate_status_for_screen_row(row, get=None):
     if conflict:
         label += " !conflict"
     return label, reasons
+
+
+if __name__ == "__main__":
+    _selftest()

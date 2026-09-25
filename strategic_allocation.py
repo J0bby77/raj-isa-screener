@@ -297,11 +297,17 @@ def _attribution_inputs():
                           for sd, m in (fev.get("per_fund") or {}).items()}}
         srcs["exposures"] = "fund_exposure_vectors.json (country vectors; region roll-ups)"
     if total is None:
-        pd_ = sorted(HERE.glob("portfolio_data_*.json"))
-        if pd_:
-            total = ((json.loads(pd_[-1].read_text(encoding="utf-8")).get("summary")) or {}
+        # ⚑ ISA-0719 (23-Sep-2026): the newest book by DECLARED data_date through the one
+        #   resolver — never the alphabetical last ('sep' sorts after 'oct').
+        try:
+            import capital_destination as _cd_sa
+            _pp = _cd_sa.latest_portfolio_path(root=str(HERE))
+        except Exception:                                               # noqa: BLE001
+            _pp = None
+        if _pp:
+            total = ((json.loads(_pp.read_text(encoding="utf-8")).get("summary")) or {}
                      ).get("total_value_gbp")
-            srcs["total_gbp"] = pd_[-1].name
+            srcs["total_gbp"] = _pp.name
     return dest, exp, total, srcs
 
 

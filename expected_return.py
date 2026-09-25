@@ -8,7 +8,8 @@ expected_return_12_24m = er_growth + er_rerate + er_yield   (annualised, % p.a.)
               C1-shaped: zeroed inside a neutral band, and the DE-RATE side damped by regime
               (RISK_ON 0.25 / LATE_CYCLE 0.50 / RISK_OFF 1.0). The RE-RATE credit for a cheap
               name is never damped. Set ER_RERATE_MODE="legacy" to restore the raw monotonic term.
-  er_yield  = dividend_yield + net_buyback_yield (from 3y share-count change)
+  er_yield  = dividend_yield ONLY (ISA-0745, 24-Sep-2026: per-share EPS growth already embeds the
+              share-count change; the 3y share-count trend is er_sharecount_sensitivity_pp, never base)
 
 D-24 (09-Aug-2026) — WHAT CHANGED AND WHY
 -----------------------------------------
@@ -57,6 +58,12 @@ import json as _json
 import math as _math
 import os as _os
 
+try:                                                    # ISA-0699/0743: CAP-expected_return EXECUTED evidence
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 try:
     import scoring_config as _cfg
 except Exception:                    # standalone/self-test safety — never block a screen
@@ -82,6 +89,47 @@ _KNEE_Q = float(_c("ER_GROWTH_KNEE_QUANTILE", 66.667))
 _KNEE_FLOOR = float(_c("ER_GROWTH_KNEE_FLOOR_PP", 15.0))
 _KNEE_CEIL = float(_c("ER_GROWTH_KNEE_CEIL_PP", 40.0))
 _KNEE_MIN_N = int(_c("ER_GROWTH_KNEE_MIN_N", 30))
+
+
+# ── ISA-0722 (23-Sep-2026): what this number IS. One home; the underwriting case copies it. ────
+ER_QUANTITY_BASIS = ("PCT_PER_ANNUM: consensus +1y EPS growth (compressed above the frame knee) "
+                     "+ damped re-rate toward the anchor multiple + dividend yield (no buyback yield: ISA-0745). "
+                     "Declared horizon = scoring_config.ER_HORIZON_MONTHS (Raj D26). NOT a "
+                     "probability-weighted or calibrated return; the field name "
+                     "expected_return_12_24m is legacy.")
+ER_VALID_STATES = ("VALID_MECHANICAL", "VALID_MECHANICAL_PROXY", "VALID_STRUCTURED_JUDGEMENT")
+
+
+def _horizon_months():
+    try:
+        import scoring_config as _sc
+        return int(getattr(_sc, "ER_HORIZON_MONTHS"))
+    except Exception:                                                   # noqa: BLE001
+        return None
+
+
+_METHOD_ID = []
+
+
+def method_id() -> str:
+    """`expected_return@<sha12 of this source>` — changes whenever the method changes, so a
+    delta across a method change can be flagged METHOD_CHANGED rather than read as like-for-like."""
+    if not _METHOD_ID:
+        import hashlib as _h
+        try:
+            with open(_os.path.abspath(__file__), "rb") as fh:
+                _METHOD_ID.append("expected_return@" + _h.sha256(fh.read()).hexdigest()[:12])
+        except Exception:                                               # noqa: BLE001
+            _METHOD_ID.append("expected_return@UNREADABLE")
+    return _METHOD_ID[0]
+
+
+def er_admissible(row_or_state) -> bool:
+    """ISA-0721 — may this E[r] support POSITIVE new size? Only a VALID state with a scalar."""
+    if isinstance(row_or_state, dict):
+        st = row_or_state.get("er_state")
+        return st in ER_VALID_STATES and row_or_state.get("expected_return_12_24m") is not None
+    return row_or_state in ER_VALID_STATES
 
 
 class AnchorTableMissing(RuntimeError):
@@ -452,6 +500,11 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
             g = rg * 0.8; basis.append("growth=rev_x0.8_fallback"); present += 0.3
         else:
             g = 0.0; basis.append("growth=MISSING")
+    # ⚑ ISA-0721 (23-Sep-2026): a MISSING growth term used to contribute 0 and the total read
+    #   er_status 'measured'. Growth is the required input of this model, so its absence now
+    #   yields NO scalar E[r] (er_state MISSING_REQUIRED_INPUT). The internal 0 below only lets
+    #   the other components be computed for display; it never reaches expected_return_12_24m.
+    growth_missing = (_num(fwd_eps_growth_pct) is None and _num(rev_growth_pct) is None)
     # ── the bound (ISA-0377) ──────────────────────────────────────────────────────────────────
     # `er_growth_clamped` KEEPS ITS ORIGINAL MEANING — raw growth outside the absolute bounds —
     # because it is a stored column with downstream readers, and quietly redefining a stored field
@@ -552,14 +605,25 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
         basis.append("rerate=UNMEASURED(" + "; ".join(why) + ")")
 
     # ── yield ─────────────────────────────────────────────────────────────────────────────────
+    # ⚑ ISA-0745 (24-Sep-2026, BuildSpec v2 §10.5): the growth term is PER-SHARE consensus EPS
+    #   growth, which already embeds the expected share-count change, and the base holds the
+    #   CURRENT share count (§10.3: historical share-count trends are SENSITIVITIES, not base
+    #   forecasts). Adding -Δshares as a "buyback yield" counted the same effect twice (the stock
+    #   analogue of ISA-0405). The cash-return term is now DIVIDENDS ONLY; the 3y share-count
+    #   trend is published as `er_sharecount_sensitivity_pp` and never enters the base.
+    #   (The confidence credit is unchanged: the share-count observation still establishes the
+    #   per-share basis, so a missing dividend with a known count is not "no cash-return data".)
     dy = _num(dividend_yield_pct) or 0.0
     sc = _num(sharecount_change_3y_pct_pa)
-    bb = -sc if sc is not None else 0.0            # shrinking count (negative change) = positive yield
+    bb_sens = (max(min(dy - sc, 15.0), -10.0) - max(min(dy, 15.0), -10.0)) if sc is not None else None
     if _num(dividend_yield_pct) is not None or sc is not None:
-        basis.append("yield=div+buyback"); present += 0.2
+        basis.append("yield=div_only(ISA-0745)"); present += 0.2
     else:
         basis.append("yield=MISSING")
-    y = max(min(dy + bb, 15.0), -10.0)
+    y = max(min(dy, 15.0), -10.0)
+    if bool(_c("ER_SHARECOUNT_IN_BASE", False)) and sc is not None:     # R4.13 rollback only
+        y = max(min(dy - sc, 15.0), -10.0)
+        basis[-1] = "yield=div+buyback(ROLLBACK ER_SHARECOUNT_IN_BASE)"
 
     if multiple_field:
         basis.append(f"mult={multiple_field}(sector={sector or 'unknown'})"
@@ -568,10 +632,25 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
         basis.append(f"anchor_tbl={anchor_table_group or '?'}@{anchor_table_as_of}")
 
     er = round(g + (rer or 0.0) + y, 1)
+    # ── ISA-0721/0722 — the TYPED state of this E[r], and the identity of what it is ─────────
+    if growth_missing:
+        er_state = "MISSING_REQUIRED_INPUT"
+        er = None
+    elif rerate_status == "UNMEASURED":
+        er_state = "PARTIAL_UNMEASURED_RERATE"
+    elif "growth=rev_x0.8_fallback" in basis:
+        er_state = "VALID_MECHANICAL_PROXY"
+    else:
+        er_state = "VALID_MECHANICAL"
     return {"expected_return_12_24m": er,
-            "er_growth": round(g, 1),
+            "er_state": er_state,
+            "er_horizon_months": _horizon_months(),
+            "er_quantity_basis": ER_QUANTITY_BASIS,
+            "er_method_id": method_id(),
+            "er_growth": (None if growth_missing else round(g, 1)),
             "er_rerate": (round(rer, 1) if rer is not None else None),
             "er_yield": round(y, 1),
+            "er_sharecount_sensitivity_pp": (None if bb_sens is None else round(bb_sens, 1)),
             "er_confidence": round(min(present, 1.0), 2),
             "er_basis": "|".join(basis),
             "er_status": ("unmeasured" if rerate_status == "UNMEASURED" else "measured"),
@@ -607,7 +686,9 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
 # Each candidate is (field_name, scale_to_percent_units).
 _KEYS = {
     "fwd_eps_growth_pct": [("fwd_eps_growth", 100), ("forward_eps_growth_pct", 1), ("eps_growth_fwd_pct", 1)],
-    "rev_growth_pct": [("rev_est_fwd_pct", 1), ("revenue_growth_fwd_pct", 1), ("recent_revenue_growth_pct", 1)],
+    # ISA-0720: `recent_revenue_growth_pct` is HISTORICAL and was a silent fallback for a FORWARD
+    #   growth term. Removed. (`rev_est_fwd_pct` is consensus +1y EPS growth under a legacy name.)
+    "rev_growth_pct": [("rev_est_fwd_pct", 1), ("revenue_growth_fwd_pct", 1)],
     # C2: the MEDIAN anchor first, the legacy 3-year MEAN only as a fallback.
     "median_5y_multiple": [("val_hist_pe_anchor", 1), ("val_hist_median_pe_5y", 1),
                            ("pe_5y_median", 1), ("val_hist_pe_3yr_avg", 1)],
@@ -697,6 +778,7 @@ def expected_return_for_row(row, get=None, regime=None, anchor_table=None,
     different E[r] from the screen that produced the candidate. That is the email-desync disease
     prevented by construction rather than by discipline.
     """
+    _fi_mark("expected_return", "expected_return_for_row")
     g = get or (lambda r, k: r.get(k) if hasattr(r, "get") else None)
     mode = str(_c("ER_ANCHOR_MODE", "cross_sectional_primary"))
 
@@ -900,7 +982,7 @@ def apply_capital_signal_conflict(row):
     return row
 
 
-if __name__ == "__main__":
+def _selftest():
     _TBL = {"as_of": "20260807", "group": "SP500", "basis": "sector_median",
             "multiple_by_sector": {"Technology": "fwd_pe", "Industrials": "ev_ebitda"},
             "median_by_sector": {"Technology": 19.5, "Industrials": 22.1},
@@ -930,7 +1012,33 @@ if __name__ == "__main__":
     d = expected_return_for_row({"fwd_eps_growth": 0.14, "trailing_pe": 24, "fwd_pe": 24,
                                  "sector": "Technology", "val_hist_pe_3yr_avg": 25,
                                  "share_count_change": -0.015}, anchor_table=_TBL)
-    assert d["er_growth"] == 14.0 and d["er_yield"] == 1.5, d
+    # ISA-0745: the fraction is still scaled x100 - it now surfaces as the SENSITIVITY, not the yield
+    assert d["er_growth"] == 14.0 and d["er_yield"] == 0.0 and d["er_sharecount_sensitivity_pp"] == 1.5, d
+    # ── ISA-0745 MUST-FIRE / NEGATIVE CONTROLS: share count never enters the per-share base ──────
+    _k = dict(fwd_eps_growth_pct=14, current_multiple=24, median_5y_multiple=25,
+              dividend_yield_pct=0.6, anchor_mode="own_history_only")
+    _neutral = compute_expected_return(**_k, sharecount_change_3y_pct_pa=0.0)
+    _buyback = compute_expected_return(**_k, sharecount_change_3y_pct_pa=-3.0)
+    _issuer = compute_expected_return(**_k, sharecount_change_3y_pct_pa=+4.0)
+    _unknown = compute_expected_return(**_k)
+    assert _buyback["expected_return_12_24m"] == _neutral["expected_return_12_24m"], \
+        "MUST-FIRE (ISA-0745): a positive buyback must NOT add yield on top of per-share EPS growth"
+    assert _issuer["expected_return_12_24m"] == _neutral["expected_return_12_24m"], \
+        "MUST-FIRE (ISA-0745): net issuance must NOT subtract a second time from per-share EPS growth"
+    assert _buyback["er_sharecount_sensitivity_pp"] == 3.0 and _issuer["er_sharecount_sensitivity_pp"] == -4.0, \
+        "the share-count trend is PUBLISHED as a sensitivity (for ISA-0744 REVIEW_REQUIRED), not dropped"
+    assert _neutral["er_yield"] == 0.6 and _unknown["er_sharecount_sensitivity_pp"] is None, \
+        "NEGATIVE CONTROL (ISA-0745): dividends stay a separate cash return; unknown count is None, not 0"
+    assert _buyback["er_confidence"] == _neutral["er_confidence"], "confidence semantics unchanged"
+    import scoring_config as _cfg745
+    _sv = getattr(_cfg745, "ER_SHARECOUNT_IN_BASE", False)
+    try:
+        _cfg745.ER_SHARECOUNT_IN_BASE = True
+        _rb = compute_expected_return(**_k, sharecount_change_3y_pct_pa=-3.0)
+        assert _rb["er_yield"] == 3.6 and "ROLLBACK" in _rb["er_basis"], \
+            "R4.13: the rollback flag restores the pre-ISA-0745 buyback yield exactly"
+    finally:
+        _cfg745.ER_SHARECOUNT_IN_BASE = _sv
     assert d["er_basis"].startswith("growth=fwd_eps") and "rerate=" in d["er_basis"], d
 
     # ── C1 (02-Aug-2026) ──────────────────────────────────────────────────────────────────────
@@ -1007,3 +1115,25 @@ if __name__ == "__main__":
     assert set(t["median_by_sector"]) == {"Technology"} and "Energy" in t["excluded"], t
     assert set(t["median_by_sector"]) | set(t["excluded"]) == {"Technology", "Energy"}, t
     print("SELF-TEST OK (A2 + C1 shape/regime + C2 anchor preference + D-24 anchor/refusal/clamps)")
+
+    # ── ISA-0720 / ISA-0721 (23-Sep-2026) ─────────────────────────────────────────────────────
+    _m = compute_expected_return(fwd_eps_growth_pct=None, rev_growth_pct=None, current_multiple=20,
+                                 median_5y_multiple=18, anchor_mode="own_history_only")
+    assert _m["expected_return_12_24m"] is None and _m["er_state"] == "MISSING_REQUIRED_INPUT", (
+        "⚑ ISA-0721 MUST-FIRE: a MISSING growth term yields NO scalar E[r], never a 0-growth figure")
+    assert not er_admissible(_m), "a MISSING E[r] must not be admissible for positive size"
+    _v = compute_expected_return(fwd_eps_growth_pct=15, current_multiple=20, median_5y_multiple=18,
+                                 anchor_mode="own_history_only")
+    assert _v["er_state"] == "VALID_MECHANICAL" and er_admissible(_v) and _v["er_horizon_months"] == 12, (
+        "NEGATIVE CONTROL: a complete input set still yields a VALID, admissible, 12-month-horizon E[r]")
+    assert _v["er_method_id"].startswith("expected_return@") and "UNREADABLE" not in _v["er_method_id"]
+    _h = expected_return_for_row({"recent_revenue_growth_pct": 40.0, "fwd_pe": 20,
+                                  "sector": "Technology"}, anchor_table=_TBL)
+    assert _h["er_state"] == "MISSING_REQUIRED_INPUT" and _h["expected_return_12_24m"] is None, (
+        "⚑ ISA-0720 MUST-FIRE: HISTORICAL revenue growth must NOT stand in for a forward growth term", _h)
+    print("ISA-0720/0721 E[r] admission assertions OK")
+    return 0
+
+
+if __name__ == "__main__":
+    _selftest()

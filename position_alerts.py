@@ -376,6 +376,15 @@ def _actionability(in_window, is_held, gain, *, position_first_entry_date=None, 
     #    read from a trades log that does not exist, so `gain` was always None and `in_window`
     #    always False, and the branch below has never once executed since 29-Jul-2026.
     #    Now: one home decides, this function renders.
+    if position_first_entry_date and gain is None:
+        # ⚑ ISA-0729 (23-Sep-2026, found by the census bringing test_wpbc under a gate): a NULL gain
+        #    was passed to min_hold_ok as at_a_loss=False, so an UNRESOLVED cost basis read as a
+        #    winner and returned PROFIT_TAKING_REVIEW_PERMITTED - a null fed to a control returning
+        #    the permissive verdict (FC-F, R4.3). Whether this is profit-taking (permitted) or C-1
+        #    loss capitulation (blocked) is UNKNOWN until the gain resolves.
+        return ("MIN_HOLD_UNEVALUATED — the position's gain/loss is unresolved, so whether a "
+                "reduction would be profit-taking (permitted) or C-1 loss capitulation (blocked) "
+                "cannot be decided. UNKNOWN, never a permission (R4.3/R2.10, ISA-0729).")
     if position_first_entry_date:
         try:
             import position_sizing as _ps

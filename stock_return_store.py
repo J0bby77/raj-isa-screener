@@ -12,7 +12,8 @@ FREQUENCY  Weekly, Friday-to-Friday. The book spans SEK, PLN, EUR, GBP and USD. 
            runs in the dangerous direction, so this is not a refinement.
 CURRENCY   GBP total return. FX correlation is part of realised risk whether or not it is
            intended, and the ISA is denominated in GBP.
-WINDOW     104 weeks target, 52 minimum. Below 52 the name is UNMEASURED and A2.3 applies.
+WINDOW     the fetch keeps ~3y (range=3y, ~156 weeks); the RISK window is isa_policy.RISK_WINDOW_WEEKS /
+           RISK_MIN_WEEKS (ISA-0680). Below the minimum the name is UNMEASURED and A2.3 applies.
 
 ═══════════════════════════════════════════════════════════════════════════════════════════
 ⚑ THE STORE IS EMPTY TODAY AND THAT IS THE CORRECT STATE, NOT A FAILURE

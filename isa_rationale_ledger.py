@@ -67,6 +67,15 @@ CAPITAL_GATING = {
     "CONVICTION_FRACTIONS": ("scoring_config.py", "Conviction bands; gates deployment at Step 9."),
     "VCI_SOURCE_WEIGHTS": ("scoring_config.py", "Ranks the VCI sleeve, from which real starters are bought."),
     "FX_RATE_FRACTION": ("extract_cash_statement.py", "Every USD trade cost estimate in the framework."),
+    # ⚑ ISA-0729 (23-Sep-2026): ISA-0465 (16-Sep) DECLARED rationale for these two backstops in
+    #   isa_rationale_declarations.json but never listed them here, so refresh() refused the whole
+    #   declarations file (R4.4 contract) - found when tests_jul2026's rationale-ledger suite was
+    #   brought under the census. Both gate new stock capital through position_sizing.allocate.
+    # ISA-0680 (23-Sep-2026): the ONE risk window every covariance-side capital control reads.
+    "RISK_WINDOW_WEEKS": ("isa_policy.py", "The covariance window (weeks of consecutive Friday GBP returns) behind the D27 sleeve-risk ceiling that REFUSES entries/holdings, the ISA-0600 beta admission gate, the A2.1 correlation admission gate and the rho_sleeve sizing input (ISA-0680)."),
+    "RISK_MIN_WEEKS": ("isa_policy.py", "Below this many consecutive overlapping weeks a covariance quantity is REFUSED (UNMEASURED -> A2.3 adverse default / gate UNMEASURED) rather than estimated (ISA-0680)."),
+    "SECTOR_CAP_NAV": ("concentration_control.py", "Post-trade direct-stock exposure to one canonical sector as a fraction of total ISA NAV; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
+    "THEME_CAP_SLEEVE": ("concentration_control.py", "Post-trade exposure to one canonical theme as a fraction of the post-trade direct-stock sleeve; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
 }
 
 # Provenance is recognised ONLY in these forms. A trailing comment is where this framework

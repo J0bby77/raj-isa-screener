@@ -61,14 +61,25 @@ def _today() -> str:
 
 
 def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[str] = None,
-           store: Optional[dict] = None, dry_run: bool = False) -> dict:
+           store: Optional[dict] = None, dry_run: bool = False,
+           record_lifecycle: Optional[bool] = None, lifecycle_observer: str = "monthly_prerun",
+           capital_authority: Optional[str] = None, ledger_path: Optional[str] = None) -> dict:
     """Per held direct-stock name: ceiling, judgement cap, disposition, obligations.
 
     Returns {rows, warnings, summary}. A control that could not be evaluated for a name is
     recorded on that name as UNEVALUATED with its reason — never omitted, because an omitted
-    name and a clean name read identically downstream (R2.10)."""
+    name and a clean name read identically downstream (R2.10).
+
+    ISA-0716: the post-event lifecycle (vci_lifecycle) runs HERE for every resolved binary, and
+    this function is the ONE entry the monthly pre-run, the VCI run and the intramonth review
+    share. `record_lifecycle` (default: not dry_run) writes the canonical decision when
+    `capital_authority` is AUTHORISED; `dry_run` continues to govern the obligation store only.
+    """
     _fi_mark("held_position_review", "review")   # ISA-0699: execution-ledger observation
     root = root or HERE
+    # ISA-0716: the ledger the lifecycle writes and the membership contract reads is the one in
+    # THIS tree unless named explicitly — never another tree's (R5.12).
+    ledger_path = ledger_path or os.path.join(root, "decision_ledger.json")
     today = today or _today()
     if not _flag():
         return {"state": "DISABLED", "rows": [], "warnings": [
@@ -94,6 +105,13 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
     #   (GBP 5,112.19, bought after the snapshot) was not in the denominator. A verdict
     #   computed on a stale sleeve must SAY SO rather than being read as current (R4.2/R2.6).
     _held_tk = {str(x["ticker"]).upper() for x in stocks}
+    # ISA-0716: inputs dated before the broker book this review runs on cannot be "fresh".
+    _book_date = None
+    try:
+        _bd = ((pf.get("_meta") or {}).get("data_date") or "").strip()
+        _book_date = datetime.datetime.strptime(_bd, "%d-%b-%Y").date().isoformat() if _bd else None
+    except Exception:                                                # noqa: BLE001
+        _book_date = None
     nav = (pf.get("summary", {}) or {}).get("total_value_gbp")
     sleeve_gbp = sum(float(x.get("value_gbp") or 0.0) for x in stocks)
     if not stocks or not nav:
@@ -113,12 +131,12 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                         "sleeve-risk ceiling is UNEVALUATED for every name, not satisfied."
                         % type(exc).__name__)
     # ⚑ ONE golden source for sigma (R6.1): stock_price_fetch.matrix at the declared
-    #   104-week window. Never recomputed locally — a second derivation of volatility would
+    #   risk window (isa_policy.RISK_WINDOW_WEEKS, ISA-0680). Never recomputed locally — a second derivation of volatility would
     #   be a second home for the number every threshold in this build is divided by.
     sigmas = {}
     try:
         import stock_price_fetch as _spf
-        _m = _spf.matrix(tickers=[str(x["ticker"]).upper() for x in stocks], weeks=104)
+        _m = _spf.matrix(tickers=[str(x["ticker"]).upper() for x in stocks])   # ISA-0680: the declared window
         sigmas = _m.get("sigma_ann") or {}
     except Exception as exc:                                         # noqa: BLE001
         warn.append("Step 6.5 (ISA-0658): sigma could not be read from "
@@ -187,29 +205,32 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                     "obligations were NOT refreshed; open claims may be stale."
                     % (type(exc).__name__, exc))
 
-    # ── the L1 budget, computed ONCE over the held binaries (ISA-0646) ──────────────────
+    # ── the L1 budget — ISA-0706: THROUGH THE SINGLE HOME, never re-assembled here ──────
+    # ⚑ This block used to build its own binary rows: no `catalyst_type`, no `catalyst_date`,
+    #   no `catalyst_domain`, and none of `held_binary_rows`' refusal machinery. On the live
+    #   Sep-2026 book that copy read QBTS as unpriceable and WITHHELD the budget, so every
+    #   `vci_size_pct` came back UNEVALUATED — while the declared one home measured committed
+    #   0.305593% / available 1.194407% on the same file. Two answers to one question, and the
+    #   worse-informed one decided the size. `held_binary_budget` is now the only calculation,
+    #   and its `calc_id` travels onto every row so a reader can PROVE the two agree rather
+    #   than hoping (R4.4/R4.5).
     budget_available_pct, budget_why = None, "not computed"
+    budget_calc_id, budget_doc = None, None
     try:
-        _bin_rows = []
-        for y in stocks:
-            _t = str(y["ticker"]).upper()
-            _d = declared.get(_t) or {}
-            if not _d.get("is_binary"):
-                continue
-            _bin_rows.append({
-                "ticker": _t,
-                "size_pct": 100.0 * float(y.get("value_gbp") or 0.0) / float(nav),
-                "is_binary": True,
-                "catalyst_status": _d.get("catalyst_status"),
-                "asset_structure": _d.get("asset_structure"),
-                "successor": _d.get("successor"),
-                "p_thesis": _d.get("p_thesis"), "L": _d.get("L")})
-        _bud = _ps.budget_available_reported(_bin_rows, budget_pct=1.5, max_concurrent=2)
-        budget_available_pct = _bud.get("available_pct")
-        budget_why = _bud.get("why") or "measured"
+        _held_rows = [{"ticker": str(y["ticker"]).upper(),
+                       "size_pct": 100.0 * float(y.get("value_gbp") or 0.0) / float(nav)}
+                      for y in stocks]
+        budget_doc = _ps.held_binary_budget(_held_rows, declared=declared,
+                                            budget_pct=1.5, max_concurrent=2)
+        budget_calc_id = budget_doc["calc_id"]
+        budget_available_pct = budget_doc.get("available_pct")
+        budget_why = budget_doc.get("why") or "measured"
+        for _r in budget_doc.get("refusals") or []:
+            warn.append("Step 6.5 VCI budget REFUSAL [%s/%s]: %s"
+                        % (_r["ticker"], _r["control"], _r["why"]))
     except Exception as _be:                                         # noqa: BLE001
         budget_why = "%s: %s" % (type(_be).__name__, _be)
-        warn.append("Step 6.5 (ISA-0646): the held-binary budget RAISED (%s) — every "
+        warn.append("Step 6.5 (ISA-0646/ISA-0706): the held-binary budget RAISED (%s) — every "
                     "budget-derived VCI size is UNEVALUATED, not unconstrained." % budget_why)
 
     for x in stocks:
@@ -294,25 +315,71 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                 except Exception as _re:                             # noqa: BLE001
                     warn.append("Step 6.5 (ISA-0658) %s: the realisation leg RAISED (%s: %s) "
                                 "— UNEVALUATED." % (tk, type(_re).__name__, _re))
-                disp = _rt.graduation_disposition(
-                    ticker=tk, catalyst_status=st,
-                    forward_case={"priceable": bool(succ.get("priceable")),
-                                  "refusal_kind": succ.get("refusal_kind")},
-                    in_profit=bool(gain is not None and gain > 0),
-                    realisation=_real,
-                    giveback={"fired": False},
-                    size_gbp=row["value_gbp"], min_entry_gbp=min_entry,
-                    rung_gbp=float(nav) * 0.035,
-                    risk_ceiling_gbp=(row.get("ceiling") or {}).get("ceiling_gbp"),
-                    min_hold_until=mh_row.get("min_hold_until"), today=today)
+                # ── ISA-0716 — THE ONE LIFECYCLE ENGINE, same invocation, route A -> B -> C ─
+                import vci_lifecycle as _lc
+                _lc_sizing = {"nav_gbp": float(nav), "min_entry_gbp": min_entry,
+                              "rung_gbp": float(nav) * 0.035,
+                              "risk_ceiling_gbp": (row.get("ceiling") or {}).get("ceiling_gbp"),
+                              "budget_available_pct": budget_available_pct,
+                              "budget_calc_id": budget_calc_id,
+                              "evidence_state": ev_states.get(tk)}
+                _lc_held = {"value_gbp": row["value_gbp"],
+                            "in_profit": bool(gain is not None and gain > 0),
+                            "min_hold_until": mh_row.get("min_hold_until"),
+                            "realisation": _real, "giveback": {"fired": False}}
+                lc = _lc.assess(ticker=tk, declared=d, held=_lc_held, sizing=_lc_sizing,
+                                inputs_not_before=_book_date, today=today)
+                _do_rec = (not dry_run) if record_lifecycle is None else bool(record_lifecycle)
+                if _do_rec:
+                    lc["record"] = _lc.record(lc, ledger_path=ledger_path,
+                                              observed_by=lifecycle_observer,
+                                              capital_authority=capital_authority)
+                else:
+                    lc["record"] = {"action": "NOT_RECORDED_DRY_RUN", "decision_id": None}
+                # R18.2/R6.2 — the PRE-LIFECYCLE wiring's answer, published beside the canonical
+                #   one so a disagreement is visible rather than absorbed. The old call passed
+                #   only {priceable, refusal_kind}; it is recomputed here as evidence, never used.
+                try:
+                    _leg = _rt.graduation_disposition(
+                        ticker=tk, catalyst_status=st,
+                        forward_case={"priceable": bool(succ.get("priceable")),
+                                      "refusal_kind": succ.get("refusal_kind")},
+                        in_profit=bool(gain is not None and gain > 0), realisation=_real,
+                        giveback={"fired": False}, size_gbp=row["value_gbp"],
+                        min_entry_gbp=min_entry, rung_gbp=float(nav) * 0.035,
+                        risk_ceiling_gbp=(row.get("ceiling") or {}).get("ceiling_gbp"),
+                        min_hold_until=mh_row.get("min_hold_until"), today=today)
+                    lc["legacy_disposition"] = _leg.get("state")
+                except Exception as _le:                             # noqa: BLE001
+                    lc["legacy_disposition"] = "RAISED %s" % type(_le).__name__
+                _new_disp = ((lc.get("executability") or {}).get("state")
+                             if lc.get("state") == _lc.EXIT else lc.get("state"))
+                if lc["legacy_disposition"] != _new_disp:
+                    warn.append("Step 6.5 (ISA-0716 SHADOW COMPARISON) %s: the pre-lifecycle "
+                                "wiring would have said %s; the lifecycle says %s (%s). Both are "
+                                "published (R6.2); the lifecycle is the decision."
+                                % (tk, lc["legacy_disposition"], _new_disp, lc.get("state")))
+                row["lifecycle"] = lc
+                # back-compatible disposition: EXECUTABILITY for an exit, the route otherwise
+                disp = {"state": ((lc.get("executability") or {}).get("state")
+                                  if lc.get("state") == _lc.EXIT else lc.get("state")),
+                        "lifecycle_state": lc.get("state"), "why": lc.get("why"),
+                        "decision_id": lc["record"].get("decision_id")}
                 row["disposition"] = disp
-                warn.append("Step 6.5 (D30/ISA-0651) %s: %s — %s"
-                            % (tk, disp.get("state"), (disp.get("why") or "")[:300]))
+                warn.append("Step 6.5 (ISA-0716 lifecycle) %s: %s -> %s [%s]; decision %s (%s)%s"
+                            % (tk, lc.get("trigger"), lc.get("state"),
+                               ", ".join(lc.get("reason_codes") or []),
+                               lc["record"].get("decision_id") or "not written",
+                               lc["record"].get("action"),
+                               ("; executability %s" % disp["state"])
+                               if lc.get("state") == _lc.EXIT else ""))
             except Exception as exc:                                 # noqa: BLE001
                 row["disposition"] = {"state": "UNEVALUATED",
                                       "why": "%s: %s" % (type(exc).__name__, exc)}
-                warn.append("Step 6.5 (ISA-0651) %s: the graduation disposition RAISED (%s: "
-                            "%s) — UNEVALUATED, which is not a decision to hold."
+                row["lifecycle"] = {"state": "UNEVALUATED",
+                                    "why": "%s: %s" % (type(exc).__name__, exc)}
+                warn.append("Step 6.5 (ISA-0716 lifecycle) %s: the lifecycle RAISED (%s: %s) — "
+                            "UNEVALUATED, which is not a decision to hold and not ACTIVE."
                             % (tk, type(exc).__name__, exc))
         # ── ISA-0646 — vci_size_pct GETS ITS FIRST PRODUCTION CALLER ────────────────
         # `isa_policy` has flagged `vci_budget_sizing: True` since ISA-0356 and the RED
@@ -341,6 +408,9 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                             evidence_state=_ev)
                         _sz["evidence_state"] = _ev
                         _sz["prior_basis"] = _pri.get("basis")
+                        # ISA-0706: the size names the ONE budget calculation it came from.
+                        _sz["budget_calc_id"] = budget_calc_id
+                        _sz["budget_available_pct"] = budget_available_pct
                         # judgement may only LOWER the evidence-earned rung (ISA-0466)
                         _cap = (row.get("thesis") or {})
                         if _cap.get("rung_out") and _cap.get("rung_in"):
@@ -385,8 +455,73 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                                 == "BELOW_CAPITAL_FLOOR"],
         "dispositions": {r["ticker"]: (r.get("disposition") or {}).get("state")
                          for r in rows if r.get("disposition")},
+        # ISA-0716 — the canonical lifecycle per transitioned name, rendered by the report
+        #   (R20.2: the email explains this record, it never re-decides graduation in prose).
+        "lifecycle": {r["ticker"]: {"state": (r.get("lifecycle") or {}).get("state"),
+                                    "trigger": (r.get("lifecycle") or {}).get("trigger"),
+                                    "decision": (r.get("lifecycle") or {}).get("decision"),
+                                    "target_gbp": (r.get("lifecycle") or {}).get("target_gbp"),
+                                    "reason_codes": (r.get("lifecycle") or {}).get("reason_codes"),
+                                    "executability": ((r.get("lifecycle") or {}).get("executability")
+                                                      or {}).get("state"),
+                                    "decision_id": (((r.get("lifecycle") or {}).get("record")
+                                                     or {}).get("decision_id")),
+                                    "record_action": (((r.get("lifecycle") or {}).get("record")
+                                                       or {}).get("action")),
+                                    "input_id": (r.get("lifecycle") or {}).get("input_id"),
+                                    "legacy_disposition": (r.get("lifecycle") or {})
+                                    .get("legacy_disposition")}
+                      for r in rows if r.get("lifecycle")},
+        "lifecycle_observer": lifecycle_observer,
+        "lifecycle_capital_authority": capital_authority,
         "thesis_states": {r["ticker"]: (r.get("thesis") or {}).get("state") for r in rows},
     }
+    # ── ISA-0685 — membership, on every held row and as a population ───────────────────
+    # ⚑ ADMITTED_UNDECIDED must be VISIBLE, RISK-COUNTED and REPORTABLE. This is where
+    #   "reportable" becomes true in fact rather than in prose: the review is what Raj reads.
+    try:
+        import sleeve_membership as _sm_hpr
+        _mem_pop = _sm_hpr.population({"stocks": stocks}, ledger_path=ledger_path)
+        _mem_by = {m["ticker"]: m for m in _mem_pop["rows"]}
+        for _r in rows:
+            _m = _mem_by.get(str(_r.get("ticker") or "").upper())
+            if _m:
+                _r["membership"] = {
+                    "state": _m["state"],
+                    "admission": _m.get("admission"),
+                    "may_generate_fill_obligation": _m["may_generate_fill_obligation"],
+                    "may_hold_new_capital_priority": _m["may_hold_new_capital_priority"],
+                    "why": _m["why"]}
+        summary["membership"] = {
+            "n_expected": _mem_pop["n_expected"], "n_classified": _mem_pop["n_classified"],
+            "by_state": _mem_pop["by_state"],
+            "admitted_undecided": _mem_pop["admitted_undecided"],
+            "admitted_undecided_gbp": _mem_pop["admitted_undecided_gbp"],
+            "exit_decided": _mem_pop.get("exit_decided"),
+            "exit_decided_value_gbp": _mem_pop.get("exit_decided_value_gbp"),
+            "authority": "sleeve_membership.population"}
+        for _t in _mem_pop["admitted_undecided"]:
+            warn.append("Step 6.5 (ISA-0685): %s is HELD with no current admitting decision on "
+                        "any route — ADMITTED_UNDECIDED. It stays visible, risk-counted and "
+                        "reportable and is NOT a sell signal; it may not create a fill "
+                        "obligation or hold new-capital priority, because a top-up is a NEW "
+                        "capital decision. Record an admission decision, or leave it "
+                        "undecided deliberately." % _t)
+    except Exception as _me:                                         # noqa: BLE001
+        summary["membership"] = {"state": "UNAVAILABLE",
+                                 "why": "%s: %s" % (type(_me).__name__, _me)}
+        warn.append("Step 6.5 (ISA-0685): the membership contract could NOT be evaluated (%s: "
+                    "%s). That is UNKNOWN, never 'all admitted'." % (type(_me).__name__, _me))
+
+    # ISA-0706 — the ONE budget calculation, published by identity on the review itself, so a
+    # reader (and the release gate) can join it to position_sizing.binary_budget_report's.
+    summary["vci_binary_budget"] = {
+        "calc_id": budget_calc_id,
+        "available_pct": budget_available_pct,
+        "committed_pct": (budget_doc or {}).get("committed_pct"),
+        "blocks_capital": (budget_doc or {}).get("blocks_capital"),
+        "authority": "position_sizing.held_binary_budget",
+        "why": budget_why}
     return {"state": "OK", "rows": rows, "warnings": warn, "summary": summary}
 
 

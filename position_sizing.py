@@ -427,6 +427,98 @@ def vci_size_pct(*, p_thesis, L, budget_available_pct, evidence_state,
                       f"(clean spec s5).")}
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0688 (20-Sep-2026) — TWO QUESTIONS, TWO FIELDS, TWO CONSUMERS
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# One `is_binary` flag answered two different questions and QBTS answered them differently:
+#
+#   POSITION_EVENT_RISK  — is the economic distribution of OWNING this position sufficiently
+#                          discontinuous / event-dominated that it belongs in the VCI
+#                          expected-loss and joint-tail treatment?
+#                          CONSUMER: the L1 expected-loss budget, joint-tail/correlation
+#                          treatment, and any position-level VCI risk ceiling. NOTHING ELSE.
+#
+#   CATALYST_IS_BINARY   — is the CURRENT NEXT material catalyst a discrete success/failure
+#                          event capable of materially changing value?
+#                          CONSUMER: the concurrent-binary-event count/cap. NOTHING ELSE.
+#
+# ⚑ MEASURED CONSEQUENCE (Wave 2 BuildSpec §2): QBTS consumed 0.1181% of the 1.5% expected-loss
+# budget AND one of two concurrent-event slots, although its next catalyst was separately
+# described as observable. One flag, two answers, and the position paid for both.
+#
+# ⚑ ONE FIELD IS NEVER INFERRED FROM THE OTHER, and an UNKNOWN is NEVER silently FALSE:
+# each consumer declares its own conservative treatment for UNKNOWN. `is_binary` remains the
+# DECLARED legacy field and is read as the fallback for BOTH, because a position declared
+# under the old schema said something true about itself — it just said it once.
+BINARY_TRUE, BINARY_FALSE, BINARY_UNKNOWN = True, False, "UNKNOWN"
+BINARY_STATES = (BINARY_TRUE, BINARY_FALSE, BINARY_UNKNOWN)
+
+
+def _typed_binary(value, legacy):
+    """Normalise a declared typed field. Absence falls back to the LEGACY `is_binary`
+    declaration; an absent legacy field too is UNKNOWN, never False (V-1/R4.3)."""
+    if value is None:
+        return BINARY_UNKNOWN if legacy is None else bool(legacy)
+    if isinstance(value, str):
+        v = value.strip().upper()
+        if v == "UNKNOWN":
+            return BINARY_UNKNOWN
+        if v in ("TRUE", "YES"):
+            return BINARY_TRUE
+        if v in ("FALSE", "NO"):
+            return BINARY_FALSE
+        raise SizingRefused(
+            "%r is not a declared binary state. ISA-0688 declares exactly %s — a new one is a "
+            "change to the contract, not a string." % (value, list(BINARY_STATES)))
+    return bool(value)
+
+
+def position_event_risk(position: dict):
+    """ISA-0688 — does OWNING this position belong in the expected-loss / joint-tail treatment?
+
+    ⚑ Read ONLY by the L1 expected-loss budget and the joint-tail treatment. A consumer that
+    reads this to decide the CONCURRENT-EVENT CAP is reading the wrong field, and
+    `consistency_check.pair_binary_fields_have_separate_consumers` says so."""
+    return _typed_binary(position.get("position_event_risk"), position.get("is_binary"))
+
+
+def catalyst_is_binary(position: dict):
+    """ISA-0688 — is the CURRENT NEXT catalyst a discrete go/no-go event?
+
+    ⚑ Read ONLY by the concurrent-binary-event count/cap. A catalyst RESOLUTION invalidates the
+    previous answer: the successor event must be identified and classified afresh, which is why
+    this reads the SUCCESSOR's own declaration once the parent has resolved."""
+    st = position.get("catalyst_status")
+    if st == RESOLVED_POSITIVE_SUCCESSOR_PENDING:
+        succ = position.get("successor") or {}
+        # The old classification died with the old catalyst. If the successor declares nothing,
+        # the honest answer is UNKNOWN — not the parent's answer carried forward.
+        return _typed_binary(succ.get("catalyst_is_binary"), None)
+    if st in (RESOLVED_POSITIVE, RESOLVED_NEGATIVE):
+        return BINARY_FALSE          # resolved: there is no live dated go/no-go event
+    return _typed_binary(position.get("catalyst_is_binary"), position.get("is_binary"))
+
+
+def binary_fields(position: dict) -> dict:
+    """Both typed fields plus the mechanical mapping, as DATA a reader can check (§5.7)."""
+    per = position_event_risk(position)
+    cib = catalyst_is_binary(position)
+    return {
+        "ticker": position.get("ticker"),
+        "position_event_risk": per,
+        "catalyst_is_binary": cib,
+        # Wave 2 §5.7's table, mechanised. UNKNOWN never collapses to FALSE on either axis.
+        "consumes_expected_loss_budget": (True if per is BINARY_TRUE
+                                          else (BINARY_UNKNOWN if per == BINARY_UNKNOWN else False)),
+        "consumes_concurrent_event_slot": (True if cib is BINARY_TRUE
+                                           else (BINARY_UNKNOWN if cib == BINARY_UNKNOWN else False)),
+        "declared_legacy_is_binary": position.get("is_binary"),
+        "basis": ("ISA-0688: position event risk and current-catalyst binary character are "
+                  "SEPARATE typed concepts with separate consumers. Neither is inferred from "
+                  "the other and an UNKNOWN is never silently FALSE."),
+    }
+
+
 def binary_commitment(position: dict) -> dict:
     """`is_binary` is STATEFUL. RESOLVED releases the budget commitment ON THE SAME RUN.
 
@@ -553,7 +645,11 @@ def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
             continue
         if not d.get("is_binary"):
             continue
+        _bf = binary_fields(dict(d, ticker=t))
         row = {"ticker": t, "size_pct": h.get("size_pct"), "is_binary": True,
+               # ISA-0688 — both typed fields travel with the row to their own consumers
+               "position_event_risk": _bf["position_event_risk"],
+               "catalyst_is_binary": _bf["catalyst_is_binary"],
                "catalyst_status": d.get("catalyst_status"),
                "catalyst_date": d.get("catalyst_date"),
                "catalyst_type": (None if d.get("catalyst_type") == UNDECLARED
@@ -598,12 +694,36 @@ def budget_available(positions: List[dict], budget_pct: float, max_concurrent: i
     live = [r for r in recs if r["commits_budget"]]
     committed = round(sum(r["commitment_pct"] for r in live), 6)
     released = [r for r in recs if not r["commits_budget"] and r["reason"].startswith("catalyst")]
+    # ══ ISA-0688 — THE COUNT CAP IS A DIFFERENT QUESTION FROM THE BUDGET ══════════════
+    # `live` is what COMMITS EXPECTED-LOSS BUDGET (the position question). The concurrent-event
+    # cap asks whether the position's CURRENT NEXT CATALYST is a dated go/no-go event, and a
+    # position can be event-dominated without having one pending — QBTS paid for both on one
+    # flag. The two populations are now computed separately and BOTH are published, so a reader
+    # can see where they differ instead of being told they are the same set.
+    fields = {f["ticker"]: f for f in (binary_fields(p) for p in positions)}
+    slot_rows = [f for f in fields.values() if f["consumes_concurrent_event_slot"] is True]
+    slot_unknown = [f["ticker"] for f in fields.values()
+                    if f["consumes_concurrent_event_slot"] == BINARY_UNKNOWN]
+    # ⚑ AN UNKNOWN COUNTS AGAINST THE CAP. R4.3/V-1: an unclassified catalyst is not a measured
+    #   absence of one, and the conservative direction for a CAP is to count it.
+    n_slots = len(slot_rows) + len(slot_unknown)
     return {"budget_pct": budget_pct, "committed_pct": committed,
             "available_pct": round(max(budget_pct - committed, 0.0), 6),
             "live_binaries": [r["ticker"] for r in live],
             "released_this_run": [r["ticker"] for r in released],
             "max_concurrent": max_concurrent,
-            "count_cap_breached": len(live) > max_concurrent,
+            "count_cap_breached": n_slots > max_concurrent,
+            # ISA-0688 — the two populations, side by side and never conflated
+            "binary_fields": fields,
+            "expected_loss_population": [r["ticker"] for r in live],
+            "concurrent_event_population": sorted(f["ticker"] for f in slot_rows),
+            "concurrent_event_unknown": sorted(slot_unknown),
+            "n_concurrent_event_slots": n_slots,
+            "cap_basis": ("ISA-0688: the concurrent-event cap counts positions whose CURRENT "
+                          "NEXT CATALYST is a dated go/no-go event, plus those whose catalyst "
+                          "character is UNKNOWN (an unclassified catalyst is not a measured "
+                          "absence of one). It does NOT count a position merely because the "
+                          "position is event-dominated — that is the expected-loss question."),
             "commitments": recs}
 
 
@@ -645,6 +765,50 @@ def budget_available_reported(positions, budget_pct: float, max_concurrent: int 
     return out
 
 
+def held_binary_budget(held, *, declared=None, budget_pct: float = 1.5,
+                       max_concurrent: int = 2, root: Optional[str] = None) -> dict:
+    """ISA-0706 — **THE ONE** held-binary L1 budget calculation, with an identity.
+
+    ⚑ WHY THIS EXISTS. Two computations of this budget disagreed on the live Sep-2026 book.
+    `binary_budget_report` (the declared one home) MEASURED committed 0.305593% / available
+    1.194407%. `held_position_review.review` assembled its OWN binary rows — without
+    `catalyst_type`, without `catalyst_date`, without `catalyst_domain` and skipping
+    `held_binary_rows`' refusal machinery entirely — read QBTS as unpriceable, WITHHELD the
+    budget, and therefore returned `vci_size` UNEVALUATED for every held binary. Two answers
+    to one question, and the one that decided capital was the worse-informed copy.
+
+    Every consumer now calls THIS, and every consumer records the returned `calc_id`, so a
+    reader can prove two figures came from one calculation rather than hoping they agree
+    (R4.4/R4.5: two paths call one function, or they are one function).
+
+    `held`: [{ticker, size_pct}] from portfolio_data — broker truth, never the watchlist.
+    """
+    _fi_mark("position_sizing", "held_binary_budget")
+    hb = held_binary_rows(held, declared=declared, root=root)
+    bud = budget_available_reported(hb["rows"], budget_pct=budget_pct,
+                                    max_concurrent=max_concurrent)
+    import hashlib as _hl
+    import json as _json
+    basis = _json.dumps({"rows": hb["rows"], "budget_pct": budget_pct,
+                         "max_concurrent": max_concurrent}, sort_keys=True, default=str)
+    calc_id = "VCIB-%s" % _hl.sha256(basis.encode("utf-8")).hexdigest()[:12]
+    return {"calc_id": calc_id,
+            "rows": hb["rows"], "refusals": hb["refusals"],
+            "unpriceable_successors": hb["unpriceable_successors"],
+            "n_held": hb["n_held"], "n_binary": hb["n_binary"],
+            "budget_pct": budget_pct, "max_concurrent": max_concurrent,
+            "committed_pct": bud.get("committed_pct"),
+            "available_pct": bud.get("available_pct"),
+            "blocks_capital": bud.get("blocks_capital"),
+            "refused_unpriceable": bud.get("refused_unpriceable"),
+            "why": bud.get("why"),
+            "budget": bud,
+            "authority": ("position_sizing.held_binary_budget — the single home (ISA-0706). "
+                          "A consumer that assembles its own binary rows is a second sizing "
+                          "authority and is refused by "
+                          "consistency_check.pair_single_binary_budget_authority.")}
+
+
 def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
                          max_concurrent: int = 2, root: Optional[str] = None) -> dict:
     """THE one home for the E4 held-binary budget (R4.4/R4.5).
@@ -680,9 +844,14 @@ def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
     held = [{"ticker": x.get("ticker"),
              "size_pct": 100.0 * float(x.get("value_gbp") or 0.0) / float(nav)}
             for x in stocks]
-    hb = held_binary_rows(held, root=root)
-    bud = budget_available_reported(hb["rows"], budget_pct=budget_pct,
-                                    max_concurrent=max_concurrent)
+    # ISA-0706: through the single home, so this report and held_position_review cannot
+    # disagree — they are the same calculation and they publish the same calc_id.
+    _auth = held_binary_budget(held, budget_pct=budget_pct, max_concurrent=max_concurrent,
+                               root=root)
+    hb = {"rows": _auth["rows"], "refusals": _auth["refusals"],
+          "unpriceable_successors": _auth["unpriceable_successors"],
+          "n_held": _auth["n_held"], "n_binary": _auth["n_binary"]}
+    bud = _auth["budget"]
     for r in hb["refusals"]:
         warn.append("Step 6.5 VCI budget REFUSAL [%s/%s]: %s" % (r["ticker"], r["control"], r["why"]))
     for r in bud["refused_unpriceable"]:
@@ -701,7 +870,9 @@ def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
     return {
         "ok": not bud["blocks_capital"],
         "warnings": warn,
+        "calc_id": _auth["calc_id"],                       # ISA-0706: one calculation, named
         "summary": {
+            "vci_binary_risk_calc_id": _auth["calc_id"],
             "vci_binary_risk_budget": budget_pct,
             "vci_binary_risk_committed": bud["committed_pct"],
             "vci_binary_risk": {
@@ -988,8 +1159,20 @@ ACTIVATION_OUTCOMES = ("ACTIVATED", "FULFILLED", "PARTIAL_FILL_RECORDED", "IDEMP
                        "FILLED_AT_EXECUTION", "NO_PLANNED_SHORTFALL", "NO_AUTHORISED_PLAN",
                        "PLAN_NOT_CONTEMPORANEOUS", "UNVERIFIED_EXECUTION",
                        "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", "BLOCKED_ON_ISA-0686",
+                       "BLOCKED_NOT_ADMITTED",
                        "NOT_BUY_LIKE", "ACTIVATION_DISABLED")
-ACTIVATION_BLOCKED_ROUTES = {"vci": "ISA-0686"}
+# ⚑ ISA-0701 / ISA-0686 (20-Sep-2026) — THE VCI ROUTE IS NO LONGER BLOCKED.
+# This map existed for one reason, stated in the code that read it: "VCI deploy decisions are
+# not canonical in decision_ledger (ISA-0686)". ISA-0686 CLOSED on 20-Sep-2026 —
+# vci_run_capture.write() now writes every VCI decision through decision_ledger.log_decision
+# with a route, a build id, an input snapshot and supersession, and the boundary contract
+# consistency_check.pair_vci_decision_captured proves it over every artefact on disk. A VCI
+# execution can therefore be matched to a canonical authorised decision like any other, and
+# blocking it now would be refusing on a reason that no longer exists (R7.9: an old corrective
+# action is not executed because the register still says so).
+# ⚑ It is emptied, not deleted: the mechanism stays, so a future route that genuinely lacks
+# canonical decisions can be blocked by declaration rather than by a new code path.
+ACTIVATION_BLOCKED_ROUTES: Dict[str, str] = {}
 
 
 def obligation_binding(o: dict) -> dict:
@@ -1036,7 +1219,8 @@ def month_label_of(date_iso: str) -> str:
 
 
 def activate_from_executions(entries: List[dict], plan_loader, *, today=None, path=None,
-                             dry_run: bool = False, doc: Optional[dict] = None) -> dict:
+                             dry_run: bool = False, doc: Optional[dict] = None,
+                             membership=None) -> dict:
     """ISA-0701 — the ONLY creator of an ACTIVE obligation (and of FULFILLED transitions).
 
     `entries`: decision_ledger entries AFTER reconcile_executions_from_transactions.
@@ -1074,6 +1258,26 @@ def activate_from_executions(entries: List[dict], plan_loader, *, today=None, pa
             outcomes.append(dict(rec, outcome="BLOCKED_ON_ISA-0686",
                                  why="VCI deploy decisions are not canonical in decision_ledger (ISA-0686); "
                                      "no obligation is inferred from the holding"))
+            continue
+        # ⚑ ISA-0685 (20-Sep-2026) — ISA-0701 mandatory negative 6, now mechanical: a held name
+        #   with no canonical admission decision creates NO obligation. Until today there was
+        #   nowhere to ASK the question; decision_ledger.current_decision is that place.
+        try:
+            import sleeve_membership as _sm_act
+            if callable(membership):
+                _mem = membership(tk)
+            elif isinstance(membership, dict) and tk in membership:
+                _mem = membership[tk]
+            else:
+                _mem = _sm_act.classify(tk, held=True)
+            _gate = _sm_act.may_activate_obligation(_mem)
+        except Exception as _mex:                                       # noqa: BLE001
+            _gate = {"allowed": False, "state": "UNKNOWN_DISABLED",
+                     "why": ("sleeve_membership unavailable (%s) - the admission question could "
+                             "not be asked, which BLOCKS (R4.3)" % _mex)}
+        if not _gate["allowed"]:
+            outcomes.append(dict(rec, outcome="BLOCKED_NOT_ADMITTED",
+                                 membership=_gate.get("state"), why=_gate["why"]))
             continue
         amt = e.get("executed_amount_gbp")
         if e.get("execution_source") != "transaction_record" or amt is None or not did:
@@ -1177,13 +1381,33 @@ def activate_from_executions(entries: List[dict], plan_loader, *, today=None, pa
 def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
              ranking_basis: str, policy=None, obligations=None,
              sequencer_order: Optional[List[str]] = None, today=None,
-             concentration=None) -> dict:
+             concentration=None, replacement_only=None, donor_releases=None,
+             membership=None, underwriting=None) -> dict:
     """Floor-then-priority fill. Returns the per-name allocation and the residual.
 
     `concentration` (ISA-0465): optional callable (ticker, gbp, is_new, admitted) -> gate dict from
     concentration_control.gate, consulted SEQUENTIALLY so candidate 2 sees candidate 1. A refused
     name is skipped (its pound stays in the queue for later destinations, then funds); a capped
     name receives only its headroom. None = no concentration gate (OFF/SHADOW authoritative pass).
+
+    ⚑⚑ ISA-0705 (Wave 2 §5.3) — `replacement_only` IS A FUNDING VERDICT, NOT A SORT KEY.
+    Before this, a name the sequencer classified REPLACEMENT_ONLY was simply absent from
+    `sequencer_order`, and `pos.get(ticker, 10_000)` sorted it LAST — **and then funded it in
+    full as an ADDITION**. Measured on the aug-2026 fixture book: a candidate at rho 0.92
+    against a held name received GBP 6,794.48 alongside an ordered name. That makes the
+    correlation admission gate decision-ineffective on capital and contradicts A2.1 ("you do
+    not own both; you own the better one").
+
+    `REPLACEMENT_ONLY` now means **NO NET INCREMENTAL CAPITAL**. Such a name may receive money
+    only through a documented paired donor release in the SAME authorisation chain:
+      `donor_releases = {ticker: {donor, released_gbp, state, provenance}}` with state in
+      REALISED / AUTHORISED (PROPOSED is not fundable — a donor leg that has not been
+      authorised cannot pay for a buy).
+    The allocation is capped at the donor release, is drawn from the DONOR and never from
+    `capital_gbp`, and carries `net_incremental_gbp = 0`. With no admissible donor the name is
+    REFUSED at GBP 0 and its pound stays in the queue for the next admissible destination —
+    which is what makes an all-excluded run a measured zero spend re-offered to funds, rather
+    than a REFUSED hold-back that reaches no destination at all (ISA-0563).
 
     ⚑⚑ THE £9,000 CASE IS RAJ'S OWN WORKED EXAMPLE AND IT DOES **NOT** GIVE £5k + £4k.
     Floor-then-priority fills #1 COMPLETELY first, so the residual is £3,528.76 — below the
@@ -1215,7 +1439,12 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
     doc = _copy.deepcopy(obligations if obligations is not None else load_fill_obligations())
     proposed, block_events, non_binding = [], [], []
 
-    uses = list(qualifying_uses)
+    # ── ISA-0705 — partition BEFORE the queue is built. A replacement-only name never
+    #    competes for `capital_gbp` at all, so no ordering accident can fund it.
+    repl = {str(t).upper() for t in (replacement_only or [])}
+    donors = {str(k).upper(): dict(v) for k, v in (donor_releases or {}).items()}
+    uses = [u for u in qualifying_uses if str(u.get("ticker", "")).upper() not in repl]
+    repl_uses = [u for u in qualifying_uses if str(u.get("ticker", "")).upper() in repl]
     for u in uses:
         if u.get(ranking_basis) is None and sequencer_order is None:
             raise SizingRefused(
@@ -1243,9 +1472,59 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
     for _t in [t for t in live_obl if t not in _held_now and t in {u["ticker"] for u in uses}]:
         non_binding.append({"ticker": _t, "reason": "ACTIVE obligation but position not held"})
         live_obl.pop(_t)
+    # ⚑ ISA-0685 (20-Sep-2026) — HELD IS NOT ADMITTED. A first claim is new-capital PRIORITY,
+    #   and priority belongs to a name the framework DECIDED to admit. "Held + in the registry"
+    #   used to be the whole membership test, so a legacy or outside-the-framework position
+    #   could hold the head of the queue on the strength of being owned. The verdict is read
+    #   from the canonical decision ledger, never inferred from `held` — that inference IS the
+    #   defect. A name with no current admitting decision keeps its position, its risk count
+    #   and its place in the report; it loses only the claim it was never granted.
+    #   `membership=` injects the resolver the way `obligations=` injects the store: a
+    #   callable (ticker) -> verdict, or a {ticker: verdict} map. Omitted, it reads the live
+    #   canonical ledger. A fixture that supplies one is STATING the admission it assumes,
+    #   which is stronger than a fixture that silently inherits whatever the live book says.
+    def _resolve_membership(t):
+        if callable(membership):
+            return membership(t)
+        if isinstance(membership, dict) and t in membership:
+            return membership[t]
+        import sleeve_membership as _sm
+        return _sm.classify(t, held=True)
+
+    _memb = {}
+    for _t in list(live_obl):
+        try:
+            _m = _resolve_membership(_t)
+        except Exception as _me:                                        # noqa: BLE001
+            _m = {"state": "UNKNOWN_DISABLED", "may_hold_new_capital_priority": False,
+                  "why": "sleeve_membership unavailable (%s) - UNKNOWN blocks (R4.3)" % _me}
+        _memb[_t] = _m
+        if not _m.get("may_hold_new_capital_priority"):
+            non_binding.append({"ticker": _t, "membership": _m.get("state"),
+                                "reason": "ISA-0685: %s - %s" % (_m.get("state"), _m.get("why"))})
+            live_obl.pop(_t)
     head = [u for u in uses if u["ticker"] in live_obl]
     tail = [u for u in uses if u["ticker"] not in live_obl]
     uses = head + tail
+
+    # ⚑⚑ RAJ DECISION 23-Sep-2026 (ISA-0721) — A D17 OBLIGATION IS NOT UNCONDITIONAL FUTURE
+    #   CAPITAL AUTHORITY. The obligation and its history are preserved, but every future fill or
+    #   top-up of a HELD name is FRESH positive capital and must consume a valid CURRENT canonical
+    #   underwriting case (this month's, from underwriting_cases.jsonl). A missing / invalid /
+    #   stale / non-admissible E[r] means NO FILL FOR THIS TRANCHE: the pound stays in the queue
+    #   for the next admissible destination. It never manufactures a SELL, never voids or deletes
+    #   the obligation, never touches the holding, and never fabricates an E[r].
+    #   `underwriting=` injects the resolver the way `membership=` does: callable(ticker) -> case
+    #   dict, or {ticker: case}. Omitted, it reads THIS month's case from the live store.
+    _uw_month = (today or datetime.date.today().isoformat())[:7]
+
+    def _resolve_case(t):
+        if callable(underwriting):
+            return underwriting(t)
+        if isinstance(underwriting, dict):
+            return underwriting.get(t)
+        import underwriting as _uw_ps
+        return _uw_ps.latest_case(t, month=_uw_month)
 
     # RAJ D23 (ISA-0544) — the ISA cash reserve, DECLARED in target_weights, never typed here.
     reserve = ((policy.get("stock_sleeve") or {}).get("cash_reserve_gbp"))
@@ -1265,6 +1544,33 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
         tk = u["ticker"]
         gap = float(u.get("gbp") or 0.0)
         is_new = float(u.get("current_value_gbp") or 0.0) <= 0.0          # ISA-0701: held truth only
+        if not is_new and remaining > 0 and gap > 0:
+            try:
+                _case = _resolve_case(tk)
+            except Exception as _ce:                                    # noqa: BLE001
+                _case = {"er": {"state": "UNKNOWN (%s)" % type(_ce).__name__}}
+            if not (_case or {}).get("admissible_for_positive_size"):
+                _st = ((_case or {}).get("er") or {}).get("state") or "NO_CURRENT_CASE"
+                _obl = tk in live_obl
+                rows.append({"ticker": tk, "allocated_gbp": 0.0,
+                             "state": ("OBLIGATION_FILL_BLOCKED_NO_ADMISSIBLE_ER" if _obl
+                                       else "TOPUP_BLOCKED_NO_ADMISSIBLE_ER"),
+                             "gap_gbp": round(gap, 2),
+                             "underwriting_case_id": (_case or {}).get("case_id"),
+                             "er_state": _st,
+                             "skip_reason": ("ISA-0721 / Raj 23-Sep-2026: a fill or top-up is fresh "
+                                             "positive capital and needs an admissible CURRENT "
+                                             "underwriting case; %s has %s. No fill this tranche - "
+                                             "the obligation is retained, nothing is sold, the "
+                                             "capital stays in the queue." % (tk, _st))})
+                if _obl:
+                    block_events.append({"obligation_id": live_obl[tk].get("obligation_id"),
+                                         "ticker": tk,
+                                         "blocked_on": today or datetime.date.today().isoformat(),
+                                         "verdict": "NO_ADMISSIBLE_ER", "er_state": _st,
+                                         "released_gbp": 0.0})
+                skipped.append(tk)
+                continue
         if remaining <= 0:
             rows.append({"ticker": tk, "allocated_gbp": 0.0, "state": "NO_CAPITAL",
                          "gap_gbp": round(gap, 2)})
@@ -1444,6 +1750,51 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
                     "the D24 anchor date is unavailable this fill." % tk)
         rows.append(row)
         opened.append(tk)
+    # ── ISA-0705 — the replacement-only leg, funded ONLY by a paired donor release ──────
+    repl_rows = []
+    for u in repl_uses:
+        tk = str(u["ticker"]).upper()
+        gap = float(u.get("gbp") or 0.0)
+        d = donors.get(tk)
+        st = str((d or {}).get("state") or "").upper()
+        rel = float((d or {}).get("released_gbp") or 0.0)
+        if not d:
+            repl_rows.append({
+                "ticker": tk, "allocated_gbp": 0.0, "state": "REFUSED_REPLACEMENT_ONLY",
+                "gap_gbp": round(gap, 2), "route": "REPLACEMENT_ONLY",
+                "net_incremental_gbp": 0.0, "funding_source": None,
+                "skip_reason": ("ISA-0705: the correlation gate classified %s "
+                                "REPLACEMENT_ONLY and NO paired donor release was supplied. "
+                                "Replacement-only means no net incremental capital, so this "
+                                "is GBP 0 — not a smaller addition." % tk)})
+            continue
+        if st not in ("REALISED", "AUTHORISED"):
+            repl_rows.append({
+                "ticker": tk, "allocated_gbp": 0.0, "state": "REFUSED_DONOR_NOT_EXECUTABLE",
+                "gap_gbp": round(gap, 2), "route": "REPLACEMENT_ONLY",
+                "net_incremental_gbp": 0.0, "donor": d.get("donor"),
+                "donor_state": st or None, "funding_source": None,
+                "skip_reason": ("ISA-0705: the donor leg for %s is %s. Only a REALISED or "
+                                "AUTHORISED release can pay for a replacement buy; a proposed "
+                                "or refused donor leg leaves the buy unauthorised, never a "
+                                "standalone addition." % (tk, st or "ABSENT"))})
+            continue
+        alloc = round(min(gap, rel), 2)
+        repl_rows.append({
+            "ticker": tk, "allocated_gbp": alloc, "state": "REPLACEMENT_FILL",
+            "gap_gbp": round(gap, 2), "route": "REPLACEMENT_ONLY",
+            "rung": u.get("rung"), "target_pct": u.get("target_pct"),
+            "donor": d.get("donor"), "donor_state": st,
+            "donor_released_gbp": round(rel, 2),
+            "funding_source": "DONOR_RELEASE",
+            "net_incremental_gbp": 0.0,
+            "donor_provenance": d.get("provenance"),
+            "basis": ("ISA-0705: funded from the paired donor release (GBP %.2f from %s), "
+                      "capped at the release and drawn from the DONOR, never from this run's "
+                      "capital. Net incremental exposure is zero."
+                      % (rel, d.get("donor")))})
+    rows.extend(repl_rows)
+
     residual = round(max(remaining, 0.0), 2)
     # ⚑ D23: the reserve is retained from the FINAL residual too, not only from top-ups — Raj's
     # rule is "leave GBP 250 of cash in the ISA account", and money swept to a fund has left it.
@@ -1457,12 +1808,31 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
                           "SINGLE control on residual deployment; there is no per-ticket top-up "
                           "floor. Instrumented for ISA-0543."),
         "rows": rows, "opened": opened, "n_opened": len(opened),
+        # ⚑ ISA-0705 — `allocated_gbp` is what THIS RUN'S CAPITAL bought. A replacement fill is
+        #   paid for by its donor, so it is deliberately NOT in this figure: including it would
+        #   understate what is re-offered to funds and would re-create the net-new exposure the
+        #   route exists to prevent. The replacement leg is published separately, in full.
         "allocated_gbp": round(float(capital_gbp) - residual, 2),
+        "replacement_only": {
+            "n_candidates": len(repl_uses),
+            "rows": repl_rows,
+            "funded_gbp": round(sum(r["allocated_gbp"] for r in repl_rows), 2),
+            "net_incremental_gbp": 0.0,
+            "refused": [r["ticker"] for r in repl_rows if r["allocated_gbp"] == 0.0],
+            "basis": ("ISA-0705 / Wave 2 §5.3: REPLACEMENT_ONLY means no net incremental "
+                      "capital. Funded only from a paired REALISED/AUTHORISED donor release, "
+                      "capped at that release, drawn from the donor and never from this run's "
+                      "capital. Absent or non-executable donor leg -> GBP 0, never a "
+                      "standalone addition.")},
         "residual_gbp": residual,
         "min_entry_gbp": floor, "starter_gbp": me["starter_gbp"],
         "order_basis": order_basis, "ranking_basis": ranking_basis,
         "order": [u["ticker"] for u in uses],
         "obligations_at_head": sorted(live_obl),
+        # ISA-0685: the membership verdict behind every claim that reached the head, and every
+        # one that did not — so a reader can see WHY a holding held priority or lost it.
+        "membership_at_head": {t: {"state": m.get("state"), "why": m.get("why")}
+                               for t, m in _memb.items()},
         "obligations_persisted_to": None,          # ISA-0701: a proposal never writes the store
         "obligations_store_mutated": False,
         "proposed_obligations": proposed,
@@ -1535,9 +1905,23 @@ def min_hold_ok(*, position_first_entry_date: Optional[str] = None, today: Optio
                       f"permitted, a full exit is not")}
 
 
+def _selftest_admit_all(t):
+    """Selftest-only resolver: every held name has an admissible CURRENT case, so the
+    pre-existing obligation/top-up fixtures keep testing what they were written to test.
+    The D17 underwriting gate itself is exercised separately with explicit resolvers."""
+    return {"case_id": "UWC-SELFTEST-%s" % t, "er": {"state": "VALID_MECHANICAL"},
+            "admissible_for_positive_size": True}
+
+
+def _selftest_allocate(*a, **k):
+    k.setdefault("underwriting", _selftest_admit_all)
+    return allocate(*a, **k)
+
+
 def _selftest_isa0548(verbose: bool = True) -> int:
     """ISA-0548 build — negative controls for the held-binary budget, the successor re-arm and
     the obligation lifecycle. liveness_ref: position_sizing._selftest_isa0548"""
+    allocate = _selftest_allocate    # D17 gate: fixtures carry admissible cases
     import json as _json
     import tempfile as _tf
     n = 0
@@ -1659,6 +2043,7 @@ def _selftest_isa0548(verbose: bool = True) -> int:
 def _selftest_isa0465(verbose: bool = False) -> int:
     """ISA-0465 R19.3 A1.3 — CAP_CONSTRAINED_ENTRY and conditional fills through the REAL allocate().
     liveness_ref: position_sizing._selftest_isa0465"""
+    allocate = _selftest_allocate    # D17 gate: fixtures carry admissible cases
     import concentration_control as _ccm
     n = 0
     NAV = 146_189.0
@@ -1710,7 +2095,7 @@ def _selftest_isa0465(verbose: bool = False) -> int:
     uses3 = [{"ticker": "OB1", "gbp": 2000.0, "current_value_gbp": sec_cap, "rung": "NORMAL", "source_score": 1},
              {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
     out3 = allocate(uses3, capital_gbp=5_300.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
-                    obligations=obl, today="2026-10-03", concentration=hook(held3))
+                    obligations=obl, today="2026-10-03", concentration=hook(held3), membership=_ADMITTED)
     r3 = {x["ticker"]: x for x in out3["rows"]}
     assert r3["OB1"]["state"] == "CONDITIONAL_FILL_BLOCKED" and r3["OB1"]["released_gbp"] == 2000.0, r3["OB1"]
     assert r3["NEW2"]["allocated_gbp"] == 5000.0, "the released first claim must fund the next name"
@@ -1721,7 +2106,7 @@ def _selftest_isa0465(verbose: bool = False) -> int:
     held4 = {"OB1": floor, "ZZ": 60_000.0}
     obl4 = {"obligations": [dict(obl["obligations"][0], blocked_count=0)]}
     out4 = allocate(uses3, capital_gbp=7_300.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
-                    obligations=obl4, concentration=hook(held4))
+                    obligations=obl4, concentration=hook(held4), membership=_ADMITTED)
     r4 = {x["ticker"]: x for x in out4["rows"]}
     assert r4["OB1"]["allocated_gbp"] == 2000.0 and r4["OB1"]["state"] == "OBLIGATION_FILLED", r4["OB1"]
     n += 1
@@ -1733,6 +2118,7 @@ def _selftest_isa0465(verbose: bool = False) -> int:
 def _selftest_isa0701(verbose: bool = False) -> int:
     """ISA-0701 BuildSpec §7 acceptance through the REAL allocate() / activate_from_executions().
     liveness_ref: position_sizing._selftest_isa0701"""
+    allocate = _selftest_allocate    # D17 gate: fixtures carry admissible cases
     import tempfile
     n = 0
     NAV = 146_189.45
@@ -1764,7 +2150,7 @@ def _selftest_isa0701(verbose: bool = False) -> int:
             # 2 NEGATIVE: re-run / dry-run shapes (obligations passed, repeated) - still no write, caller doc untouched
             passed = {"obligations": []}
             allocate(new_uses, capital_gbp=11000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
-                     obligations=passed)
+                     obligations=passed, membership=_ADMITTED)
             allocate(new_uses, capital_gbp=11000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol)
             assert passed == {"obligations": []} and open(st, "rb").read() == b0, \
                 "ISA-0701 NEGATIVE CONTROL: re-runs never mutate the store or a caller's doc"
@@ -1776,7 +2162,7 @@ def _selftest_isa0701(verbose: bool = False) -> int:
                                     target_rung="NORMAL", obligation_gbp=250.11, voided=False,
                                     voided_reason=None) for t in ("HALOX", "ZABX")]}
         out_f = allocate(new_uses, capital_gbp=13564.79, nav_gbp=NAV, ranking_basis="source_score",
-                         policy=pol, obligations=fab)
+                         policy=pol, obligations=fab, membership=_ADMITTED)
         assert out_f["obligations_at_head"] == [] and len(out_f["obligations_non_binding"]) == 2, \
             "ISA-0701 MUST-FIRE: fabricated rows without provenance are NOT at the head of the queue"
         n += 1
@@ -1786,7 +2172,7 @@ def _selftest_isa0701(verbose: bool = False) -> int:
         n += 1
         held_uses = [dict(u, current_value_gbp=1000.0) for u in new_uses[:2]]
         out_h = allocate(held_uses, capital_gbp=13564.79, nav_gbp=NAV, ranking_basis="source_score",
-                         policy=pol, obligations=fab)
+                         policy=pol, obligations=fab, membership=_ADMITTED)
         assert out_h["obligations_at_head"] == [] and all(
             "UNPROVEN" in x["reason"] for x in out_h["obligations_non_binding"]), \
             "ISA-0701 NEGATIVE CONTROL: even for a HELD name, a row without execution provenance is no first claim (0685-safe)"
@@ -1816,46 +2202,73 @@ def _selftest_isa0701(verbose: bool = False) -> int:
                     "executed_reference": ref}
         d0 = {"obligations": []}
         # 4 NEGATIVE: unexecuted recommendation
-        r = activate_from_executions([ent(status="recommended")], loader, doc=d0)
+        r = activate_from_executions([ent(status="recommended")], loader, doc=d0, membership=_ADMITTED)
         assert not d0["obligations"] and not r["outcomes"], "ISA-0701: an unexecuted recommendation creates nothing"
         n += 1
-        # 5/6 NEGATIVE: off-framework trades and held-without-admission never appear as entries; VCI blocked on 0686
-        r = activate_from_executions([ent(route="vci")], loader, doc=d0)
-        assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "BLOCKED_ON_ISA-0686" \
-            and len(r["review_required"]) == 1, r
+        # 5 NEGATIVE: off-framework trades never appear as entries at all, so they can never
+        #   activate anything.
+        # ⚑ ISA-0701/ISA-0686 (20-Sep-2026): the VCI route USED to be blocked here because VCI
+        #   decisions were not canonical in the ledger. ISA-0686 closed, so a VCI execution now
+        #   activates like any other route. This is the positive control for lifting the block.
+        r = activate_from_executions([ent(route="vci")], loader, doc=d0, membership=_ADMITTED)
+        assert d0["obligations"] and r["activated"] == ["GEN"] \
+            and d0["obligations"][0]["state"] == "ACTIVE", \
+            ("ISA-0686 MUST-FIRE: a VCI execution matched to a canonical decision and an "
+             "authorised plan now creates an ACTIVE obligation — the ISA-0686 block is lifted "
+             "because the reason for it no longer exists (%s)" % r)
         n += 1
-        r = activate_from_executions([ent(route="vci")], loader, doc=d0)
-        assert r["outcomes"][0]["outcome"] == "BLOCKED_ON_ISA-0686" and r["review_required"] == [], \
-            "ISA-0701: an unchanged outcome is re-evaluated but escalated once"
+        assert not ACTIVATION_BLOCKED_ROUTES, \
+            ("ISA-0701: the blocked-route map is EMPTY, not deleted — a future route without "
+             "canonical decisions is blocked by declaration, not by a new code path")
         n += 1
         d0 = {"obligations": []}
-        r = activate_from_executions([ent(source="holdings_delta")], loader, doc=d0)
+
+        # ⚑ 6 NEGATIVE / ISA-0685 MUST-FIRE: a HELD name with NO canonical admission decision
+        #   creates NO obligation, however confirmed the execution is. Until ISA-0686 closed
+        #   there was nowhere to ask this question; now there is, and the refusal is named.
+        d_na = {"obligations": []}
+        r = activate_from_executions([ent(tk="LEGACY")], loader, doc=d_na, membership=_UNDECIDED)
+        assert not d_na["obligations"] and r["outcomes"][0]["outcome"] == "BLOCKED_NOT_ADMITTED" \
+            and r["outcomes"][0]["membership"] == "ADMITTED_UNDECIDED", \
+            ("ISA-0685 MUST-FIRE: held is not admitted — an execution on a name the framework "
+             "never decided to admit creates no first claim (%s)" % r)
+        n += 1
+        r = activate_from_executions([ent(tk="LEGACY")], loader, doc=d_na,
+                                     membership=lambda t: {"state": "UNKNOWN_DISABLED",
+                                                           "may_generate_fill_obligation": False,
+                                                           "why": "resolver unavailable"})
+        assert not d_na["obligations"] and r["outcomes"][0]["outcome"] == "BLOCKED_NOT_ADMITTED", \
+            ("ISA-0685 NEGATIVE CONTROL: an UNKNOWN membership verdict BLOCKS and never passes "
+             "(R4.3) — not being able to ask is not the same as a yes")
+        n += 1
+        d0 = {"obligations": []}
+        r = activate_from_executions([ent(source="holdings_delta")], loader, doc=d0, membership=_ADMITTED)
         assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "UNVERIFIED_EXECUTION"
         n += 1
         # NEGATIVE: plan post-dating the decision is not the authorised plan
-        r = activate_from_executions([ent(date="2026-10-02")], loader, doc=d0)
+        r = activate_from_executions([ent(date="2026-10-02")], loader, doc=d0, membership=_ADMITTED)
         assert not d0["obligations"] and r["outcomes"][0]["outcome"] in ("PLAN_NOT_CONTEMPORANEOUS", "NO_AUTHORISED_PLAN")
         n += 1
         # 8 NEGATIVE: new-position execution below minimum entry -> named deviation, no claim
-        r = activate_from_executions([ent(amount=floor - 500.0)], loader, doc=d0)
+        r = activate_from_executions([ent(amount=floor - 500.0)], loader, doc=d0, membership=_ADMITTED)
         assert not d0["obligations"] and r["outcomes"][0]["outcome"] == "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", r
         n += 1
         # 10 POSITIVE: authorised underfilled entry + matching execution -> exactly one ACTIVE with provenance
-        r = activate_from_executions([ent()], loader, doc=d0)
+        r = activate_from_executions([ent()], loader, doc=d0, membership=_ADMITTED)
         a = d0["obligations"]
         assert r["activated"] == ["GEN"] and len(a) == 1 and a[0]["state"] == "ACTIVE" \
             and a[0]["source_decision_id"] == "2026-10-04::GEN::buy" and a[0]["execution_reference"] == "REF1" \
             and a[0]["opened_on"] == "2026-10-06" and obligation_binding(a[0])["binding"], a
         n += 1
         # 7 NEGATIVE: idempotent re-reconciliation
-        r = activate_from_executions([ent()], loader, doc=d0)
+        r = activate_from_executions([ent()], loader, doc=d0, membership=_ADMITTED)
         assert len(d0["obligations"]) == 1 and r["outcomes"][0]["outcome"] == "IDEMPOTENT_SKIP", r
         n += 1
         # 11/12 POSITIVE: the ACTIVE claim heads the next queue and fills the CURRENT gap, not the stale amount
         nxt = [{"ticker": "NEWB", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 99},
                {"ticker": "GEN", "gbp": 777.77, "current_value_gbp": floor + 100.0, "rung": "STARTER",
                 "source_score": 1}]
-        o2 = allocate(nxt, capital_gbp=10000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol, obligations=d0)
+        o2 = allocate(nxt, capital_gbp=10000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol, obligations=d0, membership=_ADMITTED)
         assert o2["order"][0] == "GEN" and o2["rows"][0]["state"] == "OBLIGATION_FILLED" \
             and o2["rows"][0]["allocated_gbp"] == 777.77 and d0["obligations"][0]["obligation_gbp"] != 777.77, o2["rows"][0]
         n += 1
@@ -1863,7 +2276,7 @@ def _selftest_isa0701(verbose: bool = False) -> int:
         plans["nov_2026"] = {"allocation": o2, "artifact": "capital_destination_nov_2026.json", "sha256": "y",
                              "as_of": "2026-11-07"}
         r = activate_from_executions([ent(decision="top_up", date="2026-11-08", ref="REF2", amount=777.77)],
-                                     loader, doc=d0)
+                                     loader, doc=d0, membership=_ADMITTED)
         assert r["fulfilled"] == ["GEN"] and d0["obligations"][0]["state"] == "FULFILLED" \
             and len(d0["obligations"]) == 1 and not obligation_binding(d0["obligations"][0])["binding"], r
         n += 1
@@ -1874,10 +2287,11 @@ def _selftest_isa0701(verbose: bool = False) -> int:
                                              "target_rung": "NORMAL", "state": "PROPOSED"}], "rows": []}
         plans["dec_2026"] = {"allocation": cc_plan, "artifact": "a", "sha256": "z", "as_of": "2026-12-05"}
         d1 = {"obligations": []}
-        activate_from_executions([ent(tk="CAPC", status="recommended", date="2026-12-06")], loader, doc=d1)
+        activate_from_executions([ent(tk="CAPC", status="recommended", date="2026-12-06")], loader, doc=d1, membership=_ADMITTED)
         assert d1["obligations"] == [], "ISA-0701: proposal-only CAP_CONSTRAINED_ENTRY creates no obligation"
         n += 1
-        activate_from_executions([ent(tk="CAPC", date="2026-12-06", amount=floor + 10, ref="R9")], loader, doc=d1)
+        activate_from_executions([ent(tk="CAPC", date="2026-12-06", amount=floor + 10, ref="R9")],
+                                 loader, doc=d1, membership=_ADMITTED)
         assert d1["obligations"][0]["kind"] == "CAP_CONSTRAINED_ENTRY" and d1["obligations"][0]["conditional"] is True \
             and d1["obligations"][0]["state"] == "ACTIVE"
         n += 1
@@ -1888,7 +2302,7 @@ def _selftest_isa0701(verbose: bool = False) -> int:
         try:
             _ip.V2_FLAGS["obligation_activation"] = False
             d2 = {"obligations": []}
-            r = activate_from_executions([ent(ref="REF3")], loader, doc=d2)
+            r = activate_from_executions([ent(ref="REF3")], loader, doc=d2, membership=_ADMITTED)
             assert d2["obligations"] == [] and r["outcomes"][0]["outcome"] == "ACTIVATION_DISABLED"
             n += 1
         finally:
@@ -1901,11 +2315,29 @@ def _selftest_isa0701(verbose: bool = False) -> int:
     return n
 
 
+# ── ISA-0685 test helper ────────────────────────────────────────────────────────────────
+# Every obligation fixture below predates the membership contract and implicitly assumes the
+# held name WAS admitted. `_ADMITTED` states that assumption instead of inheriting whatever the
+# live ledger happens to say about a synthetic ticker — a fixture that silently depends on the
+# live book is not a fixture. The refusing case has its own explicit resolver at each must-fire.
+def _ADMITTED(_t):
+    return {"ticker": _t, "state": "ADMITTED_DECIDED",
+            "may_generate_fill_obligation": True, "may_hold_new_capital_priority": True,
+            "why": "selftest fixture: this name is DECLARED admitted (ISA-0685)"}
+
+
+def _UNDECIDED(_t):
+    return {"ticker": _t, "state": "ADMITTED_UNDECIDED",
+            "may_generate_fill_obligation": False, "may_hold_new_capital_priority": False,
+            "why": "selftest fixture: held with no admitting decision (ISA-0685)"}
+
+
 def _selftest():
     """⚑ Added 26-Aug-2026 after the delivered-location sweep found this module's --selftest
     importing a scaffolding module that was never written. The other eight V2.1 modules each
     carry a real one, and a self-test that cannot run is the same class of defect as a module
     that is never called: it reports nothing and nobody notices."""
+    allocate = _selftest_allocate    # D17 gate: fixtures carry admissible cases
     lad, caps = ladder(), hard_caps()
     assert [lad[k] for k in ("STARTER", "NORMAL", "HIGH", "EARNED_MAX")] == [3.5, 4.5, 5.5, 6.5]
     assert abs(max(lad.values()) - caps["max_stock_position_pct"]) < 1e-9, "ladder max != hard cap"
@@ -2026,6 +2458,112 @@ def _selftest():
         "D23: min_topup_gbp must stay ABSENT - the GBP 250 reserve is the single control"
     assert float((_pol["stock_sleeve"])["cash_reserve_gbp"]) > 0
 
+    # ══ ISA-0688 — two questions, two fields, two consumers ═════════════════════════
+    # The QBTS shape: event-dominated POSITION whose next catalyst is observable, not go/no-go.
+    _q688 = {"ticker": "QBTSX", "size_pct": 1.0, "is_binary": True, "catalyst_status": PENDING,
+             "p_thesis": 0.55, "L": 0.35, "asset_structure": "platform",
+             "position_event_risk": True, "catalyst_is_binary": False}
+    _f = binary_fields(_q688)
+    assert _f["position_event_risk"] is True and _f["catalyst_is_binary"] is False \
+        and _f["consumes_expected_loss_budget"] is True \
+        and _f["consumes_concurrent_event_slot"] is False, \
+        ("⚑ ISA-0688 MUST-FIRE: a position may consume the EXPECTED-LOSS budget without "
+         "consuming a CONCURRENT-EVENT slot. One flag answered both and QBTS paid twice (%s)" % _f)
+    _f2 = binary_fields({"ticker": "OBS", "size_pct": 1.0, "catalyst_status": PENDING,
+                         "position_event_risk": False, "catalyst_is_binary": True})
+    assert _f2["consumes_expected_loss_budget"] is False \
+        and _f2["consumes_concurrent_event_slot"] is True, \
+        ("⚑ ISA-0688 MUST-FIRE: and the reverse — an ordinary position facing a dated go/no-go "
+         "event consumes a SLOT without entering the binary expected-loss budget (%s)" % _f2)
+    _bud688 = budget_available([_q688], budget_pct=1.5, max_concurrent=1)
+    assert _bud688["expected_loss_population"] == ["QBTSX"] \
+        and _bud688["concurrent_event_population"] == [] \
+        and _bud688["count_cap_breached"] is False, \
+        ("⚑ ISA-0688 MUST-FIRE THROUGH THE CONSUMER: the budget counts QBTSX and the cap does "
+         "NOT — the two populations are computed separately and both are published (%s)"
+         % {k: _bud688[k] for k in ("expected_loss_population", "concurrent_event_population",
+                                    "count_cap_breached")})
+    _unk688 = binary_fields({"ticker": "U", "size_pct": 1.0, "catalyst_status": PENDING,
+                             "position_event_risk": "UNKNOWN", "catalyst_is_binary": "UNKNOWN"})
+    assert _unk688["position_event_risk"] == BINARY_UNKNOWN \
+        and _unk688["consumes_expected_loss_budget"] == BINARY_UNKNOWN \
+        and _unk688["consumes_concurrent_event_slot"] == BINARY_UNKNOWN, \
+        ("⚑ ISA-0688 NEGATIVE CONTROL: UNKNOWN is never silently FALSE on either axis (V-1) "
+         "— %s" % _unk688)
+    _bud_unk = budget_available([dict(_q688, ticker="U1", catalyst_is_binary="UNKNOWN")],
+                                budget_pct=1.5, max_concurrent=0)
+    assert _bud_unk["concurrent_event_unknown"] == ["U1"] and _bud_unk["count_cap_breached"] is True, \
+        ("ISA-0688: an UNKNOWN catalyst character COUNTS against the cap — the conservative "
+         "direction for a cap is to count it, and the row is NAMED (%s)" % _bud_unk)
+    _legacy = binary_fields({"ticker": "OLD", "is_binary": True, "catalyst_status": PENDING})
+    assert _legacy["position_event_risk"] is True and _legacy["catalyst_is_binary"] is True, \
+        ("ISA-0688: a position declared under the OLD single-flag schema still says something "
+         "true about itself — the legacy declaration is the fallback for both fields, so the "
+         "split is not a silent re-declaration of every held name (%s)" % _legacy)
+    _bare = binary_fields({"ticker": "BARE", "catalyst_status": PENDING})
+    assert _bare["position_event_risk"] == BINARY_UNKNOWN \
+        and _bare["catalyst_is_binary"] == BINARY_UNKNOWN, \
+        ("ISA-0688 NEGATIVE CONTROL: with NO declaration at all both fields are UNKNOWN, never "
+         "False — absence means nobody decided (V-1/R4.3)")
+    _res = binary_fields({"ticker": "R", "is_binary": True,
+                          "catalyst_status": RESOLVED_POSITIVE_SUCCESSOR_PENDING,
+                          "successor": {"state": "PENDING"}})
+    assert _res["catalyst_is_binary"] == BINARY_UNKNOWN, \
+        ("⚑ ISA-0688 MUST-FIRE: a catalyst RESOLUTION invalidates the previous classification "
+         "— the successor must be classified AFRESH, and the parent's answer is not carried "
+         "forward (%s)" % _res)
+    assert _res["position_event_risk"] is True, \
+        ("ISA-0688: resolving a catalyst does not change whether OWNING the position is "
+         "event-dominated — that is the other question, and it survives")
+    try:
+        binary_fields({"ticker": "X", "position_event_risk": "MAYBE"})
+        assert False, "unreachable"
+    except SizingRefused:
+        pass
+    assert True, "ISA-0688 NEGATIVE CONTROL: an undeclared binary state is REFUSED"
+
+    # ══ ISA-0685 — HELD IS NOT ADMITTED, at the allocation queue ════════════════════
+    def _m_use(tk, gbp=300.0, cv=100.0, score=10.0):
+        return {"ticker": tk, "gbp": gbp, "current_value_gbp": cv, "rung": "STARTER",
+                "target_pct": 3.5, "evidence_state": "T1", "source_score": score}
+
+    def _m_doc(tk="LEG"):
+        return {"obligations": [{"ticker": tk, "voided": False, "state": "ACTIVE",
+                                 "obligation_id": "OBL-m", "source_decision_id": "D-m",
+                                 "execution_reference": "X-m", "allocated_gbp": 200.0,
+                                 "target_rung": "STARTER", "obligation_gbp": 300.0,
+                                 "opened_on": "2026-08-14"}]}
+    _mk = [_m_use("LEG", gbp=300.0, score=1.0), _m_use("NEW", gbp=4000.0, cv=0.0, score=99.0)]
+    _adm = allocate(_mk, capital_gbp=1000.0, nav_gbp=100_000.0, ranking_basis="source_score",
+                    obligations=_m_doc(), membership=_ADMITTED)
+    assert _adm["order"][0] == "LEG" and _adm["obligations_at_head"] == ["LEG"], \
+        ("ISA-0685 POSITIVE CONTROL: an ADMITTED name with an ACTIVE obligation still heads "
+         "the queue — the contract must not break a legitimate first claim (%s)" % _adm["order"])
+    _und = allocate(_mk, capital_gbp=1000.0, nav_gbp=100_000.0, ranking_basis="source_score",
+                    obligations=_m_doc(), membership=_UNDECIDED)
+    assert _und["obligations_at_head"] == [] and _und["order"][0] == "NEW", \
+        ("⚑ ISA-0685 MUST-FIRE: an ADMITTED_UNDECIDED holding loses NEW-CAPITAL PRIORITY — "
+         "being owned is not being admitted, and a first claim is priority (%s)" % _und)
+    assert any(x.get("membership") == "ADMITTED_UNDECIDED"
+               and "ISA-0685" in x.get("reason", "") for x in _und["obligations_non_binding"]), \
+        ("ISA-0685: the lost claim is PUBLISHED with its membership state and reason, never "
+         "silently dropped (R2.10) — %s" % _und["obligations_non_binding"])
+    assert _und["membership_at_head"]["LEG"]["state"] == "ADMITTED_UNDECIDED", \
+        "ISA-0685: the verdict behind every head-of-queue decision travels with the allocation"
+    _row = {r["ticker"]: r for r in _und["rows"]}["LEG"]
+    assert _row["allocated_gbp"] >= 0 and "SELL" not in str(_row.get("state")), \
+        ("⚑ ISA-0685 NEGATIVE CONTROL: ADMITTED_UNDECIDED is NOT an exit signal. The position "
+         "stays in the queue, stays sizeable and stays reportable; it loses only the priority "
+         "it was never granted (%s)" % _row)
+    _unk = allocate(_mk, capital_gbp=1000.0, nav_gbp=100_000.0, ranking_basis="source_score",
+                    obligations=_m_doc(),
+                    membership=lambda t: {"state": "UNKNOWN_DISABLED",
+                                          "may_hold_new_capital_priority": False,
+                                          "why": "resolver unavailable"})
+    assert _unk["obligations_at_head"] == [], \
+        ("ISA-0685 NEGATIVE CONTROL: an UNKNOWN membership verdict removes priority and never "
+         "grants it (R4.3) — the safe direction is the refusing one")
+
     # ── ISA-0543 (A9 half, 13-Sep-2026) — would_have_reset_clock, MEASURED not DECLARED ────
     def _a9_use(tk="AAA", gbp=300.0, cv=100.0, score=10.0):
         return {"ticker": tk, "gbp": gbp, "current_value_gbp": cv, "rung": "STARTER",
@@ -2045,7 +2583,7 @@ def _selftest():
     # the retired A9 rule would have anchored a fresh clock at the fill date, extending the
     # lock-in by exactly the gap between the two dates.
     _a9r1 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
-                     ranking_basis="source_score", obligations=_a9_doc("2026-08-14"),
+                     ranking_basis="source_score", obligations=_a9_doc("2026-08-14"), membership=_ADMITTED,
                      today="2026-09-13")["rows"][0]
     assert _a9r1["state"] == "OBLIGATION_FILLED"
     assert _a9r1["would_have_reset_clock"] is True and _a9r1["would_have_reset_clock_days"] == 30, \
@@ -2055,7 +2593,7 @@ def _selftest():
     # BOUNDARY CONTROL — a fill landing on the position's OWN first-entry date: the two
     # clocks agree, so the retired rule would NOT have extended anything.
     _a9r2 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
-                     ranking_basis="source_score", obligations=_a9_doc("2026-09-13"),
+                     ranking_basis="source_score", obligations=_a9_doc("2026-09-13"), membership=_ADMITTED,
                      today="2026-09-13")["rows"][0]
     assert _a9r2["would_have_reset_clock"] is False and _a9r2["would_have_reset_clock_days"] == 0, \
         f"ISA-0543 BOUNDARY CONTROL: a same-day fill must read would_have_reset_clock=False, " \
@@ -2064,7 +2602,7 @@ def _selftest():
     # POSITIVE CONTROL — a PARTIAL obligation fill (remaining < gap) is the same defect class
     # and must be instrumented identically to a full fill.
     _a9r3 = allocate([_a9_use(gbp=300.0)], capital_gbp=100.0, nav_gbp=100_000.0,
-                     ranking_basis="source_score", obligations=_a9_doc("2026-07-01"),
+                     ranking_basis="source_score", obligations=_a9_doc("2026-07-01"), membership=_ADMITTED,
                      today="2026-09-13")["rows"][0]
     assert _a9r3["state"] == "OBLIGATION_PARTIAL" and _a9r3["would_have_reset_clock"] is True, \
         f"ISA-0543 POSITIVE CONTROL: OBLIGATION_PARTIAL must be instrumented too, got {_a9r3}"
@@ -2072,7 +2610,7 @@ def _selftest():
     # NEGATIVE CONTROL — an obligation record with no `opened_on` is a NAMED absence
     # (None + an UNMEASURED basis string), never a silently-omitted key or a guessed date.
     _a9r4 = allocate([_a9_use(gbp=300.0)], capital_gbp=1000.0, nav_gbp=100_000.0,
-                     ranking_basis="source_score", obligations=_a9_doc(None),
+                     ranking_basis="source_score", obligations=_a9_doc(None), membership=_ADMITTED,
                      today="2026-09-13")["rows"][0]
     assert _a9r4["would_have_reset_clock"] is None and "UNMEASURED" in _a9r4["would_have_reset_clock_basis"], \
         f"ISA-0543 NEGATIVE CONTROL: a missing opened_on must read None with a named " \
@@ -2089,6 +2627,47 @@ def _selftest():
     assert _a9r5["state"] == "UNDERFILLED" and "would_have_reset_clock" not in _a9r5, \
         f"ISA-0543 NEGATIVE CONTROL: a new-position UNDERFILLED row must carry no " \
         f"would_have_reset_clock key at all, got {_a9r5}"
+
+    # ── ISA-0721 / Raj D17 decision 23-Sep-2026: a fill/top-up is FRESH positive capital ──
+    # MUST-FIRE: a HELD obligation name with NO admissible current underwriting case gets NO
+    #   fill this tranche; the obligation is retained (block event, released 0), nothing is
+    #   sold, and the capital stays in the queue for the next admissible destination.
+    _d17_obl = _a9_doc("2026-08-14")          # a binding ACTIVE obligation on held AAA
+    _d17_uses = [_a9_use(tk="AAA", gbp=300.0, cv=100.0, score=9.0),
+                 _a9_use(tk="NEWD", gbp=400.0, cv=0.0, score=5.0)]
+    _d17_miss = lambda t: None if t == "AAA" else _selftest_admit_all(t)
+    _d17a = _selftest_allocate(_d17_uses, capital_gbp=1000.0, nav_gbp=100_000.0,
+                               ranking_basis="source_score", obligations=_d17_obl,
+                               today="2026-09-23", underwriting=_d17_miss, membership=_ADMITTED)
+    _d17r = {r["ticker"]: r for r in _d17a["rows"]}
+    assert _d17r["AAA"]["state"] == "OBLIGATION_FILL_BLOCKED_NO_ADMISSIBLE_ER" \
+        and _d17r["AAA"]["allocated_gbp"] == 0.0 and _d17r["AAA"]["er_state"] == "NO_CURRENT_CASE", \
+        "MUST-FIRE: a held fill with no admissible current case must be blocked, got %r" % _d17r["AAA"]
+    assert _d17r["NEWD"]["allocated_gbp"] > 0.0, "the blocked tranche's capital must stay in the queue"
+    assert any(e.get("verdict") == "NO_ADMISSIBLE_ER" and e.get("released_gbp") == 0.0
+               for e in _d17a["obligation_block_events"]), \
+        "the obligation must be RETAINED (block event, nothing released), never voided"
+    assert not any(str(r.get("state", "")).upper().startswith("SELL") for r in _d17a["rows"]), \
+        "a missing E[r] must never manufacture a SELL"
+    # MUST-FIRE: a non-admissible (UNVERIFIED_LEGACY_PARSER) case blocks exactly like none.
+    _d17b = _selftest_allocate(_d17_uses[:1], capital_gbp=1000.0, nav_gbp=100_000.0,
+                               ranking_basis="source_score", obligations=_d17_obl, today="2026-09-23", membership=_ADMITTED,
+                               underwriting={"AAA": {"case_id": "UWC-L", "admissible_for_positive_size": False,
+                                                       "er": {"state": "UNVERIFIED_LEGACY_PARSER"}}})
+    assert _d17b["rows"][0]["state"] == "OBLIGATION_FILL_BLOCKED_NO_ADMISSIBLE_ER" \
+        and _d17b["rows"][0]["underwriting_case_id"] == "UWC-L", _d17b["rows"][0]
+    # MUST-FIRE: a held non-obligation top-up is gated the same way.
+    _d17c = _selftest_allocate(_d17_uses[:1], capital_gbp=1000.0, nav_gbp=100_000.0,
+                               ranking_basis="source_score", obligations={"obligations": []},
+                               today="2026-09-23", underwriting=lambda t: None)
+    assert _d17c["rows"][0]["state"] == "TOPUP_BLOCKED_NO_ADMISSIBLE_ER", _d17c["rows"][0]
+    # NEGATIVE CONTROL: the SAME held obligation with an admissible current case must still
+    #   fill — the gate must not become a blanket block on held names.
+    _d17d = _selftest_allocate(_d17_uses[:1], capital_gbp=1000.0, nav_gbp=100_000.0,
+                               ranking_basis="source_score", obligations=_d17_obl, today="2026-09-23", membership=_ADMITTED,
+                               underwriting=_selftest_admit_all)
+    assert _d17d["rows"][0]["state"] == "OBLIGATION_FILLED" and _d17d["rows"][0]["allocated_gbp"] == 300.0, \
+        "NEGATIVE CONTROL: an admissible current case must not be blocked, got %r" % _d17d["rows"][0]
 
     _n = sum(1 for _nd in ast.walk(ast.parse(inspect.getsource(_selftest)))
              if isinstance(_nd, (ast.Assert,)))

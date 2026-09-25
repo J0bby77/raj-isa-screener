@@ -1509,12 +1509,33 @@ def build_s7_from_scored(portfolio: dict, scored: dict) -> dict:
 # ---------------------------------------------------------------------------
 # s3 from scored case skeletons
 # ---------------------------------------------------------------------------
-def build_s3_from_scored(scored: dict) -> list:
+def build_s3_from_scored(scored: dict, step9: dict = None) -> list:
     """
     Build s3 investment cases from pre-scored skeletons.
     If no in-window names, falls back to generic skeleton.
+
+    ⚑ ISA-0608 (23-Sep-2026): when step9_pre publishes its ONE feasible population
+    (`opportunity_set.case_skeleton_population`), the buy cases are drawn from THAT population and
+    in its order - a name that cannot receive capital does not get a buy case, and a feasible name
+    with no Step-7 skeleton is NAMED as a placeholder rather than silently absent. A pre-control
+    step9_pre (no opportunity_set) keeps the old behaviour and says nothing new.
     """
     skeletons = scored.get("s3_case_skeletons", [])
+    _pop = ((step9 or {}).get("opportunity_set") or {}).get("case_skeleton_population")
+    if _pop is not None:
+        _by = {str(k.get("ticker", "")).upper(): k for k in skeletons
+               if not str(k.get("_for_step", "")).startswith("Step 8")}
+        _ordered = []
+        for t in _pop:
+            k = _by.get(str(t).upper())
+            if k is None:
+                k = {"ticker": t, "action": "BUY", "name": "",
+                     "paragraphs": ["[ISA-0608: %s is in the feasible population but Step 7 built no "
+                                    "case skeleton for it - build the case from step9_pre before "
+                                    "Checkpoint-D]" % t],
+                     "_no_step7_skeleton": True}
+            _ordered.append(k)
+        skeletons = _ordered + [k for k in skeletons if str(k.get("_for_step", "")).startswith("Step 8")]
     if not skeletons:
         return skeleton_s3()
 
@@ -1730,6 +1751,22 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
                 % pipe.get("n_refused"))
             warns.append(out["pipeline_refusal_line"])
 
+    # ISA-0616 — the ONE canonical C-1 verdict, rendered as consumed (never recomputed here)
+    _c1v = pipe.get("c1_verdicts")
+    if isinstance(_c1v, dict) and _c1v:
+        _adm = sorted(t for t, v in _c1v.items() if v == "ADMISSIBLE")
+        _no = sorted("%s (%s)" % (t, v) for t, v in _c1v.items()
+                     if v not in ("ADMISSIBLE", "NOT_APPLICABLE_VCI"))
+        out["c1_line"] = (
+            "C-1 current admissibility (canonical step9_pre verdict, ISA-0616): %d admissible%s; "
+            "%d not admissible%s. A non-admissible name receives no NEW capital this run; no "
+            "holding is sold or reduced because of C-1, and ADMISSIBLE is not a BUY instruction."
+            % (len(_adm), (" [" + ", ".join(_adm) + "]") if _adm else "",
+               len(_no), (" [" + ", ".join(_no) + "]") if _no else ""))
+    elif pipe.get("state"):
+        out["c1_line"] = ("C-1 current admissibility: NO canonical verdicts reached the router - "
+                          "no new stock capital is admissible this run (ISA-0616, fail-closed).")
+
     al = cd.get("allocation") or {}
     if al.get("state") == "OK":
         arows = []
@@ -1842,6 +1879,10 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
     out["blocked_rows"] = ["%s - %s" % (n, " | ".join(v)) for n, v in sorted(blocked.items())]
     refused = cd.get("eligibility_refused") or {}
     out["refused_rows"] = ["%s - %s" % (k, v) for k, v in sorted(refused.items())]
+    # ISA-0728 (M08): a fund whose eligibility evidence is missing is rendered AS UNKNOWN - it
+    #   joins the refused rows with its state, so the reader never mistakes absence for a pass.
+    for k, v in sorted((cd.get("eligibility_unknown") or {}).items()):
+        out["refused_rows"].append("%s - UNKNOWN_MISSING_EVIDENCE: %s" % (k, v))
 
     # ── 6. declared bands: what broke, what was repaired, and what was NOT decided ──────────
     nb = cd.get("band_not_repaired") or []
@@ -1990,6 +2031,8 @@ SUMMARY_RENDERED = {
     "allowance_remaining_gbp":    "build_s10",
     "allowance_reconciled":       "build_s10",
     "allowance_note":             "build_s10",
+    # ISA-0722 (23-Sep-2026): Original | Current | delta E[r] for every held direct stock (§6.4).
+    "held_underwriting":          "build_held_underwriting_block",  # s7 — stock sleeve
     "vci_binary_risk_committed":  "build_vci_sleeve_from_step9",  # s5 VCI sleeve
     "vci_binary_risk_budget":     "build_vci_sleeve_from_step9",
     "vci_deploy_eligible":        "build_vci_sleeve_from_step9",
@@ -2091,6 +2134,21 @@ SUMMARY_ESCALATED = {
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here
 # without one is a key nobody decided about wearing the costume of a decision.
 SUMMARY_OUT_OF_SCOPE = {
+    "pit_capture":             "ISA-0722 capture-only observability: the point-in-time evidence "
+                               "vintage's coverage for future SHADOW research - not a decision "
+                               "figure; its failure is escalated as an ISA-0722 PIT CAPTURE warning",
+    "horizon_value":           "ISA-0744 SHADOW: the 12-month horizon-value E[r] is published "
+                               "beside the additive E[r] for evidence only and moves no capital "
+                               "until Raj promotes it; rendering it now would present a SHADOW "
+                               "return as the approved one",
+    "fx_pit":                  "ISA-0197 SHADOW input: the ECB PIT FX artefact status (route, "
+                               "observation date, typed gaps) consumed only by the ISA-0744 "
+                               "horizon-value SHADOW; ECB reference rates are valuation rates, "
+                               "not a decision figure; a failure surfaces as a Step 6f warning",
+    "execution_ceiling":       "ISA-0740 SHADOW: the approval-preserving execution ceiling is "
+                               "published for evidence only and moves no capital until Raj "
+                               "promotes it; rendering it now would present a SHADOW limit as "
+                               "an execution instruction",
     "run_manifest":            "run liveness metadata — consumed by the manifest and by "
                                "consistency_check, and a stage table is not a decision figure",
     "watchlist_tickers_scored": "a COUNT of the rows Section 5 renders in full; the table is the "
@@ -2657,7 +2715,7 @@ def build_prefilled_email(
         "meta":                   build_meta(portfolio, run_date),
         "s1_decision_summary":    skeleton_s1(),
         "s2_capital_allocation":  _s2_out,
-        "s3_investment_cases":    build_s3_from_scored(scored) if has_scored else skeleton_s3(),
+        "s3_investment_cases":    build_s3_from_scored(scored, step9=step9) if has_scored else skeleton_s3(),
         "s4_liquidation_tracker": skeleton_s4(),
         "s5_watchlist":           _s5,
         "s6_portfolio_snapshot":  build_s6(portfolio, analytics, xray),
@@ -2729,6 +2787,88 @@ def main():
         in_win = [r.get('ticker') for r in scored.get('s5_watchlist_rows', []) if r.get('in_window')]
         print(f"  In-window names:        {in_win if in_win else 'none'}")
     print('  Claude fills: s1/s2/s3 narratives/s4/s5 detail/s7 thesis/s8 est_returns/s9/s11/conviction scores.')
+
+
+def build_held_underwriting_block(hu: dict) -> dict:
+    """ISA-0722 — the Original | Current | delta E[r] table for EVERY held direct stock (§6.4).
+
+    ⚑ A RENDERER (R20.2). Every figure is read from `summary.held_underwriting`, i.e. from the
+    canonical case ids; nothing is computed here except formatting. A non-numeric state is shown
+    AS the state (NOT_CAPTURED_CONTEMPORANEOUSLY, NOT_DEFENSIBLY_QUANTIFIABLE, ...), never as 0 or
+    a blank that reads like one, and a METHOD_CHANGED delta is shown as non-comparable."""
+    hu = hu or {}
+    if hu.get("state") != "OK":
+        return {"rows": [], "line": "Held-stock underwriting: %s - %s"
+                                    % (hu.get("state") or "ABSENT", hu.get("why") or "not produced")}
+
+    def _fmt(v, state):
+        return ("%.1f%%" % v) if isinstance(v, (int, float)) else (state or "—")
+    rows = []
+    for r in hu.get("rows") or []:
+        d = r.get("delta") or {}
+        if d.get("comparable"):
+            dtxt = "%+.1fpp" % d["delta_pp"]
+        elif d.get("flag") == "METHOD_CHANGED":
+            dtxt = "METHOD_CHANGED (raw %+.1fpp, not like-for-like)" % d.get("raw_delta_pp_non_comparable", 0.0)
+        else:
+            dtxt = "—"
+        rows.append({"ticker": r.get("ticker"),
+                     "original": _fmt(r.get("original_er_pct"), r.get("original_state")),
+                     "current": _fmt(r.get("current_er_pct"), r.get("current_state")),
+                     "delta": dtxt,
+                     "horizon": ("%sm" % r["horizon_months"]) if r.get("horizon_months") else "—",
+                     "validity": ("admissible" if r.get("admissible_for_positive_size")
+                                  else "NO POSITIVE NEW SIZE"),
+                     "case": r.get("current_case_id")})
+    line = ("Held-stock underwriting (ISA-0722): %d of %d held names carry a current case (%s); "
+            "original E[r] NOT_CAPTURED_CONTEMPORANEOUSLY for %d legacy holding(s)."
+            % (hu.get("n_cases_held", 0), hu.get("n_expected", 0),
+               ", ".join("%s %d" % (k, len(v)) for k, v in sorted((hu.get("by_state") or {}).items())),
+               len(hu.get("not_captured_original") or [])))
+    return {"rows": rows, "line": line}
+
+
+def _selftest():
+    """ISA-0722 — the held-underwriting renderer renders states, never fabricates a figure."""
+    hu = {"state": "OK", "n_cases_held": 2, "n_expected": 2,
+          "by_state": {"VALID_MECHANICAL": ["AAA"], "NOT_DEFENSIBLY_QUANTIFIABLE": ["BBB"]},
+          "not_captured_original": ["BBB"],
+          "rows": [{"ticker": "AAA", "original_er_pct": 19.5, "original_state": "CAPTURED",
+                    "current_er_pct": 12.0, "current_state": "VALID_MECHANICAL",
+                    "horizon_months": 12, "admissible_for_positive_size": True,
+                    "delta": {"comparable": False, "flag": "METHOD_CHANGED",
+                              "raw_delta_pp_non_comparable": -7.5}, "current_case_id": "UWC-a"},
+                   {"ticker": "BBB", "original_er_pct": None,
+                    "original_state": "NOT_CAPTURED_CONTEMPORANEOUSLY", "current_er_pct": None,
+                    "current_state": "NOT_DEFENSIBLY_QUANTIFIABLE", "horizon_months": None,
+                    "admissible_for_positive_size": False, "delta": {"comparable": False},
+                    "current_case_id": "UWC-b"}]}
+    b = build_held_underwriting_block(hu)
+    by = {r["ticker"]: r for r in b["rows"]}
+    assert by["BBB"]["original"] == "NOT_CAPTURED_CONTEMPORANEOUSLY" and by["BBB"]["current"] == \
+        "NOT_DEFENSIBLY_QUANTIFIABLE", ("⚑ MUST-FIRE: a non-numeric state renders AS the state", by["BBB"])
+    assert by["AAA"]["delta"].startswith("METHOD_CHANGED"), (
+        "⚑ MUST-FIRE: a method change is never rendered as a like-for-like delta", by["AAA"])
+    assert by["BBB"]["validity"] == "NO POSITIVE NEW SIZE"
+    e = build_held_underwriting_block({"state": "FAILED", "why": "x"})
+    assert e["rows"] == [] and "FAILED" in e["line"], (
+        "NEGATIVE CONTROL: a failed capture renders its failure, not an empty table that reads clean")
+    # ISA-0608 — buy cases are the feasible population, in its order
+    sc = {"s3_case_skeletons": [{"ticker": "ZAB.WA", "_for_step": "Step 9/10 — in-window buy candidate"},
+                                {"ticker": "HALO", "_for_step": "Step 9/10 — in-window buy candidate"},
+                                {"ticker": "MU", "_for_step": "Step 8 — existing position review"}]}
+    s9 = {"opportunity_set": {"case_skeleton_population": ["NTAP", "HALO"]}}
+    cs = [c["ticker"] for c in build_s3_from_scored(sc, step9=s9)]
+    assert cs == ["NTAP", "HALO"], ("⚑ MUST-FIRE ISA-0608: buy cases come from the feasible population in its "
+                                    "order; an infeasible ZAB.WA gets none and a feasible NTAP without a "
+                                    "skeleton is named", cs)
+    assert build_s3_from_scored(sc, step9=s9)[0]["paragraphs"][0].startswith("[ISA-0608"), \
+        "a feasible name with no Step-7 skeleton must be a named placeholder, not absent"
+    assert [c["ticker"] for c in build_s3_from_scored(sc)] == ["ZAB.WA", "HALO"], \
+        "NEGATIVE CONTROL ISA-0608: a pre-control step9_pre keeps the previous behaviour unchanged"
+    print("email_prefill selftest OK (ISA-0722 held-underwriting renderer + ISA-0608 s3 population)")
+    return 0
+
 
 if __name__ == '__main__':
     main()

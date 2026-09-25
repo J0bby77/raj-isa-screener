@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-stock_price_fetch.py — P1. Populates `stock_weekly_returns.json` with 104 weeks of
-Friday-to-Friday GBP total return for the deployment universe. **stdlib only.**
+stock_price_fetch.py — P1. Populates `stock_weekly_returns.json` with ~3 years (range=3y) of
+Friday-to-Friday GBP total return (risk window: isa_policy.RISK_WINDOW_WEEKS, ISA-0680) for the deployment universe. **stdlib only.**
 
 Authority: ISA_BuildSpec_FrameworkIntegrity_and_CapitalDeployment_27Aug2026.md P1.
 Raised as ISA-0455. Built 28-Aug-2026.
@@ -698,11 +698,19 @@ def _corr(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
 
 
 def matrix(store: Optional[dict] = None, tickers: Optional[Sequence[str]] = None,
-           *, weeks: int = 104) -> dict:
+           *, weeks: Optional[int] = None) -> dict:
     """The pairwise correlation matrix over the last `weeks` COMMON Fridays.
+
+    ⚑ ISA-0680 (23-Sep-2026): `weeks` defaults to THE declared risk window,
+    isa_policy.RISK_WINDOW_WEEKS - the literal 104 that used to sit here was a second home for
+    the same number sleeve_risk and correlation_engine now read. An explicit `weeks` (the P1.9
+    window-stability study) is a declared sensitivity, published as such.
 
     ⚑ sigma comes from THE SAME weekly series as rho, annualised sigma_weekly x sqrt(52). A
     sigma from another window would assemble a covariance matrix out of two windows (P2.5)."""
+    if weeks is None:
+        import isa_policy as _pol_0680
+        weeks = int(_pol_0680.RISK_WINDOW_WEEKS)
     store = store if store is not None else srs.load()
     cov = srs.coverage(store, list(tickers) if tickers else None)
     live = [t for t, v in cov["names"].items() if v["status"] != "STALE"]

@@ -97,6 +97,13 @@
     "schema_version": "1.0",
     "stamped_at": "2026-09-18"
   },
+  "2026-09-19|SP500": {
+    "fingerprint": "7e6fc8157576",
+    "group": "SP500",
+    "run_date": "2026-09-19",
+    "schema_version": "1.0",
+    "stamped_at": "2026-09-19"
+  },
   "_pool_exclusions": {
     "2026-08-07|SP500": {
       "approved_by": "raj",
