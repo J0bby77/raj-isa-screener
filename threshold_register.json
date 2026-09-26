@@ -25,7 +25,18 @@
    "register_item": "ISA-0458",
    "note": "⚑ The spec measured 35.2%/yr TE on 27-Aug, which puts -5pp at 0.14 SD and a 44% false-fire rate on ZERO true alpha — at 6, 12 AND 24 months. The window was never the lever. Seeded null here on purpose: P1 re-measures it rather than this build copying a number across (R4.4).",
    "basis_class": "DECLARED_POLICY",
-   "authority_trace": "clean spec V2.1 D19 leg (a) (-5pp trail vs VUAG); measured diagnostic owned by ISA-0458 (BLOCKED_ON_RAJ)"
+   "authority_trace": "clean spec V2.1 D19 leg (a) (-5pp trail vs VUAG), one of three legs of Raj's D19 conjunction (retention.PROBATION_LEGS); single-leg diagnostic retained as published information",
+   "composite": {
+    "module": "retention",
+    "legs_attr": "PROBATION_LEGS",
+    "this_leg": "trail_pp",
+    "requires_all": true,
+    "bound_k_attr": "PROBATION_MIN_TRAILING_MONTHS",
+    "bound_n_attr": "PROBATION_MONTHS",
+    "null_p": 0.5,
+    "declared_by": "Raj D19 27-Aug-2026 (three-leg conjunction), built retention.evaluate_ratchet 29-Aug-2026",
+    "basis": "ISA-0458 (25-Sep-2026): this leg never gates alone; framework_integrity judges the conjunction, verified against retention.PROBATION_LEGS"
+   }
   },
   {
    "name": "RHO_MAX_PAIRWISE_GATE",

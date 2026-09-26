@@ -679,6 +679,15 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
     if item.get("is_fix") is None:
         raise ValueError(f"{item.get('record_type')} must declare is_fix explicitly (spec s4.3)")
 
+    # ⚑ ISA-0733 (25-Sep-2026): the WRITER attaches studies (R14.1 - nothing depends on someone
+    #   remembering to run backfill_studies). A failure to scan is not a reason to refuse the write.
+    try:
+        _st = find_studies(item)
+        if _st or item.get("studies"):
+            item["studies"] = _st or None
+    except Exception:                                                   # noqa: BLE001
+        pass
+
     errs = validate(item)
     if errs:
         raise ValueError("register contract breach:\n  - " + "\n  - ".join(errs))
@@ -735,6 +744,35 @@ def register_alias(legacy_id: str, canonical_id: str, *, source: str) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0643 (25-Sep-2026) — A NEAR-EXACT DUPLICATE OF A LIVE ITEM IS REFUSED AT INTAKE
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0607/0608 were each written three times (0607/0610/0614, 0608/0611/0615), byte-identical.
+# next_id() is monotonic, so every retry of the same intake minted a new permanent id. The gate is
+# at the front door: a new item whose NORMALISED title equals a live item's is refused, naming the
+# owner, unless the caller declares it distinct (`distinct_from=[ids]` + `distinct_reason`) - a
+# related-but-different cause is admissible, but only on a stated reason that is kept on the record.
+_LIVE_STATES = ("OPEN", "IN_PROGRESS", "BLOCKED_ON_RAJ", "DEFERRED")
+
+
+class DuplicateIntake(ValueError):
+    """Raised when intake() would create a second live record for the same cause (ISA-0643)."""
+
+
+def normalise_title(title) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+
+
+def live_duplicates(title, items=None) -> list:
+    """Live items whose normalised title equals `title`'s (exact after normalisation)."""
+    key = normalise_title(title)
+    if not key:
+        return []
+    items = items if items is not None else _read_all()
+    return [i["id"] for i in items
+            if i.get("state") in _LIVE_STATES and normalise_title(i.get("title")) == key]
+
+
 # ---------------------------------------------------------------- intake (R7.7)
 
 def intake(title, *, record_type, criticality, intake_trigger, detected_by,
@@ -746,6 +784,17 @@ def intake(title, *, record_type, criticality, intake_trigger, detected_by,
     """
     if learning is None:
         raise ValueError("intake() requires a learning block - silence is not an acceptable answer (R8.1)")
+    distinct_from = kwargs.pop("distinct_from", None) or []
+    distinct_reason = str(kwargs.pop("distinct_reason", "") or "").strip()
+    dups = live_duplicates(title)
+    if dups and not (set(dups) <= set(distinct_from) and len(distinct_reason) >= MIN_4C_CHARS):
+        raise DuplicateIntake(
+            "intake refused (ISA-0643): %s already records this cause (normalised title match). Update "
+            "or revalidate the owner instead of minting a second id. A genuinely DIFFERENT cause may be "
+            "admitted with distinct_from=%s and a distinct_reason." % (", ".join(dups), dups))
+    if distinct_from and distinct_reason:
+        context = ("%s\n[intake: declared DISTINCT from %s - %s]"
+                   % (context or "", ", ".join(distinct_from), distinct_reason)).strip()
     item = {
         "id": next_id(),
         "title": title,
@@ -879,6 +928,16 @@ def revalidate(item_id: str, *, disposition: str, validated_against_build_id: st
             "revalidate: SUPERSEDED requires `superseded_by`. An item superseded by nothing "
             "named is an item quietly dropped (R7.7: nothing is de-scoped by silence).")
     item = dict(get(item_id))
+    _to_state = kwargs.get("state")
+    if (_to_state == "CLOSED_NOT_A_DEFECT" and item.get("state") != "CLOSED_NOT_A_DEFECT"
+            and not ((kwargs.get("verification") or {}).get("liveness_ref"))):
+        # ⚑ ISA-0733 (25-Sep-2026): a revalidation that TERMINATES an item as not-a-defect must say
+        #   what was checked (verification.liveness_ref), exactly as close() demands of CLOSED_FIXED
+        #   (R7.3). Grandfathered rows are untouched: the rule binds on the transition, never on
+        #   history (R7.5 - no evidence is invented for old closures).
+        raise ValueError(
+            "revalidate: closing %s as CLOSED_NOT_A_DEFECT requires verification.liveness_ref naming "
+            "the check that established it (ISA-0733, R7.3)." % item_id)
     # ⚑ ISA-0718 (23-Sep-2026) — R2.13 applied to the register's own writer. This used to be a
     #   bare assignment, so every revalidation DESTROYED the previous note - including the
     #   finding-ownership text release_gate.waiver_check reads (ISA-0695). The superseded note is
@@ -1426,6 +1485,60 @@ def selftest(verbose: bool = True) -> int:
        "ISA-0718: revalidate() must RETAIN the superseded note, not destroy it")
     ok(rv2["revalidation_history"][-1]["validated_against_build_id"] == "TB-TEST-1",
        "ISA-0718: the retained note is marked with the build it was written against (R2.13)")
+    # ── ISA-0643 — duplicate intake refused before a second durable id exists ─────────
+    # liveness_ref: isa_register.selftest :: isa0643_duplicate_intake
+    _d1 = intake("Duplicate-cause fixture: the sequencer ranked an undealable listing first",
+                 record_type="DEFECT", criticality="LOW", intake_trigger="build_discovery",
+                 detected_by="CLAUDE_BUILD", learning=lrn, **CS)
+    _id_before = next_id()
+    _refused = False
+    try:
+        intake("duplicate-cause FIXTURE - the sequencer ranked an undealable listing first!",
+               record_type="DEFECT", criticality="LOW", intake_trigger="build_discovery",
+               detected_by="CLAUDE_BUILD", learning=lrn, **CS)
+    except DuplicateIntake:
+        _refused = True
+    ok(_refused, "MUST-FIRE ISA-0643: an exact (normalised) duplicate of a live item is REFUSED at intake")
+    ok(next_id() == _id_before, "ISA-0643 crash/retry: the refused duplicate burned no id (retrying is safe)")
+    _near = intake("Duplicate-cause fixture: the sequencer ranked an undealable listing SECOND",
+                   record_type="DEFECT", criticality="LOW", intake_trigger="build_discovery",
+                   detected_by="CLAUDE_BUILD", learning=lrn, **CS)
+    ok(_near["id"] == _id_before, "NEGATIVE CONTROL ISA-0643: a near-but-distinct title is admitted")
+    _dd = intake("Duplicate-cause fixture: the sequencer ranked an undealable listing first",
+                 record_type="DEFECT", criticality="LOW", intake_trigger="build_discovery",
+                 detected_by="CLAUDE_BUILD", learning=lrn, distinct_from=[_d1["id"]],
+                 distinct_reason="different module and different capital path, same wording", **CS)
+    ok("declared DISTINCT from %s" % _d1["id"] in _dd["context"],
+       "ISA-0643: a declared-distinct duplicate is admitted only with its reason kept on the record")
+    _bad = False
+    try:
+        intake("Duplicate-cause fixture: the sequencer ranked an undealable listing first",
+               record_type="DEFECT", criticality="LOW", intake_trigger="build_discovery",
+               detected_by="CLAUDE_BUILD", learning=lrn, distinct_from=[_d1["id"], _dd["id"]],
+               distinct_reason="x", **CS)
+    except DuplicateIntake:
+        _bad = True
+    ok(_bad, "NEGATIVE CONTROL ISA-0643: a declared-distinct intake with no real reason is still refused")
+    # ── ISA-0733 — terminal NOT_A_DEFECT needs evidence; the writer attaches studies ────
+    _t = intake("NOT_A_DEFECT closure fixture", record_type="DEFECT", criticality="LOW",
+                intake_trigger="build_discovery", detected_by="CLAUDE_BUILD", learning=lrn, **CS)
+    _r = False
+    try:
+        revalidate(_t["id"], disposition="NO_LONGER_A_DEFECT", validated_against_build_id="TB-X",
+                   note="closing without saying what was checked", state="CLOSED_NOT_A_DEFECT")
+    except ValueError:
+        _r = True
+    ok(_r, "MUST-FIRE ISA-0733: a revalidation that closes CLOSED_NOT_A_DEFECT without liveness_ref RAISES")
+    _c = revalidate(_t["id"], disposition="NO_LONGER_A_DEFECT", validated_against_build_id="TB-X",
+                    note="closed with the check named", state="CLOSED_NOT_A_DEFECT",
+                    verification={"test_id": "fixture", "liveness_ref": "fixture check", "green_on": "2026-09-25"})
+    ok(_c["state"] == "CLOSED_NOT_A_DEFECT", "NEGATIVE CONTROL ISA-0733: with liveness_ref the closure is accepted")
+    _w = intake("Studies fixture citing ISA_BuildSpec_Fixture_Study_25Sep2026.md", record_type="DEFECT",
+                criticality="LOW", intake_trigger="build_discovery", detected_by="CLAUDE_BUILD",
+                learning=lrn, **CS)
+    ok(any(d["doc"] == "ISA_BuildSpec_Fixture_Study_25Sep2026.md" for d in (_w.get("studies") or [])),
+       "ISA-0733: write() attaches the study the item names (reported on_disk=false, never dropped)")
+
     shutil.rmtree(tmp, ignore_errors=True)
     os.environ.pop("ISA_REGISTER_STORE", None)
     _schema_cache.clear()

@@ -143,14 +143,14 @@ def source_files(root: str = HERE, *, include_tests: bool = False,
                  exclude_self: bool = True) -> List[str]:
     """Every .py in the framework, ordered. Backups, caches and archives are EXCLUDED and the
     exclusion is declared here rather than hidden in a walk filter."""
-    skip_dirs = {"__pycache__", "archive", "register_archive", "_to_delete", "backfill_source",
-                 "screen_history", "bench_cache", "nav_cache", "calibration_pathc_jul2026",
-                 "node_modules", "web", "dist", "Skills_to_Edit"}
+    # ⚑ ISA-0710 (25-Sep-2026): the exclusion is isa_tree_scope.excluded_dir - ONE predicate shared with
+    #   the atlas and the release fingerprint. This used to be a private set that omitted
+    #   _candidate_evidence/_dryrun_outputs, so LIVE enumerated evidence copies of registered computers
+    #   that the certified Candidate never contained. Imported, never copied; unimportable RAISES.
+    import isa_tree_scope as _ts
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if d not in skip_dirs and not d.startswith("_bak_")
-                       and not d.startswith("_baseline")]
+        dirnames[:] = [d for d in dirnames if not _ts.excluded_dir(d)]
         for fn in sorted(filenames):
             if not fn.endswith(".py"):
                 continue
@@ -1739,6 +1739,45 @@ def _rationale_declarations() -> dict:
         return {}
 
 
+def composite_contract_verdict(t: dict) -> dict:
+    """ISA-0458 (25-Sep-2026). A DECLARED_POLICY threshold that gates ONLY as one leg of a declared
+    conjunction must be judged on the CONJUNCTION, not on the leg alone. D19 (Raj, 27-Aug-2026) retired
+    the single -5pp step-down trigger (0.13 SD, ~44% false-fire on zero alpha) for a three-leg rule that
+    fires only when ALL legs hold; testing the leg alone reported a defect that D19 had already remedied.
+
+    The composite is VERIFIED against the code that implements it, never taken on the row's word:
+      - the declared module's legs attribute exists and contains this threshold's leg (and >= 2 legs);
+      - the conjunction's null false-fire rate is BOUNDED from the code's own constants by its
+        tightest countable leg: P(all legs) <= P(bounding leg) = P(Binomial(n, p0) >= k), with p0 the
+        declared null (0.5 = symmetric zero-alpha months; conservative because a month counts only when
+        it trails by the leg-(a) margin). The bound is converted to a one-sided z (t_equiv) and judged
+        by the SAME verdict_for thresholds - no new constant.
+    -> {"state": VERIFIED|UNVERIFIED, "why", "bound_false_fire", "t_equiv", "diagnostic"}"""
+    import importlib, math
+    from statistics import NormalDist
+    c = t.get("composite") or {}
+    try:
+        mod = importlib.import_module(c["module"])
+        legs = tuple(getattr(mod, c["legs_attr"]))
+        k = int(getattr(mod, c["bound_k_attr"]))
+        n = int(getattr(mod, c["bound_n_attr"]))
+        p0 = float(c.get("null_p", 0.5))
+    except Exception as e:                                              # noqa: BLE001
+        return {"state": "UNVERIFIED", "why": "composite contract unreadable (%s: %s)" % (type(e).__name__, e)}
+    if c.get("this_leg") not in legs or len(legs) < 2 or c.get("requires_all") is not True:
+        return {"state": "UNVERIFIED", "legs": list(legs),
+                "why": ("declared leg %r is not one of %s.%s=%s, or the conjunction is not declared all-legs"
+                        % (c.get("this_leg"), c.get("module"), c.get("legs_attr"), list(legs)))}
+    if not (0 < k <= n) or not (0.0 < p0 < 1.0):
+        return {"state": "UNVERIFIED", "why": "bounding leg constants out of range (k=%s, n=%s, p0=%s)" % (k, n, p0)}
+    tail = sum(math.comb(n, i) * p0 ** i * (1 - p0) ** (n - i) for i in range(k, n + 1))
+    t_eq = NormalDist().inv_cdf(1.0 - tail)
+    return {"state": "VERIFIED", "legs": list(legs), "bound_false_fire": round(tail, 4),
+            "t_equiv": round(t_eq, 4), "diagnostic": verdict_for(t_eq, 1.0),
+            "why": ("conjunction %s.%s verified; null false-fire <= P(Bin(%d, %.2f) >= %d) = %.4f "
+                    "(t_equiv %.2f)" % (c["module"], c["legs_attr"], n, p0, k, tail, t_eq))}
+
+
 def threshold_class_verdict(t: dict, *, today: Optional[str] = None, rationale: Optional[dict] = None,
                             on_disk: Optional[set] = None) -> dict:
     """ISA-0695 (BS-0695 §5E) — judge a threshold by the authority actually in force, per its basis class.
@@ -1765,6 +1804,15 @@ def threshold_class_verdict(t: dict, *, today: Optional[str] = None, rationale: 
         if rat.get("revalidate_by") and str(rat["revalidate_by"]) < today:
             missing.append("revalidate_by_past(%s)" % rat["revalidate_by"])
         out["missing"] = missing
+        if t.get("composite"):
+            # ISA-0458: a leg of a declared conjunction is judged on the conjunction (verified in code)
+            comp = composite_contract_verdict(t)
+            out["composite"] = comp
+            if comp["state"] != "VERIFIED":
+                return dict(out, verdict="COMPOSITE_CONTRACT_UNVERIFIED", severity="RED",
+                            why="declared as one leg of a conjunction that could not be verified in code: %s"
+                                % comp["why"])
+            diag = comp["diagnostic"]
         if diag["verdict"] in (VERDICT_NON_DISCRIMINATING, VERDICT_NON_INFORMATIVE):
             return dict(out, verdict="DECLARED_POLICY_INSIDE_NOISE", severity="RED",
                         why="declared policy whose own measured diagnostic is %s (t=%s) - a decision is owed"
@@ -2757,6 +2805,21 @@ def _selftest() -> int:
     ok("ISA-0695 the PROBATION_TRAIL_PP shape (declared policy inside its own noise, t=0.13) stays RED - not greenwashed",
        threshold_class_verdict({"name": "POL", "value": 5.0, "sd_of_quantity": 38.6, "basis_class": "DECLARED_POLICY"},
                                rationale=_rat)["verdict"] == "DECLARED_POLICY_INSIDE_NOISE")
+    _comp = {"name": "PROBATION_TRAIL_PP", "value": 5.0, "sd_of_quantity": 38.6, "basis_class": "DECLARED_POLICY",
+             "composite": {"module": "retention", "legs_attr": "PROBATION_LEGS", "this_leg": "trail_pp",
+                           "requires_all": True, "bound_k_attr": "PROBATION_MIN_TRAILING_MONTHS",
+                           "bound_n_attr": "PROBATION_MONTHS", "null_p": 0.5}}
+    _cv = threshold_class_verdict(_comp, rationale=_rat)
+    ok("ISA-0458 MUST-FIRE: a leg of the verified D19 conjunction is judged on the conjunction "
+       "(bound 299/4096 = 0.073, t_equiv ~1.45) - not DECLARED_POLICY_INSIDE_NOISE",
+       _cv["verdict"] != "DECLARED_POLICY_INSIDE_NOISE" and (_cv.get("composite") or {}).get("bound_false_fire") == 0.073)
+    ok("ISA-0458 NEGATIVE CONTROL: a composite whose leg is NOT in the code's conjunction is RED "
+       "(COMPOSITE_CONTRACT_UNVERIFIED), never silently passed",
+       threshold_class_verdict(dict(_comp, composite=dict(_comp["composite"], this_leg="no_such_leg")),
+                               rationale=_rat)["verdict"] == "COMPOSITE_CONTRACT_UNVERIFIED")
+    ok("ISA-0458 NEGATIVE CONTROL: an unreadable composite module is RED, not a pass",
+       threshold_class_verdict(dict(_comp, composite=dict(_comp["composite"], module="no_such_module_zz")),
+                               rationale=_rat)["severity"] == "RED")
     ok("ISA-0695 NEGATIVE CONTROL: an unclassified threshold is RED",
        threshold_class_verdict({"name": "U", "value": 1})["severity"] == "RED")
     ok("ISA-0695 DERIVED without a boundary test on disk is RED",

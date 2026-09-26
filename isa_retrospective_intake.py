@@ -99,19 +99,50 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# ⚑ ISA-0692 (25-Sep-2026) — THE RETROSPECTIVE FORMATS THE PARSER DID NOT READ. Measured on the four
+#   files ISA-0638 flagged: (11-Sep) a "## CRITICAL — <title>" SECTION whose heading is the finding;
+#   (18/19-Sep) "- **Low severity:** ..." bullets under "## Data Quality Findings"; (25-Sep) UNNUMBERED
+#   "### <title>" findings under "## Findings", beside "### CRITICAL — none identified this run.".
+#   And the suspicious-zero flag fired on CLEAN prose ("No CRITICAL findings this run"). A clean
+#   statement is recognised ONCE here and is never a finding and never a suspicion.
+CLEAN_STATEMENT = re.compile(
+    r"\b(no|none|zero)\b[^.\n|]{0,40}\b(critical|high|findings?|issues?|action items?)\b|"
+    r"\b(critical|high)\b\s*[\u2014\u2013:-]+\s*none\b|\bnone identified\b", re.I)
+_SEV_SECTION = re.compile(r"^(?P<sev>CRITICAL|HIGH)\b\s*[\u2014\u2013:-]+\s*(?P<title>.+)$", re.I)
+_H3_ANY = re.compile(r"^###\s+(?P<title>.+?)\s*$")
+_SEV_BULLET = re.compile(r"^\s*[-*]\s+\*\*(?P<sev>critical|high|medium|low)(\s+severity)?\s*:?\s*\*\*\s*:?\s*"
+                         r"(?P<title>.+)$", re.I)
+
+
 def parse(path: Path) -> dict:
-    """Findings, plus the sections deliberately skipped. Both are returned: a parser that
-    reports only what it matched cannot be audited for what it missed (R4.9)."""
+    """Findings, plus the sections deliberately skipped and the clean statements recognised. All are
+    returned: a parser that reports only what it matched cannot be audited for what it missed (R4.9)."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    findings, skipped, section, in_scope = [], [], "", False
+    findings, skipped, clean, section, in_scope = [], [], [], "", False
+    extra = 0
     i = 0
     while i < len(lines):
         ln = lines[i]
         if ln.startswith("## "):
             section = ln[3:].strip()
-            in_scope = bool(FINDING_SECTIONS.search(section))
-            if not in_scope:
-                skipped.append(section)
+            sev = _SEV_SECTION.match(section)
+            if CLEAN_STATEMENT.search(section):
+                in_scope = False
+                clean.append(section)
+            elif sev:
+                # the section heading IS the finding (ISA-0692); its body stays in scope
+                in_scope = True
+                body = []
+                j = i + 1
+                while j < len(lines) and not lines[j].startswith("## "):
+                    body.append(lines[j])
+                    j += 1
+                findings.append({"section": section, "n": 0, "title": _clean(section)[:220],
+                                 "raw": "\n".join([ln] + body).strip(), "line": i + 1})
+            else:
+                in_scope = bool(FINDING_SECTIONS.search(section))
+                if not in_scope:
+                    skipped.append(section)
             i += 1
             continue
         if in_scope:
@@ -127,13 +158,39 @@ def parse(path: Path) -> dict:
                                  "raw": "\n".join([ln] + body).strip(), "line": i + 1})
                 i = j
                 continue
+            m = _H3_ANY.match(ln)
+            if m:
+                body = []
+                j = i + 1
+                while j < len(lines) and not lines[j].startswith(("## ", "### ")):
+                    body.append(lines[j])
+                    j += 1
+                if CLEAN_STATEMENT.search(m.group("title")):
+                    clean.append(_clean(m.group("title")))
+                else:
+                    extra += 1
+                    findings.append({"section": section, "n": 50 + extra,
+                                     "title": _clean(m.group("title"))[:220],
+                                     "raw": "\n".join([ln] + body).strip(), "line": i + 1})
+                i = j
+                continue
+            m = _SEV_BULLET.match(ln)
+            if m:
+                extra += 1
+                sev = m.group("sev").upper()
+                findings.append({"section": section, "n": 80 + extra,
+                                 "title": (("%s: " % sev if sev in ("CRITICAL", "HIGH") else "")
+                                           + _clean(m.group("title")))[:220],
+                                 "raw": ln.strip(), "line": i + 1})
+                i += 1
+                continue
             m = _NUMBERED.match(ln)
             if m and len(_clean(m.group("title"))) > 15:
                 findings.append({"section": section, "n": int(m.group("n")),
                                  "title": _clean(m.group("title"))[:220],
                                  "raw": ln.strip(), "line": i + 1})
         i += 1
-    return {"findings": findings, "skipped_sections": sorted(set(skipped))}
+    return {"findings": findings, "skipped_sections": sorted(set(skipped)), "clean_statements": clean}
 
 
 # ─────────────────────────────────────────────────────────────────────────────────────────
@@ -369,7 +426,7 @@ def ingest(root=None, backfill=False, dry_run=False) -> dict:
     root = root_dir(root)
     existing = {a for it in R.read_all() for a in it.get("aliases", [])}
     log = load_log()
-    written, per_file, excluded = [], {}, []
+    written, per_file, excluded, linked = [], {}, [], []
     for p in sorted(root.glob(RETRO_GLOB)):
         text = p.read_text(encoding="utf-8", errors="replace")
         h = _sha(text)
@@ -382,6 +439,13 @@ def ingest(root=None, backfill=False, dry_run=False) -> dict:
         for rec in items:
             if rec["aliases"][1] in existing:
                 continue                      # content-derived: a re-run cannot inflate the record
+            # ⚑ ISA-0643 (25-Sep-2026): a finding whose content fingerprint has been LINKED to an
+            #   existing canonical owner (isa_register.register_alias, source retro_link) is not a new
+            #   cause - it is recorded as linked, and no second durable id is minted.
+            _owner = R.resolve_alias(rec["aliases"][1])
+            if _owner:
+                linked.append({"file": p.name, "fingerprint": rec["aliases"][1], "owner": _owner})
+                continue
             if not dry_run:
                 rec["id"] = R.next_id()
                 rec.pop("registrability_rule", None)   # not a schema field; audit lives in the log
@@ -394,13 +458,14 @@ def ingest(root=None, backfill=False, dry_run=False) -> dict:
         per_file[p.name] = new
         if not dry_run:
             log["files"][p.name] = {"sha": h, "ingested_on": R._today(), "new_items": new,
+                                    "linked_to_owner": len([x for x in linked if x["file"] == p.name]),
                                     "informational": len([e for e in info]),
                                     "intake_version": INTAKE_VERSION}
     if not dry_run:
         save_log(log)
         save_nonregistrable(excluded)
     return {"ingested": len(written), "per_file": per_file, "dry_run": dry_run,
-            "informational": len(excluded)}
+            "informational": len(excluded), "linked": linked}
 
 
 def nonregistrable_path() -> Path:
@@ -440,13 +505,14 @@ def _suspicious_zero_findings(path: Path, known: dict) -> str | None:
     """None if fine; else the reason a 0-finding ingestion of this file is not trustworthy."""
     if known is None:
         return None                                    # coverage() already flags "never ingested"
-    if (known.get("new_items") or 0) or (known.get("informational") or 0):
+    if (known.get("new_items") or 0) or (known.get("informational") or 0) or (known.get("linked_to_owner") or 0):
         return None                                    # it found SOMETHING - not this defect's shape
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    hit = _SUSPICIOUS_ZERO_FINDINGS.search(text)
+    # ISA-0692: "No CRITICAL findings this run" is a clean statement, not a suspicion
+    hit = _SUSPICIOUS_ZERO_FINDINGS.search(CLEAN_STATEMENT.sub(" ", text))
     if not hit:
         return None
     return (f"{path.name}: ingested on {known.get('ingested_on')} with ZERO findings "
@@ -692,12 +758,29 @@ def write_deliverable_baseline(root=None, *, as_of: str = None) -> dict:
     return doc
 
 
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}")
+# ⚑ ISA-0715 (25-Sep-2026): a TABLE under a findings heading is a findings table only if its header
+#   row says so (a finding/issue/title/item/id/defect/problem/# column). A quantitative DATA table
+#   (MCTR rows, tracking-error rows, authority matrices) declares none of those and its rows are data,
+#   not unregistered findings. A findings table - or a bare list row - still needs an id or token.
+_FINDINGS_TABLE_HEADER = re.compile(r"\b(id|item|items|finding|findings|issue|issues|title|defect|problem|#)\b", re.I)
+
+
 def deliverable_violations(text: str, issued: set) -> list:
     out, in_findings = [], False
-    for i, line in enumerate(text.split("\n"), 1):
+    lines = text.split("\n")
+    table = None                       # None | "data" | "findings"
+    for i, line in enumerate(lines, 1):
         h = re.match(r"^\s*#{1,6}\s+(.*)$", line)
         if h:
             in_findings = bool(FINDING_SECTIONS.search(h.group(1)))
+            table = None
+        is_pipe = line.lstrip().startswith("|")
+        if not is_pipe:
+            table = None
+        elif table is None and i < len(lines) and _TABLE_SEP.match(lines[i]):
+            table = "findings" if _FINDINGS_TABLE_HEADER.search(line) else "data"
+            continue                   # the header row itself is never a finding
         ids = {"ISA-" + x for x in ISSUED_ID.findall(line)}
         bad = sorted(ids - issued)
         if bad:
@@ -706,6 +789,8 @@ def deliverable_violations(text: str, issued: set) -> list:
         if PROVISIONAL_MARKER.search(line) and not disposed:
             out.append((i, "D2", "provisional backlog marker %r with no issued id or disposition"
                         % PROVISIONAL_MARKER.search(line).group(0)))
+        if is_pipe and (table == "data" or _TABLE_SEP.match(line)):
+            continue                   # ISA-0715: data-table rows and separators are not findings
         if not h and in_findings and _ROW.match(line) and line.strip("|-: \t") and not disposed \
                 and not re.match(r"^\s*\|.*\b(id|item|finding|#)\b.*\|\s*$", line, re.I):
             out.append((i, "D3", "findings-section row carries no issued id or disposition token"))
@@ -737,6 +822,13 @@ def deliverable_coverage(root=None, issued=None) -> list:
         for ln, rule, why in deliverable_violations(text, issued):
             errs.append("ISA-0473 %s: %s:%d %s (R7.7)" % (rule, p.name, ln, why))
     return errs
+
+
+def parse_text_fixture(root: Path, name: str, text: str) -> dict:
+    """Selftest helper: write `text` as `name` under `root` and parse it."""
+    p = Path(root) / name
+    p.write_text(text, encoding="utf-8")
+    return parse(p)
 
 
 def selftest(verbose=True) -> int:
@@ -855,8 +947,30 @@ def selftest(verbose=True) -> int:
         # recognise (the Composio-fallback shape: a "## CRITICAL - ..." heading, no
         # "### N." findings) must not read as coverage-clean just because ingestion
         # legitimately found nothing TO PARSE.
+        # ⚑ ISA-0692: the ORIGINAL fixture ("## CRITICAL - ..." section) is now PARSED; the
+        #   suspicious-zero control needs a format the parser still cannot read.
+        _p692 = parse_text_fixture(tmp, "20260910_X_retrospective.md",
+            '# X Retrospective\n\n## CRITICAL - Local bash sandbox unavailable\n- the local device shell could not be reached\n')
+        ok(len(_p692["findings"]) == 1 and _p692["findings"][0]["title"].startswith("CRITICAL"),
+           "ISA-0692 MUST-FIRE: a '## CRITICAL - <title>' section is itself a finding")
+        (tmp / "20260910_X_retrospective.md").unlink()
+        _pc = parse_text_fixture(tmp, "20260918_Y_retrospective.md",
+            '# Y\n\n## Data Quality Findings\n- **Low severity:** op_margin=-155.6 flagged for ROIV\n\n'
+            '## No Action Items\nNo CRITICAL findings this run.\n')
+        ok(len(_pc["findings"]) == 1 and "ROIV" in _pc["findings"][0]["title"],
+           "ISA-0692 MUST-FIRE: a '- **Low severity:** ...' bullet under a findings section is parsed")
+        ok("No Action Items" in _pc["clean_statements"],
+           "ISA-0692: 'No Action Items' / 'No CRITICAL findings' is recognised as a CLEAN statement")
+        (tmp / "20260918_Y_retrospective.md").unlink()
+        _p25 = parse_text_fixture(tmp, "20260925_Z_retrospective.md",
+            '# Z\n\n## Findings\n\n### CRITICAL \u2014 none identified this run.\n\n'
+            '### Data Quality \u2014 gate_variables outlier\nSKHY revenue_latest implausible.\n')
+        ok([f["title"] for f in _p25["findings"]] == ["Data Quality \u2014 gate_variables outlier"],
+           "ISA-0692: an unnumbered '### <title>' is a finding; '### CRITICAL - none identified' is NOT")
+        (tmp / "20260925_Z_retrospective.md").unlink()
         (tmp / "20260911_NASDAQ_retrospective.md").write_text(
-            '# NASDAQ Retrospective\n\n## CRITICAL - Local bash sandbox unavailable\n- the local device shell could not be reached\n- fell back to Composio for the whole run\n',
+            '# NASDAQ Retrospective\n\n## Summary\nA CRITICAL problem: the local device shell could not be reached, '
+            'so the whole run fell back to Composio.\n',
             encoding="utf-8")
         susp = ingest(tmp, backfill=True)
         ok(susp["per_file"].get("20260911_NASDAQ_retrospective.md") == 0,
@@ -874,6 +988,25 @@ def selftest(verbose=True) -> int:
            f"ISA-0638 NEGATIVE CONTROL: a 0-finding ingestion of a file naming NO severity "
            f"word must stay coverage-clean - the control is not vacuous; got {cov2}")
 
+        (tmp / "20260913_clean_retrospective.md").write_text(
+            '# Clean Retrospective\n\n## No Action Items\nNo CRITICAL findings this run.\n', encoding="utf-8")
+        ingest(tmp, backfill=True)
+        ok(not any("20260913_clean_retrospective.md" in c for c in coverage(tmp)),
+           "ISA-0692 NEGATIVE CONTROL: 'No CRITICAL findings this run' does NOT raise the suspicious-zero flag")
+        # ISA-0643: a finding linked to an existing owner mints no second id and reads as found
+        _lf = tmp / "20260926_L_retrospective.md"
+        _lf.write_text('# L\n\n## Findings\n\n### Data Quality \u2014 op_margin implausible for ROIV\nbody\n',
+                       encoding="utf-8")
+        _items = build_items(_lf, True)
+        _owner = R.read_all()[0]["id"]
+        R.register_alias(_items[0]["aliases"][1], _owner, source="retro_link")
+        _li = ingest(tmp, backfill=True)
+        ok(_li["per_file"].get("20260926_L_retrospective.md") == 0
+           and any(x["owner"] == _owner for x in _li["linked"]),
+           "ISA-0643 MUST-FIRE: a retrospective finding LINKED to an existing owner is not re-registered")
+        ok(not any("20260926_L_retrospective.md" in c for c in coverage(tmp)),
+           "ISA-0643: a linked-only ingestion is not a suspicious zero")
+        _lf.unlink()
         again = ingest(tmp, backfill=True)
         ok(again["ingested"] == 0,
            "content-derived ids: a re-run must not inflate the record even with --backfill")
@@ -966,6 +1099,15 @@ def selftest(verbose=True) -> int:
     (dtmp / "Dashboard" / "state" / DELIVERABLE_BASELINE).unlink()
     ok(any("UNKNOWN" in e for e in deliverable_coverage(dtmp, issued)),
        "ISA-0473 NEGATIVE CONTROL: no baseline -> UNKNOWN, never PASS")
+    # ── ISA-0715: a DATA table under a findings heading is not a list of findings ──
+    _dt = ("## Findings\n\n| Ticker | MCTR | Weight | Gap |\n|---|---|---|---|\n| MU | 38.4% | 47.3% | 8.9pp |\n"
+           "| AVGO | 20.1% | 18.0% | 2.1pp |\n\n| # | Finding |\n|---|---|\n| 1 | sector field drift |\n"
+           "| 2 | ISA-0002 stale anchor |\n")
+    _v = deliverable_violations(_dt, issued)
+    ok(not any(ln in (5, 6) for ln, _r, _w in _v),
+       "ISA-0715 NEGATIVE CONTROL: rows of a DATA table (header declares no finding/issue/title/id column) are not findings")
+    ok(any(ln == 10 and r == "D3" for ln, r, _w in _v) and not any(ln == 11 for ln, _r, _w in _v),
+       "ISA-0715 MUST-FIRE: a FINDINGS table row with no id still FAILS D3; the row with an issued id passes")
     shutil.rmtree(dtmp, ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
     if verbose:

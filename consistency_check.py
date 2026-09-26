@@ -1970,6 +1970,114 @@ def pair_no_gate_reads_conviction_score(root=None):
             % (m, ln, f, form) for m, ln, f, form in hits]
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0466 / ISA-0698 RESIDUAL (25-Sep-2026) — THE CAPITAL JUDGEMENT PRECONDITION READS NO
+# RETIRED FIELD
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# conviction_capture is EXEMPT from pair_no_gate_reads_conviction_score (it is the capture
+# instrument), which left the ONE module whose per-name errors refuse capital unpoliced: on
+# TB-2026-09-24-10 an optional D8 rationale or a /100 `classification` refused new money.
+# This pair names the functions that build the capital-precondition error set and asserts, by
+# AST (never file text - ISA-0446), that none of them READS a retired field: no Name, Attribute,
+# Subscript key or .get() key equal to a D8/D9/D10 dimension, `classification`, a conviction
+# total/basis or A5v3 `size_mode`. Prose inside the functions (strings that merely MENTION them
+# in an error message) is not a read. BLIND, never green, when a named function is absent.
+_CAPITAL_JUDGEMENT_FUNCS = ("capital_precondition_errors", "_d21_errors", "_vci_hurdle_answer_errors")
+_RETIRED_JUDGEMENT_FIELDS = ("d8_macro_resilience", "d9_portfolio_fit", "d10_execution_practicality",
+                             "JUDGEMENT_DIMS", "classification", "conviction_total",
+                             "conviction_normalised_100", "conviction_basis", "strategic_conviction_score",
+                             "size_mode", "d1_7_prerun_total")
+
+
+def pair_capital_judgement_no_retired_fields(root=None, _src=None):
+    import ast as _ast
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    try:
+        tree = (_ast.parse(_src) if _src is not None
+                else _sc.parse_path(os.path.join(root, "conviction_capture.py")))
+    except Exception as e:                                              # noqa: BLE001
+        return ["ISA-0698: conviction_capture.py unreadable (%s) - the capital-judgement authority "
+                "check could NOT run (BLIND, never green)" % e]
+    fns = {n.name: n for n in _ast.walk(tree)
+           if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name in _CAPITAL_JUDGEMENT_FUNCS}
+    errs = ["ISA-0698: %s is not defined in conviction_capture - the capital-precondition authority "
+            "check is BLIND for it, never green" % f for f in _CAPITAL_JUDGEMENT_FUNCS if f not in fns]
+    for name, fn in fns.items():
+        for sub in _ast.walk(fn):
+            hit = None
+            if isinstance(sub, _ast.Name) and sub.id in _RETIRED_JUDGEMENT_FIELDS:
+                hit = sub.id
+            elif isinstance(sub, _ast.Attribute) and sub.attr in _RETIRED_JUDGEMENT_FIELDS:
+                hit = sub.attr
+            elif isinstance(sub, _ast.Subscript):
+                k = getattr(sub, "slice", None)
+                k = getattr(k, "value", k)
+                if isinstance(k, _ast.Constant) and k.value in _RETIRED_JUDGEMENT_FIELDS:
+                    hit = k.value
+            elif (isinstance(sub, _ast.Call) and isinstance(sub.func, _ast.Attribute)
+                  and sub.func.attr in ("get", "pop", "setdefault") and sub.args
+                  and isinstance(sub.args[0], _ast.Constant)
+                  and sub.args[0].value in _RETIRED_JUDGEMENT_FIELDS):
+                hit = sub.args[0].value
+            if hit:
+                errs.append("ISA-0698/ISA-0466: conviction_capture.%s line %d READS retired field `%s`. "
+                            "The capital precondition is thesis_state + rationale + machine "
+                            "evidence_state (+ VCI hurdle) only - D8/D9/D10, the /100 and A5v3 may "
+                            "never refuse or admit capital." % (name, getattr(sub, "lineno", 0), hit))
+    return errs
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0710 (25-Sep-2026) — ONE EXCLUDED-DIRECTORY AUTHORITY, AND THE THREE ENUMERATIONS AGREE
+# ══════════════════════════════════════════════════════════════════════════════════════════
+def _enumerations(root):
+    from pathlib import Path as _P
+    import framework_atlas as _fa, framework_integrity as _fi, release_gate as _rg
+    return {"framework_atlas": {str(p.relative_to(root)).replace(os.sep, "/") for p in _fa._iter_py(_P(root))},
+            "framework_integrity": {os.path.relpath(p, root).replace(os.sep, "/")
+                                    for p in _fi.source_files(root, include_tests=True, exclude_self=False)},
+            "release_gate": {os.path.relpath(p, root).replace(os.sep, "/") for p in _rg._iter_source(root)}}
+
+
+def pair_excluded_dirs_single_home(root=None, _enums=None):
+    """ISA-0710. framework_atlas, framework_integrity and release_gate must enumerate the SAME .py
+    population, through isa_tree_scope.excluded_dir (ISA-0710's one home). Checked twice: on a FIXTURE tree that plants a
+    registered-computer copy under _candidate_evidence/ and _dryrun_outputs/ (neither may be
+    enumerated; the ordinary files must be - so an enumerator that excludes everything cannot pass),
+    and on the REAL tree (the three sets are equal). `_enums` injects enumerators for the controls."""
+    import tempfile as _tf, shutil as _sh
+    errs = []
+    enum = _enums or _enumerations
+    t = _tf.mkdtemp(prefix="isa0710_")
+    try:
+        for rel in ("keep.py", "pkg/k2.py", "_candidate_evidence/ISA-X/capability_checks.py",
+                    "_dryrun_outputs/d.py", "_bak_old/b.py"):
+            os.makedirs(os.path.dirname(os.path.join(t, rel)) or t, exist_ok=True)
+            with open(os.path.join(t, rel), "w", encoding="utf-8") as fh:
+                fh.write("x = 1\n")
+        try:
+            got = enum(t)
+        except Exception as e:                                          # noqa: BLE001
+            return ["ISA-0710: the enumerations could not run (%s) - BLIND, never green" % e]
+        want = {"keep.py", "pkg/k2.py"}
+        for name, g in got.items():
+            if g != want:
+                errs.append("ISA-0710: %s enumerates %s on the fixture tree, expected %s - an evidence or "
+                            "backup copy is being read as framework source (or real source is dropped)"
+                            % (name, sorted(g), sorted(want)))
+    finally:
+        _sh.rmtree(t, ignore_errors=True)
+    if _enums is None:
+        root = root or os.path.dirname(os.path.abspath(__file__))
+        real = _enumerations(root)
+        base = real["release_gate"]
+        for name, g in real.items():
+            if g != base:
+                errs.append("ISA-0710: %s and release_gate enumerate different source populations on the "
+                            "real tree (+%s / -%s)" % (name, sorted(g - base)[:5], sorted(base - g)[:5]))
+    return errs
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # P4 — ONE COMPUTER FOR stock_max, AND THE 0.75 / 0.80 PAIR KEPT DISTINCT
@@ -6272,6 +6380,8 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
         errs += _tally("pair_prose_quantity_values", pair_prose_quantity_values(mctx))      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
         errs += _tally("pair_prose_sizing_numbers", pair_prose_sizing_numbers(mctx))      # P0.5 / P7.7 - ISA-0466 (28-Aug-2026)
         errs += _tally("pair_no_gate_reads_conviction_score", pair_no_gate_reads_conviction_score())  # A3 / P7.1 - D21 (28-Aug-2026)
+        errs += _tally("pair_capital_judgement_no_retired_fields", pair_capital_judgement_no_retired_fields())  # ISA-0698/0466 residual (25-Sep-2026)
+        errs += _tally("pair_excluded_dirs_single_home", pair_excluded_dirs_single_home())  # ISA-0710 (25-Sep-2026)
         errs += _tally("pair_single_stock_max_authority", pair_single_stock_max_authority())     # P4-A1/A2 - ISA-0454 (28-Aug-2026)
         errs += _tally("pair_entry_and_review_fractions_distinct", pair_entry_and_review_fractions_distinct())  # P4-A10 - P4.4
         errs += _tally("pair_projection_carries_consumer_fields", pair_projection_carries_consumer_fields())   # ISA-0487 (29-Aug-2026)
@@ -6326,6 +6436,33 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
 
 
 def _selftest():
+    # ---- ISA-0710 (25-Sep-2026): one excluded-directory authority ------------------------------
+    assert not pair_excluded_dirs_single_home(), pair_excluded_dirs_single_home()
+    def _leaky(root):
+        out = _enumerations(root)
+        out["framework_integrity"] = out["framework_integrity"] | {"_candidate_evidence/ISA-X/capability_checks.py"}
+        return out
+    assert any("framework_integrity" in e for e in pair_excluded_dirs_single_home(_enums=_leaky)), \
+        "NEGATIVE CONTROL: an enumerator that reads _candidate_evidence must be caught"
+    assert pair_excluded_dirs_single_home(_enums=lambda r: {"a": set(), "b": set(), "c": set()}), \
+        "NEGATIVE CONTROL: an enumerator that drops real source cannot pass"
+    assert any("BLIND" in e for e in pair_excluded_dirs_single_home(_enums=lambda r: 1 / 0))
+    # ---- ISA-0698/0466 residual (25-Sep-2026): capital judgement reads no retired field --------
+    assert not pair_capital_judgement_no_retired_fields(), pair_capital_judgement_no_retired_fields()
+    _ok_src = ("def capital_precondition_errors(n, e=None):\n"
+               "    return ['D8/D9/D10 and classification are optional (prose, not a read)']\n"
+               "def _d21_errors(tag, n, m=None):\n    return [n.get('thesis_state')]\n"
+               "def _vci_hurdle_answer_errors(tag, n):\n    return []\n")
+    assert not pair_capital_judgement_no_retired_fields(_src=_ok_src), \
+        "NEGATIVE CONTROL: prose naming a retired field inside a message must NOT trip the pair"
+    _bad_src = _ok_src.replace("return [n.get('thesis_state')]",
+                               "return [n['dimensions'].get('d8_macro_resilience')]")
+    assert any("d8_macro_resilience" in e for e in pair_capital_judgement_no_retired_fields(_src=_bad_src)), \
+        "MUST-FIRE: a real read of a D8 field inside the capital precondition must be caught"
+    _bad2 = _ok_src.replace("return [n.get('thesis_state')]", "return [n.get('classification')]")
+    assert pair_capital_judgement_no_retired_fields(_src=_bad2), "MUST-FIRE: a .get('classification') read"
+    assert any("BLIND" in e for e in pair_capital_judgement_no_retired_fields(
+        _src="def _d21_errors(t, n):\n    return []\n")), "BLIND when the named functions are absent"
     # ---- ISA-0479/0480/0481/0482: occurrence-guard coverage (27-Aug-2026) -------------------
     _setup_ok = (
         "| isa-nasdaq-fri4 | NASDAQ | x | `0 9 22-28 * 5` | 4th Friday |\n"

@@ -958,10 +958,16 @@ def stock_max(candidates: List[dict], *, nav_gbp: float, capital_on_offer_gbp: f
         # GBP 1,214.60) was refused as "a NEW position may not open below the floor".
         # The gap two lines above is ALREADY computed from this value, so the row was carrying
         # the arithmetic and dropping the fact it was derived from.
+        # ⚑ ISA-0752 (25-Sep-2026): the use row CARRIES the evidence_state it was sized on. It
+        #   was dropped here, so every proposal/obligation downstream read u.get("evidence_state")
+        #   as None (HALO 12-Sep: evidence_state_at_entry null). Carried, never recomputed - the
+        #   value is the canonical producer's (capital_destination pipeline.evidence_states ->
+        #   stock_candidates), the same one the judgement scope now carries (ISA-0698).
         uses.append({"ticker": tk, "rung": t["rung"], "target_pct": t["target_pct"],
                      "gbp": round(gap, 2), "capped_by": t["capped_by"],
                      "current_value_gbp": round(float(c.get("current_value_gbp") or 0.0), 2),
-                     "correlation_measured": t["correlation_measured"]})
+                     "correlation_measured": t["correlation_measured"],
+                     "evidence_state": c["evidence_state"]})
         total += gap
     derived = min(total, float(capital_on_offer_gbp))
     return {
@@ -1344,6 +1350,10 @@ def activate_from_executions(entries: List[dict], plan_loader, *, today=None, pa
                "authorised_allocation_gbp": prop.get("authorised_allocation_gbp"),
                "shortfall_at_activation_gbp": shortfall, "obligation_gbp": shortfall,
                "evidence_state_at_entry": prop.get("evidence_state"),
+               # ISA-0752: a plan written before the use row carried evidence says so, typed
+               "evidence_state_at_entry_missing_reason": (None if prop.get("evidence_state") is not None
+                                                          else "PLAN_PREDATES_ISA_0752: the authorised plan's "
+                                                               "proposal carried no evidence_state"),
                "conditional": bool(prop.get("conditional")), "condition": prop.get("condition"),
                "voided": False, "voided_reason": None,
                "lifecycle": [{"on": today, "to": "ACTIVE", "by": "position_sizing.activate_from_executions"}],
@@ -1376,6 +1386,12 @@ def activate_from_executions(entries: List[dict], plan_loader, *, today=None, pa
                 "EXECUTION_DEVIATION_BELOW_MIN_ENTRY", "PLAN_NOT_CONTEMPORANEOUS", "BLOCKED_ON_ISA-0686",
                 "UNVERIFIED_EXECUTION", "NO_AUTHORISED_PLAN")],
             "doc": doc}
+
+
+def _declared_evidence_states() -> set:
+    """The declared evidence-state vocabulary, read from its one home (evidence_state.STATE_TO_RUNG)."""
+    import evidence_state as _es
+    return set(_es.STATE_TO_RUNG)
 
 
 def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
@@ -1438,6 +1454,22 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
     import copy as _copy
     doc = _copy.deepcopy(obligations if obligations is not None else load_fill_obligations())
     proposed, block_events, non_binding = [], [], []
+    proposal_refusals = []                 # ISA-0752: named, never silent
+
+    def _propose(p):
+        """ISA-0752. A fill-obligation PROPOSAL carries the declared evidence_state it was sized on.
+        Missing or undeclared evidence is REFUSED AS AN OBLIGATION (named in
+        `obligation_proposals_refused`); the allocation row itself is unchanged - this gate decides
+        only whether a first claim may be proposed, never how much is bought."""
+        _ev = p.get("evidence_state")
+        if _ev is None or _ev not in _declared_evidence_states():
+            proposal_refusals.append({"ticker": p.get("ticker"), "kind": p.get("kind"),
+                                      "evidence_state": _ev,
+                                      "reason": ("EVIDENCE_STATE_MISSING_OR_UNDECLARED - a fill "
+                                                 "obligation may not be proposed on an evidence state "
+                                                 "the canonical producer did not supply (ISA-0752)")})
+            return
+        proposed.append(p)
 
     # ── ISA-0705 — partition BEFORE the queue is built. A replacement-only name never
     #    competes for `capital_gbp` at all, so no ordering accident can fund it.
@@ -1683,7 +1715,7 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
             # headroom, not capital. Its later fill is CONDITIONAL (fresh headroom + continued
             # eligibility); a blocked fill releases capital the same run (branch above).
             row["obligation_gbp"] = round(gap - alloc, 2)
-            proposed.append({
+            _propose({
                 "ticker": tk, "state": "PROPOSED", "proposed_on": today or datetime.date.today().isoformat(),
                 "authorised_allocation_gbp": round(alloc, 2), "target_rung": u.get("rung"),
                 "target_pct": u.get("target_pct"), "target_gbp": round(gap, 2), "is_new": is_new,
@@ -1697,7 +1729,7 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
                           "ISA-0701: PROPOSED only - activates on confirmed execution")})
         elif state == "UNDERFILLED":
             row["obligation_gbp"] = round(gap - alloc, 2)
-            proposed.append({
+            _propose({
                 "ticker": tk, "state": "PROPOSED", "kind": "UNDERFILLED_ENTRY",
                 "proposed_on": today or datetime.date.today().isoformat(),
                 "authorised_allocation_gbp": round(alloc, 2), "target_rung": u.get("rung"),
@@ -1836,6 +1868,7 @@ def allocate(qualifying_uses: List[dict], *, capital_gbp: float, nav_gbp: float,
         "obligations_persisted_to": None,          # ISA-0701: a proposal never writes the store
         "obligations_store_mutated": False,
         "proposed_obligations": proposed,
+        "obligation_proposals_refused": proposal_refusals,
         "obligation_block_events": block_events,
         "obligations_non_binding": non_binding,
         "obligations_open": sorted(live_obl),
@@ -2063,8 +2096,11 @@ def _selftest_isa0465(verbose: bool = False) -> int:
     sec_cap = _ccm.SECTOR_CAP_NAV * NAV
     held = {"H1": sec_cap - floor - 500.0, "ZZ": 60_000.0}
     tax["sector"]["ZZ"], tax["theme"]["ZZ"] = {"value": "Other"}, []
-    uses = [{"ticker": "NEW1", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 9},
-            {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
+    # ISA-0752: fixtures carry the evidence_state the real producer (stock_max) now always supplies
+    uses = [{"ticker": "NEW1", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 9,
+             "evidence_state": "CONFIRMED"},
+            {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8,
+             "evidence_state": "THIN"}]
     out = allocate(uses, capital_gbp=12_000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
                    obligations={"obligations": []}, concentration=hook(held))
     r = {x["ticker"]: x for x in out["rows"]}
@@ -2092,8 +2128,8 @@ def _selftest_isa0465(verbose: bool = False) -> int:
                             "obligation_id": "OBL-ob1", "source_decision_id": "2026-09-01::OB1::buy",
                             "execution_reference": "REF-ob1"}]}
     held3 = {"OB1": sec_cap, "ZZ": 60_000.0}
-    uses3 = [{"ticker": "OB1", "gbp": 2000.0, "current_value_gbp": sec_cap, "rung": "NORMAL", "source_score": 1},
-             {"ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
+    uses3 = [{"evidence_state": "CONFIRMED", "ticker": "OB1", "gbp": 2000.0, "current_value_gbp": sec_cap, "rung": "NORMAL", "source_score": 1},
+             {"evidence_state": "CONFIRMED", "ticker": "NEW2", "gbp": 5000.0, "current_value_gbp": 0.0, "rung": "STARTER", "source_score": 8}]
     out3 = allocate(uses3, capital_gbp=5_300.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
                     obligations=obl, today="2026-10-03", concentration=hook(held3), membership=_ADMITTED)
     r3 = {x["ticker"]: x for x in out3["rows"]}
@@ -2124,11 +2160,11 @@ def _selftest_isa0701(verbose: bool = False) -> int:
     NAV = 146_189.45
     pol = load_policy()
     floor = min_entry_gbp(NAV, pol)["min_entry_gbp"]
-    new_uses = [{"ticker": "HALOX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
+    new_uses = [{"evidence_state": "CONFIRMED", "ticker": "HALOX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
                  "target_pct": 4.5, "source_score": 9},
-                {"ticker": "ZABX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
+                {"evidence_state": "CONFIRMED", "ticker": "ZABX", "gbp": 6578.53, "current_value_gbp": 0.0, "rung": "NORMAL",
                  "target_pct": 4.5, "source_score": 8},
-                {"ticker": "GEN", "gbp": 5116.63, "current_value_gbp": 0.0, "rung": "STARTER",
+                {"evidence_state": "CONFIRMED", "ticker": "GEN", "gbp": 5116.63, "current_value_gbp": 0.0, "rung": "STARTER",
                  "target_pct": 3.5, "source_score": 7}]
     with tempfile.TemporaryDirectory() as td:
         st = os.path.join(td, "underfilled_positions.json")
@@ -2265,8 +2301,8 @@ def _selftest_isa0701(verbose: bool = False) -> int:
         assert len(d0["obligations"]) == 1 and r["outcomes"][0]["outcome"] == "IDEMPOTENT_SKIP", r
         n += 1
         # 11/12 POSITIVE: the ACTIVE claim heads the next queue and fills the CURRENT gap, not the stale amount
-        nxt = [{"ticker": "NEWB", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 99},
-               {"ticker": "GEN", "gbp": 777.77, "current_value_gbp": floor + 100.0, "rung": "STARTER",
+        nxt = [{"evidence_state": "CONFIRMED", "ticker": "NEWB", "gbp": 6000.0, "current_value_gbp": 0.0, "rung": "NORMAL", "source_score": 99},
+               {"evidence_state": "CONFIRMED", "ticker": "GEN", "gbp": 777.77, "current_value_gbp": floor + 100.0, "rung": "STARTER",
                 "source_score": 1}]
         o2 = allocate(nxt, capital_gbp=10000.0, nav_gbp=NAV, ranking_basis="source_score", policy=pol, obligations=d0, membership=_ADMITTED)
         assert o2["order"][0] == "GEN" and o2["rows"][0]["state"] == "OBLIGATION_FILLED" \
@@ -2330,6 +2366,55 @@ def _UNDECIDED(_t):
     return {"ticker": _t, "state": "ADMITTED_UNDECIDED",
             "may_generate_fill_obligation": False, "may_hold_new_capital_priority": False,
             "why": "selftest fixture: held with no admitting decision (ISA-0685)"}
+
+
+def _selftest_isa0752(verbose: bool = False) -> int:
+    """ISA-0752 (25-Sep-2026) — evidence_state is CARRIED from the canonical producer through the use
+    row, the proposal and the activated obligation; missing evidence cannot become an obligation.
+    liveness_ref: position_sizing._selftest_isa0752"""
+    n = 0
+    NAV = 146_189.0
+    pol = load_policy()
+    _unm = {"measured": False, "rho_sleeve": 0.70,
+            "rho_basis": "UNMEASURED_ADVERSE_DEFAULT", "size_ceiling": "STARTER"}
+    sm = stock_max([{"ticker": "NEWE", "qualifies": True, "evidence_state": "CONFIRMED",
+                     "current_value_gbp": 0.0, "source_score": 9.0, "correlation": _unm}],
+                   nav_gbp=NAV, capital_on_offer_gbp=20_000.0, policy=pol)
+    u = sm["qualifying_uses"][0]
+    assert u.get("evidence_state") == "CONFIRMED", ("MUST-FIRE ISA-0752: the use row carries the "
+                                                    "producer's evidence_state", u)
+    n += 1
+    floor = min_entry_gbp(NAV, pol)["min_entry_gbp"]
+    cap = round(floor + 100.0, 2)
+    uses = [dict(u, source_score=9.0)]
+    out = allocate(uses, capital_gbp=cap, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                   obligations={"obligations": []})
+    pr = [p for p in out["proposed_obligations"] if p["ticker"] == "NEWE"]
+    assert pr and pr[0]["evidence_state"] == "CONFIRMED" and not out["obligation_proposals_refused"], (
+        "MUST-FIRE ISA-0752: an UNDERFILLED proposal carries the same evidence_state (no recompute)", out)
+    n += 1
+    bare = [{k: v for k, v in uses[0].items() if k != "evidence_state"}]
+    out2 = allocate(bare, capital_gbp=cap, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                    obligations={"obligations": []})
+    assert not out2["proposed_obligations"] and out2["obligation_proposals_refused"] \
+        and out2["obligation_proposals_refused"][0]["ticker"] == "NEWE", (
+        "NEGATIVE CONTROL ISA-0752: a use WITHOUT evidence_state cannot become a fill obligation - "
+        "refused by name, never silently", out2)
+    n += 1
+    a1 = {r["ticker"]: r["allocated_gbp"] for r in out["rows"]}
+    a2 = {r["ticker"]: r["allocated_gbp"] for r in out2["rows"]}
+    assert a1 == a2, ("NEGATIVE CONTROL ISA-0752: the evidence gate decides only whether a first claim "
+                      "is PROPOSED - the allocation itself is unchanged", a1, a2)
+    n += 1
+    bad = [dict(uses[0], evidence_state="T9")]
+    out3 = allocate(bad, capital_gbp=cap, nav_gbp=NAV, ranking_basis="source_score", policy=pol,
+                    obligations={"obligations": []})
+    assert not out3["proposed_obligations"] and out3["obligation_proposals_refused"], (
+        "NEGATIVE CONTROL ISA-0752: an UNDECLARED evidence_state is refused like a missing one", out3)
+    n += 1
+    if verbose:
+        print("position_sizing._selftest_isa0752: %d assertions, 0 failed" % n)
+    return n
 
 
 def _selftest():
@@ -2677,6 +2762,7 @@ def _selftest():
     _n0548 = _selftest_isa0548(verbose=False)
     _n0548 += _selftest_isa0465(verbose=False)
     _n0548 += _selftest_isa0701(verbose=False)
+    _n0548 += _selftest_isa0752(verbose=False)
     assert _n0548 >= 10, "the ISA-0548 control block must not be emptied by a refactor"
     # ⚑ NEGATIVE CONTROL: a HELD stock absent from the binary registry must be REFUSED, never
     #   read as not-a-binary — `false` is a declaration, absence means nobody has decided.

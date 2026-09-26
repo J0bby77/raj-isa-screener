@@ -185,7 +185,7 @@ def apply_judgements(doc, judgements, compliance_mod=None):
             import compliance as compliance_mod
         except Exception:
             compliance_mod = None
-    applied, skipped = [], []
+    applied, skipped, rejected_ev = [], [], []
     for n in doc.get("names") or []:
         j = judgements.get(n.get("ticker"))
         if not j:
@@ -213,6 +213,17 @@ def apply_judgements(doc, judgements, compliance_mod=None):
             dims[dk]["rationale"] = rationale
         if j.get("thesis_direction"):
             n["thesis_direction"] = j["thesis_direction"]
+        # ISA-0698 residual: the ONLY mandatory capital-precondition judgement fields.
+        if j.get("thesis_state") is not None:
+            n["thesis_state"] = j["thesis_state"]
+        if j.get("thesis_state_rationale") is not None:
+            n["thesis_state_rationale"] = j["thesis_state_rationale"]
+        if j.get("evidence_state") is not None:
+            if str(n.get("evidence_state_source") or "").startswith("machine") \
+                    and j["evidence_state"] != n.get("evidence_state"):
+                rejected_ev.append(n.get("ticker"))   # machine-owned; never re-judged by hand
+            else:
+                n["evidence_state"] = j["evidence_state"]
         if j.get("vci_hurdle"):
             n.setdefault("vci_hurdle", {}).update(j["vci_hurdle"])
         for o in (j.get("overrides") or []):
@@ -224,7 +235,117 @@ def apply_judgements(doc, judgements, compliance_mod=None):
         n["conviction_basis"] = basis
         n["classification"] = classify(norm)
         applied.append(n.get("ticker"))
-    return {"applied": applied, "not_supplied": skipped}
+    return {"applied": applied, "not_supplied": skipped,
+            "evidence_state_rejected_machine_owned": rejected_ev}
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0466 / ISA-0698 RESIDUAL (25-Sep-2026) — THE CAPITAL PRECONDITION HAS ONE HOME AND
+# READS ONLY D21 FIELDS
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ⚑ MEASURED ON TB-2026-09-24-10: gate_by_name() refused capital on `strict minus structural`
+#   validation, so an OPTIONAL D8/D9/D10 score with a short rationale, a /100 `classification`
+#   typo or a missing `conviction_basis` REFUSED NEW CAPITAL for a REQUIRED name — retired
+#   fields gating money (Option B item 8). And `evidence_state` had to be TYPED for every
+#   REQUIRED name although the router had already classified it (item 5): two homes for one
+#   fact, never reconciled. Now:
+#     • the capital precondition = thesis_state (+ rationale) + evidence_state + VCI hurdle,
+#       nothing else (`capital_precondition_errors`);
+#     • evidence_state for a REQUIRED name is the MACHINE value carried on the pre-judgement
+#       scope (capital_destination.judgement_scope <- pipeline.evidence_states). A recorded
+#       value that DIFFERS is refused as a conflict (never a silent override); an unresolved
+#       machine value refuses (R4.3);
+#     • every other strict error on a REQUIRED name is RECORD QUALITY — reported, never a refusal.
+_NO_MACHINE = object()
+
+
+def _d21_errors(tag, n, machine_evidence_state=_NO_MACHINE):
+    """The D21 judgement errors for ONE name. With no machine value the recorded evidence_state
+    must be present and declared (the whole-record completeness report). With a machine value
+    (a REQUIRED name) the machine value is the authority and the record may only agree."""
+    errs = []
+    _ts = n.get("thesis_state")
+    if _ts is None:
+        errs.append(f"{tag}: thesis_state is null — D21 moved judgement out of the "
+                    f"/100 and INTO thesis_state, which may BLOCK, DOWNSIZE or HOLD "
+                    f"and never upsize. Declare one of "
+                    f"{sorted(_thesis_states())}.")
+    elif _ts not in _thesis_states():
+        errs.append(f"{tag}: thesis_state {_ts!r} is not declared. Declared: "
+                    f"{sorted(_thesis_states())}.")
+    _tr = str(n.get("thesis_state_rationale") or "").strip()
+    if not _tr:
+        errs.append(f"{tag}: thesis_state has no rationale. A state without a "
+                    f"reason cannot be challenged next month, which is the only "
+                    f"thing that makes a judgement reviewable rather than a "
+                    f"preference.")
+    elif len(_tr) < 15:
+        errs.append(f"{tag}: thesis_state_rationale is {len(_tr)} chars — too "
+                    f"short to be the one-sentence rationale §7.6.2 requires of "
+                    f"every judgement field.")
+    _rec = n.get("evidence_state")
+    if machine_evidence_state is _NO_MACHINE:
+        if _rec is None:
+            errs.append(f"{tag}: evidence_state is null — the §7.6.2 gate reads "
+                        f"thesis_state AND evidence_state, both non-null with "
+                        f"rationales. Evidence sets the rung; thesis_state may only "
+                        f"cap it.")
+        elif _rec not in _evidence_states():
+            # ⚑ ISA-0466: non-null was the whole test, so a typo passed the gate and would
+            #   have been read as a rung key downstream (R4.8 — never a guessed state).
+            errs.append(f"{tag}: evidence_state {_rec!r} is not declared. "
+                        f"Declared: {sorted(_evidence_states())}.")
+    else:
+        if machine_evidence_state not in _evidence_states():
+            errs.append(f"{tag}: machine evidence_state UNRESOLVED ({machine_evidence_state!r}) on "
+                        f"the pre-judgement scope — the router's own classification is absent, so "
+                        f"no new capital (R4.3). It is never re-judged by hand.")
+        elif _rec is not None and _rec != machine_evidence_state:
+            errs.append(f"{tag}: evidence_state CONFLICT — the record says {_rec!r}, the "
+                        f"router classified {machine_evidence_state!r}. evidence_state is "
+                        f"machine-owned (ISA-0698 Option B); a differing hand value is refused, "
+                        f"never used.")
+    return errs
+
+
+def _vci_hurdle_answer_errors(tag, n):
+    """A VCI-route name's hurdle answers — part of the capital precondition (admission test)."""
+    vh = n.get("vci_hurdle")
+    if n.get("route") != "vci" or not isinstance(vh, dict):
+        return []
+    unanswered = [k for k in VCI_HURDLE_KEYS
+                  if k != "nvidia_class_exception" and vh.get(k) is None]
+    return ([f"{tag}: route='vci' but hurdle questions {unanswered} are "
+             f"unanswered — the VCI hurdle is the whole admission test"] if unanswered else [])
+
+
+def _vci_hurdle_errors(tag, n, strict_judgement=True):
+    """VCI hurdle shape (always) and answers (strict). One home for both callers."""
+    errs = []
+    vh = n.get("vci_hurdle")
+    if not isinstance(vh, dict):
+        errs.append(f"{tag}: vci_hurdle block missing")
+        return errs
+    missing = [k for k in VCI_HURDLE_KEYS if k not in vh]
+    if missing:
+        errs.append(f"{tag}: vci_hurdle missing keys {missing}")
+    if strict_judgement:
+        errs.extend(_vci_hurdle_answer_errors(tag, n))
+    return errs
+
+
+def capital_precondition_errors(n, scope_entry=None):
+    """ISA-0698 — the errors that REFUSE NEW CAPITAL for one REQUIRED name. D21 fields only:
+    thesis_state + rationale, evidence_state (machine-owned when the scope carries it) and, for a
+    VCI-route name, the hurdle answers. Under the rollback path (single sizing authority OFF) the
+    legacy strict demand applies instead — the flag restores the old behaviour exactly."""
+    tag = f"conviction[{n.get('ticker')}]"
+    scope_entry = scope_entry if isinstance(scope_entry, dict) else {}
+    machine = (scope_entry.get("evidence_state") if "evidence_state" in scope_entry
+               else _NO_MACHINE)
+    if not _single_authority():
+        return None                      # caller falls back to the legacy strict demand
+    return _d21_errors(tag, n, machine) + _vci_hurdle_answer_errors(tag, n)
 
 
 def _judgement_errors(doc, n):
@@ -251,7 +372,8 @@ def gate_by_name(doc, scope):
     blocking = validate(doc, strict_judgement=False) if doc else ["conviction: record absent"]
     names = {n.get("ticker"): n for n in (doc.get("names") or []) if isinstance(n, dict)}
     out = {"blocking": blocking, "required": [], "complete": [], "refused_capital": {},
-           "non_blocking_missing": [], "not_applicable": [],
+           "non_blocking_missing": [], "not_applicable": [], "record_quality": {},
+           "evidence_state_resolved": {},
            "basis": "ISA-0698 Option B — judgement mandatory only for the capital-precondition population"}
     if not isinstance(scope, dict) or scope.get("state") != "OK":
         out["scope_state"] = "UNKNOWN"
@@ -270,7 +392,21 @@ def gate_by_name(doc, scope):
                     out["refused_capital"][tk] = ["REQUIRED_FOR_CAPITAL_DECISION but absent from "
                                                   "the Step 9 record"]
                     continue
-                errs = _judgement_errors(doc, n)
+                # ISA-0698 residual: ONLY the D21 capital precondition refuses; the machine
+                # evidence_state on the scope is the authority; everything else is record quality.
+                _full = _judgement_errors(doc, n)
+                errs = capital_precondition_errors(n, sn[tk])
+                if errs is None:                       # rollback path: legacy strict demand
+                    errs = _full
+                if "evidence_state" in sn[tk]:
+                    out["evidence_state_resolved"][tk] = {
+                        "machine": sn[tk].get("evidence_state"),
+                        "recorded": n.get("evidence_state"),
+                        "source": sn[tk].get("evidence_state_source")}
+                _rq = [e for e in _full if e not in errs
+                       and "evidence_state is null" not in e]
+                if _rq:
+                    out["record_quality"][tk] = _rq
                 if errs:
                     out["refused_capital"][tk] = errs
                 else:
@@ -286,7 +422,8 @@ def gate_by_name(doc, scope):
                      "refused_capital": (len(out["refused_capital"])
                                          if isinstance(out["refused_capital"], dict) else "ALL"),
                      "non_blocking_missing": len(out["non_blocking_missing"]),
-                     "not_applicable": len(out["not_applicable"]), "blocking": len(blocking)}
+                     "not_applicable": len(out["not_applicable"]), "blocking": len(blocking),
+                     "record_quality_nonblocking": len(out["record_quality"])}
     return out
 
 
@@ -325,7 +462,7 @@ RANKING_REVEALS = ("source_score", "vci_source_score", "normalised_score", "rank
 
 
 def prefill(month_label, here=None, step9_pre=None, action_stack=None, regime=None,
-            blind=False):
+            blind=False, judgement_scope=None):
     """Build the conviction skeleton from pre-run output.
 
     Every machine-computed field is filled. Every JUDGEMENT field is left explicitly null with
@@ -425,7 +562,7 @@ def prefill(month_label, here=None, step9_pre=None, action_stack=None, regime=No
             },
         })
 
-    return {
+    doc = {
         "schema_version": SCHEMA_VERSION,
         "month": _month_iso(month_label),
         "run_date": datetime.now().strftime("%Y-%m-%d"),
@@ -433,6 +570,38 @@ def prefill(month_label, here=None, step9_pre=None, action_stack=None, regime=No
         "names": names,
         "not_progressed": not_progressed,
     }
+    stamp_machine_scope(doc, judgement_scope)
+    return doc
+
+
+def stamp_machine_scope(doc, judgement_scope):
+    """ISA-0698 residual (25-Sep-2026) — PREFILL, never judge. Stamps each name's mechanical
+    `judgement_scope` and, for a REQUIRED name, the router's own `evidence_state` (the machine
+    producer: capital_destination.judgement_scope <- pipeline.evidence_states). A value already
+    recorded is NEVER overwritten: if it differs, the gate refuses it as a conflict, which is the
+    only honest outcome of two homes disagreeing. Returns counts; a missing/UNKNOWN scope stamps
+    nothing (the gate then refuses all REQUIRED capital, R4.3)."""
+    out = {"state": "NO_SCOPE", "stamped_evidence": 0, "required": 0}
+    if not isinstance(judgement_scope, dict) or judgement_scope.get("state") != "OK":
+        if isinstance(doc, dict):
+            doc["judgement_scope_state"] = "UNKNOWN"
+        return out
+    sn = judgement_scope.get("names") or {}
+    out["state"] = "OK"
+    doc["judgement_scope_state"] = "OK"
+    for n in doc.get("names") or []:
+        e = sn.get(n.get("ticker"))
+        if not isinstance(e, dict):
+            continue
+        n["judgement_scope"] = e.get("scope")
+        if e.get("scope") == "REQUIRED_FOR_CAPITAL_DECISION":
+            out["required"] += 1
+            if "evidence_state" in e and n.get("evidence_state") is None:
+                n["evidence_state"] = e.get("evidence_state")
+                n["evidence_state_source"] = ("machine: %s" % (e.get("evidence_state_source")
+                                              or "capital_destination.judgement_scope"))
+                out["stamped_evidence"] += 1
+    return out
 
 
 def seal(doc, blind=True):
@@ -611,35 +780,9 @@ def validate(doc, strict_judgement=True):
             # old one is gone, and the rollback path must still refuse on something. There is
             # never a window with neither.
             if _single_authority():
-                _ts = n.get("thesis_state")
-                if _ts is None:
-                    errs.append(f"{tag}: thesis_state is null — D21 moved judgement out of the "
-                                f"/100 and INTO thesis_state, which may BLOCK, DOWNSIZE or HOLD "
-                                f"and never upsize. Declare one of "
-                                f"{sorted(_thesis_states())}.")
-                elif _ts not in _thesis_states():
-                    errs.append(f"{tag}: thesis_state {_ts!r} is not declared. Declared: "
-                                f"{sorted(_thesis_states())}.")
-                _tr = str(n.get("thesis_state_rationale") or "").strip()
-                if not _tr:
-                    errs.append(f"{tag}: thesis_state has no rationale. A state without a "
-                                f"reason cannot be challenged next month, which is the only "
-                                f"thing that makes a judgement reviewable rather than a "
-                                f"preference.")
-                elif len(_tr) < 15:
-                    errs.append(f"{tag}: thesis_state_rationale is {len(_tr)} chars — too "
-                                f"short to be the one-sentence rationale §7.6.2 requires of "
-                                f"every judgement field.")
-                if n.get("evidence_state") is None:
-                    errs.append(f"{tag}: evidence_state is null — the §7.6.2 gate reads "
-                                f"thesis_state AND evidence_state, both non-null with "
-                                f"rationales. Evidence sets the rung; thesis_state may only "
-                                f"cap it.")
-                elif n.get("evidence_state") not in _evidence_states():
-                    # ⚑ ISA-0466: non-null was the whole test, so a typo passed the gate and would
-                    #   have been read as a rung key downstream (R4.8 — never a guessed state).
-                    errs.append(f"{tag}: evidence_state {n.get('evidence_state')!r} is not declared. "
-                                f"Declared: {sorted(_evidence_states())}.")
+                # ISA-0698 residual (25-Sep-2026): the D21 check has ONE home, _d21_errors(), shared
+                # by this whole-record validator and the per-name capital precondition.
+                errs.extend(_d21_errors(tag, n))
             else:
                 # ROLLBACK PATH (V2_FLAGS["single_sizing_authority"] = False): the pre-D21
                 # gate, unchanged, so the flag restores the old behaviour exactly.
@@ -660,19 +803,7 @@ def validate(doc, strict_judgement=True):
             if td is not None and td not in THESIS_DIRECTIONS:
                 errs.append(f"{tag}: thesis_direction {td!r} not in {sorted(THESIS_DIRECTIONS)}")
 
-        vh = n.get("vci_hurdle")
-        if not isinstance(vh, dict):
-            errs.append(f"{tag}: vci_hurdle block missing")
-        else:
-            missing = [k for k in VCI_HURDLE_KEYS if k not in vh]
-            if missing:
-                errs.append(f"{tag}: vci_hurdle missing keys {missing}")
-            if strict_judgement and n.get("route") == "vci":
-                unanswered = [k for k in VCI_HURDLE_KEYS
-                              if k != "nvidia_class_exception" and vh.get(k) is None]
-                if unanswered:
-                    errs.append(f"{tag}: route='vci' but hurdle questions {unanswered} are "
-                                f"unanswered — the VCI hurdle is the whole admission test")
+        errs.extend(_vci_hurdle_errors(tag, n, strict_judgement))
 
         for j, o in enumerate(n.get("overrides") or []):
             if not isinstance(o, dict) or not str(o.get("reason", "")).strip():
@@ -831,6 +962,113 @@ def _selftest():
     ok("U-CC47 NEGATIVE CONTROL: a STRUCTURALLY invalid record still blocks",
        bool(gate_by_name(_bad_struct, _scope)["blocking"]))
 
+    # ── ISA-0698 residual (25-Sep-2026) · machine evidence_state, D21-only precondition ──
+    _mdoc = json.loads(json.dumps(doc))
+    for n in _mdoc["names"]:
+        n["evidence_state"] = None                       # the session typed nothing
+    _mscope = {"state": "OK", "names": dict(
+        {_req: {"scope": "REQUIRED_FOR_CAPITAL_DECISION", "evidence_state": "CONFIRMED",
+                "evidence_state_source": "selftest pipeline.evidence_states"}},
+        **{t: {"scope": "NON_BLOCKING_RECORD"} for t in _other})}
+    _gm = gate_by_name(_mdoc, _mscope)
+    ok("U-CC48 MUST-FIRE (machine prefill): a REQUIRED name with thesis_state + rationale and NO "
+       "typed evidence_state is COMPLETE on the router's evidence_state",
+       _gm["complete"] == [_req] and not _gm["refused_capital"]
+       and _gm["evidence_state_resolved"][_req]["machine"] == "CONFIRMED", str(_gm)[:220])
+    _cdoc = json.loads(json.dumps(_mdoc))
+    next(n for n in _cdoc["names"] if n["ticker"] == _req)["evidence_state"] = "THIN"
+    _gc = gate_by_name(_cdoc, _mscope)
+    ok("U-CC49 NEGATIVE CONTROL: a typed evidence_state that DIFFERS from the machine value is "
+       "refused as a CONFLICT, never used", _req in _gc["refused_capital"]
+       and any("CONFLICT" in e for e in _gc["refused_capital"][_req]))
+    _uscope = json.loads(json.dumps(_mscope)); _uscope["names"][_req]["evidence_state"] = None
+    _gun = gate_by_name(_mdoc, _uscope)
+    ok("U-CC50 NEGATIVE CONTROL: an UNRESOLVED machine evidence_state refuses new capital (R4.3)",
+       _req in _gun["refused_capital"]
+       and any("UNRESOLVED" in e for e in _gun["refused_capital"][_req]))
+    _jdoc = json.loads(json.dumps(_mdoc))
+    _jn = next(n for n in _jdoc["names"] if n["ticker"] == _req)
+    _jn["dimensions"]["d8_macro_resilience"] = {"score": 9, "rationale": "ok"}
+    _jn["classification"] = "Bogus"
+    _jn["conviction_total"] = 55; _jn["conviction_basis"] = None
+    _gj = gate_by_name(_jdoc, _mscope)
+    ok("U-CC51 AUTHORITY NEGATIVE CONTROL: optional D8 junk, a bad /100 classification and a "
+       "basis-less conviction_total do NOT refuse capital — they are RECORD QUALITY",
+       _gj["complete"] == [_req] and not _gj["refused_capital"]
+       and _req in _gj["record_quality"], str(_gj)[:240])
+    _sets = set()
+    for _v in (None, 0, 5, 10):
+        _vd = json.loads(json.dumps(_mdoc))
+        next(n for n in _vd["names"] if n["ticker"] == _req)["thesis_state"] = None
+        for n in _vd["names"]:
+            for d in JUDGEMENT_DIMS:
+                n["dimensions"][d] = {"score": _v, "rationale": "A deliberately varied score."}
+        _sets.add(tuple(sorted(gate_by_name(_vd, _mscope)["refused_capital"])))
+    ok("U-CC52 AUTHORITY NEGATIVE CONTROL: D8/D9/D10 values across 0..10/None cannot change who "
+       "is refused capital (the D21-missing name stays refused at every value)",
+       _sets == {(_req,)}, str(_sets))
+    _pol_cc.V2_FLAGS["single_sizing_authority"] = False
+    try:
+        _grb = gate_by_name(_jdoc, _mscope)
+        ok("U-CC53 ROLLBACK: with the single authority OFF the legacy strict demand refuses again "
+           "(the flag restores the old gate exactly)", _req in _grb["refused_capital"])
+    finally:
+        if _had_sa:
+            _pol_cc.V2_FLAGS["single_sizing_authority"] = _old_sa
+        else:
+            _pol_cc.V2_FLAGS.pop("single_sizing_authority", None)
+    _pf = prefill("aug_2026", step9_pre=step9, action_stack=stack, regime="Slowdown",
+                  judgement_scope=_mscope)
+    _pr = next(n for n in _pf["names"] if n["ticker"] == _req)
+    ok("U-CC54 PREFILL stamps the machine evidence_state on REQUIRED names only, with its source",
+       _pr.get("evidence_state") == "CONFIRMED"
+       and str(_pr.get("evidence_state_source")).startswith("machine")
+       and all(n.get("evidence_state") is None for n in _pf["names"] if n["ticker"] != _req)
+       and _pr.get("judgement_scope") == "REQUIRED_FOR_CAPITAL_DECISION")
+    _pre = json.loads(json.dumps(_pf)); _pn = next(n for n in _pre["names"] if n["ticker"] == _req)
+    _pn["evidence_state"] = "THIN"; _pn.pop("evidence_state_source")
+    stamp_machine_scope(_pre, _mscope)
+    ok("U-CC54b NEGATIVE CONTROL: a recorded value is NEVER overwritten by the stamp (the gate "
+       "refuses the conflict instead)", _pn["evidence_state"] == "THIN")
+    _pu = prefill("aug_2026", step9_pre=step9, action_stack=stack, judgement_scope=None)
+    ok("U-CC54c NEGATIVE CONTROL: no scope -> nothing stamped, state UNKNOWN",
+       _pu.get("judgement_scope_state") == "UNKNOWN"
+       and all(n.get("evidence_state") is None for n in _pu["names"]))
+    _ar = apply_judgements(_pf, {_req: {"thesis_state": "INTACT",
+                                        "thesis_state_rationale": "Revisions still rising after Q2.",
+                                        "evidence_state": "STRONG"}})
+    ok("U-CC55 --apply sets thesis_state + rationale and REFUSES to re-judge a machine-owned "
+       "evidence_state", _pr["thesis_state"] == "INTACT" and _pr["evidence_state"] == "CONFIRMED"
+       and _ar["evidence_state_rejected_machine_owned"] == [_req])
+    _vdoc = json.loads(json.dumps(_mdoc))
+    _vt = next(n["ticker"] for n in _vdoc["names"] if n["route"] == "vci")
+    next(n for n in _vdoc["names"] if n["ticker"] == _vt)["vci_hurdle"]["fv_asymmetry"] = None
+    _vscope = {"state": "OK", "names": {_vt: {"scope": "REQUIRED_FOR_CAPITAL_DECISION",
+                                             "evidence_state": "THIN"}}}
+    ok("U-CC56 MUST-FIRE: a REQUIRED VCI-route name with an unanswered hurdle is still refused "
+       "(the admission test is a capital precondition, not a retired field)",
+       _vt in gate_by_name(_vdoc, _vscope)["refused_capital"])
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _td:
+        with open(os.path.join(_td, "step9_pre_aug_2026.json"), "w", encoding="utf-8") as f:
+            json.dump(step9, f)
+        _rc0 = main(["--prefill", "--month", "aug_2026", "--here", _td])
+        _pp = os.path.join(_td, "step9_conviction_aug_2026.json")
+        ok("U-CC57 MUST-FIRE (ISA-0751): the --prefill CLI writes the skeleton",
+           _rc0 == 0 and os.path.exists(_pp) and os.path.getsize(_pp) > 0)
+        with open(_pp, "rb") as f:
+            _before = f.read()
+        os.remove(os.path.join(_td, "step9_pre_aug_2026.json"))
+        _crashed = False
+        try:
+            main(["--prefill", "--month", "aug_2026", "--here", _td])
+        except Exception:                                                # noqa: BLE001
+            _crashed = True
+        with open(_pp, "rb") as f:
+            _after = f.read()
+        ok("U-CC57b NEGATIVE CONTROL (ISA-0751): a FAILING prefill leaves the existing record "
+           "byte-identical (never truncated)", _crashed and _after == _before)
+
     ok("U-CC11 completed document passes strict validation", not validate(doc),
        str(validate(doc))[:160])
 
@@ -910,7 +1148,29 @@ def _selftest():
     return 0 if not fails else 1
 
 
-def main():
+def _atomic_write_json(path, doc):
+    """Write via a temp file + os.replace: a failure leaves any existing file byte-identical."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _scope_from_run_context(here, month):
+    """The PRE-judgement scope, from the run context — its one source (ISA-0447). A judgement
+    pass keeps the pre-judgement summary, so read that first."""
+    p = os.path.join(here, "run_context_%s.json" % month)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            cds = ((json.load(f) or {}).get("summary") or {}).get("capital_destination") or {}
+    except Exception:                                                   # noqa: BLE001
+        return None
+    return (cds.get("pre_judgement_summary") or cds).get("judgement_scope")
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefill", action="store_true")
     ap.add_argument("--month")
@@ -924,12 +1184,13 @@ def main():
     ap.add_argument("--lenient", action="store_true",
                     help="structural validation only (a prefill skeleton)")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--here", default=None, help="folder holding the month's artefacts (default: this module's)")
     ap.add_argument("--apply", metavar="JUDGEMENTS_JSON",
                     help="apply session judgements to the month's conviction doc and derive "
                          "conviction_total / classification")
     ap.add_argument("--gate", metavar="DOC_JSON",
                     help="hard gate: exit non-zero if the month may not send")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.selftest:
         return _selftest()
     if a.gate:
@@ -938,21 +1199,16 @@ def main():
         # ISA-0698: per-name gate on capital_destination's PRE-JUDGEMENT scope (same file month)
         import re as _re
         _m = _re.search(r"step9_conviction_([a-z]{3}_\d{4})", os.path.basename(a.gate))
-        _scope = None
-        if _m:
-            # one source for the router's scope: the run context (ISA-0447)
-            _rcp = os.path.join(os.path.dirname(os.path.abspath(a.gate)),
-                                "run_context_%s.json" % _m.group(1))
-            if os.path.exists(_rcp):
-                with open(_rcp, encoding="utf-8") as f:
-                    _scope = (((json.load(f) or {}).get("summary") or {})
-                              .get("capital_destination") or {}).get("judgement_scope")
+        _scope = (_scope_from_run_context(os.path.dirname(os.path.abspath(a.gate)), _m.group(1))
+                  if _m else None)
         res = gate_by_name(doc, _scope)
         for e in res["blocking"]:
             print("BLOCK: " + e)
         _ref = res["refused_capital"]
         for tk in (sorted(_ref) if isinstance(_ref, dict) else []):
             print("REFUSED NEW CAPITAL: %s — %s" % (tk, _ref[tk][0][:160]))
+        for tk in sorted(res.get("record_quality") or {}):
+            print("RECORD QUALITY (non-blocking): %s — %s" % (tk, res["record_quality"][tk][0][:160]))
         print("scope %s · counts %s" % (res["scope_state"], res["counts"]))
         print("CONVICTION RECORD VALID — the email may build; refused names receive no new capital"
               if not res["blocking"] else
@@ -969,8 +1225,10 @@ def main():
         j = {k: {kk: (tuple(vv) if isinstance(vv, list) else vv) for kk, vv in v.items()}
              for k, v in raw.items()}
         res = apply_judgements(doc, j)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(path, doc)
+        if res.get("evidence_state_rejected_machine_owned"):
+            print("  evidence_state NOT applied (machine-owned, differs from the router): "
+                  + ", ".join(res["evidence_state_rejected_machine_owned"]))
         print(f"CONVICTION_APPLY month={a.month} applied={len(res['applied'])} "
               f"({', '.join(res['applied'][:10])})")
         errs = validate(doc, strict_judgement=True)
@@ -997,19 +1255,26 @@ def main():
     if a.prefill:
         if not a.month:
             ap.error("--month required")
-            doc = prefill(a.month, regime=a.regime)
+        # ⚑ ISA-0751 (25-Sep-2026): `doc = prefill(...)` sat INSIDE the `if not a.month:` branch
+        #   after ap.error(), so it never ran; the file was then opened for WRITE and truncated
+        #   before json.dump raised. The document is now built FIRST and written atomically, so a
+        #   failure can never destroy an existing record (R4.9).
+        _here = a.here or HERE
+        _scope = _scope_from_run_context(_here, a.month)
+        doc = prefill(a.month, here=_here, regime=a.regime, judgement_scope=_scope)
         if a.blind:
             doc = seal(doc, blind=True)
-        path = os.path.join(HERE, f"step9_conviction_{a.month}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2, ensure_ascii=False)
+        path = os.path.join(_here, f"step9_conviction_{a.month}.json")
+        _atomic_write_json(path, doc)
         errs = validate(doc, strict_judgement=False)
         print(f"CONVICTION_PREFILL month={a.month} names={len(doc['names'])} "
               f"not_progressed={len(doc['not_progressed'])} -> {path}")
         print("  structural: " + ("OK" if not errs else f"{len(errs)} error(s)"))
-        print("  NOTE: judgement fields are intentionally null. The review session must fill "
-              "D8/D9/D10 score + rationale, conviction_total and classification before the "
-              "email sends; write() will refuse the file until it does.")
+        print("  judgement scope: %s" % doc.get("judgement_scope_state"))
+        print("  NOTE (ISA-0698 Option B): only names with judgement_scope = "
+              "REQUIRED_FOR_CAPITAL_DECISION need thesis_state + a one-sentence rationale (and VCI "
+              "hurdle answers on the VCI route). evidence_state is prefilled from the router and is "
+              "never re-judged. D8/D9/D10 and the /100 classification are optional display fields.")
         return 0
     ap.print_help()
     return 0

@@ -30,6 +30,8 @@ from pathlib import Path
 
 ATLAS_VERSION = "1.0.0"
 
+# ⚑ ISA-0710 (25-Sep-2026): RETAINED ONLY AS A READ-ONLY HISTORICAL NAME; the atlas no longer reads it -
+#   _iter_py calls isa_tree_scope.excluded_dir (one home).
 EXCLUDE_DIR_PARTS = ("__pycache__", "archive", "_bak", "_baseline", ".git", "node_modules",
                      "calibration_pathc_jul2026",
                      # 11-Sep-2026: aligned with release_gate.EXCLUDE_PARTS. The atlas scanned
@@ -62,10 +64,17 @@ def state_dir() -> Path:
     return repo_root() / "Dashboard" / "state"
 
 
+def _excluded_dir(name: str) -> bool:
+    """ISA-0710: the ONE predicate lives in isa_tree_scope.excluded_dir. Imported, never copied - an
+    unimportable isa_tree_scope RAISES (a second list here is exactly the drift ISA-0710 found)."""
+    import isa_tree_scope as _ts
+    return _ts.excluded_dir(name)
+
+
 def _iter_py(root: Path):
     for p in sorted(root.rglob("*.py")):
         rel = p.relative_to(root)
-        if any(part.startswith(x) or part == x for part in rel.parts for x in EXCLUDE_DIR_PARTS):
+        if any(_excluded_dir(part) for part in rel.parts[:-1]):
             continue
         yield p
 

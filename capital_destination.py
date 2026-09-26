@@ -2669,12 +2669,23 @@ def judgement_scope(doc: dict) -> dict:
                         "(ISA-0698, R4.3)."),
                 "source": "capital_destination.judgement_scope"}
     names = {}
+    # ⚑ ISA-0698 residual (25-Sep-2026) — Option B item 5: evidence_state is PREFILLED from the
+    #   canonical machine producer, never re-judged. That producer's output for this pass is
+    #   `pipeline.evidence_states` (evidence_state.classify per candidate, the value the ladder
+    #   sized on). It is carried onto each REQUIRED name so the Step 9 gate reads the router's own
+    #   classification; an absent value is carried as None and REFUSES (R4.3), never guessed.
+    _evs = ((ss.get("pipeline") or {}).get("evidence_states")) or {}
     for u in dp.get("qualifying_uses") or []:
         tk = u.get("ticker")
         route = routes.get(tk)
         if route in JUDGEMENT_REQUIRED_ROUTES:
+            _ev = _evs.get(tk)
             names[tk] = {"scope": "REQUIRED_FOR_CAPITAL_DECISION", "route": route,
                          "rung": u.get("rung"), "gbp_demand": u.get("gbp"),
+                         "evidence_state": (_ev.get("state") if isinstance(_ev, dict) else _ev),
+                         "evidence_state_source": ("capital_destination.sleeve_split.pipeline."
+                                                   "evidence_states (evidence_state.classify, "
+                                                   "pre-judgement)"),
                          "basis": "qualifying use in the final capital comparison"}
         else:
             names[tk] = {"scope": "NOT_APPLICABLE", "route": route, "gbp_demand": u.get("gbp"),
@@ -3801,6 +3812,9 @@ def judgement_pass(month_label: str, here=None, run_context_path=None, convictio
              "refusal_reasons": ({k: v[:3] for k, v in refused.items()}
                                  if isinstance(refused, dict) else None),
              "non_blocking_missing": sorted(res["non_blocking_missing"]),
+             # ISA-0698 residual: reported, never a refusal
+             "record_quality_nonblocking": sorted(res.get("record_quality") or {}),
+             "evidence_state_resolved": res.get("evidence_state_resolved") or {},
              "rerouted": False, "plan_source": "pre_judgement",
              "basis": "ISA-0698 Option B (Raj, 16-Sep-2026)"}
     if cdoc is not None and not res["blocking"] and refused:
@@ -4011,6 +4025,18 @@ def _selftest(verbose=True) -> int:
        and _js["names"]["REJ1"]["scope"] == "NON_BLOCKING_RECORD")
     ck("ISA-0698 NEGATIVE CONTROL: an unreadable population is UNKNOWN, never an empty OK",
        judgement_scope({"state": "OK", "sleeve_split": {}})["state"] == "UNKNOWN")
+    ck("ISA-0698 residual NEGATIVE CONTROL: with no machine evidence_states the REQUIRED name "
+       "carries evidence_state None (UNRESOLVED -> refuses at the gate), never a guessed state",
+       "evidence_state" in _js["names"]["NEW1"] and _js["names"]["NEW1"]["evidence_state"] is None)
+    _jd2 = json.loads(json.dumps(_jd))
+    _jd2["sleeve_split"]["pipeline"]["evidence_states"] = {"NEW1": {"state": "CONFIRMED"},
+                                                           "HELD1": {"state": "STRONG"}}
+    _js2 = judgement_scope(_jd2)
+    ck("ISA-0698 residual MUST-FIRE: the REQUIRED name carries the ROUTER's own evidence_state "
+       "(pipeline.evidence_states) with its source; the held top-up carries none (thesis_state home)",
+       _js2["names"]["NEW1"]["evidence_state"] == "CONFIRMED"
+       and "pipeline.evidence_states" in _js2["names"]["NEW1"]["evidence_state_source"]
+       and "evidence_state" not in _js2["names"]["HELD1"])
     _pipe = {"candidates": [{"ticker": "NEW1", "route": "main", "qualifies": True},
                             {"ticker": "HELD1", "route": "held_topup", "qualifies": True}]}
     _ap = _apply_judgement_refusals(_pipe, {"NEW1": "thesis_state null"}, _js)
@@ -4029,7 +4055,7 @@ def _selftest(verbose=True) -> int:
     import tempfile as _tf2
     _td = Path(_tf2.mkdtemp())
     (_td / "run_context_x_2026.json").write_text(json.dumps({"summary": {"capital_destination": {
-        "state": "OK", "stock_max_gbp": 100.0, "judgement_scope": _js}}}))
+        "state": "OK", "stock_max_gbp": 100.0, "judgement_scope": _js2}}}))   # real producer shape (machine evidence)
     _cvdoc = {"schema_version": "x", "names": []}          # structurally invalid on purpose
     (_td / "step9_conviction_x_2026.json").write_text(json.dumps(_cvdoc))
     _calls = []
@@ -4060,7 +4086,7 @@ def _selftest(verbose=True) -> int:
     _okdoc2["names"].append({"ticker": "NEW1", "tier": "T1", "route": "main",
                              "sector_type_source": "step9_pre", "thesis_state": "INTACT",
                              "thesis_state_rationale": "Thesis confirmed by the latest results.",
-                             "evidence_state": "THIN",
+                             # ISA-0698 residual: evidence_state is NOT typed - the scope carries the machine value
                              "dimensions": {"d1_7_prerun_total": 40,
                                             **{d: {"score": None, "rationale": ""} for d in _ccx.JUDGEMENT_DIMS}},
                              "vci_hurdle": {k: None for k in _ccx.VCI_HURDLE_KEYS}})

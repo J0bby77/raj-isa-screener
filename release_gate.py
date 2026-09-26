@@ -89,8 +89,11 @@ REVALIDATION_DISPOSITIONS = (
 )
 
 SOURCE_SUFFIXES = (".py",)
-EXCLUDE_PARTS = ("__pycache__", "archive", "_bak", "_baseline", ".git", "node_modules",
-                 "calibration_pathc_jul2026", "_to_delete", "_candidate_evidence")
+# ⚑ ISA-0710 (25-Sep-2026) — ONE HOME for the excluded-directory rule: isa_tree_scope (stdlib-only, so
+#   importing it adds nothing to the Composio fallback closure). Re-exported here because _tree_shas and
+#   other callers read release_gate.EXCLUDE_PARTS; there is no second list.
+from isa_tree_scope import EXCLUDE_PARTS, NON_SOURCE_DIRS, excluded_dir   # noqa: E402
+
 
 
 class ReleaseRefused(RuntimeError):
@@ -128,8 +131,7 @@ def _sha(b: bytes) -> str:
 
 def _iter_source(root: str):
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if not any(d == x or d.startswith(x) for x in EXCLUDE_PARTS)]
+        dirnames[:] = [d for d in dirnames if not excluded_dir(d)]      # ISA-0710: one predicate
         for fn in sorted(filenames):
             if fn.endswith(SOURCE_SUFFIXES):
                 yield os.path.join(dirpath, fn)
@@ -1550,6 +1552,24 @@ def _selftest(verbose: bool = True) -> int:
     ok("ISA-0729 NEGATIVE CONTROL: a REFUSED plan cannot be applied", _refused)
     for _r in (_pl, _pc, _bk):
         _shp.rmtree(_r, ignore_errors=True)
+
+    # ── ISA-0710 · one excluded-directory predicate ──────────────────────────────────────
+    ok("ISA-0710 MUST-FIRE: evidence and dry-run folders are excluded from the source population",
+       excluded_dir("_candidate_evidence") and excluded_dir("_dryrun_outputs") and excluded_dir("_bak_x")
+       and excluded_dir("Skills_to_Edit"))
+    ok("ISA-0710 NEGATIVE CONTROL: an ordinary source folder is NOT excluded (prefix match is not "
+       "a wildcard)", not excluded_dir("Dashboard") and not excluded_dir("server")
+       and not excluded_dir("tests_jul2026") and not excluded_dir("webhooks"))
+    _t710 = tempfile.mkdtemp()
+    for _rel in ("keep.py", "_candidate_evidence/ISA-X/copy.py", "_dryrun_outputs/d.py", "pkg/k2.py"):
+        os.makedirs(os.path.dirname(os.path.join(_t710, _rel)) or _t710, exist_ok=True)
+        with open(os.path.join(_t710, _rel), "w", encoding="utf-8") as fh:
+            fh.write("x = 1\n")
+    _got = sorted(os.path.relpath(p, _t710).replace(os.sep, "/") for p in _iter_source(_t710))
+    ok("ISA-0710 the release fingerprint enumerates only framework source (a registered-computer copy "
+       "under _candidate_evidence is not source)", _got == ["keep.py", "pkg/k2.py"], _got)
+    import shutil as _sh710
+    _sh710.rmtree(_t710, ignore_errors=True)
 
     if verbose:
         print("\nrelease_gate selftest: %d assertion(s), %d FAIL(s)%s"

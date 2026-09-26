@@ -3878,7 +3878,11 @@ def main():
             _regime = (summary.get("macro") or {}).get("regime")
         except Exception:
             pass
-        _cdoc = _cc.prefill(month_label, here=SCRIPT_DIR, regime=_regime)
+        # ISA-0698 residual (25-Sep-2026): the skeleton carries the PRE-judgement scope (Step 6.10's
+        # router, run above) and the router's own evidence_state for REQUIRED names — prefilled,
+        # never re-judged. An absent/UNKNOWN scope stamps nothing (the pass then refuses, R4.3).
+        _jscope = ((summary.get("capital_destination") or {}).get("judgement_scope"))
+        _cdoc = _cc.prefill(month_label, here=SCRIPT_DIR, regime=_regime, judgement_scope=_jscope)
         _cpath = os.path.join(SCRIPT_DIR, f"step9_conviction_{month_label}.json")
         _cerrs = _cc.validate(_cdoc, strict_judgement=False)
         if _cerrs:
@@ -3894,11 +3898,19 @@ def main():
             "path": _cpath, "names": len(_cdoc["names"]),
             "not_progressed": len(_cdoc["not_progressed"]),
             "state": "SKELETON_AWAITING_JUDGEMENT",
+            "judgement_scope_state": _cdoc.get("judgement_scope_state"),
+            "required_for_capital": sum(1 for _n in _cdoc["names"]
+                                        if _n.get("judgement_scope") == "REQUIRED_FOR_CAPITAL_DECISION"),
+            "evidence_state_prefilled": sum(1 for _n in _cdoc["names"]
+                                            if str(_n.get("evidence_state_source") or "").startswith("machine")),
         }
         print(f"  Conviction skeleton: {len(_cdoc['names'])} names, "
               f"{len(_cdoc['not_progressed'])} not-progressed -> {os.path.basename(_cpath)}")
-        print("  Step 9 must fill D8/D9/D10 score + rationale for every name before the email "
-              "sends.")
+        print("  Step 9 (ISA-0698 Option B): thesis_state + one-sentence rationale are MANDATORY only "
+              "for the %s REQUIRED_FOR_CAPITAL_DECISION name(s) (evidence_state prefilled from the "
+              "router for %s); every other name is a non-blocking record. D8/D9/D10 are optional."
+              % (summary["conviction_capture"]["required_for_capital"],
+                 summary["conviction_capture"]["evidence_state_prefilled"]))
     except Exception as _cce:
         warnings.append(f"Step 8b (conviction skeleton) failed: {_cce}")
         _mf_measure(status="ERROR", note=f"conviction prefill failed: {_cce}")
