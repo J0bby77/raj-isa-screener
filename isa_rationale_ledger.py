@@ -380,6 +380,13 @@ def refresh(root=None, today=None, dry_run=False) -> dict:
         target = "OPEN" if want_open else "CLOSED_NOT_A_DEFECT"
         narrative = ("Provenance RECOVERED from the documentary record, not invented (R7.5). "
                      + " ".join(supporting)) if supporting else it.get("narrative")
+        # ⚑ ISA-0788 (30-Sep-2026): the STALE re-open narrative is computed ONCE and used for both the
+        #   comparison and the write, so a second refresh on a stale store is a no-op (it re-opened the
+        #   item on every call before, turning test_refresh_is_idempotent RED from the day a date passed).
+        if want_open and name in stale:
+            narrative = (f"{name}: revalidate_by {d.get('revalidate_by')} has passed. The recorded basis "
+                         f"({d.get('evidence_basis')}) must be re-established before this closes again."
+                         + ((" " + " ".join(supporting)) if supporting else ""))
         if it.get("state") == target and (it.get("rationale") or {}) == block \
                 and it.get("narrative") == narrative:
             unchanged.append(name)
@@ -421,10 +428,7 @@ def refresh(root=None, today=None, dry_run=False) -> dict:
             item = dict(it)
             item["state"] = "OPEN"
             item["rationale"] = block
-            item["narrative"] = (
-                f"{name}: revalidate_by {d.get('revalidate_by')} has passed. The recorded basis "
-                f"({d.get('evidence_basis')}) must be re-established before this closes again."
-                if name in stale else item.get("narrative"))
+            item["narrative"] = narrative if name in stale else item.get("narrative")
             R.write(item, allow_update=True)
             reopened.append(name)
     return {"closed": sorted(closed), "reopened": sorted(reopened),
