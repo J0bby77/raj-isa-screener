@@ -602,6 +602,71 @@ def _step8_measure(dpr: list) -> dict:
                      % (n, scored, elig, typed))}
 
 
+VCI_SOURCE_FRESH_DAYS = 45   # ISA-0792: one monthly VCI cycle + slack; older = STALE, never current
+
+
+def _vci_watchlist_source(isa_folder: str, memory_md=None):
+    """ISA-0792: the VCI watchlist source with the NEWEST declared run date among the memory file
+    (only if present) and the VCI run's own output files in the ISA folder. -> (run_date, path) or
+    (None, None). The memory directory is environment-dependent; the VCI output is the artefact
+    the VCI task writes to disk, so it is the source that survives the environment."""
+    import glob as _g792
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+    import sync_vci_watchlist as _svw
+    cands = ([memory_md] if memory_md and os.path.exists(memory_md) else []) + sorted(
+        _g792.glob(os.path.join(isa_folder or "", "project_vci_output_*.md")))
+    dated = [(_svw.source_run_date(p), p) for p in cands]
+    dated = [d for d in dated if d[0]]
+    return max(dated) if dated else (None, None)
+
+
+def _step5_measure(rows: list, run_date_iso: str, src_date=None) -> dict:
+    """ISA-0792: Step 5 measured on what it is FOR - a CURRENT ACS per VCI watchlist row. A row
+    counts when its ACS is present (not None; never a manufactured 0 standing in for absence) and
+    its VCI run date is within VCI_SOURCE_FRESH_DAYS of this run. The old measure counted tickers,
+    so a skipped sync over July rows read OK."""
+    from datetime import date as _d792
+    def _age(x):
+        try:
+            return (_d792.fromisoformat(run_date_iso[:10]) - _d792.fromisoformat(str(x)[:10])).days
+        except (TypeError, ValueError):
+            return None
+    rows = rows or []
+    live = []
+    for e in rows:
+        a = _age(e.get("vci_run_date") or src_date)
+        if e.get("acs_score") is not None and a is not None and 0 <= a <= VCI_SOURCE_FRESH_DAYS:
+            live.append(e.get("ticker"))
+    n = len(rows)
+    return {"rows_out": n, "coverage": (len(live) / n) if n else 0.0,
+            "non_null_share": (len(live) / n) if n else None,
+            "note": "%d/%d VCI watchlist row(s) carry a current ACS (source run date %s, fresh <= %d d)"
+                    % (len(live), n, src_date or "NONE", VCI_SOURCE_FRESH_DAYS)}
+
+
+def _step7_measure(rows: list) -> dict:
+    """ISA-0792: Step 7 measured on each row's DECLARED score basis - a growth row on its live
+    Part A/B total, a VCI row on its ACS (present; None is absence, never a 0). The old measure
+    read every VCI row as 'no live total score', and an acknowledgement registered for the wrong
+    cause (CAP-2) masked that the VCI ACS really WAS missing."""
+    rows = rows or []
+    def _live(e):
+        if e.get("pipeline") == "vci":
+            return e.get("acs_score") is not None
+        return (e.get("total_score_54") if e.get("total_score_54") is not None else
+                e.get("total_score_50") if e.get("total_score_50") is not None else
+                e.get("total_score_36")) is not None
+    n = len(rows)
+    g = [e for e in rows if e.get("pipeline") != "vci"]
+    v = [e for e in rows if e.get("pipeline") == "vci"]
+    lg, lv = sum(1 for e in g if _live(e)), sum(1 for e in v if _live(e))
+    return {"rows_out": n, "coverage": ((lg + lv) / n) if n else None,
+            "non_null_share": ((lg + lv) / n) if n else None,
+            "note": "%d/%d rows carry a live score on their declared basis (growth total %d/%d, VCI ACS %d/%d)"
+                    % (lg + lv, n, lg, len(g), lv, len(v))}
+
+
 def _capital_authority_step(errors: list, warnings: list, root: str = None) -> dict:
     """Step 0a (R18.5, ISA-0629). Returns the authority record and escalates a non-AUTHORISED
     verdict into BOTH lists: warnings carry the declared escalation prefix (ISA-0447) and errors
@@ -1362,9 +1427,16 @@ def main():
                 # dealing cost included -- and degrades to the original
                 # holdings-delta inference when no export exists.
                 _txns = _dl_mod.load_transactions(transactions_path)
+                # ISA-0791: the export's own completeness window (filename month x creation stamp)
+                _ev791 = None
+                try:
+                    with open(transactions_path, encoding="utf-8") as _tf791:
+                        _ev791 = ((json.load(_tf791).get("_meta") or {}).get("evidence_window"))
+                except Exception:                                       # noqa: BLE001
+                    _ev791 = None
                 _res = _dl_mod.reconcile_executions_from_transactions(
                     ledger_path, _txns, _held, prior_holdings=_prior_h,
-                    date=run_date.isoformat(),
+                    date=run_date.isoformat(), evidence=_ev791,
                     # ISA-0704: a dry run executes inside a sandbox copy, so persisting there keeps
                     # parity with the real run (Step 1.5's A13 override log re-reads the ledger).
                     persist=True)
@@ -1437,6 +1509,27 @@ def main():
                                for _e5 in _led.get("entries", [])
                                if _e5.get("execution_status") == "execution_unconfirmed"
                                and _e5.get("execution_unconfirmed_reason")]
+                    # ISA-0791: MEASURED absence up to the export's evidence date, decision still in
+                    #   force. Reported (never an override - Raj has not declined anything yet).
+                    _ntd = [{"ticker": _e6.get("ticker"), "decision": _e6.get("decision"),
+                             "date": _e6.get("date"), "evidence_through": _e6.get("evidence_through")}
+                            for _e6 in _led.get("entries", [])
+                            if _e6.get("execution_status") == "not_executed_to_date"]
+                    if _ntd:
+                        summary["execution_not_executed_to_date"] = _ntd
+                        # the decision content reaches the review/email as a WARNING (SUMMARY_ESCALATED
+                        # 'Step 1.5'); a summary key alone reached nobody (TB-08 SHADOW)
+                        warnings.append(
+                            "Step 1.5 A13/ISA-0791: %d recommendation(s) NOT EXECUTED TO DATE - the "
+                            "transaction export proves no matching trade, and the decision is still in "
+                            "force (not declined, not an override): %s. Execute it, or it lapses when "
+                            "the next decision on the name supersedes it."
+                            % (len(_ntd), "; ".join("%s %s of %s (no trade through %s)"
+                                                    % (x["ticker"], x["decision"], x["date"],
+                                                       x["evidence_through"]) for x in _ntd)))
+                        print("  Not executed to date (decision still in force): %s" % "; ".join(
+                            "%s %s %s (no trade through %s)" % (x["ticker"], x["decision"], x["date"],
+                                                                x["evidence_through"]) for x in _ntd))
                     if _unconf:
                         summary["execution_unconfirmed"] = _unconf
                         _cov = (_res or {}).get("txn_coverage") or {}
@@ -1771,7 +1864,14 @@ def main():
     _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "watchlist entries")
     print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
     _mf_begin("5", "sync_vci_watchlist")
-    vci_md_path = find_memory_file("project_isa_vci_watchlist.md")
+    # ISA-0792: newest dated source - the VCI run's own output file unless a NEWER memory file exists
+    _vci_mem = find_memory_file("project_isa_vci_watchlist.md")
+    _vci_src_date, vci_md_path = _vci_watchlist_source(isa_folder, _vci_mem)
+    summary["vci_watchlist_source"] = {"path": os.path.basename(vci_md_path) if vci_md_path else None,
+                                       "run_date": _vci_src_date,
+                                       "memory_file_present": bool(_vci_mem)}
+    if vci_md_path:
+        print(f"  VCI watchlist source: {os.path.basename(vci_md_path)} (run date {_vci_src_date})")
     _vci_existing = 0
     try:
         with open(watchlist_config_path, encoding="utf-8") as _f:
@@ -1785,8 +1885,10 @@ def main():
                             "NO vci_watchlist entries -- run one pass without the flag.")
             degraded = True
     elif not vci_md_path:
-        warnings.append("Step 5 (sync_vci_watchlist): project_isa_vci_watchlist.md not found at resolved MEMORY_BASE -- VCI watchlist not synced. (Held names are still removed at Step 4.)")
-        print(f"  WARNING: project_isa_vci_watchlist.md not found -- skipped. MEMORY_BASE={MEMORY_BASE}")
+        warnings.append("Step 5 (sync_vci_watchlist): NO dated VCI watchlist source - neither a VCI run output "
+                        "(ISA folder project_vci_output_[mmm]_[yyyy].md) nor the memory file - VCI watchlist "
+                        "NOT synced; its ACS values are UNMEASURED, not current (ISA-0792).")
+        print(f"  WARNING: no VCI watchlist source -- skipped. MEMORY_BASE={MEMORY_BASE}")
         degraded = True
     elif not os.path.exists(watchlist_config_path):
         warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
@@ -1812,7 +1914,18 @@ def main():
     # ---------------------------------------------------------------------------
     # Step 6: Fetch watchlist + stock sleeve metrics (yfinance pull)
     # ---------------------------------------------------------------------------
-    _mf_probe_json(watchlist_config_path, "vci_watchlist", "ticker", "VCI entries")
+    # ISA-0792: measured on CURRENT ACS, not on ticker presence (the old probe read a skipped sync OK)
+    try:
+        with open(watchlist_config_path, encoding="utf-8") as _f792:
+            _vw792 = (json.load(_f792) or {}).get("vci_watchlist") or []
+        _m5 = _step5_measure(_vw792, run_date.isoformat(), _vci_src_date)
+        _mf_measure(rows_out=_m5["rows_out"], coverage=_m5["coverage"],
+                    non_null_share=_m5["non_null_share"], note=_m5["note"])
+        summary["vci_watchlist_source"]["current_acs_rows"] = _m5["note"]
+        if _m5["coverage"] < 1.0:
+            warnings.append("Step 5 VCI WATCHLIST NOT CURRENT (ISA-0792): " + _m5["note"])
+    except Exception as _e792:                                           # noqa: BLE001
+        _mf_measure(note=f"vci_watchlist probe failed: {_e792}")
     # ══════════════════════════════════════════════════════════════════════════════════
     # Step 5y — POPULATE THE WEEKLY GBP TOTAL-RETURN STORE (P1 / ISA-0455)
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -3265,13 +3378,9 @@ def main():
         with open(watchlist_scored_path, encoding="utf-8") as _f7:
             _sc7 = json.load(_f7)
         _cr7 = _sc7.get("conviction_ranking", []) or []
-        _live7 = sum(1 for e in _cr7
-                     if (e.get("total_score_54") or e.get("total_score_50")
-                         or e.get("total_score_36")) is not None)
-        _mf_measure(rows_out=len(_cr7),
-                    coverage=(_live7 / len(_cr7)) if _cr7 else None,
-                    non_null_share=(_live7 / len(_cr7)) if _cr7 else None,
-                    note=f"{_live7}/{len(_cr7)} rows carry a live total score")
+        _m7 = _step7_measure(_cr7)
+        _mf_measure(rows_out=_m7["rows_out"], coverage=_m7["coverage"],
+                    non_null_share=_m7["non_null_share"], note=_m7["note"])
     except Exception as _e7:
         _mf_measure(note=f"scored-file probe failed: {_e7}")
 
@@ -4063,10 +4172,24 @@ def main():
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 9 (email_prefill) skipped -- prior step failures.")
     else:
+        # ⚑ ISA-0798: THIS run's summary as a month-stamped snapshot - run_context_<month>.json is
+        #   not written until 9c, so without it the email had no same-run source for §2/§7.
+        _rc_snap = os.path.join(tempfile.gettempdir(), "isa_step9_rc_%s_%d.json" % (month_label, os.getpid()))
+        try:
+            with open(_rc_snap, "w", encoding="utf-8") as _fs798:
+                json.dump({"_meta": {"month_label": month_label,
+                                     "basis": "ISA-0798 same-run summary snapshot at Step 9"},
+                           "summary": summary}, _fs798, default=str)
+        except Exception as _e798:                                        # noqa: BLE001
+            warnings.append("Step 9 (ISA-0798): run_context snapshot could not be written (%s: %s); "
+                            "the email's router/V2.1 blocks will read ABSENT" % (type(_e798).__name__, _e798))
+            _rc_snap = None
         ok, stdout, stderr = run_script(
             "email_prefill",
             ["--portfolio", portfolio_path, "--analytics", analytics_path,
-             "--xray", xray_path, "--scored", watchlist_scored_path, "--out", email_path],
+             "--xray", xray_path, "--scored", watchlist_scored_path, "--out", email_path,
+             # ⚑ ISA-0797: THIS run's step9_pre, explicitly - never discovered by the data month
+             "--step9", step9_pre_path] + (["--run-context", _rc_snap] if _rc_snap else []),
             dry_run=args.dry_run,
         )
         if not ok:
@@ -5325,6 +5448,33 @@ def _selftest(verbose: bool = True) -> int:
        _step8_measure([{"source_score": None, "forward_eligible": True}])["coverage"] == 0.0)
     ok("ISA-0790: one home - the Step 8 coverage IS the action-stack coverage",
        _step8_measure(_rows782)["coverage"] == _action_stack_coverage(_rows782))
+    # ISA-0792: Step 5 / Step 7 measures
+    _vr = [{"ticker": "INFQ", "acs_score": 0, "vci_run_date": "2026-07-12"},
+           {"ticker": "IONQ", "acs_score": None, "vci_run_date": ""}]
+    ok("ISA-0792 MUST-FIRE: the Sep-2026 state (July rows, a 0 and a blank) is NOT current -> coverage 0",
+       _step5_measure(_vr, "2026-10-03", None)["coverage"] == 0.0)
+    _vr2 = [{"ticker": t, "acs_score": a, "vci_run_date": "2026-09-13"}
+            for t, a in (("INFQ", 69), ("IONQ", 73), ("CRSP", 69), ("RGTI", 71))]
+    ok("ISA-0792: four current ACS rows from the 13-Sep VCI run -> coverage 1.0",
+       _step5_measure(_vr2, "2026-10-03", "2026-09-13")["coverage"] == 1.0)
+    ok("ISA-0792 NEGATIVE CONTROL: the same rows 50 days later are STALE",
+       _step5_measure(_vr2, "2026-11-02", "2026-09-13")["coverage"] == 0.0)
+    _cr = ([{"pipeline": "growth_stock", "total_score_50": 38}] * 10
+           + [{"pipeline": "vci", "acs_score": a} for a in (69, 73, 69, 71)])
+    ok("ISA-0792 MUST-FIRE: 10 growth totals + 4 VCI ACS is full Step 7 coverage, not 71%",
+       _step7_measure(_cr)["coverage"] == 1.0)
+    ok("ISA-0792 NEGATIVE CONTROL: VCI rows with NO ACS still count as missing",
+       abs(_step7_measure(_cr[:10] + [{"pipeline": "vci", "acs_score": None}] * 4)["coverage"] - 10 / 14) < 1e-9)
+    # ISA-0791: the reconcile call carries the export evidence window
+    _src791 = open(os.path.abspath(__file__), encoding="utf-8").read()
+    ok("ISA-0791 ESCALATION: a not-executed-to-date recommendation reaches the warning list",
+       '"Step 1.5 A13/ISA-0791: %d recommendation(s) NOT EXECUTED TO DATE' in _src791)
+    ok("ISA-0798 WIRING: Step 9 passes THIS run's summary snapshot to email_prefill",
+       '(["--run-context", _rc_snap] if _rc_snap else [])' in _src791)
+    ok("ISA-0797 WIRING: Step 9 passes THIS run's step9_pre to email_prefill",
+       '"--step9", step9_pre_path],' in _src791)
+    ok("ISA-0791 WIRING: Step 1.5 passes the export's evidence window to the reconcile",
+       "date=run_date.isoformat(), evidence=_ev791," in _src791)
     import ast as _ast778
     _src778 = open(os.path.abspath(__file__), encoding="utf-8").read()
     _main778 = next(n for n in _ast778.parse(_src778).body

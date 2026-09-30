@@ -32,6 +32,7 @@ then calls build_monthly_isa_email.py.
 
 import argparse
 import json
+import re
 import math
 import os
 import sys
@@ -154,6 +155,23 @@ def calc_allowance_used(portfolio: dict):
 # ---------------------------------------------------------------------------
 # Fix Pack P2 helpers — A19 anchor, B5 trajectory, B1 ladder, A14 counterfactual
 # ---------------------------------------------------------------------------
+# ⚑ ISA-0798 (30-Sep-2026): THIS run's summary, handed over by the orchestrator at Step 9 (before
+#   run_context_<month>.json exists). When set, every run_context reader here uses it - the router
+#   block, the V2.1 block and the override line - so the email renders the SAME run the Step 9d
+#   check compares against. Unset (stand-alone use) -> the run-month file, never a prior month.
+_RC_SNAPSHOT = None
+
+
+def _run_context_for(run_ml=None) -> dict:
+    """ISA-0798: the run_context this email renders from - the same-run snapshot if the orchestrator
+    passed one, else THIS run month's file (ISA-0797), else {} (rendered as ABSENT, never guessed)."""
+    if _RC_SNAPSHOT is not None:
+        return _RC_SNAPSHOT
+    if run_ml:
+        return load_json_optional(os.path.join(SCRIPT_DIR, f"run_context_{run_ml}.json")) or {}
+    return {}
+
+
 def _latest_run_context_path():
     import glob as _g
     fs = sorted(_g.glob(os.path.join(SCRIPT_DIR, "run_context_*.json")), key=os.path.getmtime)
@@ -1394,7 +1412,10 @@ def skeleton_s9() -> dict:
 def skeleton_s11() -> dict:
     # A13 (P2): override P&L one-liner — filled from run_context override_log / ledger
     # reconcile counts; A9: ledger-path echo so the write is auditable from the email.
-    _rc = load_json_optional(_latest_run_context_path()) if _latest_run_context_path() else {}
+    # ISA-0798: the same-run snapshot when the orchestrator provided one (the newest file on disk
+    #   is LAST month's on a first pass); stand-alone use keeps the old newest-file behaviour.
+    _rc = (_RC_SNAPSHOT if _RC_SNAPSHOT is not None else
+           (load_json_optional(_latest_run_context_path()) if _latest_run_context_path() else {}))
     _ov = (_rc.get("summary") or {}).get("override_log") or []
     _ov_line = (f"Overrides on record: {len(_ov)} — cumulative P&L vs framework: "
                 f"{sum((o.get('pnl_vs_framework_gbp') or 0) for o in _ov):+,.0f} GBP to date"
@@ -2103,6 +2124,8 @@ SUMMARY_ESCALATED = {
     #   a table it would read as a status panel; it has to arrive as a warning, because the
     #   action it asks for is Raj exporting the missing transaction history.
     "execution_unconfirmed":      "Step 1.5",
+    "execution_not_executed_to_date": "Step 1.5",   # ISA-0791
+    "vci_watchlist_source":       "Step 5",         # ISA-0792: which VCI run the ACS came from
     "txn_coverage":               "Step 1.5",
     "anchor_rederived":           "A19",          # the anchor moved this run
     "anchor_operative_moved":     "A19",
@@ -2638,6 +2661,30 @@ def build_v21_block(v21: dict) -> dict:
     return out
 
 
+_RUN_ML_RE = re.compile(r"_((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)_\d{4})\.json$", re.IGNORECASE)
+
+
+def run_month_label(*paths):
+    """ISA-0797 (30-Sep-2026): the RUN month ('oct_2026') from the run's own artefact names
+    (email_data_<m>.json, watchlist_scored_<m>.json). NEVER the portfolio's month_label - that is
+    the DATA month ('sep_2026' on the 03-Oct run), and discovering step9_pre / run_context by it
+    built the October email from September's files. None when no path carries a month."""
+    for p in paths:
+        m = _RUN_ML_RE.search(os.path.basename(str(p or "")))
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def artefact_month_problem(doc: dict, run_ml: str, name: str):
+    """ISA-0797: None if the artefact declares the run's month (or declares none); else the reason."""
+    got = str(((doc or {}).get("_meta") or {}).get("month_label") or "").lower()
+    if run_ml and got and got != run_ml:
+        return ("%s declares month %s but this run is %s - REFUSED (ISA-0797: a prior month's "
+                "artefact must never render as this month's)" % (name, got, run_ml))
+    return None
+
+
 def build_prefilled_email(
     portfolio: dict,
     analytics: dict,
@@ -2645,6 +2692,7 @@ def build_prefilled_email(
     scored: dict,
     run_date: date,
     step9: dict = None,
+    run_ml: str = None,
 ) -> dict:
     has_scored = bool(scored and scored.get("s5_watchlist_rows"))
     _s5 = build_s5_from_scored(scored, step9) if has_scored else skeleton_s5()
@@ -2677,10 +2725,10 @@ def build_prefilled_email(
     if _pilot:
         _s7_out["gold_pilot_line"] = _pilot.get("line")
     # ── ISA-0439: the V2.1 block. Read from the run_context the pre-run wrote. ───────────
-    _rc = {}
-    _ml2 = (portfolio.get("_meta", {}) or {}).get("month_label")
-    if _ml2:
-        _rc = load_json_optional(os.path.join(SCRIPT_DIR, f"run_context_{_ml2}.json")) or {}
+    # ISA-0797/0798: THIS run's context - the orchestrator's same-run snapshot, else the RUN month's
+    #   file; never the portfolio's data month
+    _ml2 = run_ml or (portfolio.get("_meta", {}) or {}).get("month_label")
+    _rc = _run_context_for(_ml2)
     _v21 = ((_rc.get("summary") or {}).get("v21")) or {}
     _v21_block = build_v21_block(_v21)
     if _v21_block:
@@ -2744,6 +2792,8 @@ def main():
                         help="Path to watchlist_scored_mmm_yyyy.json from normalise_adapter.py")
     parser.add_argument("--step9",     default=None,
                         help="Path to step9_pre_mmm_yyyy.json (VCI sleeve table); auto-discovered beside if omitted")
+    parser.add_argument("--run-context", default=None,
+                        help="ISA-0798: THIS run's summary snapshot (written by the pre-run at Step 9)")
     parser.add_argument("--out",       default=None)
     args = parser.parse_args()
 
@@ -2760,15 +2810,39 @@ def main():
     analytics = load(args.analytics, "analytics JSON")
     xray      = load(args.xray,      "xray JSON")
     scored    = load(args.scored, "watchlist_scored JSON", required=False) if args.scored else {}
-    # FWDVCI §14.8: auto-discover step9_pre for the VCI sleeve table (optional; safe no-op if absent)
-    _ml = (portfolio.get("_meta", {}) or {}).get("month_label")
+    # FWDVCI §14.8 + ⚑ ISA-0797: the run's OWN step9_pre. Discovered (when not passed) by the RUN
+    #   month taken from this run's artefact names - never by the portfolio's data month - and
+    #   refused if it declares a different month.
+    _ml = run_month_label(args.out, args.scored, args.step9)
+    _refusals = []
+    if _ml is None:
+        _ml = (portfolio.get("_meta", {}) or {}).get("month_label")
+        _refusals.append("run month not derivable from --out/--scored; fell back to the portfolio "
+                         "DATA month %s (ISA-0797) - pass --out email_data_<mmm_yyyy>.json" % _ml)
     step9 = {}
     _s9p = args.step9 if args.step9 else (os.path.join(SCRIPT_DIR, f"step9_pre_{_ml}.json") if _ml else None)
     if _s9p and os.path.exists(_s9p):
         step9 = load(_s9p, "step9_pre JSON", required=False)
+        _why = artefact_month_problem(step9, _ml, os.path.basename(_s9p))
+        if _why:
+            _refusals.append(_why)
+            print("  WARNING: " + _why)
+            step9 = {}
+
+    global _RC_SNAPSHOT
+    if args.run_context:
+        _snap = load(args.run_context, "run_context snapshot", required=False)
+        _why = artefact_month_problem(_snap, _ml, os.path.basename(args.run_context))
+        if _why:
+            _refusals.append(_why)
+            print("  WARNING: " + _why)
+        elif _snap:
+            _RC_SNAPSHOT = _snap
 
     run_date = date.today()
-    data = build_prefilled_email(portfolio, analytics, xray, scored, run_date, step9=step9)
+    data = build_prefilled_email(portfolio, analytics, xray, scored, run_date, step9=step9, run_ml=_ml)
+    if _refusals:
+        data.setdefault("meta", {})["artefact_month_refusals"] = _refusals
 
     if args.out:
         out_path = args.out
@@ -2857,6 +2931,28 @@ def build_held_underwriting_block(hu: dict, lineage: dict = None) -> dict:
 
 def _selftest():
     """ISA-0722 — the held-underwriting renderer renders states, never fabricates a figure."""
+    # ISA-0798 - the same-run snapshot is what every run_context reader uses
+    global _RC_SNAPSHOT
+    _saved = _RC_SNAPSHOT
+    try:
+        _RC_SNAPSHOT = {"_meta": {"month_label": "oct_2026"}, "summary": {"v21": {"x": 1}}}
+        assert _run_context_for("oct_2026")["summary"]["v21"] == {"x": 1}, \
+            "⚑ MUST-FIRE ISA-0798: the orchestrator's same-run snapshot is the source"
+        _RC_SNAPSHOT = None
+        assert _run_context_for(None) == {}, \
+            "NEGATIVE CONTROL ISA-0798: no snapshot and no run month -> {} (ABSENT), never a prior file"
+    finally:
+        _RC_SNAPSHOT = _saved
+    # ISA-0797 - the run month comes from the run's artefacts, never the data month
+    assert run_month_label("/x/email_data_oct_2026.json", None) == "oct_2026", \
+        "⚑ MUST-FIRE ISA-0797: the run month is read from the run's own output name"
+    assert run_month_label(None, "/x/watchlist_scored_oct_2026.json") == "oct_2026"
+    assert run_month_label(None, None) is None, "NEGATIVE CONTROL: nothing to read -> None, never a guess"
+    assert artefact_month_problem({"_meta": {"month_label": "sep_2026"}}, "oct_2026", "step9_pre_sep_2026.json"), \
+        "⚑ MUST-FIRE ISA-0797: last month's step9_pre is REFUSED for this month's email"
+    assert artefact_month_problem({"_meta": {"month_label": "oct_2026"}}, "oct_2026", "x") is None, \
+        "NEGATIVE CONTROL ISA-0797: the run's own artefact is accepted"
+
     hu = {"state": "OK", "n_cases_held": 2, "n_expected": 2,
           "by_state": {"VALID_MECHANICAL": ["AAA"], "NOT_DEFENSIBLY_QUANTIFIABLE": ["BBB"]},
           "not_captured_original": ["BBB"],

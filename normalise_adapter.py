@@ -406,7 +406,7 @@ def build_vci_summary_section(s: dict) -> dict:
     No Part A/B tables — the full VCI scorecard lives in the VCI output file.
     Returns a structured dict for Claude to render and expand at Step 9/10.
     """
-    acs  = s.get("acs_score") or s.get("_acs_score")
+    acs  = s.get("acs_score") if s.get("acs_score") is not None else s.get("_acs_score")
     conv = prelim_conviction_bracket_vci(acs)
 
     return {
@@ -567,9 +567,26 @@ def prelim_conviction_bracket(total_score, total_max=None) -> dict:
             "conviction_score": "[Claude fills /100 at Step 9]"}
 
 
+def _acs_of(s: dict):
+    """ISA-0792: the row's ACS - the first NON-None of acs_score/_acs_score (0 is a score, None is absence)."""
+    a = s.get("acs_score")
+    return a if a is not None else s.get("_acs_score")
+
+
+def _acs_txt(acs) -> str:
+    return f"ACS {acs}/100" if acs is not None else "ACS \u2014/100 (UNAVAILABLE)"
+
+
 def prelim_conviction_bracket_vci(acs_score: int | None) -> dict:
-    """VCI conviction bracket (ACS /100). Returns deployment status and tier."""
-    acs = acs_score or 0
+    """VCI conviction bracket (ACS /100). Returns deployment status and tier.
+    ISA-0792: an ABSENT ACS is UNAVAILABLE - never scored as 0 (R2.10). The Sep-2026 email showed
+    INFQ/IONQ/CRSP/RGTI as 'ACS 0/100 Below Threshold' while the VCI run had them at 69/73/69/71."""
+    if acs_score is None:
+        return {"acs_score": None, "bracket": "ACS UNAVAILABLE", "level": "unknown",
+                "note": "No current ACS for this VCI name (source absent or not synced) - not a low score",
+                "conviction_score": "ACS \u2014/100 (UNAVAILABLE)",
+                "deployment_ready": False, "nvidia_class": False}
+    acs = acs_score
     for threshold, label, level, note in SCORE_TO_PRELIM_CONVICTION_VCI:
         if acs >= threshold:
             return {
@@ -596,7 +613,9 @@ def get_conviction_bracket(s: dict) -> dict:
     """Dispatcher: return the correct conviction bracket dict for any pipeline."""
     pipeline = s.get("_source_pipeline", "growth_stock")
     if pipeline == "vci":
-        acs = s.get("acs_score") or s.get("_acs_score")
+        acs = s.get("acs_score")
+        if acs is None:
+            acs = s.get("_acs_score")
         return prelim_conviction_bracket_vci(acs)
     else:
         return prelim_conviction_bracket(s.get("total_score"), s.get("total_max"))
@@ -620,9 +639,9 @@ def build_s5_row(ticker: str, s: dict, wl_entry: dict | None) -> dict:
     conv = get_conviction_bracket(s)
 
     if pipeline == "vci":
-        acs = s.get("acs_score") or s.get("_acs_score")
+        acs = _acs_of(s)
         score_display = (
-            f"ACS {acs}/100 | {conv['bracket']}"
+            f"{_acs_txt(acs)} | {conv['bracket']}"
             + (" ✓ Deploy" if conv.get("deployment_ready") else "")
         )
     else:
@@ -672,8 +691,8 @@ def build_s7_row(ticker: str, s: dict) -> dict:
 
     # Score display adapts to pipeline
     if pipeline == "vci":
-        acs = s.get("acs_score") or s.get("_acs_score")
-        score_summary = f"ACS {acs}/100"
+        acs = _acs_of(s)
+        score_summary = _acs_txt(acs)
     else:
         score_summary = (f"{s.get('part_a_score','?')}/28 + {s.get('part_b_score','?')}/{s.get('part_b_max',22)} "
                          f"= {s.get('total_score','?')}/{s.get('total_max',50)}")
@@ -770,13 +789,13 @@ def _build_s3_skeleton_growth(ticker: str, s: dict) -> dict:
 
 def _build_s3_skeleton_vci(ticker: str, s: dict) -> dict:
     """VCI asymmetric candidate s3 investment case skeleton (ACS /100)."""
-    acs      = s.get("acs_score") or s.get("_acs_score")
+    acs      = _acs_of(s)
     conv     = prelim_conviction_bracket_vci(acs)
     analyst  = build_analyst_summary(s)
     vci_sect = build_vci_summary_section(s)
 
     header_metrics = [
-        {"label": "ACS Score",          "value": f"ACS {acs}/100",
+        {"label": "ACS Score",          "value": _acs_txt(acs),
          "assessment": conv["bracket"],
          "signal": "green" if (acs or 0) >= VCI_DEPLOYMENT_THRESHOLD else "amber"},
         {"label": "Classification",     "value": s.get("classification") or s.get("_classification", "—"),
@@ -932,14 +951,14 @@ def run(metrics_path: str, out_path: str) -> dict:
         }
 
         if pipeline == "vci":
-            acs = s.get("acs_score") or s.get("_acs_score")
+            acs = _acs_of(s)
             base.update({
                 "acs_score":        acs,
-                "score_display":    f"ACS {acs}/100",
+                "score_display":    _acs_txt(acs),
                 "classification":   s.get("classification") or s.get("_classification", ""),
                 "nvidia_signals":   s.get("nvidia_signals") or s.get("_nvidia_signals", ""),
-                "conviction_score": f"ACS {acs}/100",
-                "deployment_ready": (acs or 0) >= VCI_DEPLOYMENT_THRESHOLD,
+                "conviction_score": _acs_txt(acs),
+                "deployment_ready": acs is not None and acs >= VCI_DEPLOYMENT_THRESHOLD,
                 "action": (
                     "Deployment threshold met — Step 9" if (acs or 0) >= VCI_DEPLOYMENT_THRESHOLD
                     else "Below VCI deployment threshold — monitor catalysts"
@@ -1089,6 +1108,18 @@ def _selftest() -> int:
     assert fmt_price(None, "USD") == "—", "positive control: no price"; n += 1
     import inspect as _i
     assert '"USD")' not in _i.getsource(build_s7_row), "must not re-default currency to USD"; n += 1
+    # ISA-0792: an absent ACS is UNAVAILABLE, never a real-looking 0
+    _b = prelim_conviction_bracket_vci(None)
+    assert _b["acs_score"] is None and _b["bracket"] == "ACS UNAVAILABLE" and not _b["deployment_ready"], \
+        "ISA-0792 MUST-FIRE: None must not become 'ACS 0/100 Below Threshold'"; n += 1
+    assert prelim_conviction_bracket_vci(0)["bracket"] == "Below Threshold", \
+        "ISA-0792 NEGATIVE CONTROL: a REAL 0 is still a (low) score"; n += 1
+    assert prelim_conviction_bracket_vci(76)["deployment_ready"] is True, "positive control: 76 >= 75"; n += 1
+    assert _acs_of({"acs_score": None, "_acs_score": 69}) == 69 and _acs_of({"acs_score": 0, "_acs_score": 69}) == 0
+    n += 1
+    import inspect as _i2
+    _pat = 'acs_score") ' + 'or s.get("_acs_score")'
+    assert _pat not in _i2.getsource(sys.modules[__name__]), "ISA-0792: no `or`-coalescing of ACS"; n += 1
     print("normalise_adapter selftest: %d assertions, 0 failed" % n)
     return n
 

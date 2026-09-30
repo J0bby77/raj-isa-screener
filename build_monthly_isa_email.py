@@ -1696,6 +1696,20 @@ def approval_gate(rc: dict, current_state_fn=None) -> tuple:
                "(Step 6.10) so the plan is formed on the current state." % (v["state"], v.get("why")))
 
 
+_PLACEHOLDER_RE = re.compile(r"\[Claude[^\]\n]{0,200}\]")
+
+
+def unfilled_placeholders(html: str) -> dict:
+    """ISA-0793 (30-Sep-2026): every '[Claude ...]' token left in the COMPLETE report -> {token: count}.
+    The prose Self-Check (Run_Context item 7b) was the only control; the 04-Oct SHADOW built rc 0
+    with 56 of them. Scanned on the complete report because the review fills every section, including
+    those the lean body omits (Sep-2026 full report: 0)."""
+    out = {}
+    for m in _PLACEHOLDER_RE.finditer(html or ""):
+        out[m.group(0)] = out.get(m.group(0), 0) + 1
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Monthly ISA Portfolio Review HTML email body from JSON data file."
@@ -1713,6 +1727,9 @@ def main():
     parser.add_argument("--gate-override-reason", default="")
     # H11 (05-Aug-2026) — the August report built clean and could not be SENT. --lean makes the
     # emailed copy deliverable; the full report is written regardless, so nothing is ever lost.
+    parser.add_argument("--allow-placeholders", action="store_true",
+                        help="ISA-0793: SHADOW/rehearsal builds only - build even with unfilled "
+                             "'[Claude ...]' placeholders. Never on a send.")
     parser.add_argument("--lean", action="store_true",
                         help="Emit a transport-safe email body: lossless style compression "
                              "(~52%% smaller) and, only if still over budget, explicit "
@@ -1860,6 +1877,17 @@ def main():
     # the record, and it must not depend on what fitted in a mail transport.
     full_body = build_email_body(data)
     full_path = args.full_output or (os.path.splitext(args.output)[0] + "_full.html")
+    # ⚑ ISA-0793: an email with '[Claude fills ...]' text left in it is not a finished report.
+    _ph = unfilled_placeholders(full_body)
+    if _ph:
+        print("  PLACEHOLDERS: %d unfilled '[Claude ...]' token(s) in the complete report:" % sum(_ph.values()))
+        for _k, _v in sorted(_ph.items(), key=lambda kv: -kv[1])[:40]:
+            print("    %3d x %s" % (_v, _k[:120]))
+        if not args.allow_placeholders:
+            print("ERROR (ISA-0793): fill every placeholder in email_data_[mmm_yyyy].json and rebuild. "
+                  "No email body was written.")
+            sys.exit(3)
+        print("  PLACEHOLDERS ALLOWED (--allow-placeholders): SHADOW/rehearsal build - NOT sendable.")
     lean_rep = {}
     if args.lean:
         with open(full_path, "w", encoding="ascii", errors="xmlcharrefreplace") as f:
@@ -1944,7 +1972,16 @@ def _selftest():
     assert v["state"] == "UNKNOWN" and m, "MUST-FIRE ISA-0727: an un-checkable binding blocks, never passes"
     v, m = approval_gate({"summary": {"capital_destination": {}}})
     assert v["state"] == "UNBOUND" and m is None, "ISA-0727: a pre-control plan is UNBOUND - reported, not blocked"
-    print("build_monthly_isa_email selftest OK (ISA-0722 section 7 table + ISA-0727 approval gate)")
+    # ISA-0793 - the placeholder gate
+    assert unfilled_placeholders("<p>[Claude fills]</p><td>[Claude: thesis/performance note]</td>[Claude fills]") \
+        == {"[Claude fills]": 2, "[Claude: thesis/performance note]": 1}, "⚑ MUST-FIRE ISA-0793: tokens counted"
+    assert unfilled_placeholders("<p>Claude filled this: [see note] and [Clause 4]</p>") == {}, \
+        "NEGATIVE CONTROL ISA-0793: ordinary bracketed text is not a placeholder"
+    import inspect as _ins793
+    _m = _ins793.getsource(main)
+    assert "sys.exit(3)" in _m and _m.index("unfilled_placeholders(full_body)") < _m.index("open(args.output, \"w\""), \
+        "ISA-0793: the gate runs BEFORE the email body file is written"
+    print("build_monthly_isa_email selftest OK (ISA-0722 section 7 table + ISA-0727 approval gate + ISA-0793 placeholder gate)")
     return 0
 
 if __name__ == "__main__":

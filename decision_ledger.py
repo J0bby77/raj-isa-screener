@@ -692,7 +692,8 @@ def _stamp_execution(entry, txn):
 
 
 def reconcile_executions_from_transactions(path, transactions, current_holdings,
-                                           prior_holdings=None, date=None, persist=True):
+                                           prior_holdings=None, date=None, persist=True,
+                                           evidence=None):
     """Confirm recommendations against the ACTUAL dealing record (broker truth).
 
     `transactions`: list of dicts as produced by
@@ -725,10 +726,20 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     _txn_dates = sorted(str(x.get("date") or "") for x in txns if x.get("date"))
     txn_from = _txn_dates[0] if _txn_dates else None
     txn_to = _txn_dates[-1] if _txn_dates else None
+    # ⚑ ISA-0791 (30-Sep-2026): the LAST TRADE is not the end of the evidence. An export dated
+    #   29-Sep whose last row is 18-Sep proves there was NO trade 19..28-Sep; reading it as "blind
+    #   after 18-Sep" reported the QBTS 13-Sep top-up as unconfirmed while the file showed no QBTS
+    #   trade at all. `evidence` = extract_transactions.export_evidence_window (from/through, from
+    #   the filename month and the workbook's own creation stamp). Absent -> old behaviour.
+    ev_from = (evidence or {}).get("from")
+    ev_to = (evidence or {}).get("through")
+    cov_to = max([x for x in (txn_to, ev_to) if x] or [None]) if (txn_to or ev_to) else None
+    cov_from = min([x for x in (txn_from, ev_from) if x] or [None]) if (txn_from or ev_from) else None
+    have_txns = have_txns or bool(ev_to)
 
     counts = {"confirmed_executed": 0, "not_executed": 0,
               "execution_unconfirmed": 0, "no_action_expected": 0,
-              "superseded_unexecuted": 0}
+              "superseded_unexecuted": 0, "not_executed_to_date": 0}
     confirmed, fallback_used = [], []
     matched_uids = set()
 
@@ -762,7 +773,10 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
         #   yet" (ISA-0684) - it is NOT terminal. It is re-derived on every reconcile, so the 06-Sep
         #   NTAP BUY confirms once the Sep export shows the 08-Sep trade instead of that trade being
         #   reported OFF-FRAMEWORK. confirmed / not_executed / superseded remain terminal.
-        if e.get("execution_status") not in ("recommended", "execution_unconfirmed"):
+        # ISA-0791: `not_executed_to_date` is also re-derived - the decision is still in force, so a
+        #   trade inside its window on a later export must still confirm it.
+        if e.get("execution_status") not in ("recommended", "execution_unconfirmed",
+                                             "not_executed_to_date"):
             continue
         # Historic entries were written with mixed casing ("BUY", "HOLD"), so
         # normalise before matching -- a case-sensitive compare would route a
@@ -796,6 +810,7 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             _stamp_execution(e, cand[0])
             e["execution_status"] = "confirmed_executed"
             e.pop("execution_unconfirmed_reason", None)                 # ISA-0787: evidence arrived
+            e.pop("evidence_through", None)                             # ISA-0791
             e["executed_confirmed_date"] = date
             counts["confirmed_executed"] += 1
             confirmed.append({"ticker": t, "decision": d,
@@ -824,19 +839,32 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             #   export reaches the run date  -> evidence complete  -> not_executed
             #   export ends after rec_date   -> blind tail         -> unconfirmed
             #   export ends before rec_date  -> no evidence at all -> unconfirmed
-            if txn_to is not None and txn_to >= str(date):
+            if cov_to is not None and cov_to >= str(date):
                 e["execution_status"] = "not_executed"
                 e.pop("execution_unconfirmed_reason", None)
+                e.pop("evidence_through", None)
                 counts["not_executed"] += 1
                 continue
-            if txn_to is None or txn_to < rec_date:
+            # ISA-0791: the evidence covers the recommendation date through `cov_to` with NO
+            #   matching trade, and the decision is still in force after it. That is a MEASURED
+            #   absence up to a date - not 'declined' (the window is open; it never feeds the A13
+            #   override log) and not 'unconfirmed' (the evidence is not blind). Re-derived next run.
+            #   Only when the export's OWN window is known (ev_to): a last-trade date is not proof.
+            if (ev_to and cov_to is not None and cov_from is not None
+                    and cov_from <= rec_date <= cov_to):
+                e["execution_status"] = "not_executed_to_date"
+                e["evidence_through"] = cov_to
+                e.pop("execution_unconfirmed_reason", None)
+                counts["not_executed_to_date"] += 1
+                continue
+            if cov_to is None or cov_to < rec_date:
                 _why = ("no transaction evidence covers this recommendation: "
                         "export covers %s..%s, recommended %s"
                         % (txn_from, txn_to, rec_date))
             else:
                 _why = ("transaction evidence is blind after %s: recommended %s, "
                         "reconciled to %s, export covers %s..%s"
-                        % (txn_to, rec_date, date, txn_from, txn_to))
+                        % (cov_to, rec_date, date, cov_from, cov_to))
             e["execution_status"] = "execution_unconfirmed"
             e["execution_unconfirmed_reason"] = _why
             counts["execution_unconfirmed"] += 1
@@ -891,9 +919,10 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             # ISA-0684: the coverage window travels with the verdict, so every
             # downstream reader can tell a refusal from a rejection (R2.10).
             "txn_coverage": {"from": txn_from, "to": txn_to,
+                             "evidence_from": ev_from, "evidence_through": ev_to,   # ISA-0791
                              "reconciled_to": str(date),
-                             "complete": bool(txn_to is not None
-                                              and txn_to >= str(date))},
+                             "complete": bool(cov_to is not None
+                                              and cov_to >= str(date))},
             "source": "transactions" if have_txns else "holdings_delta"}
 
 
@@ -1007,6 +1036,59 @@ def _selftest():
     ck("NEGATIVE CONTROL: no export -> coverage reports no evidence, not a clean window",
        r["txn_coverage"]["to"] is None and r["txn_coverage"]["complete"] is False)
 
+
+    # ══ ISA-0791 — the export's own window, not its last trade, bounds the evidence ═══════
+    _ev = {"from": "2026-09-01", "through": "2026-09-28"}
+    _t791 = [{"date": "2026-09-08", "ticker": "NTAP", "type": "buy", "quantity": 37,
+              "price": 137.0, "amount_gbp": 5112.19, "reference": "R8"},
+             {"date": "2026-09-18", "ticker": "ONT", "type": "sell", "quantity": 880,
+              "price": 1.72, "amount_gbp": 1513.43, "reference": "R18"}]
+    p = _mk([_e("QBTS", "top_up", "2026-09-13")])
+    r = reconcile_executions_from_transactions(p, _t791, {"QBTS": 68.0},
+                                               prior_holdings={"QBTS": 68.0},
+                                               date="2026-10-03", evidence=_ev)
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("⚑ ISA-0791 MUST-FIRE (the QBTS case): recommended 13-Sep, export complete to 28-Sep with no "
+       "QBTS trade -> NOT EXECUTED TO DATE (evidence through 28-Sep), never 'unconfirmed'",
+       got["execution_status"] == "not_executed_to_date" and got.get("evidence_through") == "2026-09-28"
+       and got.get("execution_unconfirmed_reason") is None)
+    ck("ISA-0791: coverage carries the evidence window", r["txn_coverage"]["evidence_through"] == "2026-09-28")
+    # re-derived: a later export showing a trade inside the still-open window CONFIRMS it
+    reconcile_executions_from_transactions(
+        p, _t791 + [{"date": "2026-10-01", "ticker": "QBTS", "type": "buy", "quantity": 48,
+                     "price": 12.5, "amount_gbp": 599.0, "reference": "R31"}],
+        {"QBTS": 116.0}, prior_holdings={"QBTS": 68.0}, date="2026-11-07",
+        evidence={"from": "2026-10-01", "through": "2026-10-31"})
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("ISA-0791: not_executed_to_date is NOT terminal - a trade inside the open window confirms it",
+       got["execution_status"] == "confirmed_executed" and "evidence_through" not in got)
+    # NEGATIVE CONTROL: without the evidence window the old (blind-tail) verdict is unchanged
+    p = _mk([_e("QBTS", "top_up", "2026-09-13")])
+    reconcile_executions_from_transactions(p, _t791, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0},
+                                           date="2026-10-03")
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("ISA-0791 NEGATIVE CONTROL: no evidence window -> still execution_unconfirmed (blind after 18-Sep)",
+       got["execution_status"] == "execution_unconfirmed"
+       and "blind after 2026-09-18" in got["execution_unconfirmed_reason"])
+    # NEGATIVE CONTROL: a recommendation dated AFTER the evidence window is not claimed
+    p = _mk([_e("QBTS", "top_up", "2026-09-30")])
+    reconcile_executions_from_transactions(p, _t791, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0},
+                                           date="2026-10-03", evidence=_ev)
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("ISA-0791 NEGATIVE CONTROL: recommended after the evidence ends -> unconfirmed, not 'not executed'",
+       got["execution_status"] == "execution_unconfirmed")
+    # evidence that reaches the run date still yields the terminal not_executed
+    p = _mk([_e("QBTS", "top_up", "2026-09-13")])
+    reconcile_executions_from_transactions(p, _t791, {"QBTS": 68.0}, prior_holdings={"QBTS": 68.0},
+                                           date="2026-09-20", evidence=_ev)
+    with open(p, encoding="utf-8") as fh:
+        got = json.load(fh)["entries"][0]
+    ck("ISA-0791: evidence reaching the run date -> not_executed (terminal), as before",
+       got["execution_status"] == "not_executed")
 
     # ══ ISA-0686 — canonical VCI decision capture ════════════════════════════════════
     _lp = _mk([])

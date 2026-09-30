@@ -86,9 +86,11 @@ def _parse_by_header(table_lines):
             rank = int(re.search(r"\d+", g("rank", "")).group())
         except (AttributeError, ValueError):
             continue
-        ticker = g("ticker")
+        ticker = g("ticker").replace("*", "").strip()
         if not ticker or ticker.lower() in ("ticker", ""):
             continue
+        if not re.match(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$", ticker):
+            continue   # ISA-0792: '(vacant)' and other non-ticker cells are not watchlist rows
         acs_m = re.search(r"\d+", g("acs_score", ""))
         exchange = ticker.split(".")[-1] if "." in ticker else g("exchange").upper()
         entry_str = g("entry_level_str")
@@ -127,11 +129,13 @@ def parse_vci_watchlist_md(md_path: str) -> list[dict]:
     lines = content.splitlines()
     start = None
     for i, ln in enumerate(lines):
-        if re.match(r"\s*#{1,6}\s*Current Asymmetric Watchlist", ln, re.IGNORECASE):
+        # ISA-0792: the memory file's '## Current Asymmetric Watchlist' OR the VCI run output's
+        #   '**Watchlist - ranked by VCI Source Score' line (the disk artefact the VCI task writes).
+        if re.match(r"\s*(#{1,6}\s*Current Asymmetric Watchlist|\*\*Watchlist\b)", ln, re.IGNORECASE):
             start = i + 1
             break
     if start is None:
-        print("  WARNING: Could not find 'Current Asymmetric Watchlist' heading in md file.")
+        print("  WARNING: Could not find a 'Current Asymmetric Watchlist' / '**Watchlist' heading in md file.")
         return []
 
     table_lines = []
@@ -234,6 +238,43 @@ def parse_vci_watchlist_md(md_path: str) -> list[dict]:
         })
 
     return rows
+
+
+_MONTHS = {m: i for i, m in enumerate(("january", "february", "march", "april", "may", "june", "july",
+                                        "august", "september", "october", "november", "december"), 1)}
+
+
+def source_run_date(md_path: str):
+    """ISA-0792: the VCI run date the watchlist source DECLARES - 'Run date: 13 September 2026' (VCI
+    output file) or 'lastUpdated: 2026-09-13' (memory file). None when undeclared: never guessed."""
+    try:
+        with open(md_path, encoding="utf-8") as fh:
+            head = fh.read(4000)
+    except OSError:
+        return None
+    m = re.search(r"^Run date:\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", head, re.MULTILINE)
+    if m and m.group(2).lower() in _MONTHS:
+        return "%s-%02d-%02d" % (m.group(3), _MONTHS[m.group(2).lower()], int(m.group(1)))
+    m = re.search(r"^lastUpdated:\s*(\d{4}-\d{2}-\d{2})", head, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def structured_acs(inv_dir: str, run_date):
+    """ISA-0792: {ticker: acs} from the VCI run's own structured artefact vci_deploy_<mmm>_<yyyy>.json
+    for the source's run month. {} when absent (the markdown ACS then stands)."""
+    if not run_date:
+        return {}
+    y, mth = int(run_date[:4]), int(run_date[5:7])
+    mon = [k for k, v in _MONTHS.items() if v == mth][0][:3]
+    p = os.path.join(inv_dir, "vci_deploy_%s_%d.json" % (mon, y))
+    try:
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    rows = d if isinstance(d, list) else list(d.values()) if isinstance(d, dict) else []
+    return {str(r.get("ticker")).upper(): r.get("acs") for r in rows
+            if isinstance(r, dict) and r.get("ticker") and isinstance(r.get("acs"), (int, float))}
 
 
 def _parse_entry_level_midpoint(entry_str: str, currency: str) -> float | None:
@@ -388,7 +429,8 @@ def recompute_acs(fresh_part_a_data: dict, existing_entry: dict) -> tuple[int, s
 
     if not reliable:
         # Carry forward — never degrade on unreliable/absent breakdown.
-        return (int(stored_acs) if isinstance(stored_acs, (int, float)) else 0), stored_breakdown
+        # ISA-0792: an ACS nobody reported stays None (UNMEASURED) - never a manufactured 0 (R2.10)
+        return (int(stored_acs) if isinstance(stored_acs, (int, float)) else None), stored_breakdown
 
     new_acs4 = fresh_acs4 if fresh_acs4 is not None else dims[4]
     new_acs8 = fresh_acs8 if fresh_acs8 is not None else dims[8]
@@ -452,6 +494,13 @@ def main():
         wt = json.load(f)
 
     existing_vci = {e["ticker"]: e for e in wt.get("vci_watchlist", [])}
+    # ISA-0792: the VCI run's reported ACS is AUTHORITATIVE for this cycle. The stored watchlist
+    #   value is only the carry-forward - using it as 'stored' let a manufactured 0 (Jul-2026)
+    #   survive every later VCI run, because the Part A refresh then 'carried forward' the 0.
+    src_run_date = source_run_date(args.watchlist_md)
+    s_acs = structured_acs(args.inv_dir, src_run_date)
+    print(f"  Source run date: {src_run_date or 'UNDECLARED'}; structured ACS for "
+          f"{len(s_acs)} name(s) from vci_deploy")
 
     # 3. For each ticker: refresh Part A, recompute ACS, build updated entry
     updated_entries = []
@@ -462,6 +511,11 @@ def main():
         print(f"  [{ticker}] Refreshing Part A via vci_acs_scorer.py...")
 
         existing = existing_vci.get(ticker, {})
+        _auth_acs = s_acs.get(str(ticker).upper(), md_entry.get("acs_score"))
+        _acs_source = ("vci_deploy" if str(ticker).upper() in s_acs
+                       else "watchlist_md" if md_entry.get("acs_score") is not None else None)
+        if _auth_acs is not None:
+            existing = dict(existing, acs_score=_auth_acs)
 
         # A10/A11 manual scores: prefer explicit entry fields, fall back to the
         # breakdown string. Without these the refresh would drop the web/Finnhub-sourced
@@ -489,7 +543,7 @@ def main():
         scorer_result = refresh_part_a(ticker, args.inv_dir, a10_override, a11_override,
                                        fv_override=fv_override, catalyst=catalyst)
 
-        old_acs = existing.get("acs_score", md_entry["acs_score"])
+        old_acs = existing_vci.get(ticker, {}).get("acs_score")
         fresh_part_a_score = None
 
         if scorer_result:
@@ -523,7 +577,9 @@ def main():
             "entry_currency":   md_entry["entry_currency"],
             "source_pipeline":  "vci",
             "acs_score":        new_acs,
-            "vci_run_date":     md_entry["last_scored"] or existing.get("vci_run_date", ""),
+            "vci_run_date":     md_entry["last_scored"] or src_run_date or existing.get("vci_run_date", ""),
+            "acs_source":       _acs_source,                                  # ISA-0792 lineage
+            "acs_source_file":  os.path.basename(args.watchlist_md),
             "nvidia_signals":   md_entry["nvidia_signals"] or existing.get("nvidia_signals", ""),
             "classification":   md_entry["classification"] or existing.get("classification", ""),
             "status":           md_entry["status"] or existing.get("status", ""),
@@ -667,7 +723,7 @@ def main():
         print(line)
 
     # Validate: all entries have acs_score
-    missing_acs = [e["ticker"] for e in updated_entries if not e.get("acs_score")]
+    missing_acs = [e["ticker"] for e in updated_entries if e.get("acs_score") is None]
     if missing_acs:
         print(f"  WARNING: acs_score missing for: {missing_acs}")
     else:
@@ -686,6 +742,30 @@ def _selftest() -> int:
     assert '"scoring_venue":    ((scorer_result.get("scoring_venue")' in src, \
         "ISA-0588 MUST-FIRE: the Step-5 scorer's captured venue must be carried onto the watchlist row"; n += 1
     assert '"fv_input_id"' in src, "ISA-0771: the FV lineage id must be carried onto the row"; n += 1
+    # ISA-0792 - the VCI run output format parses, the vacant row is dropped, the date is declared
+    _td = tempfile.mkdtemp(prefix="vci792_")
+    _md = os.path.join(_td, "project_vci_output_sep_2026.md")
+    with open(_md, "w", encoding="utf-8") as fh:
+        fh.write("# VCI Run Output - September 2026\nRun date: 13 September 2026 (2nd-Sunday run)\n\n"
+                 "| Rank | Ticker | Theme | QMS | Status |\n|---|---|---|---|---|\n| 1 | CRSP | 4 | 95.6 | SCORED - ACS 69 |\n\n"
+                 "**Watchlist - ranked by VCI Source Score (advisory), NOT ACS.**\n\n"
+                 "| Rank | Ticker | Company | Source | ACS | asym / P25 | Floor | 3yr Pos | NVIDIA | Deploy? | Status |\n"
+                 "|------|--------|---------|--------|-----|-----------|-------|---------|--------|---------|--------|\n"
+                 "| 1 | INFQ | Infleqtion | 31.5 | **69** \u25b21 | 2.93 / 2.25 | 2.00 | 39.0% | 4/6 | No | x |\n"
+                 "| 2 | IONQ | IonQ | 24.2 | 73 = | 2.45 / 1.88 | 2.00 | 40.0% | 4/6 | No | x |\n"
+                 "| 5 | *(vacant)* | - | - | - | - | - | - | - | - | none |\n")
+    _rows = parse_vci_watchlist_md(_md)
+    assert [(r["ticker"], r["acs_score"]) for r in _rows] == [("INFQ", 69), ("IONQ", 73)], _rows; n += 1
+    assert source_run_date(_md) == "2026-09-13"; n += 1
+    with open(os.path.join(_td, "vci_deploy_sep_2026.json"), "w", encoding="utf-8") as fh:
+        json.dump([{"ticker": "INFQ", "acs": 69}, {"ticker": "IONQ", "acs": 73}], fh)
+    assert structured_acs(_td, "2026-09-13") == {"INFQ": 69, "IONQ": 73}; n += 1
+    assert structured_acs(_td, None) == {}, "negative control: no declared date -> no structured source"; n += 1
+    # MUST-FIRE: a stored manufactured 0 with no reliable breakdown no longer survives the VCI run's 69
+    _acs, _ = recompute_acs({"acs4": 7, "acs8": 6}, {"acs_score": 69, "acs_breakdown": ""})
+    assert _acs == 69, "ISA-0792 MUST-FIRE: the authoritative ACS is carried, not the stale stored value"; n += 1
+    _acs0, _ = recompute_acs({"acs4": 7}, {"acs_score": None, "acs_breakdown": ""})
+    assert _acs0 is None, "ISA-0792 NEGATIVE CONTROL: no ACS anywhere -> None, never a manufactured 0"; n += 1
     print("sync_vci_watchlist selftest: %d assertions, 0 failed" % n)
     return n
 

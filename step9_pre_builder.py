@@ -370,7 +370,10 @@ def compute_decision_bucket(
 
     # VCI pipeline
     if pipeline == "vci":
-        acs = acs_score or 0
+        if acs_score is None:
+            # ISA-0792: an absent ACS is UNAVAILABLE - never labelled as a low score
+            return "ACS Unavailable (not scored this cycle)"
+        acs = acs_score
         if tier == "T1-A" or tier == "T1_A":
             return "Deploy Now (Asymmetric)"
         elif tier in ("T2-A", "T2_A"):
@@ -870,6 +873,12 @@ def _selftest() -> int:
         fails.append("MUST-FIRE (ISA-0616): a declared VCI name must be NOT_APPLICABLE_VCI")
     if _c1t["verdicts"]["G1"]["verdict"] != "NO_SNAPSHOT" or _c1t["verdicts"]["G1"]["admissible"]:
         fails.append("MUST-FIRE (ISA-0616): a growth name with no snapshot must be NO_SNAPSHOT, not admitted")
+    # ISA-0792 - an absent VCI ACS is labelled UNAVAILABLE, never 'Below VCI Threshold'
+    _kw = dict(normalised_score=None, stale_score_flag=False, probation_flag=False, thesis_break_triggered=False)
+    ok("ISA-0792 MUST-FIRE: a VCI row with NO ACS reads 'ACS Unavailable', not 'Below VCI Threshold'",
+       compute_decision_bucket("T3-A", "vci", acs_score=None, **_kw).startswith("ACS Unavailable"))
+    ok("ISA-0792 NEGATIVE CONTROL: a real low ACS (52) is still 'Below VCI Threshold'",
+       compute_decision_bucket("T3-A", "vci", acs_score=52, **_kw) == "Below VCI Threshold")
     print("step9_pre_builder selftest: %d FAIL(s)" % len(fails))
     assert not fails, "step9_pre_builder negative controls must not fail: %s" % fails
     return 0
@@ -1120,7 +1129,8 @@ def main():
         scored_kind = ts.get("_kind", "unknown")
 
         if pipeline == "vci":
-            acs_score = wt_entry.get("acs_score") or ts.get("acs_score")
+            acs_score = (wt_entry.get("acs_score") if wt_entry.get("acs_score") is not None
+                         else ts.get("acs_score"))                      # ISA-0792: 0 is a score, None is absence
             classification = wt_entry.get("classification", "")
             # Forward-led PASS-THROUGH fields (§14.3) — recomputed upstream at the live price by
             # monthly_isa_prerun Step 6.5 (vci_deploy_eval). These are a SEPARATE deployability

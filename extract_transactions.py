@@ -265,6 +265,44 @@ def asset_class_for(ticker):
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
+_EXPORT_NAME_RE = re.compile(r"Transaction History (\d{2})-(\d{4})\.xlsx$", re.IGNORECASE)
+
+
+def export_evidence_window(xlsx_path, created=None):
+    """ISA-0791 (30-Sep-2026): the window the dealing record PROVABLY covers.
+
+    A transaction export proves an ABSENCE only for the period it covers - and that period is not
+    the date of its last trade. The naming contract (`Transaction History MM-YYYY.xlsx`, Run_Context
+    'Monthly input') declares the month; AJ Bell stamps the export's creation time inside the
+    workbook. Covered = [1st of MM, min(last day of MM, the full day BEFORE the export was created)]
+    - the export day itself is excluded because a trade placed that day after the download would
+    not be in it. UNKNOWN (None) when the name or the stamp is missing: never guessed (R2.10)."""
+    import calendar as _cal
+    from datetime import date as _d, timedelta as _td
+    m = _EXPORT_NAME_RE.search(os.path.basename(str(xlsx_path or "")))
+    if not m:
+        return None
+    mm, yy = int(m.group(1)), int(m.group(2))
+    if created is None:
+        try:
+            _wb = openpyxl.load_workbook(xlsx_path, read_only=True)
+            created = _wb.properties.created
+            _wb.close()
+        except Exception:                                               # noqa: BLE001
+            created = None
+    if created is None:
+        return None
+    c_day = created.date() if hasattr(created, "date") else created
+    month_end = _d(yy, mm, _cal.monthrange(yy, mm)[1])
+    through = min(month_end, c_day - _td(days=1))
+    frm = _d(yy, mm, 1)
+    if through < frm:
+        return None
+    return {"from": frm.isoformat(), "through": through.isoformat(),
+            "export_created_at": created.isoformat() if hasattr(created, "isoformat") else str(created),
+            "basis": "ISA-0791: filename month %02d-%d x workbook creation stamp (export day excluded)" % (mm, yy)}
+
+
 def parse_xlsx(path, mapping):
     """Return (rows, warnings). Never drops a row silently."""
     warnings = []
@@ -711,6 +749,8 @@ def run(xlsx_path, isa_folder, ledger_path, out_path, stamp=None, quiet=False,
             "ledger_file": os.path.basename(ledger_path),
             "schema_version": LEDGER_SCHEMA_VERSION,
             "status": "ERROR" if not rows else ("WARN" if warnings else "OK"),
+            # ISA-0791: the period this export proves complete (absence of a trade is evidence here)
+            "evidence_window": export_evidence_window(xlsx_path),
         },
         "import": merge_stats,
         "warnings": warnings,
@@ -833,5 +873,24 @@ def main():
     return 0 if data["_meta"]["status"] != "ERROR" else 1
 
 
+def _selftest() -> int:
+    """ISA-0791 - the export proves the window its NAME and its own creation stamp declare."""
+    from datetime import datetime as _dt
+    n = 0
+    w = export_evidence_window("Transaction History 09-2026.xlsx", created=_dt(2026, 9, 29, 20, 7, 18))
+    assert w and w["from"] == "2026-09-01" and w["through"] == "2026-09-28", \
+        "MUST-FIRE ISA-0791: exported 29-Sep evening -> complete 01..28-Sep (export day excluded)"; n += 1
+    w = export_evidence_window("Transaction History 08-2026.xlsx", created=_dt(2026, 10, 3, 9, 0))
+    assert w["through"] == "2026-08-31", "a month exported later is capped at its month end"; n += 1
+    assert export_evidence_window("transactionhistory 1st April.xlsx", created=_dt(2026, 9, 29)) is None, \
+        "NEGATIVE CONTROL: a file outside the naming contract declares NO window (never guessed)"; n += 1
+    assert export_evidence_window("Transaction History 09-2026.xlsx", created=_dt(2026, 9, 1, 8, 0)) is None, \
+        "NEGATIVE CONTROL: exported on the 1st -> no complete day in the month -> no window"; n += 1
+    print("extract_transactions selftest: %d assertions, 0 failed" % n)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     sys.exit(main())
