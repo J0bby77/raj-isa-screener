@@ -430,6 +430,19 @@ def compute_pilot_line(pilots, price_now_map):
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
+EMAIL_SUBJECT_PREFIX = "Monthly ISA Portfolio Review - "
+
+
+def email_subject(run_date: date) -> str:
+    """ISA-0795 (Raj, 30-Sep-2026): the subject names the RUN month - the month of the review
+    Sunday this pre-run feeds (the Sunday on or after run_date), e.g. pre-run Sat 03-Oct-2026 ->
+    'Monthly ISA Portfolio Review - Oct 2026'; pre-run Sat 31-Oct -> review Sun 01-Nov -> 'Nov 2026'.
+    It is NOT the portfolio data month (run_month_label), which the report body keeps."""
+    from datetime import timedelta as _td795
+    review = run_date + _td795(days=(6 - run_date.weekday()) % 7)
+    return EMAIL_SUBJECT_PREFIX + review.strftime("%b %Y")
+
+
 def build_meta(portfolio: dict, run_date: date) -> dict:
     run_month   = portfolio["_meta"]["run_month"]
     data_date   = portfolio["_meta"]["data_date"]
@@ -450,6 +463,8 @@ def build_meta(portfolio: dict, run_date: date) -> dict:
         "tax_year_month":   tax_month,
         "broker":           "AJ Bell (ACB8G2I)",
         "run_month_label":  run_month,
+        # ISA-0795: the send subject - RUN (review) month, never the data month
+        "email_subject":    email_subject(run_date),
     }
 
 
@@ -2931,6 +2946,13 @@ def build_held_underwriting_block(hu: dict, lineage: dict = None) -> dict:
 
 def _selftest():
     """ISA-0722 — the held-underwriting renderer renders states, never fabricates a figure."""
+    # ISA-0795 - the subject names the review month, not the data month
+    assert email_subject(date(2026, 10, 3)) == "Monthly ISA Portfolio Review - Oct 2026", \
+        "⚑ MUST-FIRE ISA-0795: pre-run Sat 03-Oct-2026 -> 'Monthly ISA Portfolio Review - Oct 2026'"
+    assert email_subject(date(2026, 10, 31)) == "Monthly ISA Portfolio Review - Nov 2026", \
+        "ISA-0795: pre-run Sat 31-Oct -> review Sun 01-Nov -> Nov 2026"
+    assert email_subject(date(2026, 10, 4)) == "Monthly ISA Portfolio Review - Oct 2026", \
+        "NEGATIVE CONTROL ISA-0795: built on the review Sunday itself -> same month, no drift"
     # ISA-0798 - the same-run snapshot is what every run_context reader uses
     global _RC_SNAPSHOT
     _saved = _RC_SNAPSHOT

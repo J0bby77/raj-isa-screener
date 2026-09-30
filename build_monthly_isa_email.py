@@ -1710,6 +1710,18 @@ def unfilled_placeholders(html: str) -> dict:
     return out
 
 
+def email_subject_for(meta: dict, today=None) -> str:
+    """ISA-0795 (Raj, 30-Sep-2026): the subject the prefill declared (RUN/review month, e.g.
+    'Monthly ISA Portfolio Review - Oct 2026'). Email data without that field (built before
+    TB-2026-09-30-10) falls back to the month this build runs in (the review day) - never to the
+    data-month run_month_label."""
+    s = (meta or {}).get("email_subject")
+    if s:
+        return s
+    import datetime as _dt795
+    return "Monthly ISA Portfolio Review - " + (today or _dt795.date.today()).strftime("%b %Y")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Monthly ISA Portfolio Review HTML email body from JSON data file."
@@ -1925,7 +1937,7 @@ def main():
                   "Lower --max-bytes or send the full report as a file, as in August.")
 
     meta       = data.get("meta", {})
-    run_month  = meta.get("run_month_label", "Mmm YYYY")
+    subject    = email_subject_for(meta)
     char_count = len(body)
     print(f"Email body written: {args.output}")
     print(f"  Body length: {char_count:,} characters")
@@ -1935,7 +1947,7 @@ def main():
     print("GMAIL_SEND_EMAIL parameters:")
     print(f"  recipient_email: rjobanputra@sky.com")
     print(f"  sender_email:    raj.a.jobanputra@gmail.com")
-    print(f"  subject:         Monthly ISA Portfolio Review -- {run_month}")
+    print(f"  subject:         {subject}")
     print(f"  body:            <contents of {args.output}>")
     print("  is_html:         true   (MANDATORY -- always pass is_html=true)")
     print("=" * 65)
@@ -1972,6 +1984,14 @@ def _selftest():
     assert v["state"] == "UNKNOWN" and m, "MUST-FIRE ISA-0727: an un-checkable binding blocks, never passes"
     v, m = approval_gate({"summary": {"capital_destination": {}}})
     assert v["state"] == "UNBOUND" and m is None, "ISA-0727: a pre-control plan is UNBOUND - reported, not blocked"
+    # ISA-0795 - the subject is the declared run-month subject, never the data month
+    import datetime as _d795
+    assert email_subject_for({"email_subject": "Monthly ISA Portfolio Review - Oct 2026",
+                              "run_month_label": "Sep 2026"}) == "Monthly ISA Portfolio Review - Oct 2026", \
+        "⚑ MUST-FIRE ISA-0795: the declared subject wins over the data-month label"
+    assert email_subject_for({"run_month_label": "Sep 2026"}, today=_d795.date(2026, 10, 4)) \
+        == "Monthly ISA Portfolio Review - Oct 2026", \
+        "NEGATIVE CONTROL ISA-0795: legacy email data (no field) never falls back to the data month"
     # ISA-0793 - the placeholder gate
     assert unfilled_placeholders("<p>[Claude fills]</p><td>[Claude: thesis/performance note]</td>[Claude fills]") \
         == {"[Claude fills]": 2, "[Claude: thesis/performance note]": 1}, "⚑ MUST-FIRE ISA-0793: tokens counted"
