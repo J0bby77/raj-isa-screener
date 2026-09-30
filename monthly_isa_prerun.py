@@ -580,6 +580,28 @@ def _action_stack_coverage(dpr: list):
     return (sum(1 for e in elig if e.get("source_score") is not None) / len(elig)) if elig else None
 
 
+def _typed_ineligible(e: dict) -> bool:
+    """CAP-4: forward-ineligible WITH a typed reason -> no source_score BY DESIGN (rank_basis fallback)."""
+    return e.get("forward_eligible") is False and bool(str(e.get("forward_ineligible_reason") or "").strip())
+
+
+def _step8_measure(dpr: list) -> dict:
+    """ISA-0790: the Step 8 manifest measure on the SAME semantics as ISA-0782 (one home, R4.4).
+    coverage       = source_score share of the forward-ELIGIBLE population (_action_stack_coverage);
+    non_null_share = share of rows carrying a DECLARED rank basis - source_score, or forward-ineligible
+                     with a typed reason. An ineligible row with NO reason is still null (R2.10)."""
+    dpr = dpr or []
+    n = len(dpr)
+    scored = sum(1 for e in dpr if e.get("source_score") is not None)
+    typed = sum(1 for e in dpr if e.get("source_score") is None and _typed_ineligible(e))
+    elig = n - sum(1 for e in dpr if _typed_ineligible(e))
+    return {"rows_out": n, "coverage": _action_stack_coverage(dpr),
+            "non_null_share": ((scored + typed) / n) if n else None,
+            "note": ("deployment_priority_rank=%d, source_score present on %d; forward-eligible %d; "
+                     "%d forward-ineligible with a typed reason (no source_score by design, CAP-4/ISA-0790)"
+                     % (n, scored, elig, typed))}
+
+
 def _capital_authority_step(errors: list, warnings: list, root: str = None) -> dict:
     """Step 0a (R18.5, ISA-0629). Returns the authority record and escalates a non-AUTHORISED
     verdict into BOTH lists: warnings carry the declared escalation prefix (ISA-0447) and errors
@@ -3411,11 +3433,12 @@ def main():
         with open(step9_pre_path, encoding="utf-8") as _f8:
             _s9 = json.load(_f8)
         _dpr = _s9.get("deployment_priority_rank", []) or []
-        _scored8 = sum(1 for e in _dpr if e.get("source_score") is not None)
-        _mf_measure(rows_out=len(_dpr),
-                    coverage=(_scored8 / len(_dpr)) if _dpr else None,
-                    non_null_share=(_scored8 / len(_dpr)) if _dpr else None,
-                    note=f"deployment_priority_rank={len(_dpr)}, source_score present on {_scored8}")
+        # ⚑ ISA-0790 (30-Sep-2026): measured on the declared semantics (see _step8_measure). The old
+        #   source_score/len(all rows) counted CAP-4's forward-ineligible rows as null: 29/59 = 49% ->
+        #   'null-dominant' ERROR -> the review task BLOCKED, on a correct output.
+        _m8 = _step8_measure(_dpr)
+        _mf_measure(rows_out=_m8["rows_out"], coverage=_m8["coverage"],
+                    non_null_share=_m8["non_null_share"], note=_m8["note"])
 
         # ── ISA-0600 — surface the sleeve covariance gate into run_context and the warnings ──
         # ⚑ A CONSTRAINT NOBODY CAN SEE FIRING IS INDISTINGUISHABLE FROM ONE THAT NEVER RAN.
@@ -5278,6 +5301,30 @@ def _selftest(verbose: bool = True) -> int:
                                    {"source_score": None, "forward_eligible": False}]) - 0.5) < 1e-9)
     ok("ISA-0782: an eligible row lacking source_score is missing data",
        _action_stack_coverage([{"source_score": None, "forward_eligible": True}]) == 0.0)
+    # ISA-0790: the Step 8 manifest measure, through the REAL run_manifest classifier
+    _rows790 = ([{"source_score": 70.0, "forward_eligible": True}] * 29
+                + [{"source_score": None, "forward_eligible": False,
+                    "forward_ineligible_reason": "forward gate: revision_stage='Rolling over'"}] * 30)
+    _m790 = _step8_measure(_rows790)
+    ok("ISA-0790 MUST-FIRE: the October composition (29 scored eligible + 30 typed-ineligible) is "
+       "coverage 1.0 and non-null 1.0, not 49%", _m790["coverage"] == 1.0 and _m790["non_null_share"] == 1.0)
+    import tempfile as _tf790
+    import run_manifest as _rm790
+    def _classify790(m):
+        _mf = _rm790.Manifest("selftest_790", script_dir=_tf790.gettempdir())
+        with _mf.step("8", "step9_pre_builder") as _st:
+            _st.rows_out(m["rows_out"]).coverage(m["coverage"]).non_null_share(m["non_null_share"])
+        return _mf.steps[-1]["status"]
+    ok("ISA-0790 MUST-FIRE: through the REAL run_manifest classifier the October composition is OK, "
+       "not a null-dominant ERROR", _classify790(_m790) == _rm790.OK)
+    _neg790 = _step8_measure([{"source_score": 70.0, "forward_eligible": True}] * 29
+                             + [{"source_score": None, "forward_eligible": False}] * 30)
+    ok("ISA-0790 NEGATIVE CONTROL: 30 ineligible rows with NO typed reason are null -> ERROR (R2.10)",
+       _classify790(_neg790) == _rm790.ERROR)
+    ok("ISA-0790: an eligible row lacking source_score is still missing coverage",
+       _step8_measure([{"source_score": None, "forward_eligible": True}])["coverage"] == 0.0)
+    ok("ISA-0790: one home - the Step 8 coverage IS the action-stack coverage",
+       _step8_measure(_rows782)["coverage"] == _action_stack_coverage(_rows782))
     import ast as _ast778
     _src778 = open(os.path.abspath(__file__), encoding="utf-8").read()
     _main778 = next(n for n in _ast778.parse(_src778).body
