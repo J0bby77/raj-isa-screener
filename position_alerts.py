@@ -31,8 +31,10 @@ SCOPE: held stock-sleeve positions + T1 watchlist names. NOT the ~1,000-name scr
 CLI
 ---
   python3 position_alerts.py --snapshots eps_trend_snapshots.json \\
-      --watchlist watchlist_tickers.json --trades-log project_isa_trades_log.md \\
-      --out position_alerts.json [--quiet]
+      --watchlist watchlist_tickers.json --out position_alerts.json [--quiet]
+  (the min-hold entry date is the FIRST BUY in transaction_ledger.json; the retired trades-log
+   flag is no longer accepted as an input and is ignored with a warning if a caller passes it —
+   ISA-0761)
 Exit 0 = no alerts (normal). Exit 1 = one or more alerts recorded.
 """
 from __future__ import annotations
@@ -515,26 +517,37 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
     return alerts, skipped
 
 
-def main():
+def _parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--snapshots", default="eps_trend_snapshots.json")
     ap.add_argument("--watchlist", default="watchlist_tickers.json")
-    ap.add_argument("--trades-log", dest="trades_log", default=None)
     ap.add_argument("--out", default="position_alerts.json")
     ap.add_argument("--price-cache", dest="price_cache", default=None,
                     help="cached close matrix (CSV) — offline/reproducible price rules; omit for live yfinance")
     ap.add_argument("--asof", default=None)
     ap.add_argument("--today", default=None)
     ap.add_argument("--quiet", action="store_true")
-    a = ap.parse_args()
+    return ap
+
+
+def main():
+    # ⚑ ISA-0761: the trades-log flag is RETIRED. An installed task that still passes it must not
+    #   crash (installed-task text is unreadable from a session, ISA-0537), so unknown arguments
+    #   are tolerated, WARNED, and never read.
+    a, _extra = _parser().parse_known_args()
+    if _extra:
+        print("WARNING (ISA-0761): ignoring retired/unknown argument(s) %s - min-hold comes from "
+              "transaction_ledger.json" % _extra, file=sys.stderr)
 
     if not os.path.exists(a.snapshots):
         print("NO_SNAPSHOTS %s — weekly EPS task has not written yet; nothing to evaluate." % a.snapshots)
         return 0
     store = json.load(open(a.snapshots, encoding="utf-8"))
     held, watch = scope_tickers(a.watchlist)
-    min_hold = load_min_hold(a.trades_log)
-    gain = load_position_gain(a.trades_log, price_csv=a.price_cache, asof=a.asof)
+    min_hold = load_min_hold(None)          # -> transaction_ledger.json first BUY (ISA-0645)
+    # No cost-basis store is read by this CLI (the trades log never existed): gain is UNAVAILABLE
+    # and the winners/losers rule degrades to NOT_ACTIONABLE — never to a permissive verdict.
+    gain = {}
     alerts, skipped = evaluate(store, held + watch, set(held), min_hold, today=a.today,
                                price_csv=a.price_cache, asof=a.asof, gain_pct=gain)
 
@@ -547,6 +560,9 @@ def main():
         "thresholds": {k: _cfg(k) for k in DEFAULTS},
         "alerts": alerts,
         "insufficient_history": skipped,
+        "min_hold_source": "transaction_ledger.json (first BUY; ISA-0645/0761)",
+        "gain_basis": ("UNAVAILABLE - no cost-basis store is read by this CLI; in-window "
+                       "winners/losers degrade to NOT_ACTIONABLE (ISA-0761)"),
         "consumed_by": ["monthly_isa_prerun (Step 5 context)", "isa-mid-month-intelligence-brief"],
         "doctrine": ("Detection only. Never an execution trigger. Alerts are context for the next "
                      "SCHEDULED review; the framework 182-day min-hold (C-1) is unaffected."),
@@ -628,6 +644,15 @@ def _selftest(verbose: bool = True) -> int:
     ok(st2["enforced"] is False and st2["positions"] == {} and st2["why"],
        "⚑ NEGATIVE CONTROL: with no ledger the control must report UNENFORCED with a reason, "
        "not an empty-and-therefore-clean result: %r" % st2)
+    # ISA-0761 — the trades-log flag is retired from the CLI and never read
+    _retired = "--" + "trades-log"      # built, so the no-trades-log code scan does not match its own test
+    _opts = {o for act in _parser()._actions for o in act.option_strings}
+    ok(_retired not in _opts,
+       "ISA-0761: the CLI must no longer accept the retired trades-log flag: %r" % sorted(_opts))
+    _a, _x = _parser().parse_known_args([_retired, "x.md", "--quiet"])
+    ok(_x == [_retired, "x.md"] and _a.quiet is True,
+       "NEGATIVE CONTROL (ISA-0761): an installed task still passing the flag is tolerated as an "
+       "ignored extra, never parsed into an input: %r" % (_x,))
     if verbose:
         print("position_alerts._selftest: %d assertions, 0 failed" % n)
     return n

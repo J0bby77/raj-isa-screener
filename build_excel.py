@@ -321,6 +321,23 @@ def trailing_pe_fmt(v):
         _fmt_guard("trailing_pe_fmt", v, e); return s(v)
 
 
+LISTING_CCY_UNKNOWN = "UNKNOWN"
+
+
+def listing_ccy(v):
+    """ISA-0582: the evidenced quote currency of the screened listing, or UNKNOWN. Never a default."""
+    t = "" if v is None else str(v).strip()
+    if not t or t.upper() in ("N/A", "NAN", "NONE", "UNKNOWN"):
+        return LISTING_CCY_UNKNOWN
+    return t
+
+
+def listing_ccy_basis(v):
+    """Provenance of the Listing Currency cell (the workbook's run date is its as_of)."""
+    return ("QUOTE_CCY_AT_SCORING" if listing_ccy(v) != LISTING_CCY_UNKNOWN
+            else "MISSING_NOT_CAPTURED")
+
+
 def get_currency_sym(row):
     """Return currency symbol based on currency field or ticker suffix."""
     cur = s(row.get("currency", "N/A")).upper()
@@ -337,7 +354,13 @@ def get_currency_sym(row):
         return "R$"
     if cur == "MXN" or ticker.endswith(".MX"):
         return "MX$"
-    return "$"
+    # ISA-0582 (26-Sep-2026): "$" only for an EVIDENCED USD quote. A known non-USD currency renders
+    # its ISO code (ISS.CO DKK 293.20 was printed "$293.20"); a missing one asserts nothing.
+    if cur == "USD":
+        return "$"
+    if cur and cur not in ("N/A", "NAN", "NONE", "UNKNOWN"):
+        return cur + " "
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,6 +409,12 @@ SUMMARY_COLS = [
     ("",                           "Industry",           "industry",                 s,                 True),
     ("",                           "Sector Bucket",      "sector_bucket",            s,                 True),
     ("",                           "Index",              "index",                    s,                 True),
+    # ISA-0582 (26-Sep-2026, listing identity): the currency in which the SCREENED listing is quoted,
+    # exactly as the scoring fetch captured it (full_data `currency` = provider quote currency at
+    # scoring). NOT the reporting/financial-statement currency and NOT the GBP portfolio base. A blank
+    # capture is written UNKNOWN - never "USD" (R4.1). update_watchlist reads this header.
+    ("",                           "Listing Currency",   "currency",                 listing_ccy,       True),
+    ("",                           "Listing Ccy Basis",  "currency",                 listing_ccy_basis, True),
     ("",                           "Final Status",       "final_status",             s,                 True),
     # Group 2 — Scores (3 cols)
     ("Group 2 — Scores",           "Part A (/28)",       "part_a_score",             score_int,         False),
@@ -649,6 +678,7 @@ def build_summary(wb, df_full, run_date, group):
         "industry":                  18,
         "sector_bucket":             18,  # new
         "index":                     10,
+        "currency":                  9,
         "final_status":              20,
         "part_a_score":              8,
         "forward_axis_score":        9,
@@ -1331,5 +1361,24 @@ def main():
     print(f"[build_excel] VALIDATION_OK: valid v27 workbook, {len(_tabs)} tabs, SCORES rows={_rows}.", flush=True)
 
 
+def _selftest() -> int:
+    """ISA-0582 (26-Sep-2026) listing-currency controls for the Growth workbook producer."""
+    n = 0
+    assert get_currency_sym({"currency": "USD", "ticker": "MU"}) == "$", "positive control: evidenced USD"; n += 1
+    assert get_currency_sym({"currency": "DKK", "ticker": "ISS.CO"}) == "DKK ", \
+        "negative control: a DKK quote must not render as $ (26-Sep ISS.CO)"; n += 1
+    assert get_currency_sym({"ticker": "FRO"}) == "", "negative control: a missing currency must not assert USD"; n += 1
+    assert listing_ccy(None) == LISTING_CCY_UNKNOWN and listing_ccy("") == LISTING_CCY_UNKNOWN, \
+        "negative control: absence must not become a currency"; n += 1
+    assert listing_ccy("NOK") == "NOK" and listing_ccy_basis("NOK") == "QUOTE_CCY_AT_SCORING", "positive control"; n += 1
+    assert listing_ccy_basis(None) == "MISSING_NOT_CAPTURED", "negative control: missing basis is named"; n += 1
+    hdrs = [c[1] for c in SUMMARY_COLS]
+    assert "Listing Currency" in hdrs and "Listing Ccy Basis" in hdrs, "must fail if the machine column is dropped"; n += 1
+    print("build_excel selftest: %d assertions, 0 failed" % n)
+    return n
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

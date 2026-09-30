@@ -171,6 +171,14 @@ def flow_adjusted_mean(observations, flows, months=None):
                 "note": (f"{len(obs)} of {n} month-end observations available — refusing to "
                          f"present a {len(obs)}-month mean as a {n}-month mean (R4.9)")}
     latest = _d(obs[0]["month_end"])
+    # ⚑ ISA-0781 (30-Sep-2026): ONLY REALISED FLOWS ADJUST A MONTH-END. The flow ledger also carries
+    #   the declared one-offs as status 'planned' (for the D-4 exclusion). A planned flow dated on or
+    #   before the latest month-end has either been realised - and its cash-statement row is already
+    #   counted - or it did not happen; counting it adjusted Jul/Aug twice for the Sep lump
+    #   (realised 02-Sep + planned 05-Sep: +GBP 22,500 instead of +11,250, mean overstated GBP 7,500,
+    #   anchor 13.3% instead of the realised-basis figure). Planned rows are excluded and reported.
+    planned_excluded = [f for f in flows if str(f.get("status") or "realised") == "planned"]
+    flows = [f for f in flows if str(f.get("status") or "realised") != "planned"]
     rows = []
     for o in obs:
         od = _d(o["month_end"])
@@ -203,6 +211,8 @@ def flow_adjusted_mean(observations, flows, months=None):
             "spot_latest_gbp": round(float(obs[0]["value_gbp"]), 2),
             "understatement_avoided_gbp": round(direct - plain, 2),
             "rows": rows,
+            "planned_flows_excluded": [{"date": f.get("date"), "amount_gbp": f.get("amount_gbp"),
+                                        "source": f.get("source")} for f in planned_excluded],
             "identity_check": {"direct_gbp": round(direct, 6),
                                "via_plain_plus_mean_adjustment_gbp": round(via, 6),
                                "abs_gap_gbp": round(gap, 10), "tolerance_gbp": 1e-6,
@@ -604,7 +614,15 @@ def _reported_solve(state, pv, vd):
     """The fresh solve. Unchanged arithmetic — only the value it is solved ON has moved (D-3)."""
     td = date.fromisoformat(state["target_date"])
     sched = state["contribution_schedule"]
-    one_offs = state.get("one_off_contributions") or []
+    # ⚑ ISA-0781 (30-Sep-2026): a declared one-off dated BEFORE the valuation date is already inside
+    #   the portfolio value (fv_at_rate refuses to count it twice, R5.2). The solve used to pass every
+    #   declared one-off, so the first valuation after a planned lump sum crashed the derivation
+    #   (measured: the 05-Sep GBP 11,250 lump vs the 30-Sep valuation, production parallel for 03-Oct)
+    #   and the 30-Sep scheduled operative window could never apply. Only FORWARD one-offs enter the
+    #   solve; the past ones are reported, with the realised deposit that evidences them (or its absence).
+    _all_oo = state.get("one_off_contributions") or []
+    one_offs = [o for o in _all_oo if date.fromisoformat(str(o["date"])[:10]) >= vd]
+    past_oo = [o for o in _all_oo if date.fromisoformat(str(o["date"])[:10]) < vd]
     floor = solve_required_annual_pct(float(state["target_floor_gbp"]), pv, vd, td, sched,
                                       one_offs=one_offs)
     stretch = solve_required_annual_pct(float(state["target_stretch_gbp"]), pv, vd, td, sched,
@@ -618,7 +636,11 @@ def _reported_solve(state, pv, vd):
     return {"floor_pct": floor, "stretch_pct": stretch, "operative_pct": operative,
             "guardrail_state": gstate, "glidepath_note": gnote,
             "one_off_contributions_applied": [
-                {"date": o["date"], "amount_gbp": float(o["amount_gbp"])} for o in one_offs]}
+                {"date": o["date"], "amount_gbp": float(o["amount_gbp"])} for o in one_offs],
+            "one_off_contributions_in_value": [
+                {"date": o["date"], "amount_gbp": float(o["amount_gbp"]),
+                 "basis": "dated before the valuation date %s - inside the portfolio value, not re-counted" % vd}
+                for o in past_oo]}
 
 
 def derive(state: dict, portfolio_value=None, value_date=None, as_of=None,
@@ -702,6 +724,7 @@ def derive(state: dict, portfolio_value=None, value_date=None, as_of=None,
         "anchor_cadence": cad,
         "flow_trigger": trig,
         "one_off_contributions_applied": rep["one_off_contributions_applied"],
+        "one_off_contributions_in_value": rep["one_off_contributions_in_value"],
     }
     if rep.get("glidepath_note"):
         out["glidepath_note"] = rep["glidepath_note"]
@@ -875,6 +898,35 @@ def seed_stores(state_path=None, folder=None, write=True, quiet=False):
                   f"basis will DEGRADE to spot and say so until the {VALUATION_MEAN_MONTHS}th "
                   f"lands. It is not silently a 2-month mean.")
     return vdoc, fdoc
+
+
+def written_state_keys() -> set:
+    """ISA-0775: the target_state.json keys this module WRITES, read from its own source (AST):
+    the `out = {...}` literal in derive(), `out["k"] = ...` there, and `state["k"] = ...` /
+    `state.setdefault("k", ...)` in main(). Read, not restated (R4.4)."""
+    import ast as _ast
+    with open(os.path.abspath(__file__), encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read())
+    keys = set()
+    for fn in tree.body:
+        if not isinstance(fn, _ast.FunctionDef) or fn.name not in ("derive", "main"):
+            continue
+        for node in _ast.walk(fn):
+            if isinstance(node, _ast.Assign):
+                for t in node.targets:
+                    if (isinstance(t, _ast.Name) and t.id == "out" and fn.name == "derive"
+                            and isinstance(node.value, _ast.Dict)):
+                        keys |= {k.value for k in node.value.keys if isinstance(k, _ast.Constant)}
+                    if (isinstance(t, _ast.Subscript) and isinstance(t.value, _ast.Name)
+                            and t.value.id in (("out",) if fn.name == "derive" else ("state",))
+                            and isinstance(t.slice, _ast.Constant)):
+                        keys.add(t.slice.value)
+            if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "setdefault" and isinstance(node.func.value, _ast.Name)
+                    and node.func.value.id == "state" and node.args
+                    and isinstance(node.args[0], _ast.Constant)):
+                keys.add(node.args[0].value)
+    return keys
 
 
 def _selftest():
@@ -1097,6 +1149,48 @@ def _selftest():
         raise AssertionError("an unparseable date must RAISE, never be guessed")
     except AnchorCadenceError:
         _n[0] += 1
+
+    # ══ ISA-0781: a planned one-off and its realised deposit adjust a month-end ONCE; a past one-off
+    #    is excluded from the forward solve instead of crashing the derivation.
+    _o781 = [{"month_end": "2026-09-30", "value_gbp": 160.0}, {"month_end": "2026-08-31", "value_gbp": 146.0},
+             {"month_end": "2026-07-31", "value_gbp": 139.0}]
+    _f781 = [{"date": "2026-09-02", "amount_gbp": 11.0, "status": "realised", "source": "cash"},
+             {"date": "2026-09-05", "amount_gbp": 11.0, "status": "planned", "source": "target_state"}]
+    _m781 = flow_adjusted_mean(_o781, _f781)
+    ok(abs(_m781["value_gbp"] - (160.0 + 157.0 + 150.0) / 3) < 0.01 and len(_m781["planned_flows_excluded"]) == 1,
+       "ISA-0781 MUST-FIRE: realised + planned for the same lump counts ONCE (got %s)" % _m781["value_gbp"])
+    _m781n = flow_adjusted_mean(_o781, [dict(_f781[1], status="realised")] + [_f781[0]])
+    ok(abs(_m781n["value_gbp"] - (160.0 + 168.0 + 161.0) / 3) < 0.01,
+       "ISA-0781 NEGATIVE CONTROL: two REALISED flows both count (the filter is on status, not amount)")
+    _st781 = {"target_date": "2037-12-31", "contribution_schedule": [{"from": "2026-07-01", "monthly_gbp": 0}],
+              "target_floor_gbp": 1_000_000, "target_stretch_gbp": 1_500_000,
+              "one_off_contributions": [{"date": "2026-09-05", "amount_gbp": 11_250},
+                                        {"date": "2027-04-06", "amount_gbp": 5_000}]}
+    _r781 = _reported_solve(_st781, 160_000.0, date(2026, 9, 30))
+    ok([o["date"] for o in _r781["one_off_contributions_applied"]] == ["2027-04-06"]
+       and [o["date"] for o in _r781["one_off_contributions_in_value"]] == ["2026-09-05"],
+       "ISA-0781 MUST-FIRE: a one-off before the valuation date is reported in-value, not solved (no crash)")
+    _r781b = _reported_solve(dict(_st781, one_off_contributions=[{"date": "2027-04-06", "amount_gbp": 5_000}]),
+                             160_000.0, date(2026, 9, 30))
+    ok(_r781["floor_pct"] == _r781b["floor_pct"],
+       "ISA-0781: the past one-off changes nothing in the solve (it is already in the value)")
+
+    # ══ ISA-0775: every key this module writes into target_state.json is declared RUNTIME in the
+    #    signed-config projection (release_gate.CONFIG_RUNTIME_KEYS), so a pre-run cannot make LIVE
+    #    UNTRUSTED by doing its job - and a NEW written key fails HERE before it can do so in LIVE.
+    _wk = written_state_keys()
+    ok({"derived_at", "derivation_history", "required_return_operative_pct",
+        "reported_derived_at"} <= _wk and len(_wk) >= 20,
+       "ISA-0775: the AST scan must find the derivation's written keys (%d found)" % len(_wk))
+    try:
+        import release_gate as _rg775
+        _rk = set(_rg775.CONFIG_RUNTIME_KEYS.get("target_state.json", ()))
+        ok(not (_wk - _rk), "ISA-0775 MUST-FIRE: keys written to target_state.json but NOT declared "
+                            "runtime in release_gate.CONFIG_RUNTIME_KEYS: %s" % sorted(_wk - _rk))
+        ok(bool((_wk | {"an_unlisted_new_key"}) - _rk),
+           "ISA-0775 NEGATIVE CONTROL: an unlisted written key must be detected")
+    except ImportError:
+        raise AssertionError("ISA-0775: release_gate not importable - the key contract is UNKNOWN, never PASS")
 
     print(f"derive_required_return SELF-TEST OK — {_n[0]} assertions "
           f"(U-A19 + D-2/D-3/D-4 T-CAD-1..18)")

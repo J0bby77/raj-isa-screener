@@ -256,11 +256,18 @@ def run_surface_texts(root: Path = None, with_basis: bool = False):
 
     Each SKILL surface is read from the EXECUTED location when that is reachable and from the
     ISA-folder mirror otherwise. `with_basis=True` returns {label: (text, basis)} where basis is
-    `executed` | `mirror` - never absent, because a check that cannot say what it read is not
+    `executed` | `canonical_loaded` (ISA-0537: proven loaded by the thin launcher) | `mirror` - never absent, because a check that cannot say what it read is not
     evidence (R4.2)."""
     root = root or repo_root()
     live = scheduled_skills_dir()
     out, basis, seen = {}, {}, set()
+    # ISA-0537 (27-Sep-2026): a SKILL whose task is on the thin launcher (a real launcher receipt) is
+    # the CANONICAL LOADED workflow, not a mirror. Unreadable authority -> empty set -> 'mirror'.
+    try:
+        import task_authority as _ta
+        _loaded = _ta.canonical_loaded_labels(str(root))
+    except Exception:                                                   # noqa: BLE001
+        _loaded = set()
     for pattern in RUN_SURFACE_GLOBS:
         for f in sorted(root.glob(pattern)):
             if f in seen or any(x in f.as_posix() for x in ("archive", "_bak", "_baseline")):
@@ -274,6 +281,8 @@ def run_surface_texts(root: Path = None, with_basis: bool = False):
                 cand = live / label / "SKILL.md"
                 if cand.is_file():
                     src, why = cand, "executed"
+            if f.name == "SKILL.md" and why == "mirror" and label in _loaded:
+                why = "canonical_loaded"
             out[label] = src.read_text(encoding="utf-8", errors="replace")
             basis[label] = why
     if with_basis:

@@ -82,6 +82,14 @@ NEVER_PURGE = (
     # battery assertion behind it (consistency_check.pair_register_store_protected).
     "isa_items.jsonl", "isa_item.schema.json", "isa_id_map.json",
     "isa_id_highwater.json", "isa_migration_declarations.json",
+    # ISA-0760 (27-Sep-2026): the investment-case lineage stores. A capital decision binds ids in
+    # these; purging one would make the decision unreconstructable and the outcome unlearnable.
+    "thesis_records.jsonl", "thesis_states.json", "underwriting_cases.jsonl",
+    # ISA-0537 (27-Sep-2026): append-only scheduled-task invocation receipts - the only evidence of
+    # which workflow a scheduled run executed and whether an expected occurrence fired.
+    "task_invocations.jsonl",
+    # ISA-0771 (27-Sep-2026): append-only structured-FV input journal - the lineage a VCI deploy cites.
+    "vci_fv_input_records.jsonl",
 )
 
 
@@ -234,6 +242,12 @@ def _selftest():
 
         ok("U-CA6 no NEVER_PURGE name is in PURGE_SET",
            not (set(NEVER_PURGE) & {t.format(month="x") for t in PURGE_SET}))
+        ok("U-CA7 ISA-0760: the investment-case lineage stores are NEVER purged",
+           {"thesis_records.jsonl", "thesis_states.json", "underwriting_cases.jsonl"}
+           <= set(NEVER_PURGE))
+        _widened = set(PURGE_SET) | {"thesis_records.jsonl"}
+        ok("U-CA7-neg NEGATIVE CONTROL: a PURGE_SET widened to the thesis journal IS caught by the "
+           "U-CA6 overlap test", bool(set(NEVER_PURGE) & {t.format(month="x") for t in _widened}))
 
     print(("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)})"))
     return 0 if not fails else 1

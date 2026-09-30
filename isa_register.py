@@ -387,7 +387,16 @@ _DOC_RE = re.compile(
     r"([A-Za-z0-9][A-Za-z0-9_.\-]{6,120}\.(?:md|pdf|json))")
 
 
+# ⚑ ISA-0784 (30-Sep-2026): per-run GENERATED reports are not research artefacts. calibration_report.py
+#   writes calibration_report_[mmm]_[yyyy].md on EVERY pre-run; matching `_calibration_` made each new
+#   month's report an "orphan study", so the pre-run's own output drifted the register views it then
+#   checked (R14.3 ERROR on the first October pass).
+GENERATED_RUN_REPORTS = re.compile(r"^calibration_report_[a-z]{3}_\d{4}\.md$", re.I)
+
+
 def is_study_name(name: str) -> bool:
+    if GENERATED_RUN_REPORTS.match(name or ""):
+        return False
     low = "_" + name.lower().replace("-", "_") + "_"
     return any(pat in low for pat in STUDY_PATTERNS)
 
@@ -570,7 +579,35 @@ def read_all() -> list:
     return _read_all()
 
 
+# ⚑ ISA-0784 (30-Sep-2026): the generated views are a function of the store AND the calendar (rank
+#   score, tier, age). A drift check that re-renders with TODAY therefore reported every view stale on
+#   any day after it was rendered. `as_of_date(d)` lets a checker re-render AS OF the date stamped in
+#   the view; nothing that WRITES the store honours it (writers keep the real clock).
+_DATE_OVERRIDE = [None]
+
+
+def _clock_today() -> date:
+    return _DATE_OVERRIDE[0] or date.today()
+
+
+class as_of_date:
+    """Context manager: rank_score/ranked/tier/age_days read `d` instead of the calendar (views only; writers keep _today())."""
+
+    def __init__(self, d):
+        self.d = d if isinstance(d, date) else date.fromisoformat(str(d)[:10])
+
+    def __enter__(self):
+        self._old = _DATE_OVERRIDE[0]
+        _DATE_OVERRIDE[0] = self.d
+        return self.d
+
+    def __exit__(self, *exc):
+        _DATE_OVERRIDE[0] = self._old
+        return False
+
+
 def _today() -> str:
+    """The WRITER clock - always the calendar, never the view override (ISA-0784)."""
     return date.today().isoformat()
 
 
@@ -856,6 +893,45 @@ def close(item_id: str, *, verification: dict, corrective_action=None,
     return write(item, allow_update=True)
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0758 (26-Sep-2026) — ONE HOME FOR THE TERMINAL-DISPOSITION EVIDENCE RULE
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# R7.3 refuses CLOSED without a liveness reference; R7.10 makes SUPERSEDED a first-class disposition
+# that names its successor; R7.5 forbids back-filling a judgement never made. Before this, the writer
+# enforced its own subset (close() and the CLOSED_NOT_A_DEFECT transition) while
+# tests_jul2026/test_isa_register_migration demanded a liveness_ref on EVERY terminal retrospective row -
+# two homes, two scopes (R4.4) - so nine 13-Sep cleanup rows failed a suite the writer never enforced.
+# The rule now lives here and the test reads it:
+#   SUPERSEDED / DUPLICATE  -> must name `superseded_by` (R7.10); a liveness_ref is not required
+#   CLOSED_*                -> must carry verification.liveness_ref (R7.3), EXCEPT the rows below
+# ⚑ R7.5 GRANDFATHER LIST - EXPLICIT AND CLOSED. These rows were terminally dispositioned before the
+#   ISA-0733 transition rule (25-Sep-2026) with no check recorded; ISA-0733 grandfathered history rather
+#   than invent evidence. They are LISTED so the exemption cannot grow silently: any other row fails.
+R75_GRANDFATHERED_NO_LIVENESS = frozenset({
+    "ISA-0411",   # CLOSED_NOT_A_DEFECT 13-Sep-2026 - transient network blips, self-resolved (no check recorded)
+    "ISA-0414",   # CLOSED_NOT_A_DEFECT 13-Sep-2026 - external bash timeout ceiling (operating constraint)
+    "ISA-0485",   # CLOSED_NOT_A_DEFECT 13-Sep-2026 - checkpoint replay after a bash timeout
+})
+_SUPERSESSION_STATES = ("SUPERSEDED", "DUPLICATE")
+
+
+def terminal_evidence_gaps(item: dict) -> list:
+    """[] when a TERMINAL item carries the evidence its disposition requires; else the named gaps."""
+    st = item.get("state")
+    if st in _LIVE_STATES or not st:
+        return []
+    if st in _SUPERSESSION_STATES:
+        # a named successor (R7.10) OR a recorded check (R7.3, the stronger evidence) satisfies it
+        if str(item.get("superseded_by") or "").strip() or (item.get("verification") or {}).get("liveness_ref"):
+            return []
+        return ["%s: %s with neither superseded_by (R7.10) nor a liveness_ref (R7.3)" % (item.get("id"), st)]
+    if (item.get("verification") or {}).get("liveness_ref"):
+        return []
+    if item.get("id") in R75_GRANDFATHERED_NO_LIVENESS:
+        return []
+    return ["%s: %s with no verification.liveness_ref (R7.3)" % (item.get("id"), st)]
+
+
 # ------------------------------------------------- R7.8 / R7.9 / R7.10 build authority
 
 REVALIDATION_DISPOSITIONS = (
@@ -991,7 +1067,7 @@ def _next_run_date(run_type: str, today: date) -> date:
 
 
 def rank_score(item: dict, today: date = None) -> int:
-    today = today or date.today()
+    today = today or _clock_today()
     score = 0
     br = item.get("blocks_run")
     if br and br.get("run_date"):
@@ -1018,7 +1094,7 @@ def rank_score(item: dict, today: date = None) -> int:
 
 
 def ranked(today: date = None) -> list:
-    today = today or date.today()
+    today = today or _clock_today()
     live = []
     for it in _read_all():
         if it["state"] in CLOSED_STATES:
@@ -1082,8 +1158,7 @@ def age_days(item, today=None):
     year-old item look new - a stored value that says one thing and is another. `detected_on` is
     the real clock and `age_basis` records which was used.
     """
-    from datetime import date as _d
-    today = today or _d.today()
+    today = today or _clock_today()
     src = item.get("detected_on") or item.get("created_on")
     if not src:
         return None
@@ -1229,6 +1304,16 @@ def selftest(verbose: bool = True) -> int:
           "consequence": "selftest fixture consequence",
           "corrective_action": "selftest fixture corrective action"}
 
+    # ISA-0758 - terminal evidence rule, one home (positive + negative controls; no store needed)
+    ok(terminal_evidence_gaps({"id": "X1", "state": "SUPERSEDED", "superseded_by": "ISA-0001"}) == [],
+       "positive control: SUPERSEDED with a named successor satisfies R7.10")
+    ok(terminal_evidence_gaps({"id": "X2", "state": "SUPERSEDED"}) != [],
+       "negative control: SUPERSEDED with no successor must not pass")
+    ok(terminal_evidence_gaps({"id": "X3", "state": "CLOSED_NOT_A_DEFECT"}) != [],
+       "negative control: a CLOSED row with no liveness_ref must not pass unless grandfathered")
+    ok(terminal_evidence_gaps({"id": "ISA-0411", "state": "CLOSED_NOT_A_DEFECT"}) == [],
+       "positive control: an explicitly LISTED R7.5 grandfathered row passes")
+    ok(terminal_evidence_gaps({"id": "X4", "state": "OPEN"}) == [], "a live row is not judged")
     a = intake("Selftest defect one", record_type="DEFECT", criticality="HIGH",
                intake_trigger="build_discovery", detected_by="CLAUDE_BUILD", learning=lrn, **CS)
     ok(a["id"] == "ISA-0001", "first id must be ISA-0001")

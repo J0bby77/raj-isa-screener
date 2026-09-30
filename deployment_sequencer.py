@@ -266,13 +266,15 @@ def rho_to_set(cand: str, held: Sequence[str], matrix: Dict[str, float],
         return {"rho_sleeve": None, "rho_max_pairwise": None, "measured": False,
                 "basis": "UNMEASURED_ADVERSE_DEFAULT",
                 "unmeasured_against": sorted(h for h, v in pairs if v is None)}
-    if weights:
-        tw = sum(abs(weights.get(h, 0.0)) for h, _ in got)
-        rs = (sum(abs(weights.get(h, 0.0)) * v for h, v in got) / tw) if tw else None
-    else:
-        rs = sum(v for _, v in got) / len(got)
+    # ⚑ ISA-0714 (25-Sep-2026): SAME quantity as correlation_engine's rho_sleeve (a candidate's
+    #   weight-averaged correlation to a name set); only the SET differs (P6.4). It is therefore
+    #   computed by the ONE home, correlation_engine.sleeve_rho, and RELAYED here - the
+    #   sequencer's historical conventions (|w|, zero total weight -> None) are passed explicitly.
+    import correlation_engine as _ce
+    _agg = _ce.sleeve_rho(dict(pairs), weights, abs_weights=True, zero_weight="none")
     mx = max(got, key=lambda x: x[1])
-    return {"rho_sleeve": round(rs, 4) if rs is not None else None,
+    return {"rho_sleeve": (round(_agg["rho_sleeve"], 4)
+                           if _agg["rho_sleeve"] is not None else None),
             "rho_max_pairwise": round(mx[1], 4), "rho_max_against": mx[0],
             "measured": True, "n_measured_pairs": len(got),
             "unmeasured_against": sorted(h for h, v in pairs if v is None),
@@ -363,8 +365,17 @@ def sequence(candidates, *, held: Sequence[str] = (), matrix: Optional[Dict] = N
              k: Optional[int] = None, se_rho: Optional[float] = None,
              ranking_basis: str = "source_score",
              rho_pairwise_gate: float = 0.70, rho_sleeve_gate: float = 0.60,
-             panel_path: Optional[str] = None) -> dict:
-    """-> the deployment ORDER over the qualified set, with the displacement published."""
+             panel_path: Optional[str] = None,
+             prospective_weights=None) -> dict:
+    """-> the deployment ORDER over the qualified set, with the displacement published.
+
+    ⚑ ISA-0714 (26-Sep-2026) — `prospective_weights` is an OPTIONAL callable
+    `f(admitted_in_run: list[str]) -> {ticker: weight_fraction}` SUPPLIED BY THE SIZING AUTHORITY
+    UPSTREAM (prospective_weight_shadow over position_sizing.target_pct / min_entry_gbp). When
+    given, a name admitted earlier in THIS run enters the next candidate's weighted rho_sleeve at
+    that weight (P6.4 "the sleeve as it will then stand"). This module never invents a size: with
+    `prospective_weights=None` (the LIVE path) behaviour is byte-identical to before. SHADOW only
+    until a separate acceptance decision (handoff v2 Stage G)."""
     _fi_mark("deployment_sequencer", "sequence")
     cands = list(candidates.get("qualifying") if isinstance(candidates, dict) else candidates)
     matrix = matrix or {}
@@ -396,17 +407,31 @@ def sequence(candidates, *, held: Sequence[str] = (), matrix: Optional[Dict] = N
         # only names in the best available band compete — conviction dominates (P6.2)
         best_band = min(bi.get(c["ticker"], len(bands)) for c in remaining)
         tier = [c for c in remaining if bi.get(c["ticker"], len(bands)) == best_band]
-        measured = [(c, rho_to_set(c["ticker"], admitted, matrix, weights)) for c in tier]
+        _w_eff = weights
+        if prospective_weights is not None and weights is not None and len(admitted) > len(held):
+            _w_eff = dict(weights)
+            _w_eff.update({t: w for t, w in (prospective_weights(admitted[len(held):]) or {}).items()
+                           if w is not None})
+        measured = [(c, rho_to_set(c["ticker"], admitted, matrix, _w_eff)) for c in tier]
         declared_first = tier[0]
         if len(tier) == 1:
             pick, rec = measured[0]
         else:
             # ⚑ P6.3 THE NOISE GATE. Reorder ONLY when the rho_sleeve gap beats the SE.
             scored = [(c, r) for c, r in measured if r.get("rho_sleeve") is not None]
-            if len(scored) < 2 or se_rho is None:
+            # ⚑ 25-Sep-2026 (venue package): the gap is measured AGAINST the declared-first
+            # name. If THAT name's rho_sleeve is unmeasured (e.g. a newly venue-verified listing
+            # whose series is not yet in the store) there is no gap to form. This used to raise
+            # StopIteration inside `next(...)`, which capital_destination caught as "sequence
+            # failed" — and the router then REFUSED THE WHOLE STOCK ALLOCATION.
+            _first_scored = any(c["ticker"] == declared_first["ticker"] for c, _r in scored)
+            if len(scored) < 2 or se_rho is None or not _first_scored:
                 pick, rec = measured[0]
-                suppressed.append({"band": best_band, "reason": ("rho unmeasured or SE(rho) "
-                                   "unavailable — the band's declared order stands")})
+                suppressed.append({"band": best_band, "reason": (
+                    "the declared-first name's rho_sleeve is UNMEASURED, so no gap can be "
+                    "formed against it — the band's declared order stands"
+                    if (len(scored) >= 2 and se_rho is not None) else
+                    "rho unmeasured or SE(rho) unavailable — the band's declared order stands")})
             else:
                 lo = min(scored, key=lambda x: x[1]["rho_sleeve"])
                 gap = abs(lo[1]["rho_sleeve"]
@@ -523,6 +548,48 @@ def _selftest() -> int:
     ok("P6-A1 ...and C1 is IN the set C2 was measured against (that is the whole fix)",
        "C1" in c2rec["against"], c2rec["against"])
 
+    # ── ISA-0714 — rho_to_set RELAYS correlation_engine.sleeve_rho; values unchanged ─────
+    def _legacy_rho_sleeve(cand, held, matrix, weights):          # the pre-0714 inline formula
+        got = [(h, _rho(cand, h, matrix)) for h in held]
+        got = [(h, v) for h, v in got if v is not None]
+        if not got:
+            return None
+        if weights:
+            tw = sum(abs(weights.get(h, 0.0)) for h, _ in got)
+            return round((sum(abs(weights.get(h, 0.0)) * v for h, v in got) / tw), 4) if tw else None
+        return round(sum(v for _, v in got) / len(got), 4)
+    import random as _rnd
+    _rng = _rnd.Random(714)
+    _mism = []
+    for _i in range(200):
+        _held = ["H%d" % j for j in range(_rng.randint(1, 5))]
+        _mx = {"X|%s" % h: (round(_rng.uniform(-0.3, 0.95), 4) if _rng.random() > 0.2 else None)
+               for h in _held}
+        _wts = (None if _rng.random() < 0.2 else
+                {h: _rng.choice([0.0, _rng.uniform(0.5, 5.0)]) for h in _held})
+        _new = rho_to_set("X", _held, _mx, _wts).get("rho_sleeve")
+        _old = _legacy_rho_sleeve("X", _held, _mx, _wts)
+        if _new != _old:
+            _mism.append((_held, _mx, _wts, _new, _old))
+    ok("ISA-0714 NEGATIVE CONTROL: rho_to_set's rho_sleeve through the one home equals the legacy "
+       "formula on 200 randomised sets (incl. zero weights, no weights, unmeasured pairs)",
+       not _mism, _mism[:2])
+
+    # ── P6-A2b — MUST-FIRE: an UNMEASURED declared-first name in a measured band ─────────
+    UN = {"ticker": "UNM", "source_score": 71.0}          # declared first, no series
+    try:
+        _u = sequence([UN, LO_ := {"ticker": "LO", "source_score": 70.0},
+                       {"ticker": "HI", "source_score": 69.9}], held=HELD,
+                      matrix={"LO|AVGO": 0.60, "LO|MU": 0.60, "HI|AVGO": 0.10, "HI|MU": 0.10,
+                              "AVGO|MU": 0.45},
+                      sigmas={**SIG, "LO": 0.5, "HI": 0.5}, se_rho=0.0995, panel_path=None)
+        _ok_u = (_u["state"] == "OK" and _u["order"] and _u["order"][0] == "UNM"
+                 and any("UNMEASURED" in (x.get("reason") or "") for x in _u["suppressed_reorders"]))
+    except StopIteration as _e:                                         # the old defect
+        _u, _ok_u = repr(_e), False
+    ok("P6-A2b MUST-FIRE: an unmeasured declared-first name does not crash the sequencer; the "
+       "declared order stands and the suppression is named", _ok_u, _u)
+
     # ── P6-A2 — the noise gate, both directions ──────────────────────────────────────
     LO = {"ticker": "LO", "source_score": 70.0}   # declared first
     HI = {"ticker": "HI", "source_score": 69.9}   # same band, lower rho
@@ -603,6 +670,20 @@ def _selftest() -> int:
        b2["rho_max_pairwise"] > a["rho_max_pairwise"], (a, b2))
     ok("P6.4 an empty held set is EMPTY_SET, not a measured zero",
        rho_to_set("C1", [], M)["measured"] is False)
+
+    # ── ISA-0714 (26-Sep-2026) — prospective weights are SUPPLIED, never invented here ──
+    _H = ["H1", "H2"]; _W = {"H1": 0.03, "H2": 0.03}
+    _M = {"H1|H2": 0.40, "C1|H1": 0.30, "C1|H2": 0.30, "C2|H1": 0.55, "C2|H2": 0.55, "C1|C2": 0.69}
+    _S = {"H1": 0.5, "H2": 0.5, "C1": 0.5, "C2": 0.5}
+    _C = [{"ticker": "C1", "source_score": 70.0}, {"ticker": "C2", "source_score": 69.0}]
+    _v = lambda r: {x["ticker"]: x["verdict"] for x in r["records"]}
+    _none = sequence(_C, held=_H, matrix=_M, sigmas=_S, weights=_W, se_rho=0.0995)
+    _fn = sequence(_C, held=_H, matrix=_M, sigmas=_S, weights=_W, se_rho=0.0995,
+                   prospective_weights=lambda in_run: {t: 0.035 for t in in_run})
+    ok("ISA-0714 positive control: with prospective_weights=None the admitted C1 carries weight 0 and C2 is ADMIT (LIVE path unchanged)",
+       _v(_none).get("C2") == "ADMIT", _v(_none))
+    ok("ISA-0714 must fire: a supplied 3.5% prospective weight for in-run C1 makes C2 REPLACEMENT_ONLY (reproduced on demand)",
+       _v(_fn).get("C2") == "REPLACEMENT_ONLY", _v(_fn))
 
     # ── rollback ─────────────────────────────────────────────────────────────────────
     import isa_policy as _p

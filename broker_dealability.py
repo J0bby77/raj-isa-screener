@@ -96,6 +96,14 @@ def load_verified(root: Optional[str] = None) -> dict:
     return {"by_symbol": by, "as_of": doc.get("refreshed_on") or doc.get("built_on")}
 
 
+def _alias_states(root: Optional[str] = None) -> Dict[str, str]:
+    try:
+        import stock_price_fetch as _spf
+        return dict(_spf.alias_states(os.path.join(root or HERE, SYMBOL_MAP_FILE)))
+    except Exception:                                                   # noqa: BLE001
+        return {}
+
+
 def _aliases() -> Dict[str, str]:
     """Declared broker-ticker -> Yahoo-symbol aliases. Never guessed."""
     try:
@@ -111,7 +119,8 @@ class Resolver:
     capital by name instead of crashing the run or admitting anything."""
 
     def __init__(self, root: Optional[str] = None, *, declaration: Optional[dict] = None,
-                 verified: Optional[dict] = None, aliases: Optional[Dict[str, str]] = None):
+                 verified: Optional[dict] = None, aliases: Optional[Dict[str, str]] = None,
+                 alias_states: Optional[Dict[str, str]] = None):
         self.load_error = None
         try:
             self.declaration = declaration if declaration is not None else load_declaration(root)
@@ -120,6 +129,10 @@ class Resolver:
             self.declaration, self.verified = None, None
             self.load_error = "%s: %s" % (type(exc).__name__, exc)
         self.aliases = aliases if aliases is not None else _aliases()
+        # ⚑ ISA-0725 — a DECLARED alias (ticker != symbol) is admitted only when the last
+        # Step-5x refresh exchange-VERIFIED it. Declaration is provenance, not verification.
+        self.alias_states = (alias_states if alias_states is not None
+                             else _alias_states(root))
 
     def __call__(self, ticker) -> dict:
         return verdict(ticker, resolver=self)
@@ -150,6 +163,15 @@ def verdict(ticker, *, resolver: Optional[Resolver] = None, root: Optional[str] 
     t = ticker.strip()
     sym = rs.aliases.get(t, t)
     out["yahoo_symbol"] = sym
+    if sym != t:
+        _ast = (rs.alias_states or {}).get(t)
+        out["alias_state"] = _ast or "NEVER_VERIFIED"
+        if _ast != "VERIFIED":
+            out["why"] = ("%s is a DECLARED alias of %s that the last symbol-map refresh did not "
+                          "exchange-verify (state %s) - a declaration is provenance, not "
+                          "verification (ISA-0725), so it cannot receive automated new capital"
+                          % (t, sym, out["alias_state"]))
+            return out
     e = rs.verified["by_symbol"].get(sym)
     if e is None:
         out["why"] = ("%s has no VERIFIED listing in %s (symbol %s) - its venue is not "
@@ -203,7 +225,8 @@ def _selftest() -> int:
         "ONT.L": {"ticker": "ONT.L", "exchange": "LSE", "currency": "GBp"},
         "LOTB.BR": {"ticker": "LOTB.BR", "exchange": "BRU", "currency": "EUR"},
         "BAD": {"ticker": "BAD", "exchange": ""}}}
-    rs = Resolver(declaration=DEC, verified=VER, aliases={"ONT": "ONT.L"})
+    rs = Resolver(declaration=DEC, verified=VER, aliases={"ONT": "ONT.L"},
+                  alias_states={"ONT": "VERIFIED"})
     ok("MUST-FIRE: the Sep-2026 Warsaw shape (ZAB.WA on WSE) must not be admissible",
        rs("ZAB.WA")["state"] == NOT_DEALABLE_ONLINE and not rs("ZAB.WA")["admissible_for_new_capital"],
        rs("ZAB.WA"))
@@ -219,6 +242,16 @@ def _selftest() -> int:
        rs(None)["state"] == UNKNOWN_VENUE and rs("BAD")["state"] == UNKNOWN_VENUE)
     ok("NEGATIVE CONTROL: the suffix is not read - an unverified '.L' ticker must not be admitted",
        rs("NOPE.L")["state"] == UNKNOWN_VENUE)
+    # ⚑ ISA-0725 MUST-FIRE: the same alias, NOT verified (contradicted / never refreshed)
+    for _st in ("CONTRADICTED", None, "NO_VENUE_EXPECTATION", "FETCH_FAILED"):
+        _rs = Resolver(declaration=DEC, verified=VER, aliases={"ONT": "ONT.L"},
+                       alias_states=({"ONT": _st} if _st else {}))
+        ok("MUST-FIRE: a declared alias in state %s refuses as UNKNOWN_VENUE" % _st,
+           _rs("ONT")["state"] == UNKNOWN_VENUE and not _rs("ONT")["admissible_for_new_capital"]
+           and _rs("ONT")["alias_state"] == (_st or "NEVER_VERIFIED"), _rs("ONT"))
+    ok("NEGATIVE CONTROL: an identity mapping (HALO->HALO) needs no alias verification",
+       Resolver(declaration=DEC, verified=VER, aliases={"HALO": "HALO"}, alias_states={})("HALO")
+       ["state"] == DEALABLE_ONLINE)
     broken = Resolver(declaration=None, verified=None, root="/nonexistent-dir-for-selftest")
     ok("MUST-FIRE: unreadable inputs must refuse every name, not admit it",
        broken("HALO")["state"] == UNKNOWN_VENUE and broken.load_error)

@@ -27,6 +27,73 @@ def _read(name):
     return _sc.read(os.path.join(HERE, name), errors="ignore")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0524 (26-Sep-2026) — EMPTY-INPUT SEMANTICS: "measured and clean" can never equal "nothing
+# was measured". Every control that evaluates a declared population carries ONE of:
+#   C-A  empty impossible: an EXPLICIT empty population means its producer failed -> typed ERROR
+#   C-B  empty legitimately clean: recorded as EMPTY_VALID with what was evaluated (EMPTY_RESULTS)
+#   C-C  empty valid only under a declared parent state: recorded EMPTY_VALID_UNDER_PARENT; a
+#        missing/unknown parent is an ERROR
+#   ENV  no null-input surface (reads its environment only; a vestigial parameter is declared)
+# The declaration lives ON the control (@empty_semantics) so KR3 reads it, never a second list.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+EMPTY_RESULTS = {}
+EMPTY_CLASSES = ("C-A", "C-B", "C-C", "ENV")
+
+
+def _is_empty(v):
+    return v is not None and hasattr(v, "__len__") and len(v) == 0
+
+
+def _empty_input_error(pair, args, population):
+    return (f"ISA-0524 C-A: {pair}: EXPLICIT EMPTY {', '.join(args)} - the declared population "
+            f"({population}) was not produced; nothing was checked, which is UNKNOWN, never PASS")
+
+
+def empty_semantics(cls, corpus=(), population="", mode="any", reason=""):
+    """Declare a control's empty-input class. For C-A, an explicitly supplied corpus argument that
+    is empty returns the typed error without running the body (mode 'all': only when every
+    supplied corpus argument is empty)."""
+    if cls not in EMPTY_CLASSES:
+        raise ValueError("empty_semantics: %r is not one of %s" % (cls, EMPTY_CLASSES))
+
+    def deco(fn):
+        import functools as _ft
+        import inspect as _insp
+        sig = _insp.signature(fn)
+
+        @_ft.wraps(fn)
+        def wrapper(*a, **k):
+            if cls == "C-A" and corpus:
+                try:
+                    bound = sig.bind_partial(*a, **k).arguments
+                except TypeError:
+                    bound = {}
+                given = [c for c in corpus if c in bound and bound[c] is not None]
+                empt = [c for c in given if _is_empty(bound[c])]
+                if empt and (mode == "any" or len(empt) == len(given)):
+                    return [_empty_input_error(fn.__name__, empt, population)]
+            return fn(*a, **k)
+        wrapper._empty_semantics = {"class": cls, "corpus": tuple(corpus), "population": population,
+                                    "mode": mode, "reason": reason}
+        return wrapper
+    return deco
+
+
+def _empty_valid(pair, cls, why, n_evaluated=None):
+    """Record a TYPED clean-empty result (C-B / C-C) with what was evaluated, and return []."""
+    import datetime as _dtm
+    EMPTY_RESULTS[pair] = {"state": "EMPTY_VALID" if cls == "C-B" else "EMPTY_VALID_UNDER_PARENT",
+                           "class": cls, "why": why, "n_evaluated": n_evaluated,
+                           "at": _dtm.datetime.now().isoformat(timespec="seconds")}
+    return []
+
+
+def empty_states():
+    """The typed clean-empty results recorded by the last run of the controls (evidence, R2.10)."""
+    return dict(EMPTY_RESULTS)
+
+
 # ── pair implementations (take text so the self-test can feed mutations) ────────────────
 
 # Markers that make a line HISTORICAL rather than operative. A correction note must be able to
@@ -104,6 +171,7 @@ def pair_email_sections(run_ctx_text, build_email_text):
     return []
 
 
+@empty_semantics("C-A", corpus=("py_texts",), population="growth builder sources")
 def pair_retired_constants(py_texts):
     """A1/A7: retired constants must have NO live consumer ({filename: text})."""
     errs = []
@@ -404,6 +472,7 @@ def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None,
     return errs
 
 
+@empty_semantics("C-A", corpus=("step9_pre",), population="step9_pre artefact")
 def pair_broker_dealable_destinations(root=None, step9_pre=None, plan=None, resolver=None):
     """ISA-0607 (23-Sep-2026) — no capital destination sits on a venue the broker cannot deal
     ONLINE. Checks the newest step9_pre (its `deployable_stack`) and the capital plan of the same
@@ -462,6 +531,7 @@ def pair_broker_dealable_destinations(root=None, step9_pre=None, plan=None, reso
     return [msg if post else warn(msg)]
 
 
+@empty_semantics("C-A", corpus=("checkpoint", "step9_pre"), population="Checkpoint-D / step9_pre artefacts")
 def pair_checkpoint_d_population(root=None, checkpoint=None, run_ctx=None, step9_pre=None, resolver=None):
     """ISA-0608 (23-Sep-2026) — the recorded Checkpoint-D top-5 is the run's FEASIBLE top-5.
 
@@ -480,7 +550,9 @@ def pair_checkpoint_d_population(root=None, checkpoint=None, run_ctx=None, step9
     if checkpoint is None:
         _p = os.path.join(root, "checkpoint_d_%s.json" % label)
         if not os.path.exists(_p):
-            return []                      # no Checkpoint-D recorded yet this month: nothing to police
+            # ISA-0524 C-C: valid empty only under its parent - step9_pre for the month was read
+            return _empty_valid("pair_checkpoint_d_population", "C-C",
+                                "no Checkpoint-D recorded for %s yet; step9_pre for the month is readable" % label)
         checkpoint = json.load(open(_p, encoding="utf-8"))
     top = [str(t).upper() for t in (checkpoint.get("top5") or [])]
     if run_ctx is None:
@@ -573,6 +645,7 @@ def pair_one_risk_share_authority(root=None, ctx=None):
     return errs
 
 
+@empty_semantics("C-A", population="framework source files under root", reason="the src parameter is vestigial; the population is enumerated from root")
 def pair_single_binary_budget_authority(root=None, src=None):
     """ISA-0706 (20-Sep-2026) — only the authoritative home may call the L1 budget primitive.
 
@@ -594,6 +667,9 @@ def pair_single_binary_budget_authority(root=None, src=None):
     except Exception as exc:                                            # noqa: BLE001
         return ["pair_single_binary_budget_authority: source enumeration unavailable (%s) - R2.9"
                 % exc]
+    if not files:
+        return ["ISA-0524 C-A: pair_single_binary_budget_authority: source enumeration returned NO files "
+                "under %s - nothing was checked, UNKNOWN never PASS" % root]
     def _is_test_scope(fn_name):
         n = str(fn_name or "")
         return n.startswith("_selftest") or n.startswith("selftest") or n.startswith("test_")
@@ -722,6 +798,7 @@ def pair_vci_decision_captured(root=None, ledger_path=None, glob_fn=None):
     return errs
 
 
+@empty_semantics("C-C", population="source files changed today", reason="valid empty only when the source scan ran over a non-empty tree and found no change today")
 def pair_register_updated_after_build(root=None, today=None, items=None, since_ts=None):
     """ISA-0321. A build that did not touch the register FAILS the battery.
 
@@ -744,7 +821,9 @@ def pair_register_updated_after_build(root=None, today=None, items=None, since_t
     root = root or HERE
     today = today or _dt.date.today().isoformat()
     changed, self_written = [], []
+    n_scanned = 0
     for fp in _register_gate_sources(root):
+        n_scanned += 1
         try:
             mt = os.path.getmtime(fp)
         except OSError:
@@ -755,8 +834,12 @@ def pair_register_updated_after_build(root=None, today=None, items=None, since_t
             self_written.append(os.path.basename(fp))     # this run wrote it — not a build
             continue
         changed.append(os.path.basename(fp))
+    if not n_scanned:
+        return ["ISA-0524 C-C: pair_register_updated_after_build: the source scan found NO files under "
+                "%s - the parent state (a scanned tree) is UNKNOWN, never PASS" % root]
     if not changed:
-        return []                      # nothing was built today; the gate has nothing to say
+        return _empty_valid("pair_register_updated_after_build", "C-C",
+                            "%d source file(s) scanned, none changed today" % n_scanned, n_scanned)
     if items is None:
         try:
             sys.path.insert(0, HERE)
@@ -958,6 +1041,7 @@ def pair_monthly_email_sections(ctx_text, builder_text):
     return []
 
 
+@empty_semantics("C-A", corpus=("ctx_text",), population="monthly Run_Context text")
 def pair_monthly_t1_mode(ctx_text, t1_qualification_mode):
     """T1 semantics in prose must match T1_QUALIFICATION_MODE. Under qualification mode the
     rank-band reading ('T1 = top ~5') is retired and must not appear in operative prose — it
@@ -998,6 +1082,7 @@ _NEGATION_RE = re.compile(
     r"|which\s+does\s+not\s+exist)\b", re.I)
 
 
+@empty_semantics("C-A", corpus=("ctx_text",), population="operative monthly run-surface text")
 def pair_monthly_retired(ctx_text):
     """No operative line may instruct the run to use a construct that has been retired."""
     errs = []
@@ -1038,6 +1123,7 @@ STANDARD_FILE = "ISA_Engineering_Rules.md"
 _RUN_CTX_RE = re.compile(r"Run_Context_[A-Za-z_]+\.md")
 
 
+@empty_semantics("C-A", corpus=("surfaces",), population="run surfaces")
 def pair_standard_referenced(surfaces=None, exists=os.path.exists):
     """ISA-0027 / O-10. Every run surface must REACH the engineering standard.
 
@@ -1075,6 +1161,7 @@ def pair_standard_referenced(surfaces=None, exists=os.path.exists):
     return errs
 
 
+@empty_semantics("ENV", reason="reads framework_atlas run-surface mirrors through the atlas module, not a supplied population")
 def pair_run_surface_basis(atlas=None):
     """ISA-0211. Say which copy of each SKILL the guards actually read, and flag drift.
 
@@ -1102,7 +1189,7 @@ def run_surface_basis_note(atlas=None) -> str:
         import framework_atlas as atlas
     live = atlas.scheduled_skills_dir()
     wb = atlas.run_surface_texts(with_basis=True)
-    n_exec = sum(1 for _, b in wb.values() if b == "executed")
+    n_exec = sum(1 for _, b in wb.values() if b in ("executed", "canonical_loaded"))
     if live is None:
         return (f"run-surface basis: {n_exec}/{len(wb)} read from the EXECUTED contract; the "
                 f"scheduled directory is unreachable from here, so the SKILL surfaces were read "
@@ -1132,6 +1219,7 @@ def pair_retrospectives_ingested(intake=None, screens=None):
         errs += [f"ISA-0231: {g}" for g in intake.run_coverage(screens)]
     return errs
 
+@empty_semantics("C-A", corpus=("doc",), population="stock_weekly_returns store")
 def pair_return_store_identity_unique(srs=None, doc=None):
     """ISA-0549. No two keys of stock_weekly_returns.json may resolve to one declared security
     (store_return_store.identity_report). A legacy alias or a conflict FAILS; an unreadable store
@@ -1179,6 +1267,7 @@ def pair_rationale_ledger(ledger=None):
                     f"reported as UNKNOWN, never as PASS"]
     return [f"R12.3: {c}" for c in ledger.coverage()]
 
+@empty_semantics("C-B", population="register LOW items past the archive threshold", reason="an empty due-list is a clean state; an empty REGISTER is a producer failure")
 def pair_archive_backlog(reg=None):
     """Ageing policy (Raj, 12-Aug-2026). Reports LOW items past the archive threshold.
 
@@ -1188,9 +1277,15 @@ def pair_archive_backlog(reg=None):
     """
     if reg is None:
         import isa_register as reg
+    try:
+        _n_items = len(reg.read_all())
+    except Exception as e:                                          # noqa: BLE001
+        return [f"ISA-0524 C-A: pair_archive_backlog: register unreadable ({type(e).__name__}) - UNKNOWN, never PASS"]
+    if not _n_items:
+        return ["ISA-0524 C-A: pair_archive_backlog: the register is EMPTY - producer failure, UNKNOWN never PASS"]
     due = reg.archive_candidates()
     if not due:
-        return []
+        return _empty_valid("pair_archive_backlog", "C-B", "%d item(s) evaluated, none past the archive threshold" % _n_items, _n_items)
     return [f"AGEING: {len(due)} LOW item(s) are past the {reg.ARCHIVE_AFTER_DAYS['LOW']}-day "
             f"archive threshold - run `python3 -c \"import isa_register as R; "
             f"R.archive_aged(dry_run=False)\"` to close them (reversible)"]
@@ -1241,7 +1336,30 @@ def pair_register_renders_current(check=None, export_check=None):
     artefact classes are covered by one gate and one negative-control pattern.
     """
     errs = []
+    # ⚑ ISA-0784 (30-Sep-2026): re-render AS OF the date stamped in the view (the views and exports are
+    #   written together by the documented fix), so drift means a store move or a hand edit - never
+    #   merely "a day has passed". Real check functions only; injected fakes keep their own semantics.
+    _stamp = None
+    if check is None and export_check is None:
+        try:
+            _hd = open(os.path.join(HERE, "ISA_OPEN_ITEMS_REGISTER.md"), encoding="utf-8").read(600)
+            _m = re.search(r"\*\*Generated (\d{4}-\d{2}-\d{2}) by", _hd)
+            _stamp = _m.group(1) if _m else None
+        except OSError:
+            _stamp = None
+    import contextlib as _ctx784
+    try:
+        import isa_register as _R784
+        _clock = _R784.as_of_date(_stamp) if _stamp else _ctx784.nullcontext()
+    except Exception:                                             # noqa: BLE001
+        _clock = _ctx784.nullcontext()
+    with _clock:
+        errs += _register_render_errors(check, export_check, _stamp)
+    return errs
 
+
+def _register_render_errors(check, export_check, stamp):
+    errs = []
     if check is None:
         try:
             import isa_register_render
@@ -1250,6 +1368,11 @@ def pair_register_renders_current(check=None, export_check=None):
             errs.append(f"R14.3: isa_register_render unavailable ({e}) - register-view drift "
                         f"cannot be verified, reported as UNKNOWN rather than PASS")
             check = None
+        else:
+            if stamp:
+                import datetime as _dt784
+                _real = check
+                check = lambda d: _real(d, as_of=stamp, today=_dt784.date.fromisoformat(stamp))  # noqa: E731
     if check is not None:
         try:
             res = check(HERE)
@@ -1349,6 +1472,7 @@ def pair_monthly_lean_email(ctx_text, builder_text):
     return errs
 
 
+@empty_semantics("C-A", population="score_panel.csv + screen_history")
 def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
     """§Q/M1 (05-Aug-2026). Two INDEPENDENT derivations of "a screen ran for (run_date, group)"
     must agree:
@@ -1381,7 +1505,8 @@ def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
         return [f"A18/\u00a7Q: capture_screen_artefacts not importable ({e}) \u2014 the weekly "
                 f"139/151-column frame, PIT constituents and PIT regime are being destroyed"]
     if not exists(os.path.join(root, "score_panel.csv")):
-        return []                      # nothing to reconcile against yet; not a defect
+        return ["ISA-0524 C-A: pair_screen_capture_coverage: score_panel.csv is absent under %s - "
+                "capture coverage was NOT reconciled (UNKNOWN, never PASS)" % root]
     try:
         v = _csa.verify(root)
     except Exception as e:
@@ -1561,7 +1686,333 @@ def pair_monthly_prerun_stages(ctx_text, prerun_text):
                  % (first + 1, common[first] if first < len(common) else None,
                     actual[first] if first < len(actual) else None,
                     " -> ".join(common), " -> ".join(actual)))]
+    # ── M5c — HARD PRECEDENCE (ISA-0759, 26-Sep-2026) ───────────────────────────────────
+    # ⚑ M5b proves the table and the code AGREE; it cannot catch a stage moved in BOTH (a
+    #   coordinated edit reads as consistent). These pairs are data dependencies, not layout:
+    #   the capital authority is read before any work, the symbol map is refreshed before the
+    #   price fetch that resolves through it, and the weekly return store is refreshed before
+    #   the risk stack and the router size capital on it. Checked on the code's executed order
+    #   whenever both stages are present (presence is M5's and ISA-0577's job, not this one's).
+    _pos = {s_: i_ for i_, s_ in enumerate(exec_order)}
+    bad = ["%s must run before %s (%s)" % (a_, b_, why_)
+           for a_, b_, why_ in PRERUN_REQUIRED_PRECEDENCE
+           if a_ in _pos and b_ in _pos and _pos[a_] > _pos[b_]]
+    if bad:
+        return ["A18/M5c: pre-run hard precedence violated - " + "; ".join(bad)]
     return []
+
+
+# ISA-0759 — the liveness-critical data dependencies of the monthly pre-run (one home).
+PRERUN_REQUIRED_PRECEDENCE = (
+    ("0a", "1", "R18.5 capital authority before any work"),
+    ("1b", "3", "the transaction ledger is appended before analytics reads purchase dates (ISA-0124)"),
+    ("5x", "5y", "symbol map refreshed before the price fetch resolves through it (ISA-0577/0725)"),
+    ("5y", "6.12", "weekly return store refreshed before the V2.1 risk stack (ISA-0708)"),
+    ("5y", "6.10", "weekly return store refreshed before the router sizes capital (ISA-0754)"),
+    ("8", "6.10", "step9_pre (current_admissibility) produced before the router consumes it (ISA-0616)"),
+    ("6.12", "6.08", "return architecture reads the anchor the 6.12 stack publishes"),
+)
+
+
+# ── ISA-0124 / ISA-0759 — the retired trades-log contract (26-Sep-2026) ────────────────────
+# `project_isa_trades_log.md` never existed; its fields live in transaction_ledger.json
+# (dates, ISA-0645), thesis_state + decision_ledger (D21) and underwriting_cases (ISA-0722).
+# Scoped to the two monthly workflows (Package A); other workflows are owned by ISA-0761.
+MONTHLY_SKILL_MIRRORS = ("Skills_to_Edit/isa-monthly-prerun/SKILL.md",
+                         "Skills_to_Edit/monthly-isa-portfolio-review/SKILL.md")
+MONTHLY_TRADES_LOG_CODE = ("monthly_isa_prerun.py", "portfolio_analytics.py")
+# ISA-0761 (27-Sep-2026): the same retirement on the intramonth review and the alert CLI.
+INTRAMONTH_SURFACES = ("Run_Context_Intramonth_Stock_Review.md",
+                       "Skills_to_Edit/intramonth-stock-review/SKILL.md")
+OTHER_TRADES_LOG_CODE = ("position_alerts.py",)
+# ISA-0761: surfaces that may not present an S5 go-live capability as default-OFF.
+S5_BANNER_SURFACES = tuple("Skills_to_Edit/%s/SKILL.md" % d for d in (
+    "isa-eu-a-sat4", "isa-eu-b-sat2", "isa-nasdaq-fri2", "isa-nasdaq-fri4",
+    "isa-sp-midcap400-fri3", "isa-sp500-fri1", "isa-sp500-sat3",
+    "vci-monthly-value-chain-intelligence")) + ("Run_Context_VCI_Task.md",)
+_TRADES_LOG_PROSE_RE = re.compile(r"(?i)project_isa_trades_log|trades[ _-]log")
+# A negation counts only when it is ABOUT the log (proximity-scoped): the generic _NEGATION_RE would
+# exempt a whole paragraph for an unrelated "There is no Path C" sentence.
+_TRADES_LOG_NEGATION_RE = re.compile(
+    r"(?i)(?:there\s+is\s+no|no\s+longer|never)[^.\n]{0,60}(?:trades[ _-]log|project_isa_trades_log)"
+    r"|(?:trades[ _-]log|project_isa_trades_log)(?:\.md)?[^.\n]{0,40}(?:never\s+existed|does\s+not\s+exist)")
+_TRADES_LOG_CODE_RES = (re.compile(r"find_memory_file\(\s*[\"']project_isa_trades_log"),
+                        re.compile(r"[\"']--trades-log[\"']"),
+                        re.compile(r"def\s+parse_trades_log"))
+
+
+@empty_semantics("C-A", corpus=("texts", "code"), population="monthly run surfaces + code", mode="all")
+def pair_monthly_no_trades_log(texts=None, code=None):
+    """No operative monthly prose, and no monthly code path, may read or write the trades log."""
+    if texts is None:
+        texts = {}
+        for rel in (MONTHLY_CTX,) + MONTHLY_SKILL_MIRRORS + INTRAMONTH_SURFACES:
+            fp = os.path.join(HERE, rel)
+            if not os.path.exists(fp):
+                return [f"ISA-0759: {rel} not readable - trades-log convergence UNKNOWN, never PASS"]
+            texts[rel] = open(fp, encoding="utf-8").read()
+    if code is None:
+        _code_set = MONTHLY_TRADES_LOG_CODE + OTHER_TRADES_LOG_CODE
+        code = {fn: _read(fn) for fn in _code_set
+                if os.path.exists(os.path.join(HERE, fn))}
+        if len(code) != len(_code_set):
+            return ["ISA-0759: monthly code surface missing - trades-log check UNKNOWN"]
+    errs = []
+    # ⚑ NOT _live_lines(): the monthly Run_Context writes whole steps as single paragraphs, and a
+    #   paragraph that mentions "retired" anywhere (e.g. "There is no Path C - retired") would hide
+    #   an operative trades-log instruction in the same line. Only a NEGATING statement about the
+    #   log itself is exempt.
+    for rel, txt in sorted(texts.items()):
+        for ln in txt.splitlines():
+            hits = _TRADES_LOG_PROSE_RE.findall(ln)
+            if not hits or len(_TRADES_LOG_NEGATION_RE.findall(ln)) >= len(hits):
+                continue
+            if hits:
+                errs.append(f"ISA-0124: {rel} still instructs the retired trades log - "
+                            f"line: {ln.strip()[:110]}")
+    for fn, src in sorted(code.items()):
+        for rx in _TRADES_LOG_CODE_RES:
+            if rx.search(src):
+                errs.append(f"ISA-0124: {fn} still reads the retired trades log (/{rx.pattern}/)")
+    return errs
+
+
+# ── ISA-0760 — investment-case lineage: one home per semantic domain ──────────────────────
+#   execution -> transaction_ledger.json; decision-time valuation -> underwriting case;
+#   thesis contract/evaluation -> thesis_records.jsonl (thesis_state). Signal 1 is a diagnostic
+#   with NO capital authority (Raj DECISION 27-Sep-2026).
+_ICL_KEY = "purchase" + "_multiple"          # split so this file does not match its own rule
+_ICL_DIAG = "multiple_change" + "_since_decision"
+_ICL_KEY_RE = re.compile(r"""["']""" + _ICL_KEY + r"""["']""")
+_ICL_JOURNAL_RE = re.compile(r"thesis_records\.jsonl")
+_ICL_DIAG_HOMES = ("underwriting.py", "consistency_check.py", "email_prefill.py")
+_ICL_JOURNAL_HOMES = ("thesis_state.py", "consistency_check.py", "sync_repo_to_github.py",
+                      "capture_archive.py")
+_ICL_LEDGER_FORBIDDEN = ("thesis", "thesis_state", "conditions", "thesis_contract_id",
+                         "expected_return", "er", "valuation_multiple", "primary_valuation_metric",
+                         _ICL_KEY)
+
+
+def _icl_code():
+    out = {}
+    for fn in sorted(os.listdir(HERE)):
+        if fn.endswith(".py") and not fn.startswith(("test_", "_")):
+            try:
+                out[fn] = open(os.path.join(HERE, fn), encoding="utf-8").read()
+            except Exception:                                            # noqa: BLE001
+                pass
+    return out
+
+
+@empty_semantics("C-A", corpus=("code", "ledger", "ctx"), population="framework code + ledger + "
+                 "monthly Run_Context", mode="any")
+def pair_investment_case_single_homes(code=None, ledger=None, ctx=None):
+    """ISA-0760: no second home for the retired trades-log semantics, and Signal 1 cannot gate."""
+    if code is None:
+        code = _icl_code()
+    if ledger is None:
+        lp = os.path.join(HERE, "transaction_ledger.json")
+        if not os.path.exists(lp):
+            return ["ISA-0760: transaction_ledger.json absent - execution-only check UNKNOWN"]
+        ledger = (json.load(open(lp, encoding="utf-8")) or {}).get("entries") or []
+    if ctx is None:
+        fp = os.path.join(HERE, MONTHLY_CTX)
+        if not os.path.exists(fp):
+            return ["ISA-0760: %s not readable - Signal 1 authority UNKNOWN" % MONTHLY_CTX]
+        ctx = open(fp, encoding="utf-8").read()
+    errs = []
+    for fn, src in sorted(code.items()):
+        if fn == "consistency_check.py":
+            continue
+        if _ICL_KEY_RE.search(src):
+            errs.append("ISA-0760: %s keys a '%s' field - the entry multiple lives ONLY in the "
+                        "underwriting case (observations.valuation_multiple)" % (fn, _ICL_KEY))
+        if _ICL_DIAG in src and fn not in _ICL_DIAG_HOMES:
+            errs.append("ISA-0760: %s reads %s - the Signal-1 successor is a diagnostic with no "
+                        "capital authority; only renderers may show it via the case rows"
+                        % (fn, _ICL_DIAG))
+        if _ICL_JOURNAL_RE.search(src) and fn not in _ICL_JOURNAL_HOMES:
+            errs.append("ISA-0760: %s names thesis_records.jsonl - the journal has ONE writer "
+                        "(thesis_state.record)" % fn)
+    bad = sorted({k for e in ledger if isinstance(e, dict) for k in e
+                  if k in _ICL_LEDGER_FORBIDDEN})
+    if bad:
+        errs.append("ISA-0760: transaction_ledger entries carry investment-case keys %s - broker "
+                    "truth must stay execution-only" % bad)
+    for ln in ctx.splitlines():
+        if re.search(r"(?i)\bSignal 1\b", ln) and not re.search(r"(?i)exit signal 1", ln):
+            if re.search(r"(?i)(escalate|trim candidate|valuation watch)", ln) and \
+                    not re.search(r"(?i)no capital authority|diagnostic only", ln):
+                errs.append("ISA-0760: Run_Context still gives Signal 1 decision authority - "
+                            "line: %s" % ln.strip()[:120])
+    return errs
+
+
+@empty_semantics("C-B", population="thesis_records.jsonl",
+                 reason="an empty journal is valid until the first contract is written at a review")
+def pair_thesis_journal_integrity(root=None):
+    """ISA-0760: every journal record re-validates in append order; the projection is current."""
+    import thesis_state as _tsj
+    try:
+        recs = _tsj.load_journal(root)
+    except _tsj.ThesisRecordRefused as exc:
+        return ["ISA-0760: %s" % exc]
+    if not recs:
+        return _empty_valid("pair_thesis_journal_integrity", "C-B",
+                            "no thesis contract recorded yet - legacy holdings are typed "
+                            "NOT_CAPTURED_CONTEMPORANEOUSLY (first contracts at the 04-Oct review)",
+                            0)
+    errs, prior, seen = [], [], set()
+    for r in recs:
+        rid = r.get("record_id")
+        if rid in seen:
+            errs.append("ISA-0760: duplicate record_id %s" % rid)
+        seen.add(rid)
+        try:
+            if r.get("record_type") == _tsj.CONTRACT:
+                _tsj.validate_contract(r, prior, root)
+            elif r.get("record_type") == _tsj.EVALUATION:
+                _tsj.validate_evaluation(r, prior, root)
+            else:
+                errs.append("ISA-0760: record %s has undeclared type %r" % (rid, r.get("record_type")))
+        except _tsj.ThesisRecordRefused as exc:
+            errs.append("ISA-0760: record %s no longer validates: %s" % (rid, exc))
+        prior.append(r)
+    drift = _tsj.projection_drift(root)
+    if drift:
+        errs.append("ISA-0760: thesis_states.json rows %s differ from their newest journal "
+                    "evaluation - run `thesis_state.py --project`; never hand-edit a projected row"
+                    % drift)
+    return errs
+
+
+# ── ISA-0759 — Forward-Led is unconditional on the pre-run surfaces ───────────────────────
+_FWD_TOGGLE_RES = (
+    re.compile(r"(?i)\bS5\b[^\n]{0,40}\bMODE\b[^\n]{0,30}default\s+OFF"),
+    re.compile(r"(?i)when the activation flags are ON"),
+    re.compile(r"(?i)\+\s*decay\s*\(`?FLUID_POOL_DECAY"),
+    re.compile(r"(?i)default\s+off\W{0,4}activate\s+in\s+S5"),       # ISA-0761
+)
+
+
+@empty_semantics("C-A", corpus=("texts",), population="pre-run surfaces")
+def pair_prerun_forward_led_authority(texts=None):
+    """The monthly pre-run surfaces may not present Forward-Led as a toggle or carry-forward decay."""
+    if texts is None:
+        texts = {}
+        for rel in (MONTHLY_CTX, MONTHLY_SKILL_MIRRORS[0]) + S5_BANNER_SURFACES:
+            fp = os.path.join(HERE, rel)
+            if not os.path.exists(fp):
+                return [f"ISA-0759: {rel} not readable - Forward-Led authority UNKNOWN"]
+            texts[rel] = open(fp, encoding="utf-8").read()
+    errs = []
+    for rel, txt in sorted(texts.items()):
+        for ln in _live_lines(txt):
+            if _NEGATION_RE.search(ln):
+                continue
+            for rx in _FWD_TOGGLE_RES:
+                if rx.search(ln):
+                    errs.append(f"ISA-0759: {rel} presents Forward-Led as optional/decay - "
+                                f"line: {ln.strip()[:110]}")
+                    break
+    return errs
+
+
+# ── ISA-0755 / ISA-0483 / ISA-0764 (26-Sep-2026) — Growth-screen completion + R7.7 one home ──
+GROWTH_RECEIPT_EFFECTIVE_FROM = "2026-10-02"   # first screen run under the completion contract
+
+
+@empty_semantics("C-A", corpus=("frames",), population="retained screen_history frames")
+def pair_growth_completion_receipt(root=None, frames=None, receipts=None, ledger_runs=None):
+    """Every retained Growth frame since the contract took effect has (a) a completion receipt and
+    (b) a source-performance runs[] entry. Earlier runs are owned by ISA-0755/0483 history, not
+    re-litigated here (the 25-Sep NASDAQ observation is unrecoverable)."""
+    root = root or HERE
+    errs = []
+    if frames is None:
+        import glob as _g
+        frames = []
+        for f in _g.glob(os.path.join(root, "screen_history", "*_full_data.csv")):
+            m = re.match(r"(\d{4}-\d{2}-\d{2})_(.+)_full_data\.csv$", os.path.basename(f))
+            if m:
+                frames.append((m.group(1), m.group(2).upper()))
+    if receipts is None:
+        try:
+            receipts = json.load(open(os.path.join(root, "screen_completion_receipts.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            receipts = {}
+    if ledger_runs is None:
+        try:
+            ledger_runs = {(str(e.get("run_date"))[:10], str(e.get("group", "")).upper())
+                           for e in json.load(open(os.path.join(root, "source_performance_log.json"),
+                                                   encoding="utf-8")).get("runs") or []}
+        except (OSError, ValueError):
+            return ["ISA-0483: source_performance_log.json unreadable - run-ledger coverage UNKNOWN, never PASS"]
+    if not frames:
+        return [_empty_input_error("pair_growth_completion_receipt", ["frames"], "retained screen_history frames")]
+    if not any(d >= GROWTH_RECEIPT_EFFECTIVE_FROM for d, _g in frames):
+        return _empty_valid("pair_growth_completion_receipt", "C-B",
+                            "%d retained frame(s), none on/after %s" % (len(frames), GROWTH_RECEIPT_EFFECTIVE_FROM),
+                            len(frames))
+    for d, g in sorted(frames):
+        if d < GROWTH_RECEIPT_EFFECTIVE_FROM:
+            continue
+        key = "%s_%s" % (d.replace("-", ""), g)
+        if key not in receipts:
+            errs.append(f"ISA-0755: screen {key} has a retained frame but NO completion receipt "
+                        f"(screen_completion.py --write was not run; its email could not be a COMPLETE email)")
+        if (d, g) not in ledger_runs:
+            errs.append(f"ISA-0483: screen {key} has no source_performance_log runs[] entry")
+    return errs
+
+
+def pair_growth_email_renderer(build_email_text=None, run_ctx_text=None):
+    """The Growth email renders the receipt + findings ledger and never asserts persistence itself;
+    the Run_Context orders receipt (17b) before the email (18)."""
+    be = build_email_text if build_email_text is not None else _read("build_email.py")
+    rc = run_ctx_text if run_ctx_text is not None else _read("Run_Context_ISA_Growth_Stock_Analysis.md")
+    errs = []
+    for need, why in (("screen_completion", "reads the completion receipt"),
+                      ("run_findings", "renders the findings ledger")):
+        if need not in be:
+            errs.append(f"ISA-0755: build_email.py does not reference {need} - it no longer {why}")
+    for bad in ("(RETRO SAVED)", "File saved:"):
+        if bad in be:
+            errs.append(f"ISA-0755: build_email.py asserts a persistence fact itself ('{bad}')")
+        if bad in rc:
+            errs.append(f"ISA-0755: Run_Context_Growth still instructs a persistence claim ('{bad}')")
+    i17, i18 = rc.find("17b. **COMPLETION RECEIPT"), rc.find("\n18. Build the email")
+    if i17 < 0 or i18 < 0 or i17 > i18:
+        errs.append("ISA-0755: Run_Context_Growth does not order the completion receipt (17b) before the email (18)")
+    return errs
+
+
+def pair_r77_single_promotion_home(intake_text=None, rules_text=None, root=None):
+    """R7.7 (as amended by ISA-0764) names ONE promotion mechanism; both intake paths call it and no
+    other module decides retrospective promotion."""
+    root = root or HERE
+    it = intake_text if intake_text is not None else _read("isa_retrospective_intake.py")
+    rt = rules_text if rules_text is not None else _read("ISA_Engineering_Rules.md")
+    errs = []
+    if "def promotion_decision(" not in it:
+        errs.append("ISA-0764: isa_retrospective_intake.promotion_decision is not defined - R7.7 has no home")
+    else:
+        body_rf = it.split("def record_findings(", 1)[-1].split("\ndef ", 1)[0]
+        body_bi = it.split("def build_items(", 1)[-1].split("\ndef ", 1)[0]
+        for nm, body in (("record_findings", body_rf), ("build_items", body_bi)):
+            if "promotion_decision(" not in body:
+                errs.append(f"ISA-0764: {nm} does not route through promotion_decision - a second policy exists")
+    if "promotion_decision" not in rt or "ISA-0764" not in rt:
+        errs.append("ISA-0764: ISA_Engineering_Rules.md R7.7 does not name the promotion mechanism")
+    if intake_text is None:
+        import glob as _g
+        for f in _g.glob(os.path.join(root, "*.py")):
+            bn = os.path.basename(f)
+            if bn in ("isa_retrospective_intake.py", "consistency_check.py"):
+                continue
+            if re.search(r"\bregistrability\(", open(f, encoding="utf-8", errors="ignore").read()):
+                errs.append(f"ISA-0764: {bn} calls registrability() directly - promotion must go through promotion_decision")
+    return errs
 
 
 def pair_monthly_prerun_reads(ctx_text):
@@ -1778,6 +2229,7 @@ def _ladder_values(policy=None):
     return vals, lad
 
 
+@empty_semantics("C-A", corpus=("run_ctx_text", "surfaces"), population="sizing prose surfaces", mode="all")
 def pair_prose_sizing_numbers(run_ctx_text=None, surfaces=None, policy=None):
     """P0.5 / P7.7. Every position-size literal in a live run surface must be a CURRENT ladder
     value, and the retired sizing vocabulary must appear nowhere.
@@ -1959,7 +2411,12 @@ def _is_value_test(cmp_node):
     return False
 
 
+@empty_semantics("C-A", population="framework python sources under root")
 def pair_no_gate_reads_conviction_score(root=None):
+    import glob as _gl0
+    if not _gl0.glob(os.path.join(root or HERE, "*.py")):
+        return ["ISA-0524 C-A: pair_no_gate_reads_conviction_score: no python sources under %s - "
+                "nothing was scanned (UNKNOWN, never PASS)" % (root or HERE)]
     """A3 (P7.1). `strategic_conviction_score` may be computed and displayed and may NOT be
     read by any gate. Enforced by AST on comparisons that control a branch — a display read is
     permitted and a gating read is not, and only an AST can tell them apart."""
@@ -2039,6 +2496,7 @@ def _enumerations(root):
             "release_gate": {os.path.relpath(p, root).replace(os.sep, "/") for p in _rg._iter_source(root)}}
 
 
+@empty_semantics("ENV", reason="builds its own fixture tree in a temp dir; it tests the three enumerations, not a population")
 def pair_excluded_dirs_single_home(root=None, _enums=None):
     """ISA-0710. framework_atlas, framework_integrity and release_gate must enumerate the SAME .py
     population, through isa_tree_scope.excluded_dir (ISA-0710's one home). Checked twice: on a FIXTURE tree that plants a
@@ -2546,6 +3004,56 @@ def pair_occurrence_guard_coverage(setup_text=None, mirrors=None, exists=os.path
     return errs
 
 
+# ── ISA-0537 (27-Sep-2026) — SCHEDULED-TASK RUN-SURFACE AUTHORITY ──────────────────────────
+# The installed Cowork task text is unreadable from every session, so the framework cannot diff it.
+# The fix makes it a stable THIN LAUNCHER and moves the proof to the invocation: task_authority.launch
+# verifies Trusted identity + canonical surfaces and writes a receipt. This pair is the static half:
+# every declared task has a contract, every contract points at existing canonical surfaces, every
+# generated LAUNCHER.md equals the ONE template and passes the single-home lint (no rule, threshold,
+# schedule, path or build id). The dynamic half is task_authority.health(): an ENFORCED task that
+# missed an expected occurrence is an ERROR; legacy/probation gaps are one WARN line (a habitually
+# red control is unread).
+def pair_task_authority(ta=None, health_fn=None):
+    try:
+        if ta is None:
+            import task_authority as ta
+        errs = list(ta.integrity_findings())
+        h = health_fn() if health_fn is not None else ta.health()
+    except Exception as e:                                             # noqa: BLE001
+        return [f"ISA-0537: task authority could not be checked ({type(e).__name__}: {e}) - "
+                f"UNMEASURED, never clean (R4.9)"]
+    if h.get("state") == "UNKNOWN":
+        return errs + [f"ISA-0537: task health UNKNOWN - {h.get('why')}"]
+    for k, v in sorted((h.get("tasks") or {}).items()):
+        if v.get("effective_state") == "ENFORCED" and v.get("missed"):
+            errs.append(f"ISA-0537: ENFORCED task {k} MISSED expected occurrence(s) {v['missed']} - a task "
+                        f"that never fired cannot report itself")
+    soft = sorted(k for k, v in (h.get("tasks") or {}).items()
+                  if v.get("effective_state") != "ENFORCED" and v.get("capital_relevant"))
+    if soft:
+        missed = sorted(o for k in soft for o in (h["tasks"][k].get("missed") or []))
+        errs.append(warn(f"ISA-0537: {len(soft)} capital-relevant scheduled task(s) not yet ENFORCED "
+                         f"(installed text unverified until Raj installs the thin launcher): "
+                         f"legacy={h.get('n_legacy')} probation={h.get('n_probation')}"
+                         + (f"; unobserved/missed occurrences {missed}" if missed else "")))
+    return errs
+
+
+# ── ISA-0771 (27-Sep-2026) — ONE WRITER FOR VCI STRUCTURED FV INPUTS ─────────────────────────
+# vci_fv_inputs.json used to be a hand-maintained sidecar; the Aug run's promised append never
+# happened. It is now a generated projection of the append-only journal; any hand edit (or a journal
+# with corrupt lines) is an ERROR, because the deploy verdicts cite fv_input_ids from that journal.
+def pair_vci_fv_inputs_single_writer(drift_fn=None):
+    try:
+        if drift_fn is None:
+            import vci_fv_inputs as _fvi
+            drift_fn = _fvi.projection_drift
+        return list(drift_fn())
+    except Exception as e:                                             # noqa: BLE001
+        return [f"ISA-0771: FV-input lineage could not be checked ({type(e).__name__}: {e}) - UNMEASURED, never clean"]
+
+
+@empty_semantics("C-A", population="the Composio fallback import closure")
 def pair_fallback_inputs_classified(gaps_fn=None):
     """ISA-0498 (built 11-Sep-2026; promised 02-Sep and never wired). Every data file the Composio
     fallback's own code names must be classified in sync_repo_to_github.py — synced to git,
@@ -2555,6 +3063,9 @@ def pair_fallback_inputs_classified(gaps_fn=None):
     try:
         if gaps_fn is None:
             import sync_repo_to_github as _srg
+            if not _srg._fallback_closure(HERE, _srg.FALLBACK_ENTRYPOINTS):
+                return ["ISA-0524 C-A: pair_fallback_inputs_classified: the fallback import closure is "
+                        "EMPTY under %s - nothing was classified (UNKNOWN, never PASS)" % HERE]
             gaps = _srg.fallback_input_gaps(HERE)
         else:
             gaps = gaps_fn()
@@ -2566,6 +3077,7 @@ def pair_fallback_inputs_classified(gaps_fn=None):
             for name, mods in sorted(gaps.items())]
 
 
+@empty_semantics("C-A", corpus=("texts",), population="execution-contract surfaces")
 def pair_referenced_scripts_exist(texts, exists=os.path.exists):
     """Every *.py referenced by an execution contract must be present on disk.
     THE pair that would have caught fetch_metrics_local.py: the pre-run recipe invoked it every
@@ -2612,6 +3124,7 @@ def _assigned_and_imported(tree):
     return bound
 
 
+@empty_semantics("C-A", corpus=("py_texts",), population="tracked run scripts")
 def pair_undefined_constants(py_texts):
     """Names USED at runtime but never bound or imported anywhere in the file.
 
@@ -2730,6 +3243,7 @@ def _m9_literal_type(v):
     if isinstance(v, ast.JoinedStr): return str
     return None
 
+@empty_semantics("C-A", corpus=("py_texts",), population="tracked python sources")
 def pair_literal_attr_calls(py_texts):
     errs = []
     for fn, txt in sorted(py_texts.items()):
@@ -2785,6 +3299,7 @@ def pair_literal_attr_calls(py_texts):
 
 
 
+@empty_semantics("C-A", population="portfolio_data artefact")
 def pair_broker_file_predates_cash(root=None):
     """Deployable cash must be on the CASH-STATEMENT basis, not the month-end broker snapshot.
 
@@ -2808,7 +3323,8 @@ def pair_broker_file_predates_cash(root=None):
     errs = []
     port = _latest_j("portfolio_data")
     if not port:
-        return errs
+        return ["ISA-0524 C-A: pair_broker_file_predates_cash: no portfolio_data artefact readable - "
+                "the deployable-cash basis was NOT checked (UNKNOWN, never PASS)"]
     cash = (port.get("cash") or {})
     basis = str(cash.get("deployable_basis") or "").strip()
     if not basis:
@@ -2937,6 +3453,7 @@ def pair_er_callsite_manifest():
     return out
 
 
+@empty_semantics("C-A", population="score_panel.csv")
 def pair_score_panel_date_format(store=None):
     """D-15 (09-Aug-2026). ONE SPELLING PER DAY IN THE PANEL KEY.
 
@@ -2957,7 +3474,8 @@ def pair_score_panel_date_format(store=None):
         return [f"D-15: score_panel_logger unimportable ({type(e).__name__}: {e})"]
     path = store or os.path.join(HERE, "score_panel.csv")
     if not os.path.exists(path):
-        return errs
+        return ["ISA-0524 C-A: pair_score_panel_date_format: %s is absent - the panel was NOT checked "
+                "(UNKNOWN, never PASS)" % os.path.basename(path)]
     bad = _spl.assert_one_date_format(path)
     if bad:
         errs.append(f"D-15: score_panel.csv carries non-ISO run_date values {bad} — the panel key "
@@ -3061,6 +3579,7 @@ _STDLIB_MODULES = (
 )
 
 
+@empty_semantics("C-A", corpus=("py_texts",), population="name-resolution scripts")
 def pair_unimported_stdlib_modules(py_texts):
     """A module name READ in a file but never imported or assigned in it.
 
@@ -3097,6 +3616,7 @@ def pair_unimported_stdlib_modules(py_texts):
     return errs
 
 
+@empty_semantics("C-A", corpus=("items",), population="canonical register rows")
 def pair_no_informational_in_register(items=None):
     """No live register item is a finding the registrability gate would now refuse.
 
@@ -3128,13 +3648,20 @@ def pair_no_informational_in_register(items=None):
         if it.get("domain") != "screener":
             continue
         title = it["title"].split("] ", 1)[1] if "] " in it["title"] else it["title"]
-        v = _RI.registrability(title, "", it.get("criticality", "MEDIUM"))
+        # ISA-0764: the ONE promotion decision (R7.7 policy, extending ISA-0336). An item promoted
+        # on an escalation recorded at intake (recurrence, work, systemic...) carries the marker
+        # "[R7.7 promotion: ...]" - that decision used facts the title alone cannot re-derive.
+        if "[R7.7 promotion:" in str(it.get("narrative") or ""):
+            continue
+        v = _RI.promotion_decision({"title": title, "severity": it.get("criticality", "MEDIUM")},
+                                   sightings=[])
         if not v["registrable"]:
             errs.append(f"A18/M10: {it['id']} is live but rule {v['rule']} says it is a "
                         f"retrospective observation, not a fix or enhancement: {title[:90]}")
     return errs
 
 
+@empty_semantics("C-A", corpus=("items",), population="canonical register rows")
 def pair_register_fourc_complete(items=None):
     """Every post-cutover item captures all five mandatory Cs.
 
@@ -3162,6 +3689,7 @@ def pair_register_fourc_complete(items=None):
 
 
 
+@empty_semantics("C-A", corpus=("tw",), population="target_weights.json")
 def pair_target_weights_bucket_reconciliation(tw=None):
     """The per-fund targets in a bucket MUST sum to that bucket's declared total. (20-Aug-2026)
 
@@ -3225,6 +3753,7 @@ def pair_target_weights_bucket_reconciliation(tw=None):
 _READINESS_CLAIM = re.compile(r"^\s*(?:\u2691\s*)?(BUILD[-\s]READY|ANALYSIS[-\s]FIRST)", re.I)
 
 
+@empty_semantics("C-A", corpus=("items",), population="canonical register rows")
 def pair_build_readiness_declared(items=None):
     """An item's corrective_action may not assert a readiness its own field contradicts. (ISA-0399)
 
@@ -3723,6 +4252,7 @@ def pair_return_basis_declared():
 # test_return_architecture was red in the delivered location.
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
+@empty_semantics("C-A", corpus=("py_texts",), population="top-level python sources")
 def pair_no_literal_fallback_for_derived_thresholds(py_texts=None):
     """Forms 1-3. AST over the Python sources: no numeric literal may stand in for a threshold
     that isa_policy declares DERIVED."""
@@ -3791,6 +4321,7 @@ def pair_no_literal_fallback_for_derived_thresholds(py_texts=None):
     return errs
 
 
+@empty_semantics("C-A", corpus=("tw", "cfg"), population="policy JSON documents")
 def pair_no_derived_threshold_in_json(tw=None, cfg=None, reporter_texts=None):
     """Form 4. A derived quantity restated in a JSON policy file.
 
@@ -3935,6 +4466,7 @@ def pair_stock_ladder_reconciles(tw=None):
     return errs
 
 
+@empty_semantics("C-A", corpus=("py_texts",), population="declared constant modules")
 def pair_no_duplicate_module_constant(py_texts=None, modules=("scoring_config.py",)):
     """Form 5. No module-level name in a CONFIG module may be assigned more than once.
 
@@ -3971,6 +4503,7 @@ def pair_no_duplicate_module_constant(py_texts=None, modules=("scoring_config.py
     return errs
 
 
+@empty_semantics("C-A", corpus=("module_texts",), population="top-level python modules")
 def pair_single_sizing_authority(module_texts=None):
     """ISA-0442 — THERE IS EXACTLY ONE PATH FROM A QUALIFIED CANDIDATE TO A POSITION SIZE.
 
@@ -4000,7 +4533,7 @@ def pair_single_sizing_authority(module_texts=None):
                         "scoring_config.SIZE_AUTHORITY_SINGLE"),
     }
     texts = module_texts if module_texts is not None else {}
-    if not texts:
+    if module_texts is None:            # ISA-0524: an EXPLICIT empty never falls through to the live tree
         import glob as _g
         import os as _os
         for fp in sorted(_g.glob(_os.path.join(HERE, "*.py"))):
@@ -4062,6 +4595,7 @@ def pair_single_sizing_authority(module_texts=None):
     return errs
 
 
+@empty_semantics("C-A", corpus=("sources",), population="monthly orchestration sources")
 def pair_local_used_before_bound(sources=None, root=None):
     """ISA-0589 — no local is READ before it is BOUND, in any orchestrator entry point.
 
@@ -4955,6 +5489,7 @@ def pair_prose_task_schedules(setup_text=None, mirrors=None):
 #   deleted the drift control for every position below the top rung. This pair asserts the
 #   invariant across the WHOLE ladder, so re-introducing the contradiction at any rung fails,
 #   and so does moving the ladder up without moving the trigger with it.
+@empty_semantics("ENV", reason="reads the position_sizing ladder/tier caps (policy module), not a supplied population; an empty ladder already refuses")
 def pair_tier_caps_rung_aware(policy=None):
     """ISA-0496. For every evidence state: the effective Tier 1 trigger >= that state's earned
     ladder rung, both remedies trim to the trigger (never below the rung), and the Tier 2 hard
@@ -5330,11 +5865,13 @@ def pair_capability_chain(root=None):
         out.append(warn(f"R4.14/KR12: {rec['n_not_live']} of {rec['n_capabilities']} capabilities "
                         f"are not proven decision-effective, carrying GBP "
                         f"{rec['gbp_exposure_not_live']:,.2f} of declared exposure. Blocked at - "
-                        f"{blocked}. Tracked as ISA-0628; the semantic fields are UNDECLARED "
+                        f"{blocked}. Tracked as ISA-0699 (declarations/liveness backlog; the "
+                        f"registry mechanism itself was ISA-0628); the semantic fields are UNDECLARED "
                         f"rather than broken."))
     return out
 
 
+@empty_semantics("ENV", reason="the surfaces parameter is vestigial: the control reads the live PROJECT_INSTRUCTIONS_*.md contract and discussion_preflight.py only")
 def pair_discussion_preflight_wired(surfaces=None, exists=os.path.exists):
     """R12.4 — the Project Instructions must INVOKE the discussion preflight.
 
@@ -5451,6 +5988,7 @@ def pair_score_definition_declared(root=None, current=None, registry=None):
     return errs
 
 
+@empty_semantics("C-A", population="framework python sources under root")
 def pair_one_register(root=None):
     """R7.1 — `Dashboard/state/isa_items.jsonl` has exactly one writer.
 
@@ -5461,6 +5999,9 @@ def pair_one_register(root=None):
     import ast as _ast
     root = root or HERE
     writers = set()
+    if not any(f.endswith(".py") for f in os.listdir(root)):
+        return ["ISA-0524 C-A: pair_one_register: no python sources under %s - nothing was scanned "
+                "(UNKNOWN, never PASS)" % root]
     for fn in sorted(os.listdir(root)):
         if not fn.endswith(".py") or fn in ("isa_register.py",):
             continue
@@ -6140,6 +6681,7 @@ def pair_framework_integrity_preflight_reaches_run_context(run_ctx=None, root=No
     return []
 
 
+@empty_semantics("C-A", corpus=("email_data",), population="email_data artefact")
 def pair_email_absent_notice_contradicts_run_context(email_data=None, run_ctx=None, root=None):
     """ISA-0618. FAIL when a pre-filled email block says ABSENT/NOT COMPUTED for something the
     FINAL run_context actually produced — the prose-disagrees-with-state class A18 already
@@ -6149,7 +6691,9 @@ def pair_email_absent_notice_contradicts_run_context(email_data=None, run_ctx=No
     if email_data is None or run_ctx is None:
         p, rc_path, label = _latest_month_pair(root)
         if p is None:
-            return []                              # no paired files on disk — nothing to check
+            # ISA-0524 C-C: the month-pair listing ran and found no email_data/run_context pair
+            return _empty_valid("pair_email_absent_notice_contradicts_run_context", "C-C",
+                                "no paired email_data/run_context month on disk")
         try:
             email_data = json.load(open(p, encoding="utf-8"))
             run_ctx = json.load(open(rc_path, encoding="utf-8"))
@@ -6300,6 +6844,8 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_adoption_gate_refuses", pair_adoption_gate_refuses())                  # ISA-0409 (20-Aug-2026)
     errs += _tally("pair_return_basis_declared", pair_return_basis_declared())                  # ISA-0402 / ISA-0401 (20-Aug-2026)
     errs += _tally("pair_occurrence_guard_coverage", pair_occurrence_guard_coverage())              # ISA-0479/0480/0481/0482 (27-Aug-2026)
+    errs += _tally("pair_task_authority", pair_task_authority())                              # ISA-0537 (27-Sep-2026)
+    errs += _tally("pair_vci_fv_inputs_single_writer", pair_vci_fv_inputs_single_writer())    # ISA-0771 (27-Sep-2026)
     # ── ISA-0623 / ISA-0467 ENFORCEMENT (09-Sep-2026) ───────────────────────────────────
     # ⚑⚑ THESE ARE THE CALL SITES. Every control below already existed; ISA-0467's finding was
     #    that nothing invoked them. `framework_atlas.check()` returned False against the
@@ -6341,6 +6887,9 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_summary_floor_prose", pair_summary_floor_prose(run_ctx))
     errs += _tally("pair_top10_columns", pair_top10_columns(run_ctx, bem))
     errs += _tally("pair_email_sections", pair_email_sections(run_ctx, bem))
+    errs += _tally("pair_growth_completion_receipt", pair_growth_completion_receipt())      # ISA-0755/0483 (26-Sep-2026)
+    errs += _tally("pair_growth_email_renderer", pair_growth_email_renderer(bem, run_ctx))     # ISA-0755 (26-Sep-2026)
+    errs += _tally("pair_r77_single_promotion_home", pair_r77_single_promotion_home())       # ISA-0764 (26-Sep-2026)
     try:
         errs += _tally("pair_monthly_return_architecture", pair_monthly_return_architecture(
             _read("Run_Context_Monthly_ISA_Review.md"), _read("email_prefill.py"),
@@ -6375,6 +6924,10 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
         errs += _tally("pair_monthly_action_categories", pair_monthly_action_categories(mctx))
         errs += _tally("pair_monthly_email_sections", pair_monthly_email_sections(mctx, mbuild))
         errs += _tally("pair_monthly_retired", pair_monthly_retired(mctx))
+        errs += _tally("pair_monthly_no_trades_log", pair_monthly_no_trades_log())                    # ISA-0124/0759 (26-Sep-2026)
+        errs += _tally("pair_investment_case_single_homes", pair_investment_case_single_homes())      # ISA-0760 (27-Sep-2026)
+        errs += _tally("pair_thesis_journal_integrity", pair_thesis_journal_integrity())              # ISA-0760 (27-Sep-2026)
+        errs += _tally("pair_prerun_forward_led_authority", pair_prerun_forward_led_authority())      # ISA-0759 (26-Sep-2026)
         errs += _tally("pair_monthly_prerun_stages", pair_monthly_prerun_stages(mctx, prerun))
         errs += _tally("pair_monthly_prerun_reads", pair_monthly_prerun_reads(mctx))
         errs += _tally("pair_prose_quantity_values", pair_prose_quantity_values(mctx))      # P0.5 seed - ISA-0461 / ISA-0471 (27-Aug-2026)
@@ -6596,9 +7149,16 @@ def _selftest():
             _gp = os.path.join(_td, _g)
             open(_gp, "w").write("generated\n")
             os.utime(_gp, (_dt2.datetime.fromisoformat(_t).timestamp(),) * 2)
-        os.remove(_f)
+        # ISA-0524: keep the source file (an unscanned, source-less tree is now UNKNOWN, never PASS)
+        # but age it, so the only files touched today are the generated views.
+        os.utime(_f, (_dt2.datetime(2026, 1, 1).timestamp(),) * 2)
         assert not pair_register_updated_after_build(_td, _t, _stale), \
             "regenerating the views is not a build and must not trip the gate"
+        assert empty_states().get("pair_register_updated_after_build", {}).get("state") == "EMPTY_VALID_UNDER_PARENT", \
+            "ISA-0524 C-C: the clean result is TYPED with what was scanned"
+        os.remove(_f)
+        assert pair_register_updated_after_build(_td, _t, _stale), \
+            "ISA-0524 C-C MUST-FIRE: a tree with NO scannable source is UNKNOWN, never a clean pass"
     # an unevaluable D-4 trigger must FAIL, never pass as "no flow"
     assert pair_anchor_cadence({**_cad_ok,
                                 "flow_trigger": {"status": "UNKNOWN", "blocks": True,
@@ -6760,21 +7320,216 @@ def _selftest():
 
     # M5 — an executed stage with no row in the table (the 1.5/6.5/9b.5/9c/9d defect).
     assert pair_monthly_prerun_stages(good_m.replace("| **9d** | x |\n", ""), good_prerun)
+    # ── ISA-0759 — M5c hard precedence, the monthly trades-log contract, Forward-Led authority
+    _pre_ok = ('def main(\nprint("\\n[0a] a")\nprint("\\n[1] b")\nprint("\\n[5x] c")\n'
+               'print("\\n[5y] d")\nprint("\\n[6.12] e")\n')
+    _tbl = lambda order: ("**Pre-run scripts (Investment Analysis folder):**\n\n| Step | S |\n|---|---|\n"
+                          + "".join("| **%s** | x |\n" % o for o in order) + "\n## Next\n")
+    assert not pair_monthly_prerun_stages(_tbl(["0a", "1", "5x", "5y", "6.12"]), _pre_ok), \
+        pair_monthly_prerun_stages(_tbl(["0a", "1", "5x", "5y", "6.12"]), _pre_ok)
+    _pre_swap = ('def main(\nprint("\\n[0a] a")\nprint("\\n[1] b")\nprint("\\n[5y] d")\n'
+                 'print("\\n[5x] c")\nprint("\\n[6.12] e")\n')
+    assert any("M5c" in e for e in pair_monthly_prerun_stages(_tbl(["0a", "1", "5y", "5x", "6.12"]),
+                                                            _pre_swap)), \
+        "M5c MUST-FIRE: 5y moved before 5x in BOTH table and code must still FAIL (M5b cannot see it)"
+    _no_tl_ok = {"ctx": "Step 5 reads thesis_state and transaction_ledger.json.\n"
+                        "There is no separate trades-log memory file (ISA-0124).\n"}
+    assert not pair_monthly_no_trades_log(_no_tl_ok, {"x.py": "led = 'transaction_ledger.json'\n"})
+    assert pair_monthly_no_trades_log({"ctx": "Read `memory/project_isa_trades_log.md` at Step 5.\n"}, {}), \
+        "ISA-0124 negative control: an operative trades-log read in monthly prose must FAIL"
+    assert pair_monthly_no_trades_log({}, {"x.py": 'p = find_memory_file("project_isa_trades_log.md")\n'}), \
+        "ISA-0124 negative control: reintroducing the trades-log lookup in code must FAIL"
+    assert pair_monthly_no_trades_log({}, {"x.py": 'args += ["--trades-log", p]\n'}), \
+        "ISA-0124 negative control: passing --trades-log must FAIL"
+    assert pair_monthly_no_trades_log({"ctx": "There is no Path C. Write the trades log entry at 10.7.\n"}, {}), \
+        "ISA-0759 must-fire: a 'retired' word elsewhere in the paragraph must not hide a trades-log instruction"
+    assert not pair_monthly_no_trades_log({"ctx": "project_isa_trades_log.md has never existed (ISA-0645).\n"}, {}), \
+        "a statement that the log never existed is a prohibition, not an instruction"
+    assert not pair_prerun_forward_led_authority({"s": "## FORWARD-LED MODE - LIVE\nThere is no flags-OFF mode.\n"})
+    assert pair_prerun_forward_led_authority({"s": "## ⚑ S5 MODE (default OFF)\n"}), \
+        "ISA-0759 negative control: an S5 default-OFF banner on a pre-run surface must FAIL"
+    assert pair_prerun_forward_led_authority({"s": "admission uses the floor + decay (`FLUID_POOL_DECAY`)\n"}), \
+        "ISA-0759 negative control: decay-based carry-forward admission must FAIL"
+    assert not pair_monthly_no_trades_log(), pair_monthly_no_trades_log()
+    # ISA-0761 — intramonth + alert CLI + S5 banners
+    assert pair_prerun_forward_led_authority({"vci": "Gated by X (default off — activate in S5).\n"}), \
+        "MUST-FIRE (ISA-0761): 'default off - activate in S5' on a live capability must fire"
+    assert pair_prerun_forward_led_authority({"vci": "## S5 MODE (default OFF)\n"}), \
+        "MUST-FIRE (ISA-0761): the stale VCI S5 banner must fire"
+    assert not pair_prerun_forward_led_authority({"vci": "Gated by X, True since the S5 go-live.\n"}), \
+        "NEGATIVE CONTROL (ISA-0761): the converged wording passes"
+    assert pair_monthly_no_trades_log({"intramonth": "4. **`project_isa_trades_log.md`** - Add a new entry.\n"}, {}), \
+        "MUST-FIRE (ISA-0761): an intramonth trades-log writer must fire"
+    # ── ISA-0760 — investment-case single homes: must-fire + negative controls ─────────────
+    _icl_ctx_ok = "*Signal 1 — Multiple change since decision (diagnostic only, no capital authority):* x\n"
+    assert not pair_investment_case_single_homes({"a.py": "x = 1\n"}, [{"type": "buy"}], _icl_ctx_ok), \
+        "NEGATIVE CONTROL: a clean corpus must pass"
+    assert pair_investment_case_single_homes({"a.py": "m = row['" + _ICL_KEY + "']\n"}, [{}], _icl_ctx_ok), \
+        "MUST-FIRE: a second home for the entry multiple must fire"
+    assert pair_investment_case_single_homes({"router.py": "if d['" + _ICL_DIAG + "'] > .2: sell()\n"},
+                                             [{}], _icl_ctx_ok), \
+        "MUST-FIRE: Signal-1 successor consumed by decision code must fire"
+    assert pair_investment_case_single_homes({"x.py": "open('thesis_records.jsonl','a')\n"}, [{}],
+                                             _icl_ctx_ok), \
+        "MUST-FIRE: a second journal writer must fire"
+    assert pair_investment_case_single_homes({"a.py": ""}, [{"type": "buy", "thesis": "x"}], _icl_ctx_ok), \
+        "MUST-FIRE: thesis semantics in the transaction ledger must fire"
+    assert pair_investment_case_single_homes({"a.py": ""}, [{}],
+        "*Signal 1:* 2 sd above = Valuation Watch; escalate to Step 10 for trim review\n"), \
+        "MUST-FIRE: Signal 1 regaining decision authority in the Run_Context must fire"
+    assert pair_investment_case_single_homes({}, [{}], _icl_ctx_ok) and \
+        "empty" in pair_investment_case_single_homes({}, [{}], _icl_ctx_ok)[0].lower(), \
+        "C-A: an empty code corpus is a typed error, never a pass"
+    assert not pair_investment_case_single_homes(), pair_investment_case_single_homes()
+    import tempfile as _tf0760
+    import thesis_state as _ts0760
+    _r0760 = _tf0760.mkdtemp(prefix="cc0760_")
+    try:
+        assert not pair_thesis_journal_integrity(_r0760) and \
+            EMPTY_RESULTS["pair_thesis_journal_integrity"]["state"] == "EMPTY_VALID", \
+            "C-B: an empty journal is a TYPED clean empty"
+        _c0760 = _ts0760.build_contract(ticker="ZZC", route_id="growth", effective_from="2026-10-04",
+                                        basis=_ts0760.BASIS_REUNDERWRITTEN, thesis_summary="x",
+                                        conditions=[{"condition_id": "E1", "kind": "EVENT",
+                                                     "description": "d", "event": "e",
+                                                     "source_contract": "s"}],
+                                        contract_version=1, created_by="t", evidence_basis="t",
+                                        source_underwriting_case_id=None,
+                                        underwriting_case_absent_reason="selftest")
+        _ts0760.record(_c0760, root=_r0760)
+        _e0760 = _ts0760.build_evaluation(
+            thesis_contract_id=_c0760["thesis_contract_id"], ticker="ZZC", as_of="2026-10-04",
+            run_id="R1", condition_results=[{"condition_id": "E1", "result": "CLEAR", "reason": "r",
+                                             "source": "s", "as_of": "2026-10-04"}],
+            aggregate_thesis_state="INTACT", state_rationale="fixture", reviewer_or_automation="t")
+        _ts0760.record(_e0760, root=_r0760)
+        assert not pair_thesis_journal_integrity(_r0760), pair_thesis_journal_integrity(_r0760)
+        _sp = os.path.join(_r0760, _ts0760.STORE_FILE)
+        _d = json.load(open(_sp))
+        _d["states"]["ZZC"]["state"] = "STRENGTHENING"
+        json.dump(_d, open(_sp, "w"))
+        assert any("differ" in e for e in pair_thesis_journal_integrity(_r0760)), \
+            "MUST-FIRE: a hand-edited projected row must fire"
+        with open(_ts0760.journal_path(_r0760), "a") as _fh:
+            _bad = dict(_e0760, record_id="TR-dup-conflict", evaluation_id="TE-x",
+                        aggregate_thesis_state="INTACT",
+                        condition_results=[{"condition_id": "E1", "result": "BROKEN", "reason": "r",
+                                            "source": "s", "as_of": "2026-10-04"}])
+            _fh.write(json.dumps(_bad) + "\n")
+        assert any("no longer validates" in e for e in pair_thesis_journal_integrity(_r0760)), \
+            "MUST-FIRE: a hand-appended invalid record (BROKEN under INTACT) must fire"
+    finally:
+        import shutil as _sh0760
+        _sh0760.rmtree(_r0760, ignore_errors=True)
+    assert not pair_prerun_forward_led_authority(), pair_prerun_forward_led_authority()
+    # ── ISA-0755/0483/0764 — Growth completion + R7.7 one home
+    _fr = [("2026-09-26", "STOXX600"), ("2026-10-02", "NASDAQ")]
+    assert not pair_growth_completion_receipt(frames=_fr, receipts={"20261002_NASDAQ": {}},
+                                              ledger_runs={("2026-10-02", "NASDAQ")}), \
+        "a receipted + ledgered run passes; a pre-contract run (26-Sep) is not re-litigated"
+    _e = pair_growth_completion_receipt(frames=_fr, receipts={}, ledger_runs=set())
+    assert any("NO completion receipt" in x for x in _e) and any("ISA-0483" in x for x in _e), \
+        "ISA-0755 MUST-FIRE: a post-contract frame with no receipt and no runs[] entry must FAIL"
+    assert not pair_growth_email_renderer("screen_completion run_findings", "17b. **COMPLETION RECEIPT x\n18. Build the email y")
+    assert pair_growth_email_renderer("screen_completion run_findings (RETRO SAVED)", "17b. **COMPLETION RECEIPT x\n18. Build the email y"), \
+        "ISA-0755 negative control: the email asserting 'RETRO SAVED' must FAIL"
+    assert pair_growth_email_renderer("screen_completion run_findings", "18. Build the email y\n17b. **COMPLETION RECEIPT x"), \
+        "ISA-0755 negative control: email before receipt must FAIL"
+    _good_it = "def promotion_decision(x):\n  pass\ndef record_findings(a):\n  promotion_decision(a)\ndef build_items(b):\n  promotion_decision(b)\n"
+    assert not pair_r77_single_promotion_home(_good_it, "R7.7 ... promotion_decision ... ISA-0764")
+    assert pair_r77_single_promotion_home(_good_it.replace("  promotion_decision(a)", "  registrability(a)"),
+                                          "R7.7 ... promotion_decision ... ISA-0764"), \
+        "ISA-0764 negative control: a capture path bypassing promotion_decision must FAIL"
+    assert pair_r77_single_promotion_home(_good_it, "R7.7 unchanged"), \
+        "ISA-0764 negative control: Rules text not naming the mechanism must FAIL"
+    assert not pair_r77_single_promotion_home(), pair_r77_single_promotion_home()
+    # ── ISA-0524 — EVERY declared C-A control refuses an EXPLICIT empty population (systematic,
+    #    derived from the declarations, so a new control cannot opt out by omission)
+    import inspect as _insp524
+    _decl = {n: f for n, f in globals().items() if n.startswith("pair_") and callable(f)
+             and (getattr(f, "_empty_semantics", None) or {}).get("class") == "C-A"
+             and (getattr(f, "_empty_semantics", None) or {}).get("corpus")}
+    assert len(_decl) >= 25, "ISA-0524: the C-A declarations went missing (%d)" % len(_decl)
+    for _n, _f in sorted(_decl.items()):
+        _sem = _f._empty_semantics
+        _kw = {}
+        for _c in _sem["corpus"]:
+            _p = _insp524.signature(_f).parameters[_c]
+            _nm = _c.lower()
+            _kw[_c] = "" if (_nm.endswith("text") or _nm.endswith("_src") or _nm.endswith("_doc")) else (
+                [] if (_nm.endswith("items") or _nm.endswith("rows") or _nm.endswith("frames")) else {})
+        _out = _f(**_kw)
+        assert _out and "ISA-0524 C-A" in _out[0], \
+            "ISA-0524 C-A MUST-FIRE: %s returned %r on an explicit empty population" % (_n, _out)
+    # C-A 'all' mode: one empty corpus beside a populated one is NOT an empty population
+    assert not pair_monthly_no_trades_log({}, {"x.py": "led = 'transaction_ledger.json'\n"}), \
+        "ISA-0524: mode='all' - a populated corpus beside an empty one is still checked"
+    # C-C: the typed empty records what was evaluated; C-B for the growth receipt window
+    assert not pair_growth_completion_receipt(frames=[("2026-09-26", "X")], receipts={}, ledger_runs=set())
+    assert empty_states()["pair_growth_completion_receipt"]["state"] == "EMPTY_VALID", \
+        "ISA-0524 C-B: no post-contract frame is a TYPED clean empty with its denominator"
+    # ENV declarations must carry a reason (no silent opt-out)
+    for _n, _f in globals().items():
+        _sm = getattr(_f, "_empty_semantics", None) if callable(_f) else None
+        if _sm and _sm["class"] == "ENV":
+            assert len(_sm.get("reason") or "") >= 20, "ISA-0524: ENV declaration without a reason: %s" % _n
+    assert not pair_growth_email_renderer(), pair_growth_email_renderer()
 
     # ── ISA-0590 — the register gate must not fire on the run's OWN outputs, and must still
     #    fire on everything else. Three assertions, because the middle one is the whole fix and
     #    the outer two are what stop it becoming a way to switch the gate off (R5.5).
     import time as _t590
+    import tempfile as _tf590
     _no_items = []
-    assert pair_register_updated_after_build(items=_no_items), \
-        "ISA-0321: files changed today with NO register activity must FAIL"
-    assert not pair_register_updated_after_build(items=_no_items, since_ts=_t590.time() - 86400), \
-        "ISA-0590: a file THIS RUN wrote is not evidence of a build"
-    assert pair_register_updated_after_build(items=_no_items, since_ts=_t590.time() + 60), \
-        "ISA-0590: a since_ts in the future exempts nothing - the gate keeps its teeth"
-    assert not pair_register_updated_after_build(
-        items=[{"id": "X", "created_on": __import__("datetime").date.today().isoformat()}]), \
-        "ISA-0321: an item touched today satisfies the gate"
+    # ⚑ ISA-0776 (30-Sep-2026): these four must-fires used to scan the REAL tree (root=HERE), so they
+    #   could only pass on a day somebody edited source - the census went RED on every non-build day
+    #   (28-Sep lead census; the 03-Oct capital run would have been REFUSED). They now test the GATE
+    #   against a fixture tree holding one source file touched NOW, never the calendar (R5.5).
+    with _tf590.TemporaryDirectory(prefix="isa0776_") as _fx590:
+        with open(os.path.join(_fx590, "fixture_module.py"), "w", encoding="utf-8") as _fh590:
+            _fh590.write("X = 1\n")
+        _now590 = _t590.time()      # explicit: the process clock, not the filesystem's, defines "today"
+        os.utime(os.path.join(_fx590, "fixture_module.py"), (_now590 - 5, _now590 - 5))
+        assert pair_register_updated_after_build(root=_fx590, items=_no_items), \
+            "ISA-0321: files changed today with NO register activity must FAIL"
+        assert not pair_register_updated_after_build(root=_fx590, items=_no_items,
+                                                     since_ts=_t590.time() - 86400), \
+            "ISA-0590: a file THIS RUN wrote is not evidence of a build"
+        assert pair_register_updated_after_build(root=_fx590, items=_no_items,
+                                                 since_ts=_t590.time() + 60), \
+            "ISA-0590: a since_ts in the future exempts nothing - the gate keeps its teeth"
+        assert not pair_register_updated_after_build(
+            root=_fx590,
+            items=[{"id": "X", "created_on": __import__("datetime").date.today().isoformat()}]), \
+            "ISA-0321: an item touched today satisfies the gate"
+    # ISA-0784: the view clock is overridable for a re-render AS OF the stamped date; the writer clock is not.
+    import isa_register as _R784t
+    with _R784t.as_of_date("2026-01-02"):
+        assert _R784t.age_days({"detected_on": "2026-01-01"}) == 1, \
+            "ISA-0784 MUST-FIRE: age_days reads the view clock inside as_of_date"
+        assert _R784t._today() == __import__("datetime").date.today().isoformat(), \
+            "ISA-0784 NEGATIVE CONTROL: the WRITER clock (_today) ignores the view override"
+    assert _R784t.age_days({"detected_on": "2026-01-01"}) != 1 or \
+        __import__("datetime").date.today().isoformat() == "2026-01-02", "ISA-0784: the override is released"
+    assert not _R784t.is_study_name("calibration_report_oct_2026.md") and \
+        _R784t.is_study_name("ISA_Rerating_Calibration_Study_02Aug2026.md"), \
+        "ISA-0784: a per-run generated report is not a study; a real calibration study still is"
+    import extract_portfolio as _ep785
+    assert not _ep785.statement_is_stale("2026-09-18", "2026-09-30", 346.81, 346.81), \
+        "ISA-0785 MUST-FIRE: a reconciled closing balance is CURRENT even when the last activity row is older"
+    assert _ep785.statement_is_stale("2026-09-18", "2026-09-30", 346.81, 1346.81), \
+        "ISA-0785 NEGATIVE CONTROL: an older last row with an UNRECONCILED balance is still stale"
+    assert not _ep785.statement_is_stale("2026-09-30", "2026-09-30", 1.0, 2.0), \
+        "ISA-0785: a statement as new as the broker file is never stale by date"
+    # ISA-0776 NEGATIVE CONTROL: a fixture tree with NO file touched today is a clean empty, never a
+    # FAIL - proving the must-fire above is driven by the fixture's mtime and not by the live tree.
+    with _tf590.TemporaryDirectory(prefix="isa0776n_") as _fn590:
+        _old590 = os.path.join(_fn590, "old_module.py")
+        with open(_old590, "w", encoding="utf-8") as _fh590:
+            _fh590.write("X = 1\n")
+        os.utime(_old590, (_t590.time() - 3 * 86400, _t590.time() - 3 * 86400))
+        assert not pair_register_updated_after_build(root=_fn590, items=_no_items), \
+            "ISA-0776: a tree with no source changed today must not FAIL the register gate"
 
     # ── ISA-0589 — used-before-bound, with its NEGATIVE CONTROL (R5.5) ───────────────────
     assert pair_local_used_before_bound({"x.py": (
@@ -6903,15 +7658,29 @@ def _selftest():
     class _Due:
         ARCHIVE_AFTER_DAYS = {"LOW": 90}
         @staticmethod
+        def read_all():
+            return [{"id": "ISA-0001"}]
+        @staticmethod
         def archive_candidates():
             return [({"id": "ISA-0001"}, 120, 90)]
     assert pair_archive_backlog(_Due), "an overdue LOW item must be reported"
     class _Clean:
         ARCHIVE_AFTER_DAYS = {"LOW": 90}
         @staticmethod
+        def read_all():
+            return [{"id": "ISA-0001"}]
+        @staticmethod
         def archive_candidates():
             return []
     assert not pair_archive_backlog(_Clean), "a clean register must not report an archive backlog"
+    assert empty_states()["pair_archive_backlog"]["state"] == "EMPTY_VALID", \
+        "ISA-0524 C-B: a clean due-list is a TYPED empty with its denominator"
+    class _NoRegister(_Clean):
+        @staticmethod
+        def read_all():
+            return []
+    assert any("C-A" in e for e in pair_archive_backlog(_NoRegister)), \
+        "ISA-0524 C-A MUST-FIRE: an EMPTY register is a producer failure, never a clean backlog"
 
     # R12.3 negative controls: a constant with no ledger record FAILS; a recorded constant with
     # no reason does NOT fail, because inventing reasons to go green is the failure mode.
@@ -7540,6 +8309,37 @@ def _suite_census_controls():
     assert _nop and _norm(_nop[0])["severity"] == ERROR, \
         ("ISA-0713 NEGATIVE CONTROL: with no broker book the population is UNKNOWN and that "
          "blocks - an unestablished denominator must not read as full coverage (R4.3)")
+
+    # ── ISA-0537 pair_task_authority: must-fire + positive control ─────────────────────────
+    class _TA:
+        def __init__(self, f): self._f = f
+        def integrity_findings(self): return list(self._f)
+        def health(self): return {"state": "OK", "tasks": {}}
+    assert pair_task_authority(ta=_TA([])) == [], "ISA-0537 POSITIVE CONTROL: clean contract -> []"
+    _o537 = pair_task_authority(ta=_TA(["ISA-0537: x/LAUNCHER.md differs from the generator"]))
+    assert _o537 and _norm(_o537[0])["severity"] == ERROR, \
+        "ISA-0537 NEGATIVE CONTROL: a hand-edited launcher (substantive prose) must be an ERROR"
+    _h537 = lambda: {"state": "RED", "tasks": {"t": {"effective_state": "ENFORCED", "missed": ["t@2026-10-03"],
+                                                     "capital_relevant": True}}}
+    _m537 = pair_task_authority(ta=_TA([]), health_fn=_h537)
+    assert _m537 and _norm(_m537[0])["severity"] == ERROR and "MISSED" in _norm(_m537[0])["message"], \
+        "ISA-0537 MUST-FIRE: an ENFORCED task with a missed occurrence is an ERROR"
+    _l537 = pair_task_authority(ta=_TA([]), health_fn=lambda: {"state": "OK", "n_legacy": 1, "n_probation": 0,
+        "tasks": {"t": {"effective_state": "LEGACY_OBSERVED", "missed": [], "capital_relevant": True}}})
+    assert _l537 and _norm(_l537[0])["severity"] == WARN, \
+        "ISA-0537 CONTAINMENT: an unmigrated task is a WARN, never a new ERROR (BuildSpec §13)"
+    assert _norm(pair_task_authority(ta=_TA([]), health_fn=lambda: {"state": "UNKNOWN", "why": "x"})[0])["severity"] == ERROR, \
+        "ISA-0537: an unreadable contract is UNKNOWN and blocks, never clean (R4.3)"
+
+    # ── ISA-0771 pair_vci_fv_inputs_single_writer: must-fire + positive control ────────────
+    assert pair_vci_fv_inputs_single_writer(drift_fn=lambda: []) == [], "ISA-0771 POSITIVE CONTROL: clean -> []"
+    _f771 = pair_vci_fv_inputs_single_writer(drift_fn=lambda: ["ISA-0771: vci_fv_inputs.json differs - hand-edited"])
+    assert _f771 and _norm(_f771[0])["severity"] == ERROR, \
+        "ISA-0771 NEGATIVE CONTROL: a hand-edited FV projection must be an ERROR"
+    def _boom():
+        raise OSError("x")
+    assert "UNMEASURED" in _norm(pair_vci_fv_inputs_single_writer(drift_fn=_boom)[0])["message"], \
+        "ISA-0771: an unreadable store is UNMEASURED, never clean"
 
 
 if __name__ == "__main__":

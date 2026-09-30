@@ -149,6 +149,24 @@ def load_weights(calibration_state_path: str = None) -> dict:
     return _normalise_weights(base)
 
 
+# --- ISA-0667 (27-Sep-2026): typed measurement state --------------------------------------
+# The score used to fall back to a CONSTANT when its inputs were absent: with asymmetry, floor and
+# quality all None, every normaliser returned 0.0 and the neutral 0.5 revisions term alone produced
+# 7.5 on every unscored row - a flat number presented as a per-name rank (ISA-0161's tautology
+# shape). R4.3/V-1: a score whose MANDATORY inputs are unmeasured is UNKNOWN, never a number.
+# Mandatory = the three terms that make it a deployability rank at all (asymmetry above its floor,
+# and quality). Catalyst proximity, signal count and revisions keep their declared neutral/zero
+# readings (an undated catalyst is 0 proximity; thin coverage is the E6 neutral 0.5).
+SCORE_MEASURED, SCORE_UNMEASURED = "MEASURED", "UNMEASURED"
+
+
+def source_score_state(fv_asymmetry, floor, quality_input) -> dict:
+    """{"state": MEASURED|UNMEASURED, "missing": [...]} - THE one home for 'can this be ranked'."""
+    missing = [n for n, v in (("fv_asymmetry", fv_asymmetry), ("fv_floor", floor),
+                              ("quality(acs_ex_acs8|acs)", quality_input)) if _num(v) is None]
+    return {"state": SCORE_UNMEASURED if missing else SCORE_MEASURED, "missing": missing}
+
+
 # --- THE score ------------------------------------------------------------------------------
 def compute_vci_source_score(*, fv_asymmetry, floor, acs, days_to_catalyst, signal_count,
                              revision_velocity=None, acs_ex_acs8=None,
@@ -158,6 +176,13 @@ def compute_vci_source_score(*, fv_asymmetry, floor, acs, days_to_catalyst, sign
     E6: `revision_velocity` (0-1) feeds the revisions component (None -> neutral 0.5)."""
     w = _normalise_weights(weights) if weights else load_weights()
     quality_input = acs_ex_acs8 if acs_ex_acs8 is not None else acs
+    st = source_score_state(fv_asymmetry, floor, quality_input)
+    if st["state"] != SCORE_MEASURED:
+        # ISA-0667: UNKNOWN, not a constant. Callers rank only numeric scores and keep the name
+        # as a NAMED refusal (vci_deploy_eval.rank_eligible / refusal_report).
+        if return_components:
+            return None, {"weights": w, "components": None, "state": st}
+        return None
     comp = {
         "asymmetry": norm_asymmetry(fv_asymmetry, floor),
         "quality":   norm_quality(quality_input),
@@ -167,7 +192,7 @@ def compute_vci_source_score(*, fv_asymmetry, floor, acs, days_to_catalyst, sign
     }
     score = round(100 * sum(w.get(k, 0.0) * comp[k] for k in comp), 1)
     if return_components:
-        return score, {"weights": w, "components": comp}
+        return score, {"weights": w, "components": comp, "state": st}
     return score
 
 
@@ -186,7 +211,8 @@ def vci_source_score_for_row(row, get=None):
 
 
 # --- inline self-test -----------------------------------------------------------------------
-if __name__ == "__main__":
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 selftest (census-visible; was an inline __main__ block until 27-Sep-2026, VCI-A)."""
     # R-T2: forward decides. X lower ACS but higher asymmetry+nearer catalyst.
     X = compute_vci_source_score(fv_asymmetry=3.0, floor=2.0, acs=77, days_to_catalyst=45, signal_count=5)
     Y = compute_vci_source_score(fv_asymmetry=2.1, floor=2.0, acs=83, days_to_catalyst=400, signal_count=4)
@@ -221,4 +247,26 @@ if __name__ == "__main__":
     w = load_weights()
     print(f"weights: {w}  sum={round(sum(w.values()),4)}")
     assert abs(sum(w.values()) - 1.0) < 1e-6 and set(w) >= set(_DEFAULT_WEIGHTS)
+    # ISA-0667 MUST-FIRE + NEGATIVE CONTROLS
+    assert compute_vci_source_score(fv_asymmetry=None, floor=None, acs=None, days_to_catalyst=None,
+                                    signal_count=None) is None, \
+        "ISA-0667 MUST-FIRE: all mandatory inputs unmeasured -> UNKNOWN (was the constant 7.5)"
+    assert compute_vci_source_score(fv_asymmetry=2.4, floor=2.0, acs=None, days_to_catalyst=90,
+                                    signal_count=3) is None, "ISA-0667: unmeasured quality -> UNKNOWN"
+    _s, _c = compute_vci_source_score(fv_asymmetry=None, floor=2.0, acs=80, days_to_catalyst=90,
+                                      signal_count=3, return_components=True)
+    assert _s is None and _c["state"]["missing"] == ["fv_asymmetry"], _c
+    _low = compute_vci_source_score(fv_asymmetry=2.0, floor=2.0, acs=40, days_to_catalyst=None,
+                                    signal_count=0)
+    assert _low is not None and _low == 7.5, \
+        ("ISA-0667 NEGATIVE CONTROL: a GENUINELY measured weak name (asymmetry at floor, low quality) "
+         "still scores numerically - the control bans unmeasured-as-number, not low numbers: %r" % _low)
+    _t1 = compute_vci_source_score(fv_asymmetry=2.6, floor=2.0, acs=80, days_to_catalyst=100, signal_count=4)
+    _t2 = compute_vci_source_score(fv_asymmetry=2.6, floor=2.0, acs=80, days_to_catalyst=100, signal_count=4)
+    assert _t1 == _t2 and _t1 is not None, "ISA-0667: identical inputs may tie (ties are legal)"
     print("vci_source_score v2 self-test PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    _selftest()

@@ -183,7 +183,7 @@ def run_surface_fingerprint(root: str = HERE) -> dict:
         wb = fa.run_surface_texts(_P(root), with_basis=True)
         digests = {k: _sha(v[0].encode("utf-8")) for k, v in wb.items()}
         bases = {k: v[1] for k, v in wb.items()}
-        n_exec = sum(1 for b in bases.values() if b == "executed")
+        n_exec = sum(1 for b in bases.values() if b in ("executed", "canonical_loaded"))
         return {"roll": _roll(digests), "n_surfaces": len(digests),
                 "n_from_executed_contract": n_exec, "basis": bases, "digests": digests,
                 "state": GREEN if digests else ENV_UNKNOWN,
@@ -209,14 +209,71 @@ CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "targ
                 "broker_venues.json",
                 # ISA-0729 (23-Sep-2026): the declared release denominator of the script battery - an
                 # unsigned edit could quietly move a failing release test out of the census.
-                "script_suite_census.json")
+                "script_suite_census.json",
+                # ISA-0537 (27-Sep-2026): which framework workflow each scheduled task's thin launcher
+                # loads, and each task's enforcement ceiling - an unsigned edit would redirect a task.
+                os.path.join("Dashboard", "state", "task_contracts.json"),
+                # ISA-0537: the occurrence rules task_authority.launch REFUSES on (ENFORCED tasks) are
+                # read from this document's tables - an unsigned edit could move a task's window.
+                "SCHEDULED_TASKS_SETUP.md")
+
+
+# ⚑ ISA-0775 (30-Sep-2026) — A SIGNED FILE THAT THE CERTIFIED CODE REWRITES EVERY RUN.
+#   target_state.json holds Raj's DECLARED target inputs (floor/stretch GBP, date, contribution
+#   schedule, one-off contributions, allowance plan) AND the anchor state derive_required_return
+#   writes on EVERY pre-run (D-2 reported speed; operative on the 31-Mar/30-Sep windows). Signing the
+#   whole file made LIVE read UNTRUSTED_LIVE_STATE after the first pre-run pass, so the second pass,
+#   the 11-Oct VCI run and every lead census were REFUSED (measured, 30-Sep production parallel). The
+#   signature now covers the declared keys only; the keys below are RUNTIME STATE produced by
+#   certified code (like every other run artefact) and are asserted by the A19/A19b pairs and by
+#   `derive_required_return --check`. derive_required_return._selftest proves every key it writes is
+#   listed here (fail-closed: an unlisted new key makes LIVE UNTRUSTED, never silently unsigned).
+CONFIG_RUNTIME_KEYS = {
+    "target_state.json": (
+        "schema_version", "portfolio_value_gbp", "portfolio_value_date", "valuation_basis",
+        "required_return_reported_floor_pct", "required_return_reported_stretch_pct",
+        "required_return_reported_operative_pct", "reported_derived_at", "guardrail_state",
+        "required_return_floor_pct", "required_return_stretch_pct", "required_return_operative_pct",
+        "operative_guardrail_state", "operative_effective_from", "operative_derived_at",
+        "operative_portfolio_value_gbp", "operative_next_window", "anchor_cadence", "flow_trigger",
+        "one_off_contributions_applied", "one_off_contributions_in_value", "glidepath_note",
+        "derived_at", "derivation", "next_derivation_due", "next_operative_window",
+        "reported_derivation_cadence", "derivation_basis", "derivation_history"),
+}
+
+
+def _config_file_digest(path: str, rel: str) -> Optional[str]:
+    """sha256 of a config file; for a file in CONFIG_RUNTIME_KEYS, of its DECLARED projection
+    (canonical JSON without the runtime keys). An unparseable projected file hashes RAW, so a
+    corrupted file still changes the roll (fail-closed)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    rk = CONFIG_RUNTIME_KEYS.get(rel.replace(os.sep, "/"))
+    if not rk:
+        return _sha(raw)
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except Exception:                                                   # noqa: BLE001
+        return _sha(raw)
+    if not isinstance(doc, dict):
+        return _sha(raw)
+    proj = {k: v for k, v in doc.items() if k not in set(rk)}
+    return _sha(("ISA-0775-declared-projection:" + json.dumps(proj, sort_keys=True)).encode("utf-8"))
 
 
 def config_fingerprint(root: str = HERE) -> dict:
     names = CONFIG_FILES
     present = [os.path.join(root, n) for n in names if os.path.exists(os.path.join(root, n))]
     missing = [n for n in names if not os.path.exists(os.path.join(root, n))]
-    files = _fingerprint_files(present, root)
+    files = {}
+    for p in sorted(present):
+        rel = os.path.relpath(p, root)
+        dg = _config_file_digest(p, rel)
+        if dg is not None:
+            files[rel] = dg
     return {"roll": _roll(files), "n_files": len(files), "missing": missing, "files": files,
             "state": GREEN if not missing else ENV_UNKNOWN,
             "why": None if not missing else
@@ -1270,6 +1327,49 @@ def _selftest(verbose: bool = True) -> int:
        "but inside the folder", _v_elsewhere["state"] == "TRUSTED", _v_elsewhere)
     ok("ISA-0697: fingerprint keys are tree-relative (no '..' segments)",
        all(not k.startswith("..") for k in source_fingerprint(tmp)["files"]))
+
+    # ── ISA-0775: target_state.json - declared keys signed, derived anchor state runtime ─────────
+    _ts = os.path.join(tmp, "target_state.json")
+    _ts_orig = open(_ts, "rb").read()
+    _ts_doc = {"target_floor_gbp": 1000000, "target_date": "2037-12-31",
+               "contribution_schedule": [{"from": "2026-07-01", "monthly_gbp": 0}],
+               "derived_at": "2026-09-05", "operative_derived_at": "2026-09-05",
+               "reported_derived_at": "2026-09-05", "derivation_history": [{"derived_at": "2026-09-05"}]}
+    with open(_ts, "w", encoding="utf-8") as fh:
+        json.dump(_ts_doc, fh)
+    _fp775 = live_fingerprints(tmp)
+    with open(receipt_path(tmp), "w", encoding="utf-8") as fh:
+        json.dump({"build_id": "TB-TEST-0775", "fingerprints": _fp775}, fh)
+    _d2 = dict(_ts_doc, derived_at="2026-10-03", reported_derived_at="2026-10-03",
+               operative_effective_from="2026-09-30",
+               derivation_history=_ts_doc["derivation_history"] + [{"derived_at": "2026-10-03"}])
+    with open(_ts, "w", encoding="utf-8") as fh:
+        json.dump(_d2, fh, indent=2)
+    _v775a = verify_live(tmp)
+    ok("ISA-0775 MUST-FIRE: a pre-run derivation rewrite of target_state.json (derived_at, reported, "
+       "operative window, history) keeps LIVE TRUSTED - the certified code's own output is runtime state",
+       _v775a["state"] == "TRUSTED", _v775a)
+    with open(_ts, "w", encoding="utf-8") as fh:
+        json.dump(dict(_d2, target_floor_gbp=900000), fh)
+    _v775b = verify_live(tmp)
+    ok("ISA-0775 NEGATIVE CONTROL: a hand edit of a DECLARED key (target_floor_gbp) is still "
+       "UNTRUSTED_LIVE_STATE naming target_state.json",
+       _v775b["state"] == "UNTRUSTED_LIVE_STATE" and any(
+           "target_state.json" in d.get("changed_files", []) for d in _v775b.get("diffs", [])), _v775b)
+    with open(_ts, "w", encoding="utf-8") as fh:
+        json.dump(dict(_d2, new_unlisted_key=1), fh)
+    ok("ISA-0775 FAIL-CLOSED: a key not declared runtime (a new field) changes the signature",
+       verify_live(tmp)["state"] == "UNTRUSTED_LIVE_STATE")
+    with open(_ts, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    ok("ISA-0775 FAIL-CLOSED: an unparseable target_state.json hashes raw and reads UNTRUSTED",
+       verify_live(tmp)["state"] == "UNTRUSTED_LIVE_STATE")
+    with open(_ts, "wb") as fh:
+        fh.write(_ts_orig)
+    with open(receipt_path(tmp), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+    ok("ISA-0775 comparator: restoring the original fixture and receipt verifies TRUSTED again",
+       verify_live(tmp)["state"] == "TRUSTED")
 
     # ── ISA-0629: the refusal AT THE RUN SURFACE, on the same fixture ───────────────────
     # ISA-0696: the signed fixture carries a complete, CLEAN, same-identity census (its tree has no suites)

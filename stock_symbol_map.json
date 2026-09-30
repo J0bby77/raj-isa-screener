@@ -2,7 +2,7 @@
  "_what": "P1.2c VERIFIED ticker->Yahoo symbol map. An entry exists ONLY where (a) an index screen, the broker, a VCI artefact, the VCI watchlist or the declared benchmark list named the ticker, AND (b) the live listing's EXCHANGE is one its declared venue permits. \u2691 A symbol match is NOT a check: a bare `ONT` returns meta.symbol 'ONT' for Onterris, Inc. The EXCHANGE is the falsifier. \u2691 REFRESHED BY THE RUN THAT CONSUMES IT (Step 5x, ISA-0577) \u2014 this file was a hand-run artefact frozen at 2026-08-28 while the universe grew every month, and 119 of 178 names (66.9%) were unmapped, unfetched and sized on A2.3's adverse 0.70. \u2691 APPEND-ONLY: an existing entry is never re-decided (R4.8). \u2691 GENERATED \u2014 never hand-edited (R14.3).",
  "built_on": "2026-08-28",
  "n_map": 178,
- "n_refused": 2,
+ "n_refused": 1,
  "map": {
   "AVGO": "AVGO",
   "MU": "MU",
@@ -1122,6 +1122,18 @@
    "company": "4IMPRINT GROUP PLC",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FRO.OL",
+   "currency": "NOK",
+   "exchange": "OSL",
+   "expected_exchanges": [
+    "OSL"
+   ],
+   "source": "declared alias FRO.OL -> FRO.OL (stock_price_fetch.SYMBOL_MAP)",
+   "declared_alias_of": "FRO.OL",
+   "verified_by": "declared_alias_exchange_verified",
+   "admitted_on": "2026-09-25"
   },
   {
    "ticker": "FROG",
@@ -2349,6 +2361,25 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "QBTS",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "declared alias QBTS -> QBTS (stock_price_fetch.SYMBOL_MAP)",
+   "declared_alias_of": "QBTS",
+   "verified_by": "declared_alias_exchange_verified",
+   "admitted_on": "2026-09-25"
+  },
+  {
    "ticker": "RACE.MI",
    "currency": "EUR",
    "exchange": "MIL",
@@ -3144,23 +3175,230 @@
  ],
  "refused": [
   {
-   "ticker": "FRO",
-   "group": "STOXX600",
-   "source": "constituents_history",
-   "company": "FRONTLINE PLC",
-   "declared_venue": null,
-   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"FRO\": \"FRO.L\" \u2014 deliberately, never guessed",
-   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
-  },
-  {
    "ticker": "SATL",
    "group": "VCI",
-   "source": "artefact:vci_prescore_aug_2026.json",
+   "source": "artefact:vci_prescore_sep_2026.json",
    "company": "Satellogic Inc.",
    "declared_venue": null,
-   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, e.g. \"SATL\": \"SATL.L\" \u2014 deliberately, never guessed",
+   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, \"SATL\": \"<symbol>.<venue suffix>\" \u2014 deliberately, never guessed",
    "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
   }
  ],
- "refreshed_on": "2026-09-12"
+ "refreshed_on": "2026-09-25",
+ "alias_verification": [
+  {
+   "alias": "ABCL",
+   "symbol": "ABCL",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "exchange": "NMS",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "AVGO",
+   "symbol": "AVGO",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "exchange": "NMS",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "COCO",
+   "symbol": "COCO",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "exchange": "NMS",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "FRO",
+   "symbol": "FRO.OL",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "identity": {
+    "listing": "FRO.OL",
+    "venue": "OSL",
+    "issuer": "Frontline plc",
+    "isin": "CY0200352116",
+    "isin_evidence": [
+     "STOXX600 index-screen rows 25-Jul/22-Aug/27-Aug-2026 (<date>_STOXX600_yf_gate_results.csv isin column)",
+     "Euronext Oslo Bors product page CY0200352116-XOSL",
+     "Frontline annual report: post-2022 redomiciliation, NYSE and Oslo lines share CY0200352116"
+    ],
+    "conflicting_raw": {
+     "yfinance FRO.OL isin (25-Sep-2026)": "PLCTHQM00018"
+    },
+    "decided_by": "Raj 25-Sep-2026 (candidate entered via the STOXX600 route)",
+    "register_item": "ISA-0585"
+   },
+   "expected_exchanges": [
+    "OSL"
+   ],
+   "exchange": "OSL",
+   "currency": "NOK",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "FRO.OL",
+   "symbol": "FRO.OL",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "OSL"
+   ],
+   "exchange": "OSL",
+   "currency": "NOK",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "IWMO.L",
+   "symbol": "IWMO.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "MU",
+   "symbol": "MU",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "exchange": "NMS",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "ONT",
+   "symbol": "ONT.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "GBp",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "ONT.L",
+   "symbol": "ONT.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "GBp",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "QBTS",
+   "symbol": "QBTS",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "exchange": "NMS",
+   "currency": "USD",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "SWDA.L",
+   "symbol": "SWDA.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "GBp",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "VUAG.L",
+   "symbol": "VUAG.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "GBP",
+   "state": "VERIFIED"
+  },
+  {
+   "alias": "VWRL.L",
+   "symbol": "VWRL.L",
+   "declared_in": "stock_price_fetch.SYMBOL_MAP",
+   "verified_on": "2026-09-25",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "exchange": "LSE",
+   "currency": "GBP",
+   "state": "VERIFIED"
+  }
+ ],
+ "alias_refused": []
 }

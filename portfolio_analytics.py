@@ -13,8 +13,8 @@ Computes (all deterministic — no web lookups required):
   - VUAG + Vanguard US consolidation flag
   - Rebalancing candidates: trade sizes in £ to return to target
   - Stock sleeve phase status (Phase 1 / Phase 2 / transition imminent)
-  - Stock sleeve return (simple or annualised — requires trades_log data if available)
-  - Section A/B/C framework skeleton (B = indicative until trades log read)
+  - Stock sleeve return (simple or annualised — purchase dates from transaction_ledger.json)
+  - Section A/B/C framework skeleton
   - Overlap check structure: lists which stocks to check against fund top-10 holdings
   - Capital deployment summary: cash available, stock sleeve headroom, constraints
 
@@ -27,7 +27,7 @@ Usage:
     python3 portfolio_analytics.py
         --portfolio portfolio_data_mmm_yyyy.json
         --weights   target_weights.json
-        [--trades-log path/to/project_isa_trades_log.md]
+        [--transaction-ledger transaction_ledger.json]
         [--prior-portfolio portfolio_data_prior_mmm_yyyy.json]
         [--out analytics_data_mmm_yyyy.json]
 """
@@ -172,51 +172,40 @@ def calc_rebalance_trade(
 
 
 # ---------------------------------------------------------------------------
-# Stock sleeve return (if trades log available)
+# Stock sleeve return — purchase dates from the TRANSACTION LEDGER
 # ---------------------------------------------------------------------------
-def parse_trades_log_positions(trades_log_path: str) -> list:
-    """
-    Parses project_isa_trades_log.md for open stock positions.
-    Returns list of {ticker, purchase_date, cost_gbp}.
-    Minimal regex parse — robust to format changes.
-    """
-    if not trades_log_path or not os.path.exists(trades_log_path):
+def purchase_dates_from_ledger(ledger_path: str = None) -> list:
+    """ISA-0124 / ISA-0759 (26-Sep-2026). Open-position purchase dates for Section B.
+
+    ⚑ AUTHORITY: `transaction_ledger.json` (ISA-0645), via ONE home —
+    `position_alerts.min_hold_from_ledger` — which already derives each ticker's FIRST buy
+    (D24: a top-up never restarts the clock) and excludes the declared MMF tickers. This
+    replaced `parse_trades_log_positions()`, which parsed `project_isa_trades_log.md`: that
+    file never existed, so every Section B ran with no purchase dates. A ticker with no BUY
+    row is OMITTED, never given a manufactured date (R4.3).
+
+    Returns [{ticker, purchase_date: date, source}]; [] when the ledger is absent/unreadable
+    (the caller states the degradation — absent is not empty, R2.10)."""
+    if not ledger_path or not os.path.exists(ledger_path):
         return []
-
-    positions = []
     try:
-        with open(trades_log_path, encoding="utf-8") as f:
-            text = f.read()
-
-        # Look for rows in the open positions table:
-        # | TICKER | Date | ... | Cost £ | ...
-        # Pattern: pipe-delimited table row with a ticker and date
-        row_pattern = re.compile(
-            r"\|\s*([A-Z]{1,6})\s*\|"          # ticker
-            r"[^|]*\|"                           # name
-            r"\s*(\d{2}-\w{3}-\d{4})\s*\|",    # purchase date dd-Mon-YYYY
-            re.MULTILINE
-        )
-        for m in row_pattern.finditer(text):
-            ticker = m.group(1).strip()
-            date_str = m.group(2).strip()
-            try:
-                purchase_date = datetime.strptime(date_str, "%d-%b-%Y").date()
-            except ValueError:
-                continue
-            positions.append({
-                "ticker":        ticker,
-                "purchase_date": purchase_date,
-            })
-    except Exception:
-        pass
-
-    return positions
+        import position_alerts as _pa
+        rows = _pa.min_hold_from_ledger(ledger_path)
+    except Exception:                                                   # noqa: BLE001
+        return []
+    out = []
+    for tk, r in sorted(rows.items()):
+        try:
+            d = datetime.strptime(str(r["position_first_entry_date"])[:10], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            continue
+        out.append({"ticker": tk, "purchase_date": d, "source": "transaction_ledger.json"})
+    return out
 
 
 def calc_stock_sleeve_return(
     stocks: list,
-    trades_log_positions: list,
+    purchase_positions: list,
     run_date: date,
 ) -> dict:
     """
@@ -243,8 +232,8 @@ def calc_stock_sleeve_return(
 
     simple_return_pct = round((total_value - total_cost) / total_cost * 100, 2)
 
-    # Build date map from trades log
-    date_map = {p["ticker"]: p["purchase_date"] for p in trades_log_positions}
+    # Build date map from the transaction ledger (first BUY per ticker)
+    date_map = {p["ticker"]: p["purchase_date"] for p in purchase_positions}
 
     # Check if we have >=3 positions with >=6 months history
     mature_positions = []
@@ -416,7 +405,7 @@ def run_analytics(
     portfolio: dict,
     target_weights: dict,
     prior_portfolio: dict = None,
-    trades_log_path: str = None,
+    transaction_ledger_path: str = None,
     run_date: date = None,
     xray: dict = None,
 ) -> dict:
@@ -587,8 +576,10 @@ def run_analytics(
     # ---------------------------------------------------------------------------
     # Stock sleeve return check
     # ---------------------------------------------------------------------------
-    trades_log_positions = parse_trades_log_positions(trades_log_path)
-    stock_return_check = calc_stock_sleeve_return(stocks_list, trades_log_positions, run_date)
+    purchase_positions = purchase_dates_from_ledger(transaction_ledger_path)
+    stock_return_check = calc_stock_sleeve_return(stocks_list, purchase_positions, run_date)
+    stock_return_check["purchase_date_source"] = (
+        "transaction_ledger.json" if purchase_positions else "UNAVAILABLE")
 
     # ---------------------------------------------------------------------------
     # Section A: Fund sleeve weighted average return (skeleton — Claude fills est_return_pct per fund)
@@ -774,8 +765,9 @@ def main():
                         help="Path to target_weights.json. Defaults to Investment Analysis folder.")
     parser.add_argument("--prior-portfolio", default=None,
                         help="Path to prior month portfolio_data JSON (for phase transition check).")
-    parser.add_argument("--trades-log",    default=None,
-                        help="Path to project_isa_trades_log.md (for stock sleeve return calc).")
+    parser.add_argument("--transaction-ledger", default=None,
+                        help="transaction_ledger.json - purchase dates for the Section B "
+                             "stock-sleeve return (ISA-0645 authority; ISA-0124).")
     parser.add_argument("--xray",          default=None,
                         help="xray_data_mmm_yyyy.json — supplies the PUBLISHED look-through "
                              "table that retired the hand-calculated overlap check (H10)")
@@ -813,7 +805,7 @@ def main():
     analytics = run_analytics(
         portfolio, target_weights,
         prior_portfolio=prior_portfolio,
-        trades_log_path=args.trades_log,
+        transaction_ledger_path=args.transaction_ledger,
         run_date=date.today(),
         xray=xray,
     )
@@ -847,5 +839,66 @@ def main():
 
 
 
+
+# ---------------------------------------------------------------------------
+# Selftest (ISA-0124 / ISA-0759, 26-Sep-2026) — the Section B purchase-date authority
+# ---------------------------------------------------------------------------
+def _selftest(verbose: bool = True) -> int:
+    """Section B purchase dates come from transaction_ledger.json, never a trades log.
+    Hermetic: every fixture is written to a temp dir; no LIVE store is read or written."""
+    import tempfile
+    fails = []
+
+    def ck(name, cond):
+        if verbose:
+            print(("  PASS  " if cond else "  FAIL  ") + name)
+        if not cond:
+            fails.append(name)
+
+    td = tempfile.mkdtemp(prefix="pa_selftest_")
+    led = os.path.join(td, "transaction_ledger.json")
+    rows = [
+        {"date": "2026-01-10", "type": "buy", "ticker": "AAA", "asset_class": "stock"},
+        {"date": "2026-03-01", "type": "buy", "ticker": "AAA", "asset_class": "stock"},  # top-up
+        {"date": "2026-02-01", "type": "buy", "ticker": "BBB", "asset_class": "stock"},
+        {"date": "2026-02-02", "type": "buy", "ticker": "CCC", "asset_class": "stock"},
+        {"date": "2026-02-03", "type": "buy", "ticker": "CSH2", "asset_class": "stock"},  # MMF
+        {"date": "2026-02-04", "type": "sell", "ticker": "DDD", "asset_class": "stock"},
+        {"date": "2026-02-05", "type": "buy", "ticker": "FUND1", "asset_class": "fund"},
+    ]
+    with open(led, "w", encoding="utf-8") as fh:
+        json.dump({"entries": rows}, fh)
+    got = {r["ticker"]: r["purchase_date"] for r in purchase_dates_from_ledger(led)}
+    ck("first BUY is the entry (a top-up does not restart the clock)",
+       got.get("AAA") == date(2026, 1, 10))
+    ck("negative control: the declared MMF is not a stock position", "CSH2" not in got)
+    ck("negative control: a SELL-only ticker gets no manufactured entry date", "DDD" not in got)
+    ck("negative control: a fund row is not a stock purchase date", "FUND1" not in got)
+    ck("negative control: an absent ledger yields [] (the caller states the degradation)",
+       purchase_dates_from_ledger(os.path.join(td, "absent.json")) == [])
+    ck("negative control: no ledger path yields []", purchase_dates_from_ledger(None) == [])
+
+    stocks = [{"ticker": t, "value_gbp": 130.0, "cost_gbp": 100.0} for t in ("AAA", "BBB", "CCC")]
+    pos = purchase_dates_from_ledger(led)
+    r_mature = calc_stock_sleeve_return(stocks, pos, date(2026, 9, 30))
+    ck("must-fire: 3 positions >=180 days held -> annualised method",
+       r_mature["method"] == "annualised" and r_mature.get("mature_positions") == 3)
+    r_young = calc_stock_sleeve_return(stocks, pos, date(2026, 5, 1))
+    ck("negative control: positions <180 days held stay simple_indicative",
+       r_young["method"] == "simple_indicative")
+    r_nodates = calc_stock_sleeve_return(stocks, [], date(2026, 9, 30))
+    ck("negative control: no purchase dates can never produce an annualised verdict",
+       r_nodates["method"] == "simple_indicative")
+    # the retired contract must not return: no trades-log reader or CLI flag in this module
+    import inspect as _insp
+    src = _insp.getsource(sys.modules[__name__])
+    ck("negative control: the retired trades-log parser is absent",
+       ("def " + "parse_trades_log") not in src and '"--trades' + '-log"' not in src)
+    if verbose:
+        print("portfolio_analytics selftest: %d failure(s)" % len(fails))
+    return 1 if fails else 0
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

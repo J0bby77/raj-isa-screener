@@ -124,12 +124,14 @@ def fmt_val(v, decimals=2, prefix="") -> str:
     except (TypeError, ValueError):
         return "—"
 
-def fmt_price(v, currency="USD") -> str:
-    """Format a price with appropriate symbol."""
+def fmt_price(v, currency=None) -> str:
+    """Format a price with appropriate symbol. ISA-0582 (26-Sep-2026): an absent currency renders no
+    symbol (never "$"); a known currency with no symbol renders its ISO code."""
     if v is None:
         return "—"
     symbols = {"USD": "$", "GBP": "£", "EUR": "€", "CAD": "C$"}
-    sym = symbols.get(currency.upper(), "")
+    _c = str(currency or "").strip()
+    sym = symbols.get(_c.upper(), (_c + " ") if _c and _c.upper() not in ("UNKNOWN", "N/A", "NONE") else "")
     try:
         return f"{sym}{float(v):.2f}"
     except (TypeError, ValueError):
@@ -441,7 +443,7 @@ def build_analyst_summary(s: dict) -> dict:
     n_anal   = s.get("num_analysts")
     t_price  = s.get("target_price_mean")
     c_price  = s.get("current_price")
-    currency = s.get("currency", "USD")
+    currency = s.get("currency")
 
     implied_upside = None
     if t_price and c_price and c_price > 0:
@@ -610,7 +612,7 @@ def build_s5_row(ticker: str, s: dict, wl_entry: dict | None) -> dict:
     """
     rank     = s.get("_rank") or (wl_entry.get("rank") if wl_entry else None)
     entry    = s.get("_entry_level")
-    ecur     = s.get("_entry_currency", "USD")
+    ecur     = s.get("_entry_currency")
     c_price  = s.get("current_price")
     currency = s.get("currency", ecur)
     pipeline = s.get("_source_pipeline", "growth_stock")
@@ -655,7 +657,7 @@ def build_s5_row(ticker: str, s: dict, wl_entry: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 def build_s7_row(ticker: str, s: dict) -> dict:
     c_price  = s.get("current_price")
-    currency = s.get("currency", "USD")
+    currency = s.get("currency")
     cost     = s.get("_cost_per_share")
     shares   = s.get("_shares")
     gain_pct_raw = None
@@ -726,8 +728,8 @@ def _build_s3_skeleton_growth(ticker: str, s: dict) -> dict:
         {"label": "Part B Score",       "value": f"{s.get('part_b_score','?')}/{s.get('part_b_max',22)}",  "assessment": s.get("part_b_status",""),  "signal": "green" if (s.get("part_b_score") or 0) >= PART_B_STRONG_THRESHOLD else "amber"},
         {"label": "Combined Score",     "value": f"{s.get('total_score','?')}/{s.get('total_max',50)}",   "assessment": conv["bracket"],             "signal": conv["level"] if conv["level"] != "low" else "amber"},
         {"label": "Conviction Score",   "value": conv["conviction_score"],            "assessment": conv["note"],                "signal": "amber"},
-        {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency","USD")), "assessment": "", "signal": ""},
-        {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency","USD")), "assessment": "In range ✓" if s.get("_in_window") else "Above entry", "signal": "green" if s.get("_in_window") else "amber"},
+        {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency")), "assessment": "", "signal": ""},
+        {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency")), "assessment": "In range ✓" if s.get("_in_window") else "Above entry", "signal": "green" if s.get("_in_window") else "amber"},
         {"label": "Target Gap (display)", "value": fmt_pct(_tgap(s)),    "assessment": analyst["analyst_rating_clean"], "signal": "green" if (_tgap(s) or 0) > 0.20 else "amber"},
         {"label": "Analyst Count",      "value": str(analyst.get("num_analysts","—")), "assessment": "", "signal": ""},
         {"label": "Next Earnings",      "value": s.get("next_earnings","—"),          "assessment": "", "signal": ""},
@@ -787,9 +789,9 @@ def _build_s3_skeleton_vci(ticker: str, s: dict) -> dict:
          "signal": "green" if (acs or 0) >= VCI_DEPLOYMENT_THRESHOLD else "amber"},
         {"label": "VCI Run Date",       "value": s.get("vci_run_date") or s.get("_vci_run_date", "—"),
          "assessment": "", "signal": ""},
-        {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency", "USD")),
+        {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency")),
          "assessment": "", "signal": ""},
-        {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency", "USD")),
+        {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency")),
          "assessment": "In range ✓" if s.get("_in_window") else "Above entry",
          "signal": "green" if s.get("_in_window") else "amber"},
         {"label": "Next Earnings",      "value": s.get("next_earnings", "—"),
@@ -909,7 +911,7 @@ def run(metrics_path: str, out_path: str) -> dict:
 
         pipeline     = s.get("_source_pipeline", "growth_stock")
         entry_level  = s.get("_entry_level")
-        ecur         = s.get("_entry_currency", "USD")
+        ecur         = s.get("_entry_currency")
         c_price      = s.get("current_price")
         currency_s   = s.get("currency", ecur)
         conv         = get_conviction_bracket(s)
@@ -1077,5 +1079,21 @@ def main():
     run(args.metrics, out_path)
 
 
+def _selftest() -> int:
+    """ISA-0582 (26-Sep-2026): display formatting never manufactures a USD symbol."""
+    n = 0
+    assert fmt_price(10, "USD") == "$10.00", "positive control"; n += 1
+    assert fmt_price(10, None) == "10.00", "negative control: a missing currency must not render $"; n += 1
+    assert fmt_price(10, "UNKNOWN") == "10.00", "negative control: UNKNOWN must not render $"; n += 1
+    assert fmt_price(10, "SEK") == "SEK 10.00", "negative control: SEK must not render $"; n += 1
+    assert fmt_price(None, "USD") == "—", "positive control: no price"; n += 1
+    import inspect as _i
+    assert '"USD")' not in _i.getsource(build_s7_row), "must not re-default currency to USD"; n += 1
+    print("normalise_adapter selftest: %d assertions, 0 failed" % n)
+    return n
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

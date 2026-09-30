@@ -419,38 +419,6 @@ def get_coverage_counts(full_data, gate_data, unresolved_rows=None):
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
-def build_coverage_line(counts, group, run_date):
-    """Section 1 — Coverage stats bar."""
-    total = counts["total_constituents"]
-    analysed = counts["analysed"]
-    pct_analysed = f"{(analysed / total * 100):.0f}%" if total else "N/A"
-    sb = counts["strong_buys"]
-    fm = counts["fair_mixed"]
-    acc = counts["acceptable"]
-    excl = counts["pre_screen_excluded"]
-    hgf = counts["hard_gate_fail"]
-    insuf = counts["insufficient_data"]
-    ns = counts["not_screened"]
-
-    text = (
-        f"<strong style=\"color:#1a6b2a\">{sb} SUMMARY Candidate{'s' if sb != 1 else ''}</strong> | "
-        f"{analysed} of {total} total constituents analysed ({pct_analysed}) | "
-        f"{fm} Fair/Mixed | {acc} Acceptable | "
-        f"{excl} Pre-Screen Excluded | {hgf} Hard Gate Fails | "
-        f"{insuf} Insufficient Data | {ns} Not Screened"
-    )
-    html = (
-        f'<p style="background:#f0f4fa;padding:10px 14px;border-left:4px solid #1a3a6b;'
-        f'font-size:13px;margin-bottom:20px">{safe_entities(text)}</p>'
-    )
-    # Replace the strong tag we built manually (it's safe ASCII)
-    html = html.replace(
-        safe_entities(f"<strong style=\"color:#1a6b2a\">{sb} SUMMARY Candidate{'s' if sb != 1 else ''}</strong>"),
-        f'<strong style="color:#1a6b2a">{sb} SUMMARY Candidate{"s" if sb != 1 else ""}</strong>'
-    )
-    return html
-
-
 def _cfg_get(name, default):
     try:
         import scoring_config as _c; return getattr(_c, name, default)
@@ -511,63 +479,6 @@ def build_drawdown_line():
             f'font-size:12px;margin-bottom:16px">{safe_entities(txt)}</p>\n')
 
 
-def build_kpi_tiles(strong_buys, gate_passers):
-    """KPI tiles row using table layout (Rule 3 — no flexbox)."""
-    sb_count = len(strong_buys)
-    gp_count = len(gate_passers)
-
-    # Top score
-    if strong_buys:
-        top = strong_buys[0]
-        top_score = score_int(get_field(top, "total_score"))
-        top_fwd = score_int(get_field(top, "forward_axis_score"))
-        top_ticker = get_field(top, "ticker")
-        top_max = int(sf(get_field(top, "total_max")) or 50)   # P2-6: max-aware (/50 base, /54 semis)
-    else:
-        top_score = "N/A"
-        top_fwd = "N/A"
-        top_ticker = "N/A"
-        top_max = 50
-
-    # Avg upside of top 10 — Fix Pack D7: FV-composite implied upside (consensus gap is display-only)
-    top10 = strong_buys[:10]
-    upsides = [_capital_upside(r)[0] for r in top10]
-    upsides = [u for u in upsides if u is not None]
-    avg_upside = f"{sum(upsides) / len(upsides) * 100:.1f}%" if upsides else "N/A"
-
-    html = (
-        '<table cellpadding="0" cellspacing="0" border="0" style="width:100%;margin-bottom:24px">\n'
-        '<tr>\n'
-        f'<td style="width:25%;padding:0 6px 0 0">\n'
-        f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#1a6b2a;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{sb_count}</td></tr>\n'
-        f'  <tr><td style="color:#c8e6c9;font-size:11px">Candidates (fwd-led)</td></tr>\n'
-        f'  </table>\n'
-        f'</td>\n'
-        f'<td style="width:25%;padding:0 6px">\n'
-        f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#1a3a6b;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{top_fwd}/100</td></tr>\n'
-        f'  <tr><td style="color:#b3c6e6;font-size:11px">Top Forward ({safe_entities(top_ticker)})</td></tr>\n'
-        f'  </table>\n'
-        f'</td>\n'
-        f'<td style="width:25%;padding:0 6px">\n'
-        f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#6b3a1a;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{gp_count}</td></tr>\n'
-        f'  <tr><td style="color:#e6c9b3;font-size:11px">Gate Passers Scored</td></tr>\n'
-        f'  </table>\n'
-        f'</td>\n'
-        f'<td style="width:25%;padding:0 0 0 6px">\n'
-        f'  <table cellpadding="12" cellspacing="0" border="0" style="width:100%;background:#4a1a6b;border-radius:6px;text-align:center">\n'
-        f'  <tr><td style="color:#fff;font-size:28px;font-weight:bold">{safe_entities(avg_upside)}</td></tr>\n'
-        f'  <tr><td style="color:#d4b3e6;font-size:11px">Avg FV Upside (Top 10)</td></tr>\n'
-        f'  </table>\n'
-        f'</td>\n'
-        '</tr>\n'
-        '</table>\n'
-    )
-    return html
-
-
 _HELD_CACHE = None
 
 
@@ -596,125 +507,16 @@ def _held_tickers():
     return _HELD_CACHE
 
 
-def build_top10_table(strong_buys):
-    """Section 2 — Top 10 stocks table (exactly 13 columns per Run_Context spec).
-    Fix Pack 12-Jul-26: Src = unified screen_source (A6, screen=deploy); Upside (FV) =
-    implied_upside_fv per D7 (consensus gap display-only, fallback for old CSVs); E[r] =
-    expected_return_12_24m % pa (A2 shadow column — becomes a T1 gate input at P2)."""
-    if not strong_buys:
-        return '<p style="color:#666;font-style:italic">No SUMMARY candidates identified this run.</p>\n'
-
-    header_cols = [
-        "Rank", "Ticker", "Company", "Sector",
-        "Fwd /100", "Src", "Stage",
-        "Part A", "Part B", "Total", "ROIC", "Upside (FV)", "E[r]", "Actionable?"
-    ]  # review item 4 (18-Jul-26): 14th col = T1 gate status (contract updated in Run_Context)
-    widths = ["4%", "5%", "13%", "9%", "5%", "5%", "9%", "4%", "4%", "5%", "6%", "7%", "7%", "17%"]
-
-    # Header row
-    header_html = "".join(
-        f'<th style="background:#1a3a6b;color:#fff;padding:8px 6px;text-align:center;'
-        f'font-size:12px;white-space:nowrap;width:{widths[i]}">{safe_entities(col)}</th>'
-        for i, col in enumerate(header_cols)
-    )
-
-    # Data rows
-    rows_html = ""
-    for rank, row in enumerate(strong_buys[:10], 1):
-        bg = "#f9f9f9" if rank % 2 == 0 else "#ffffff"
-        ticker = safe_entities(get_field(row, "ticker") or "N/A")
-        company = safe_entities(get_field(row, "company") or "N/A")
-        sector = safe_entities(get_field(row, "sector") or "N/A")
-        a = score_int(get_field(row, "part_a_score"))
-        b = score_int(get_field(row, "part_b_score"))
-        total = score_int(get_field(row, "total_score"))
-        fwd = score_int(get_field(row, "forward_axis_score"))
-        src = round(_source_score(row) * 100)
-        stage = safe_entities(str(get_field(row, "revision_stage") or "—"))  # item 9: no [:11] truncation
-        roic_raw = sf(get_field(row, "roic"))
-        upside_raw, _up_basis = _capital_upside(row)   # D7: FV-composite implied upside
-        roic_str = pct(roic_raw) if roic_raw is not None else "N/A"
-
-        # Upside with colour (marked when only the display-only consensus gap was available)
-        if upside_raw is not None:
-            sign = "+" if upside_raw >= 0 else ""
-            upside_colour = "#1a6b2a" if upside_raw >= 0 else "#c0392b"
-            _mark = "*" if _up_basis != "fv" else ""
-            upside_str = f'<span style="color:{upside_colour}">{sign}{upside_raw*100:.1f}%{_mark}</span>'
-        else:
-            upside_str = "N/A"
-
-        # E[r] % pa (A2 shadow) — percent-unit value stamped by screener_core.
-        # P2.1 (18-Jul-26): when the stamped column is blank (local-path run that missed the
-        # fixpack stamp), recompute via THE shared implementation — parity with build_excel.
-        # Review item 4 (18-Jul-26): T1 gate status per row (screen-row variant) + HELD flag
-        _gate_label = "n/a"
-        try:
-            import t1_gates as _t1
-            _gate_label, _ = _t1.gate_status_for_screen_row(row, get=lambda r, k: get_field(r, k))
-        except Exception:
-            pass
-        if ticker in _held_tickers():
-            _gate_label = "HELD | " + _gate_label
-        # ⚑ D-24 §1.2 (09-Aug-2026). build_email RECOMPUTES E[r] independently, at REVIEW time,
-        # and had no screen anchor table in scope. Left alone it would fall back to the old path
-        # and the monthly review email would disagree with the screen that produced the candidate
-        # — the email-desync disease, in the number that gates capital. It now reads the PERSISTED
-        # anchor table; where there is none it declares `unmeasured` (marked "?") rather than
-        # silently publishing a different E[r].
-        _er_raw = sf(get_field(row, "expected_return_12_24m"))
-        _er_unmeas = str(get_field(row, "er_status") or "") == "unmeasured"
-        if _er_raw is None:
-            try:
-                import expected_return as _erm
-                _tbl = _erm.load_anchor_table(required=False)
-                _rec = _erm.expected_return_for_row(
-                    row, get=lambda r, k: get_field(r, k), anchor_table=_tbl,
-                    allow_missing_anchor_table=True)
-                _er_raw = sf(_rec.get("expected_return_12_24m"))
-                _er_unmeas = _rec.get("er_status") == "unmeasured"
-            except Exception:
-                _er_raw = None
-        er_str = (f"{_er_raw:.1f}%" + ("?" if _er_unmeas else "")) if _er_raw is not None else "—"
-
-        cell_style = f'padding:7px 6px;border-bottom:1px solid #e8e8e8;background:{bg};font-size:12px;text-align:center'
-
-        rows_html += (
-            f'<tr>'
-            f'<td style="{cell_style}">{rank}</td>'
-            f'<td style="{cell_style};font-weight:bold">{ticker}</td>'
-            f'<td style="{cell_style};text-align:left">{company}</td>'
-            f'<td style="{cell_style};text-align:left">{sector}</td>'
-            f'<td style="{cell_style};font-weight:bold;color:#6a1b9a">{fwd}</td>'
-            f'<td style="{cell_style};font-weight:bold">{src}</td>'
-            f'<td style="{cell_style};text-align:left;font-size:11px">{stage}</td>'
-            f'<td style="{cell_style}">{a}</td>'
-            f'<td style="{cell_style}">{b}</td>'
-            f'<td style="{cell_style};color:#555">{total}</td>'
-            f'<td style="{cell_style}">{safe_entities(roic_str)}</td>'
-            f'<td style="{cell_style}">{upside_str}</td>'
-            f'<td style="{cell_style};color:#4a1a6b;font-weight:bold">{safe_entities(er_str)}</td>'
-            f'<td style="{cell_style};text-align:left;font-size:11px;'
-            f'color:{"#1a6b2a" if _gate_label.startswith("PASS") else "#c0392b"};font-weight:bold">'
-            f'{safe_entities(_gate_label)}</td>'
-            f'</tr>\n'
-        )
-
-    return (
-        '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 10 Stocks &mdash; By screen_source '
-        '(unified screen=deploy)</h3>\n'
-        '<table style="width:100%;border-collapse:collapse;margin-bottom:24px" '
-        'cellpadding="0" cellspacing="0" border="0">\n'
-        f'<tr>{header_html}</tr>\n'
-        f'{rows_html}'
-        '</table>\n'
-    )
-
-
 def _currency_sym(row):
     """Infer currency symbol from ticker suffix or currency field."""
     ticker = get_field(row, "ticker", default="")
     currency = get_field(row, "currency", default="")
+    # ISA-0763 (26-Sep-2026): the EVIDENCED currency decides first; suffix inference is only a
+    # fallback for a row with no currency (a CHF .SW listing rendered as EUR before this).
+    _cur_ev = str(currency or "").strip().upper()
+    if _cur_ev and _cur_ev not in ("N/A", "NAN", "NONE", "UNKNOWN"):
+        return {"GBP": "&pound;", "GBX": "&pound;", "EUR": "&euro;", "USD": "$"}.get(
+            _cur_ev, _cur_ev + " ") if currency != "GBp" else "&pound;"
     if currency in ("GBP", "GBp"):
         return "&pound;"
     if currency == "EUR":
@@ -729,158 +531,15 @@ def _currency_sym(row):
         return "R$"
     if ticker.endswith(".MX"):
         return "MX$"
-    return "$"  # USD default
-
-
-def build_top3_picks(strong_buys):
-    """Section 3 — Top 3 picks with green-bordered tables."""
-    if not strong_buys:
-        return '<p style="color:#666;font-style:italic">No Strong Buy candidates for Top 3 section.</p>\n'
-
-    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">Top 3 Picks</h3>\n'
-
-    for rank, row in enumerate(strong_buys[:3], 1):
-        margin_bottom = "24px" if rank == 3 else "16px"
-        ticker = safe_entities(get_field(row, "ticker") or "N/A")
-        company = safe_entities(get_field(row, "company") or "N/A")
-        sector = safe_entities(get_field(row, "sector") or "N/A")
-        industry = safe_entities(get_field(row, "industry") or "N/A")
-        total = score_int(get_field(row, "total_score"))
-        tmax = int(sf(get_field(row, "total_max")) or 50)   # P2-6: max-aware total denominator
-        curr_sym = _currency_sym(row)
-
-        # Price info
-        price_raw = sf(get_field(row, "current_price"))
-        target_raw = sf(get_field(row, "target_mean"))
-        upside_raw = sf(get_field(row, "upside_pct"))
-        analyst_count = get_field(row, "analyst_count") or "N/A"
-        analyst_rating = rating_display(get_field(row, "analyst_rating") or "N/A")
-
-        price_str = f"{curr_sym}{price_raw:.2f}" if price_raw is not None else "N/A"
-        target_str = f"{curr_sym}{target_raw:.2f}" if target_raw is not None else "N/A"
-
-        if upside_raw is not None:
-            sign = "+" if upside_raw >= 0 else ""
-            upside_colour = "#1a6b2a" if upside_raw >= 0 else "#c0392b"
-            upside_str = f'<span style="color:{upside_colour};font-weight:bold">{sign}{upside_raw*100:.1f}%</span>'
-        else:
-            upside_str = "N/A"
-
-        # Commentary
-        commentary_raw = get_field(row, "commentary") or ""
-        if not commentary_raw or commentary_raw in ("N/A", "nan", "None", ""):
-            commentary_raw = (
-                f"{company} scores {total}/{tmax} with strong Part A growth quality and Part B valuation metrics. "
-                f"Sector: {sector}. Industry: {industry}. "
-                f"Refer to SUMMARY tab in Excel for full overlay data and detailed analysis."
-            )
-        commentary = safe_entities(commentary_raw)
-
-        # Mini metrics
-        rev_cagr = pct(sf(get_field(row, "rev_cagr")))
-        gm = pct(sf(get_field(row, "gross_margin")))
-        roic = pct(sf(get_field(row, "roic")))
-        fcf_y = pct(sf(get_field(row, "fcf_yield")))
-        nd_ebitda_raw = sf(get_field(row, "nd_ebitda"))
-        nd_ebitda = f"{nd_ebitda_raw:.1f}x" if nd_ebitda_raw is not None else "N/A"
-        eps_cagr = pct(sf(get_field(row, "eps_cagr")))
-
-        html += (
-            f'<table cellpadding="14" cellspacing="0" border="0" '
-            f'style="width:100%;border:1px solid #c8e6c9;border-radius:6px;'
-            f'margin-bottom:{margin_bottom};border-collapse:separate">\n'
-            f'<tr><td>\n'
-            # Header line
-            f'<div style="margin-bottom:6px">'
-            f'<strong style="font-size:16px;color:#1a3a6b">{rank}. {ticker} &mdash; {company}</strong> '
-            f'<span style="background:#1a6b2a;color:#fff;padding:2px 8px;border-radius:3px;'
-            f'font-size:11px;font-weight:bold">{total}/{tmax}</span> '
-            f'<span style="color:#888;font-size:12px">&nbsp;{sector} / {industry}</span>'
-            f'</div>\n'
-            # Price info row
-            f'<div style="font-size:12px;color:#555;margin-bottom:10px">'
-            f'Price: {price_str} &nbsp;|&nbsp; '
-            f'Target: {target_str} &nbsp;|&nbsp; '
-            f'Target gap (display): {upside_str} &nbsp;|&nbsp; '  # D7: consensus gap is display-only
-
-            f'{safe_entities(analyst_count)} analysts &mdash; {safe_entities(analyst_rating)}'
-            f'</div>\n'
-            # Commentary
-            f'<p style="font-size:13px;margin:0 0 10px 0">{commentary}</p>\n'
-            # Mini metrics
-            f'<div style="font-size:11px;color:#555;border-top:1px solid #e8e8e8;padding-top:8px">'
-            f'Rev CAGR: <strong>{safe_entities(rev_cagr)}</strong> &nbsp;|&nbsp; '
-            f'GM: <strong>{safe_entities(gm)}</strong> &nbsp;|&nbsp; '
-            f'ROIC: <strong>{safe_entities(roic)}</strong> &nbsp;|&nbsp; '
-            f'FCF Yield: <strong>{safe_entities(fcf_y)}</strong> &nbsp;|&nbsp; '
-            f'ND/EBITDA: <strong>{safe_entities(nd_ebitda)}</strong> &nbsp;|&nbsp; '
-            f'EPS CAGR: <strong>{safe_entities(eps_cagr)}</strong>'
-            f'</div>\n'
-            f'</td></tr>\n'
-            f'</table>\n'
-        )
-
-    return html
-
-
-def build_key_observations(strong_buys, full_data, group):
-    """Section 4 — Key observations."""
-    observations = []
-
-    # Check for sector concentration among strong buys
-    if strong_buys:
-        sector_counts = {}
-        for row in strong_buys:
-            s = get_field(row, "sector") or "Unknown"
-            sector_counts[s] = sector_counts.get(s, 0) + 1
-        top_sector = max(sector_counts, key=sector_counts.get)
-        top_pct = sector_counts[top_sector] / len(strong_buys) * 100
-        if top_pct > 40:
-            observations.append(
-                f"<strong>Sector concentration:</strong> {safe_entities(top_sector)} accounts for "
-                f"{top_pct:.0f}% of Strong Buys ({sector_counts[top_sector]} of {len(strong_buys)}). "
-                f"Consider diversification when acting on these results."
-            )
-
-    # Near misses: stocks with total >= 38 but not strong buy
-    near_misses = []
-    for row in full_data:
-        if is_strong_buy(row):
-            continue
-        a = sf(get_field(row, "part_a_score"))
-        b = sf(get_field(row, "part_b_score"))
-        total = sf(get_field(row, "total_score"))
-        if total is not None and total >= 38:
-            near_misses.append(row)
-
-    if near_misses:
-        nm_list = ", ".join(
-            f"{safe_entities(get_field(r, 'ticker'))} "
-            f"(A:{score_int(get_field(r, 'part_a_score'))}/B:{score_int(get_field(r, 'part_b_score'))})"
-            for r in near_misses[:5]
-        )
-        _floor = _cfg_get("SUMMARY_SOURCE_FLOOR", 70)
-        observations.append(
-            f"<strong>Near-misses (&ge;38 total, not in SUMMARY):</strong> {nm_list}. "
-            f"High combined score but below the forward-led bar (SUMMARY-eligible + "
-            f"unified Source &ge; {_floor:g}) &mdash; review item 9: legacy Part-A/Part-B "
-            f"threshold text retired 18-Jul-26."
-        )
-
-    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">Key Observations</h3>\n'
-
-    if observations:
-        html += '<ul style="margin:0 0 24px 0;padding-left:20px">\n'
-        for obs in observations:
-            html += f'<li style="margin-bottom:8px;font-size:13px">{obs}</li>\n'
-        html += '</ul>\n'
-    else:
-        html += (
-            '<p style="font-size:13px;color:#555;margin-bottom:24px">'
-            'No additional key observations for this run.</p>\n'
-        )
-
-    return html
+    # ISA-0582 (26-Sep-2026): the 26-Sep STOXX600 email printed ISS.CO (DKK) as "$293.20". "$" is
+    # rendered only for an EVIDENCED USD quote; another known currency renders its ISO code; a
+    # missing currency renders no symbol rather than a USD assertion.
+    cur = str(currency or "").strip().upper()
+    if cur == "USD":
+        return "$"
+    if cur and cur not in ("N/A", "NAN", "NONE", "UNKNOWN"):
+        return cur + " "
+    return ""
 
 
 def build_dq_section(unresolved_rows, tech_fail_rows, run_qa_rows):
@@ -1055,95 +714,6 @@ def build_source_section(run_qa_rows, group, gate_data):
     return html
 
 
-def build_retrospective_section(retro_path, group, run_date):
-    """Section 7 — Retrospective summary from .md file."""
-    html = (
-        '<h3 style="color:#1a3a6b;margin-bottom:8px">Retrospective</h3>\n'
-        '<table cellpadding="14" cellspacing="0" border="0" '
-        'style="width:100%;border:1px solid #dde4f0;border-radius:6px;margin-bottom:24px">\n'
-        '<tr><td>\n'
-    )
-
-    retro_filename = ""
-    if retro_path:
-        retro_filename = os.path.basename(retro_path)
-
-    if retro_filename:
-        html += (
-            f'<p style="color:#555;font-style:italic;margin:0 0 12px 0">'
-            f'File saved: Investment Analysis/{safe_entities(retro_filename)}</p>\n'
-        )
-
-    # Parse retrospective items from .md file
-    items = []
-    if retro_path and os.path.exists(retro_path):
-        with open(retro_path, encoding="utf-8") as f:
-            content = f.read()
-
-        # Extract recommendations section
-        reco_match = re.search(
-            r'## Recommendations?(.*?)(?=^##|\Z)',
-            content, re.DOTALL | re.MULTILINE
-        )
-        if reco_match:
-            reco_text = reco_match.group(1).strip()
-            # Extract numbered items
-            item_matches = re.findall(r'\d+\.\s+\*\*(.*?)\*\*[:\s]+(.*?)(?=\n\d+\.|\Z)', reco_text, re.DOTALL)
-            for title, body in item_matches[:5]:
-                items.append((title.strip(), body.strip()))
-
-        # P2.1 (18-Jul-26): accept the scheduled-task retro format — "## Retrospective Items"
-        # with "### N. TITLE" sub-items (e.g. 17-Jul-26 MIDCAP400 retro). Writer/parser heading
-        # drift previously reduced Section 7 to a bare file pointer.
-        if not items:
-            ri_match = re.search(r'^## Retrospective Items(.*?)(?=^## |\Z)',
-                                 content, re.DOTALL | re.MULTILINE)
-            if ri_match:
-                for title, body in re.findall(r'^###\s*\d+\.\s*(.*?)\n(.*?)(?=^###\s|\Z)',
-                                              ri_match.group(1), re.DOTALL | re.MULTILINE)[:5]:
-                    items.append((title.strip().rstrip(':'),
-                                  re.sub(r'\s+', ' ', re.sub(r'[*_#|-]{2,}', '', body)).strip()[:300]))
-
-        # Fallback: extract any issues section ("## Issues", "## Issues / notes", etc.)
-        if not items:
-            issues_match = re.search(
-                r'## (?:Issues(?:\s*/\s*notes)?|Data Quality Issues|Execution Notes)(.*?)(?=^##|\Z)',
-                content, re.DOTALL | re.MULTILINE
-            )
-            if issues_match:
-                issues_text = issues_match.group(1).strip()
-                issue_matches = re.findall(
-                    r'###\s+\[?\w+\]?\s*(.*?)\n(.*?)(?=###|\Z)',
-                    issues_text, re.DOTALL
-                )
-                for title, body in issue_matches[:5]:
-                    items.append((title.strip(), body.strip()[:200]))
-                # P2.1: plain "- bullet" notes (e.g. "## Issues / notes\n- None. Clean run...")
-                if not items:
-                    for m in re.findall(r'^[-*]\s+(.*)$', issues_text, re.MULTILINE)[:5]:
-                        items.append(("Run note", m.strip()[:300]))
-
-    if items:
-        for i, (title, body) in enumerate(items, 1):
-            html += (
-                f'<p style="font-size:13px;margin:0 0 8px 0">'
-                f'<strong>Item {i}:</strong> '
-                f'<strong>{safe_entities(title)}:</strong> '
-                f'{safe_entities(body[:300])}'
-                f'</p>\n'
-            )
-    else:
-        html += (
-            f'<p style="font-size:13px;color:#555;margin:0">'
-            f'Retrospective file written for {safe_entities(group)} run ({safe_entities(run_date)}). '
-            f'See file for full detail: {safe_entities(retro_filename or "not found")}.'
-            f'</p>\n'
-        )
-
-    html += '</td></tr>\n</table>\n'
-    return html
-
-
 def build_footer(group, run_date):
     """Footer — required on every email."""
     return (
@@ -1155,125 +725,640 @@ def build_footer(group, run_date):
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0762 / ISA-0755 (26-Sep-2026) — THE INSTITUTIONAL GROWTH-SCREEN EMAIL
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# The weekly email is a TRIAGE / DISCOVERY product feeding the monthly capital process. It answers:
+# what did the screen discover, why did these names rank, what do they do, what changed, what is the
+# forward E[r] and its margin to the authorised hurdle, what is the main contrary evidence, what is
+# merely screen-eligible versus capital-authorised, what failed and why, and how far to trust the run.
+# ⚑ It is a RENDERER (R20.2): completion comes from the screen_completion receipt, findings from the
+#   retrospective findings ledger, E[r] from expected_return, the hurdle from isa_policy, eligibility
+#   from t1_gates. It computes no decision of its own and grants no capital authority.
+# ⚑ Vocabulary: SCREEN_ELIGIBLE / SCREEN_BLOCKED(...) - never "Actionable", "Strong Buy" or "Top Picks".
+SCREEN_ELIGIBLE = "SCREEN_ELIGIBLE"
+SCREEN_BLOCKED = "SCREEN_BLOCKED"
+NOT_CAPITAL_AUTHORITY = ("Screen eligibility is not capital authority: capital is decided only by the "
+                         "monthly review's underwriting, sizing and routing.")
+def _h(text):
+    """HTML-escape (<, >, &) THEN apply the email entity table - labels such as 'E[r]<15.7' are
+    data, not markup."""
+    import html as _html
+    return safe_entities(_html.escape(str(text if text is not None else ""), quote=False))
+
+
+STATE_COLOURS = {"COMPLETE": "#1a6b2a", "DEGRADED": "#b8860b", "INCOMPLETE": "#c0392b",
+                 "FAILED": "#8b0000", "NO_RECEIPT": "#8b0000"}
+
+
+def _hurdle():
+    """The authorised hurdle = isa_policy.derived('ER_DEPLOY_FLOOR') (one home; ISA-0432)."""
+    try:
+        import isa_policy as _ip
+        return float(_ip.derived("ER_DEPLOY_FLOOR"))
+    except Exception:
+        return None
+
+
+def _er(row):
+    """(E[r] % pa | None, unmeasured: bool) - stamped value first, else the SAME recompute the
+    screen uses (D-24 §1.2); never a silently different number."""
+    v = sf(get_field(row, "expected_return_12_24m"))
+    unmeas = str(get_field(row, "er_status") or "") == "unmeasured"
+    if v is None:
+        try:
+            import expected_return as _erm
+            _tbl = _erm.load_anchor_table(required=False)
+            _rec = _erm.expected_return_for_row(row, get=lambda r, k: get_field(r, k),
+                                                anchor_table=_tbl, allow_missing_anchor_table=True)
+            v = sf(_rec.get("expected_return_12_24m"))
+            unmeas = _rec.get("er_status") == "unmeasured"
+        except Exception:
+            v = None
+    return v, unmeas
+
+
+def screen_status(row):
+    """-> (label, reasons). SCREEN_ELIGIBLE only when t1_gates' screen-row gates all pass."""
+    try:
+        import t1_gates as _t1
+        lab, reasons = _t1.gate_status_for_screen_row(row, get=lambda r, k: get_field(r, k))
+    except Exception as exc:
+        return "%s(gate unavailable)" % SCREEN_BLOCKED, ["gate unavailable: %s" % type(exc).__name__]
+    if lab.startswith("PASS"):
+        return SCREEN_ELIGIBLE + lab[4:], []
+    return SCREEN_BLOCKED + lab[len("BLOCKED"):] if lab.startswith("BLOCKED") else SCREEN_BLOCKED, reasons
+
+
+_WL_CACHE = None
+
+
+def _watchlist_tickers():
+    global _WL_CACHE
+    if _WL_CACHE is None:
+        _WL_CACHE = set()
+        try:
+            import json as _j
+            _d = _j.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "watchlist_tickers.json"), encoding="utf-8"))
+            for k in ("watchlist", "candidate_pool"):
+                for e in (_d.get(k) or []):
+                    if isinstance(e, dict) and e.get("ticker"):
+                        _WL_CACHE.add(str(e["ticker"]).upper())
+        except Exception:
+            _WL_CACHE = set()
+    return _WL_CACHE
+
+
+def book_state(row):
+    t = str(get_field(row, "ticker") or "").upper()
+    if t in _held_tickers():
+        return "HELD"
+    if t in _watchlist_tickers():
+        return "WATCHLIST"
+    return "NEW"
+
+
+def business_line(row):
+    txt = get_field(row, "business_summary")
+    return txt if txt else "DESCRIPTION_UNAVAILABLE"
+
+
+def key_driver(row):
+    """Up to two of the strongest ALREADY-COMPUTED forward drivers (no new scoring)."""
+    out = []
+    fwd = sf(get_field(row, "forward_axis_score"))
+    if fwd is not None and fwd >= 70:
+        out.append("forward axis %d/100" % round(fwd))
+    stage = str(get_field(row, "revision_stage") or "")
+    if stage in ("Accelerating", "Sustained"):
+        out.append("revisions %s" % stage.lower())
+    d = str(get_field(row, "est_rev_direction") or "").lower()
+    if d in ("improving", "up", "rising"):
+        out.append("estimates rising")
+    up, basis = _capital_upside(row)
+    if up is not None and up > 0 and basis == "fv":
+        out.append("FV upside %+.0f%%" % (up * 100))
+    if str(get_field(row, "momentum_state") or "") == "PX_ADVANCING":
+        out.append("price advancing")
+    return "; ".join(out[:2]) or "no dominant forward driver"
+
+
+def key_concern(row, reasons=None):
+    """The largest contrary signal, from computed fields and the screen gate's own reasons."""
+    out = []
+    for r in (reasons or []):
+        out.append({"stage": "revision stage blocks", "late-cycle": "late-cycle valuation",
+                    "gate-fail": "hard/mandatory gate fail", "E[r] missing": "E[r] missing",
+                    "E[r] partial": "E[r] partially measured"}.get(r, r))
+    d = str(get_field(row, "est_rev_direction") or "").lower()
+    if d in ("deteriorating", "down", "falling"):
+        out.append("estimates being cut")
+    ms = str(get_field(row, "momentum_state") or "")
+    if ms in ("PX_DECLINING", "PX_DETERIORATING"):
+        out.append("price %s" % ms[3:].lower())
+    nd = sf(get_field(row, "nd_ebitda"))
+    if nd is not None and nd > 3:
+        out.append("ND/EBITDA %.1fx" % nd)
+    up, basis = _capital_upside(row)
+    if up is not None and up < 0:
+        out.append("FV implies %+.0f%%" % (up * 100))
+    return "; ".join(dict.fromkeys(out).keys()) if out else "none flagged by the screen"
+
+
+def signal_consistency(row, er=None, hurdle=None):
+    """Typed diagnostic - never a blended composite. Sign-based, no invented magnitude:
+    CONFLICTED  E[r] clears the hurdle while the FV composite says the price is ABOVE fair value,
+                or E[r] is negative while the FV composite says it is BELOW fair value;
+    REVIEW_REQUIRED  E[r] or the FV composite is missing / partially measured;
+    CONSISTENT  otherwise."""
+    if er is None:
+        er, unmeas = _er(row)
+    else:
+        unmeas = str(get_field(row, "er_status") or "") == "unmeasured"
+    hurdle = _hurdle() if hurdle is None else hurdle
+    up, basis = _capital_upside(row)
+    if er is None or unmeas or up is None or basis != "fv" or hurdle is None:
+        return "REVIEW_REQUIRED", ("E[r] %s, FV %s" % ("partial" if unmeas else ("missing" if er is None else "ok"),
+                                                       "missing" if up is None or basis != "fv" else "ok"))
+    if er >= hurdle and up < 0:
+        return "CONFLICTED", "E[r] %.1f%% clears hurdle %.1f%% but FV composite implies %+.0f%%" % (er, hurdle, up * 100)
+    if er < 0 and up > 0:
+        return "CONFLICTED", "E[r] %.1f%% negative but FV composite implies %+.0f%%" % (er, up * 100)
+    return "CONSISTENT", "E[r] and FV composite agree in direction"
+
+
+def change_info(rows, group, run_date_iso, panel_path=None):
+    """{ticker: {state, prior, delta, rank_delta}} vs the prior run of the SAME group - only when
+    both runs carry a comparable score-definition identity (ISA-0619). Otherwise INCOMPARABLE,
+    never a fabricated delta. Diagnostic only: no persistence gate is (re)created here."""
+    out = {str(get_field(r, "ticker")).upper(): {"state": "INCOMPARABLE"} for r in rows}
+    try:
+        import csv as _csv
+        import score_definition as _sd
+        p = panel_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "score_panel.csv")
+        runs = {}
+        with open(p, newline="", encoding="utf-8") as fh:
+            for r in _csv.DictReader(fh):
+                if str(r.get("group", "")).upper() != str(group).upper():
+                    continue
+                runs.setdefault(r["run_date"][:10], []).append(r)
+        cur = runs.get(run_date_iso) or []
+        prior_dates = sorted(d for d in runs if d < run_date_iso)
+        if not cur or not prior_dates:
+            return out
+        prev = runs[prior_dates[-1]]
+        h_cur = {x.get("score_definition_hash") for x in cur} - {""}
+        h_prev = {x.get("score_definition_hash") for x in prev} - {""}
+        if len(h_cur) != 1 or len(h_prev) != 1 or not _sd.compatible(next(iter(h_cur)), next(iter(h_prev))):
+            return out
+        def _rank(rs):
+            srt = sorted(rs, key=lambda x: -(sf(x.get("source_score")) or -1))
+            return {x["ticker"].upper(): (i + 1, sf(x.get("source_score"))) for i, x in enumerate(srt)}
+        rc, rp = _rank(cur), _rank(prev)
+        for t in out:
+            if t not in rp:
+                out[t] = {"state": "NEW_SINCE_PRIOR", "prior_run": prior_dates[-1]}
+            elif t in rc and rc[t][1] is not None and rp[t][1] is not None:
+                out[t] = {"state": "COMPARABLE", "prior": rp[t][1], "delta": rc[t][1] - rp[t][1],
+                          "rank_delta": rp[t][0] - rc[t][0], "prior_run": prior_dates[-1]}
+    except Exception:
+        pass
+    return out
+
+
+def _chg_text(c):
+    if not c or c.get("state") == "INCOMPARABLE":
+        return "INCOMPARABLE"
+    if c["state"] == "NEW_SINCE_PRIOR":
+        return "new vs %s" % c.get("prior_run", "prior")
+    return "%+.1f (rank %+d)" % (c["delta"], c["rank_delta"])
+
+
+def _td(v, style=""):
+    return '<td style="padding:6px 5px;border-bottom:1px solid #e8e8e8;font-size:11px;%s">%s</td>' % (style, v)
+
+
+def build_executive_section(receipt, group, run_date, summary_rows, eligible, dq_counts, hurdle):
+    """# Section 1 — Executive Screen Result."""
+    st = (receipt or {}).get("state") or "NO_RECEIPT"
+    col = STATE_COLOURS.get(st, "#8b0000")
+    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">1. Executive Screen Result</h3>\n'
+    if st != "COMPLETE":
+        miss = ", ".join((receipt or {}).get("missing_mandatory") or []) or "-"
+        anc = ", ".join((receipt or {}).get("ancillary_short") or []) or "-"
+        why = (receipt or {}).get("why") or ("no completion receipt was produced for this run - the "
+                                             "screen's persistence contract cannot be shown to have held")
+        html += ('<p style="background:%s;color:#fff;padding:10px 14px;font-size:14px;font-weight:bold;'
+                 'margin:0 0 10px 0">RUN INTEGRITY: %s &mdash; %s<br><span style="font-weight:normal;'
+                 'font-size:12px">Missing mandatory: %s | Ancillary short: %s</span></p>\n'
+                 % (col, _h(st), _h(why), _h(miss), _h(anc)))
+    else:
+        html += ('<p style="border-left:4px solid %s;background:#eef7ee;padding:8px 14px;font-size:12px;'
+                 'margin:0 0 10px 0"><strong>Run integrity: COMPLETE</strong> &mdash; every mandatory '
+                 'persistence component verified in the canonical stores.</p>\n' % col)
+    tb = ((receipt or {}).get("trusted_build") or {}).get("build_id") or "UNKNOWN"
+    route = (receipt or {}).get("route") or "UNDECLARED"
+    pop = (receipt or {}).get("population") or {}
+    if pop.get("state") in ("RECONCILED", "UNRECONCILED"):
+        rej = "; ".join("%s %d" % (k, v) for k, v in list((pop.get("gate_rejected_by_code") or {}).items())[:5])
+        by = pop.get("scored_by_status") or {}
+        wf = ("Universe %d &rarr; gate-rejected %d (%s) &rarr; scored %d (rankable %d; mandatory-min fail %d; "
+              "other %d) &rarr; SUMMARY %d &rarr; screen-eligible %d"
+              % (pop["universe"], pop["gate_rejected"], _h(rej), pop["scored"],
+                 by.get("CANDIDATE_RANKABLE", 0), by.get("MANDATORY_MINIMUM_FAIL", 0),
+                 pop["scored"] - by.get("CANDIDATE_RANKABLE", 0) - by.get("MANDATORY_MINIMUM_FAIL", 0),
+                 len(summary_rows), len(eligible)))
+        wf_state = pop["state"]
+    else:
+        wf = "Population accounting UNMEASURED (no reconciled receipt): scored %d &rarr; SUMMARY %d &rarr; screen-eligible %d" % (
+            dq_counts.get("scored", 0), len(summary_rows), len(eligible))
+        wf_state = "UNMEASURED"
+    books = {"HELD": 0, "WATCHLIST": 0, "NEW": 0}
+    for r in summary_rows:
+        books[book_state(r)] += 1
+    top = summary_rows[0] if summary_rows else None
+    if top is not None:
+        er, unm = _er(top)
+        mg = ("%+.1fpp vs hurdle" % (er - hurdle)) if (er is not None and hurdle is not None) else "margin n/a"
+        strongest = "%s (%s) Source %d, E[r] %s, %s" % (
+            get_field(top, "ticker"), get_field(top, "company") or "", round(_source_score(top) * 100),
+            ("%.1f%%%s" % (er, "?" if unm else "")) if er is not None else "n/a", mg)
+    else:
+        strongest = "none - no SUMMARY candidate this run"
+    if eligible:
+        esc = ("%d screen-eligible candidate(s) &mdash; %s &mdash; go forward to the monthly capital process "
+               "for underwriting. %s" % (len(eligible), ", ".join(get_field(r, "ticker") for r in eligible[:5]),
+                                         NOT_CAPITAL_AUTHORITY))
+    else:
+        esc = "No screen-eligible candidate: nothing from this screen needs escalating to the monthly capital process."
+    lines = [
+        "<strong>Screen:</strong> %s | %s | route %s | Trusted Build %s" % (_h(group), _h(run_date),
+                                                                          _h(route), _h(tb)),
+        "<strong>Population (%s):</strong> %s" % (wf_state, wf),
+        "<strong>SUMMARY book mix:</strong> %d held | %d watchlist/pool | %d new" % (books["HELD"], books["WATCHLIST"], books["NEW"]),
+        "<strong>Strongest current signal:</strong> %s" % _h(strongest),
+        "<strong>Authorised hurdle (ER_DEPLOY_FLOOR):</strong> %s" % (("%.1f%%" % hurdle) if hurdle is not None else "UNAVAILABLE"),
+        "<strong>Data-quality exceptions:</strong> %d unresolved metric record(s), %d technical failure(s)" % (
+            dq_counts.get("unresolved", 0), dq_counts.get("techfail", 0)),
+        "<strong>Escalation:</strong> %s" % esc,
+    ]
+    html += "".join('<p style="font-size:13px;margin:0 0 5px 0">%s</p>\n' % l for l in lines)
+    return html + '<div style="margin-bottom:18px"></div>\n'
+
+
+def build_top10_table(strong_buys, hurdle=None, changes=None):
+    """# Section 2 — Ranked Screen Candidates (the SUMMARY set, forward-led Source Score order).
+    Source Score / stage / E[r] / hurdle margin are primary; Part A/B stay in the workbook only."""
+    if not strong_buys:
+        return ('<h3 style="color:#1a3a6b;margin-bottom:8px">2. Ranked Screen Candidates</h3>\n'
+                '<p style="color:#666;font-style:italic">No SUMMARY candidates identified this run.</p>\n')
+    hurdle = _hurdle() if hurdle is None else hurdle
+    changes = changes or {}
+    header_cols = [
+        "Rank", "Ticker", "Company", "What the company does", "Source", "Stage", "E[r]",
+        "Hurdle", "Margin", "Key forward driver", "Key concern / conflict", "Book",
+        "Screen status", "Source chg"
+    ]  # ISA-0762 (26-Sep-2026): 14 columns — contract in Run_Context ("exactly these 14")
+    head = "".join('<th style="background:#1a3a6b;color:#fff;padding:6px 4px;font-size:11px;'
+                   'text-align:left">%s</th>' % _h(c) for c in header_cols)
+    body = ""
+    for rank, row in enumerate(strong_buys[:10], 1):
+        bg = "#f9f9f9" if rank % 2 == 0 else "#ffffff"
+        er, unm = _er(row)
+        er_s = ("%.1f%%%s" % (er, "?" if unm else "")) if er is not None else "\u2014"
+        mg = (er - hurdle) if (er is not None and hurdle is not None) else None
+        mg_s = ('<span style="color:%s;font-weight:bold">%+.1fpp</span>' % ("#1a6b2a" if mg >= 0 else "#c0392b", mg)
+                if mg is not None else "&mdash;")
+        lab, reasons = screen_status(row)
+        cons, cwhy = signal_consistency(row, er=er, hurdle=hurdle)
+        concern = key_concern(row, reasons)
+        if cons != "CONSISTENT":
+            concern = "%s: %s; %s" % (cons, cwhy, concern)
+        body += ('<tr style="background:%s">' % bg
+                 + _td(rank, "text-align:center")
+                 + _td("<strong>%s</strong>" % _h(get_field(row, "ticker") or "N/A"))
+                 + _td(_h(get_field(row, "company") or "N/A"))
+                 + _td(_h(business_line(row)), "max-width:220px")
+                 + _td("<strong>%d</strong>" % round(_source_score(row) * 100), "text-align:center")
+                 + _td(_h(str(get_field(row, "revision_stage") or "—")))
+                 + _td(_h(er_s), "text-align:center;color:#4a1a6b;font-weight:bold")
+                 + _td(("%.1f%%" % hurdle) if hurdle is not None else "n/a", "text-align:center")
+                 + _td(mg_s, "text-align:center")
+                 + _td(_h(key_driver(row)))
+                 + _td(_h(concern))
+                 + _td(book_state(row), "text-align:center")
+                 + _td(_h(lab), "font-weight:bold;color:%s" % ("#1a6b2a" if lab.startswith(SCREEN_ELIGIBLE) else "#c0392b"))
+                 + _td(_h(_chg_text(changes.get(str(get_field(row, "ticker")).upper()))), "text-align:center")
+                 + '</tr>\n')
+    return ('<h3 style="color:#1a3a6b;margin-bottom:8px">2. Ranked Screen Candidates &mdash; by forward-led '
+            'Source Score</h3>\n<p style="font-size:11px;color:#666;margin:0 0 6px 0">%s Part A/B diagnostics '
+            'remain in the workbook.</p>\n<table style="width:100%%;border-collapse:collapse;margin-bottom:22px" '
+            'cellpadding="0" cellspacing="0" border="0">\n<tr>%s</tr>\n%s</table>\n'
+            % (_h(NOT_CAPITAL_AUTHORITY), head, body))
+
+
+def build_candidate_briefs(summary_rows, eligible, hurdle=None):
+    """# Section 3 — Top Candidates for Further Review (3 compact lines each)."""
+    hurdle = _hurdle() if hurdle is None else hurdle
+    pick = eligible[:5] if eligible else summary_rows[:3]
+    title = ("3. Top Candidates for Further Review" if eligible else
+             "3. Top Candidates for Further Review &mdash; none screen-eligible; strongest SUMMARY names shown with their blockers")
+    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">%s</h3>\n' % title
+    if not pick:
+        return html + '<p style="font-size:13px;color:#555">No candidates this run.</p>\n'
+    for row in pick:
+        er, unm = _er(row)
+        lab, reasons = screen_status(row)
+        mg = ("%+.1fpp" % (er - hurdle)) if (er is not None and hurdle is not None) else "n/a"
+        l1 = "<strong>%s &mdash; %s.</strong> %s" % (_h(get_field(row, "ticker")),
+                                                      _h(get_field(row, "company") or ""),
+                                                      _h(business_line(row)))
+        l2 = ("<em>Forward evidence:</em> Source %d | stage %s | E[r] %s vs hurdle %s (margin %s) | drivers: %s"
+              % (round(_source_score(row) * 100), _h(str(get_field(row, "revision_stage") or "—")),
+                 ("%.1f%%%s" % (er, "?" if unm else "")) if er is not None else "&mdash;",
+                 ("%.1f%%" % hurdle) if hurdle is not None else "n/a", mg, _h(key_driver(row))))
+        cons, cwhy = signal_consistency(row, er=er, hurdle=hurdle)
+        l3 = ("<em>Concern / state:</em> %s | %s (%s) | %s | %s"
+              % (_h(key_concern(row, reasons)), cons, _h(cwhy), book_state(row), _h(lab)))
+        html += ('<table cellpadding="10" cellspacing="0" border="0" style="width:100%%;border:1px solid #dde4f0;'
+                 'margin-bottom:10px"><tr><td style="font-size:12px"><p style="margin:0 0 4px 0">%s</p>'
+                 '<p style="margin:0 0 4px 0">%s</p><p style="margin:0">%s</p></td></tr></table>\n' % (l1, l2, l3))
+    return html + '<div style="margin-bottom:14px"></div>\n'
+
+
+def reject_candidates(full_data, summary_rows, hurdle=None, n=5):
+    """The most decision-relevant rejected / conflicted names (opportunity-cost evidence)."""
+    hurdle = _hurdle() if hurdle is None else hurdle
+    in_sum = {str(get_field(r, "ticker")) for r in summary_rows}
+    floor = _cfg_get("SUMMARY_SOURCE_FLOOR", 70.0)
+    out = []
+    for r in full_data:
+        t = str(get_field(r, "ticker"))
+        src = _source_score(r) * 100
+        er, unm = _er(r)
+        up, basis = _capital_upside(r)
+        st = str(get_field(r, "final_status") or "").upper()
+        blocker = None
+        if src >= floor and er is not None and hurdle is not None and er < hurdle and not unm:
+            blocker = "E[r] %.1f%% below hurdle %.1f%% despite Source %d" % (er, hurdle, round(src))
+        elif er is not None and hurdle is not None and er >= hurdle and up is not None and basis == "fv" and up < 0:
+            blocker = "CONFLICTED: E[r] %.1f%% clears hurdle but FV composite implies %+.0f%%" % (er, up * 100)
+        elif src >= floor and (er is None or unm):
+            blocker = "E[r] %s on a Source %d name" % ("missing" if er is None else "partially measured", round(src))
+        elif st in ("MANDATORY_MINIMUM_FAIL", "HARD_GATE_FAIL") and (sf(get_field(r, "forward_axis_score")) or 0) >= 70:
+            blocker = "%s blocks an otherwise strong forward candidate (forward %d)" % (st, round(sf(get_field(r, "forward_axis_score"))))
+        if blocker and (t not in in_sum or blocker.startswith("CONFLICTED")):
+            out.append((src, r, blocker))
+    out.sort(key=lambda x: -x[0])
+    return out[:n]
+
+
+def build_rejects_section(full_data, summary_rows, hurdle=None):
+    """# Section 4 — Important Rejects / Conflicts (exact blocker per name)."""
+    rows = reject_candidates(full_data, summary_rows, hurdle)
+    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">4. Important Rejects / Conflicts</h3>\n'
+    if not rows:
+        return html + '<p style="font-size:13px;color:#555;margin-bottom:20px">No decision-relevant reject or conflict this run.</p>\n'
+    html += '<ul style="margin:0 0 20px 0;padding-left:18px">\n'
+    for src, r, blk in rows:
+        html += ('<li style="font-size:12px;margin-bottom:5px"><strong>%s</strong> (%s) &mdash; %s</li>\n'
+                 % (_h(get_field(r, "ticker")), _h(get_field(r, "company") or ""), _h(blk)))
+    return html + '</ul>\n'
+
+
+def build_retrospective_section(run_label, receipt=None):
+    """# Section 5 — Retrospective / Run Integrity: EVERY finding in the run's findings ledger
+    (promoted AND observation-only) plus the completion components. Absent ledger = MISSING."""
+    html = '<h3 style="color:#1a3a6b;margin-bottom:8px">5. Retrospective / Run Integrity</h3>\n'
+    try:
+        import isa_retrospective_intake as _RI
+        rf = _RI.run_findings(run_label) if run_label else {"state": "MISSING", "ledger": []}
+    except Exception as exc:
+        rf = {"state": "MISSING", "ledger": [], "why": str(exc)}
+    st = rf["state"]
+    if st == "MISSING":
+        html += ('<p style="background:#c0392b;color:#fff;padding:8px 12px;font-size:13px">RETROSPECTIVE NOT '
+                 'CAPTURED for %s: the run recorded neither findings nor an explicit clean result. This is an '
+                 'incident, never "no findings" (ISA-0755).</p>\n' % _h(run_label or "this run"))
+    elif st == "NO_FINDINGS_CAPTURED":
+        html += '<p style="font-size:13px">Explicit clean result recorded: this run declared no findings.</p>\n'
+    else:
+        led = rf.get("ledger") or []
+        if rf.get("legacy_count_only"):
+            html += '<p style="font-size:12px;color:#8b0000">Findings count recorded without a ledger (pre-ISA-0764 capture).</p>\n'
+        html += ('<table style="width:100%;border-collapse:collapse;margin-bottom:10px" cellpadding="0" '
+                 'cellspacing="0" border="0"><tr>'
+                 + "".join('<th style="background:#1a3a6b;color:#fff;padding:5px;font-size:11px;text-align:left">%s</th>' % c
+                           for c in ("Id", "Severity", "Finding", "Disposition", "ISA item", "Rule / trigger"))
+                 + '</tr>\n')
+        for x in led:
+            trig = x.get("rule") or ""
+            if x.get("escalations"):
+                trig += " [%s]" % ", ".join(x["escalations"])
+            if x.get("recurrence"):
+                trig += " recurs: %s" % ", ".join(x["recurrence"][-3:])
+            html += ('<tr>' + _td(_h(x.get("finding_id") or "")) + _td(_h(x.get("severity") or ""))
+                     + _td(_h(x.get("title") or "")) + _td(_h(x.get("disposition") or ""))
+                     + _td(_h(x.get("isa_id") or "\u2014")) + _td(_h(trig)) + '</tr>\n')
+        html += '</table>\n'
+    comps = (receipt or {}).get("components") or {}
+    if comps:
+        html += '<p style="font-size:12px;margin:6px 0 2px 0"><strong>Completion receipt (%s, route %s):</strong></p>\n' % (
+            _h((receipt or {}).get("state") or ""), _h((receipt or {}).get("route") or ""))
+        html += '<ul style="margin:0 0 18px 0;padding-left:18px">\n'
+        for k in ("workbook", "screen_history", "score_panel", "constituents", "regime", "capture_status",
+                  "fallback", "retrospective", "source_performance"):
+            c = comps.get(k) or {}
+            html += '<li style="font-size:11px">%s: <strong>%s</strong> &mdash; %s</li>\n' % (
+                k, _h(str(c.get("state"))), _h(str(c.get("why") or "")))
+        html += '</ul>\n'
+    else:
+        html += '<p style="font-size:12px;color:#8b0000;margin-bottom:18px">No completion receipt: persistence state UNVERIFIED.</p>\n'
+    return html
+
+
+def email_subject(group, run_date, receipt, n_summary, n_eligible):
+    """The subject is DERIVED from the receipt; it never asserts a persistence fact itself.
+    ('RETRO SAVED' is retired - ISA-0755.)"""
+    st = (receipt or {}).get("state") or "NO_RECEIPT"
+    pre = "" if st == "COMPLETE" else "[INCIDENT: %s] " % st
+    return ("%sISA Growth Screen - %s | %s | %d SUMMARY, %d screen-eligible | run %s"
+            % (pre, group, run_date, n_summary, n_eligible, st))
+
+
 # ---------------------------------------------------------------------------
 # Main assembler
 # ---------------------------------------------------------------------------
 def build_email_body(
     group, run_date, full_data, gate_data,
-    retro_path=None, run_qa_rows=None, unresolved_rows=None, tech_fail_rows=None
+    retro_path=None, run_qa_rows=None, unresolved_rows=None, tech_fail_rows=None,
+    receipt=None, run_label=None, run_date_iso=None
 ):
-    """Assemble the complete HTML email body string."""
+    """Assemble the complete HTML email body string (ISA-0762 layout, 6 sections).
+    `retro_path` is accepted for call-compatibility and IGNORED: findings are rendered from the
+    durable findings ledger (ISA-0755/0764), never from a transient file."""
+    del retro_path
     run_qa_rows = run_qa_rows or []
     unresolved_rows = unresolved_rows or []
     tech_fail_rows = tech_fail_rows or []
-
-    # Classify stocks
-    # S5: headline ranking MIRRORS the Excel SUMMARY — count-based, forward-led Source Score.
-    _sb_all = [r for r in full_data if is_strong_buy(r)]  # informational Strong-Buy set (badge secondary under S5)
+    # S5: the ranked set MIRRORS the Excel SUMMARY — count-based, forward-led Source Score.
     if _cfg_get("SUMMARY_COUNT_BASED", False):
-        # Fix Pack A1 (12-Jul-26): floor-based selection via THE shared source_score.select_summary
-        # (fixed top-30 retired) — email headline set mirrors the Excel SUMMARY by construction.
         _sel, _sqa = _ss.select_summary(full_data, get=lambda r, k: get_field(r, k))
-        strong_buys = [r for r, _sc in _sel]
+        summary_rows = [r for r, _sc in _sel]
     else:
-        strong_buys = sorted(_sb_all, key=lambda r: -(sf(get_field(r, "total_score")) or 0))
-    gate_passers = [r for r in full_data if is_gate_passer(r)]
-    counts = get_coverage_counts(full_data, gate_data, unresolved_rows=unresolved_rows)
-
-    # Outer container
+        summary_rows = sorted([r for r in full_data if is_strong_buy(r)],
+                              key=lambda r: -(_source_score(r)))
+    eligible = [r for r in summary_rows if screen_status(r)[0].startswith(SCREEN_ELIGIBLE)]
+    hurdle = _hurdle()
+    changes = change_info(summary_rows, group, run_date_iso) if run_date_iso else {}
+    dq_counts = {"unresolved": len(unresolved_rows), "techfail": len(tech_fail_rows), "scored": len(full_data)}
     html_parts = [
         '<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;'
-        'max-width:900px;margin:0 auto;padding:20px">\n',
-        # Main heading
+        'max-width:980px;margin:0 auto;padding:20px">\n',
         f'<h2 style="color:#1a3a6b;border-bottom:2px solid #1a3a6b;padding-bottom:8px;margin-bottom:16px">'
-        f'ISA Growth Stock Analysis &mdash; {safe_entities(group)} | {safe_entities(run_date)}'
-        f'</h2>\n',
-        # Section 1 — Coverage stats (FIRST in body)
-        build_coverage_line(counts, group, run_date),
+        f'ISA Growth Screen &mdash; {safe_entities(group)} | {safe_entities(run_date)}</h2>\n',
+        # Section 1 — Executive Screen Result (completion state, waterfall, escalation)
+        build_executive_section(receipt, group, run_date, summary_rows, eligible, dq_counts, hurdle),
         # B1 standing line (review item 9, 18-Jul-26 — mechanical, all groups)
         build_drawdown_line(),
-        # KPI tiles (immediately after coverage stats)
-        build_kpi_tiles(strong_buys, gate_passers),
-        # Section 2 — Top 10
-        build_top10_table(strong_buys),
-        # Section 3 — Top 3
-        build_top3_picks(strong_buys),
-        # Section 4 — Key Observations
-        build_key_observations(strong_buys, full_data, group),
-        # Section 5 — DQ
+        # Section 2 — Ranked Screen Candidates
+        build_top10_table(summary_rows, hurdle=hurdle, changes=changes),
+        # Section 3 — Top Candidates for Further Review
+        build_candidate_briefs(summary_rows, eligible, hurdle=hurdle),
+        # Section 4 — Important Rejects / Conflicts
+        build_rejects_section(full_data, summary_rows, hurdle=hurdle),
+        # Section 5 — Retrospective / Run Integrity
+        build_retrospective_section(run_label, receipt),
+        # Section 6 — Data quality and source appendix
+        '<h3 style="color:#1a3a6b;margin-bottom:8px">6. Data Quality &amp; Source Appendix</h3>\n',
         build_dq_section(unresolved_rows, tech_fail_rows, run_qa_rows),
-        # Section 6 — Source Data
         build_source_section(run_qa_rows, group, gate_data),
-        # Section 7 — Retrospective
-        build_retrospective_section(retro_path, group, run_date),
-        # Footer
         build_footer(group, run_date),
         '</div>\n',
     ]
-
-    return "".join(html_parts)
+    return "".join(html_parts), summary_rows, eligible
 
 
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+EXIT_COMPLETE, EXIT_INCIDENT, EXIT_NO_RECEIPT = 0, 2, 3
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Build ISA Growth Stock Analysis HTML email body."
+        description="Build ISA Growth Screen HTML email body (renderer of the completion receipt)."
     )
-    parser.add_argument("--group", required=True,
-                        help="Group label e.g. NASDAQ, SP500, STOXX600")
-    parser.add_argument("--run_date", required=True,
-                        help="Human-readable run date e.g. '22-May-26'")
-    parser.add_argument("--full_data", required=True,
-                        help="Path to {YYYYMMDD}_{GROUP}_full_data.csv")
-    parser.add_argument("--gates", required=True,
-                        help="Path to {YYYYMMDD}_{GROUP}_yf_gate_results.csv")
-    parser.add_argument("--output", required=True,
-                        help="Output path for HTML body file e.g. email_body.html")
+    parser.add_argument("--group", required=True, help="Group label e.g. NASDAQ, SP500, STOXX600")
+    parser.add_argument("--run_date", required=True, help="Human-readable run date e.g. '22-May-26'")
+    parser.add_argument("--run_date_iso", default=None,
+                        help="YYYY-MM-DD; defaults to parsing --run_date. Keys the completion receipt.")
+    parser.add_argument("--full_data", required=True, help="Path to {YYYYMMDD}_{GROUP}_full_data.csv")
+    parser.add_argument("--gates", required=True, help="Path to {YYYYMMDD}_{GROUP}_yf_gate_results.csv")
+    parser.add_argument("--output", required=True, help="Output path for HTML body file")
     parser.add_argument("--retrospective", default=None,
-                        help="Path to {YYYYMMDD}_{GROUP}_retrospective.md")
-    parser.add_argument("--run_qa", default=None,
-                        help="Path to {YYYYMMDD}_{GROUP}_run_qa.csv")
-    parser.add_argument("--unresolved", default=None,
-                        help="Path to {YYYYMMDD}_{GROUP}_unresolved_metrics.csv")
-    parser.add_argument("--tech_fails", default=None,
-                        help="Path to {YYYYMMDD}_{GROUP}_technical_failures.csv")
-    parser.add_argument("--constituent", default=None,
-                        help="Path to {YYYYMMDD}_{GROUP}_constituent_master.csv (optional)")
-
+                        help="DEPRECATED (ISA-0755): ignored - findings come from the durable ledger")
+    parser.add_argument("--run_qa", default=None)
+    parser.add_argument("--unresolved", default=None)
+    parser.add_argument("--tech_fails", default=None)
+    parser.add_argument("--constituent", default=None)
     args = parser.parse_args()
 
-    # Load data
-    print(f"Loading full_data: {args.full_data}")
+    iso = args.run_date_iso
+    if not iso:
+        for fmt in ("%d-%b-%y", "%d-%b-%Y", "%Y-%m-%d"):
+            try:
+                iso = datetime.strptime(args.run_date, fmt).date().isoformat()
+                break
+            except ValueError:
+                continue
+    receipt = None
+    try:
+        import screen_completion as _sc
+        receipt = _sc.get(args.group, iso) if iso else None
+    except Exception as exc:
+        print(f"[build_email] completion receipt unreadable: {exc}")
+    run_label = ("%s_%s" % (iso.replace("-", ""), args.group.upper())) if iso else None
+
     full_data = load_csv(args.full_data)
-    print(f"  Loaded {len(full_data)} rows")
-
-    print(f"Loading gate results: {args.gates}")
     gate_data = load_csv(args.gates)
-    print(f"  Loaded {len(gate_data)} rows")
-
-    run_qa_rows      = load_csv(args.run_qa)      if args.run_qa      else []
-    unresolved_rows  = load_csv(args.unresolved)  if args.unresolved  else []
-    tech_fail_rows   = load_csv(args.tech_fails)  if args.tech_fails  else []
-
-    html_body = build_email_body(
-        group        = args.group,
-        run_date     = args.run_date,
-        full_data    = full_data,
-        gate_data    = gate_data,
-        retro_path   = args.retrospective,
-        run_qa_rows  = run_qa_rows,
-        unresolved_rows = unresolved_rows,
-        tech_fail_rows  = tech_fail_rows,
-    )
-
+    run_qa_rows = load_csv(args.run_qa) if args.run_qa else []
+    unresolved_rows = load_csv(args.unresolved) if args.unresolved else []
+    tech_fail_rows = load_csv(args.tech_fails) if args.tech_fails else []
+    html_body, summary_rows, eligible = build_email_body(
+        group=args.group, run_date=args.run_date, full_data=full_data, gate_data=gate_data,
+        run_qa_rows=run_qa_rows, unresolved_rows=unresolved_rows, tech_fail_rows=tech_fail_rows,
+        receipt=receipt, run_label=run_label, run_date_iso=iso)
     with open(args.output, "w", encoding="ascii", errors="xmlcharrefreplace") as fh:
         fh.write(html_body)
-
+    subject = email_subject(args.group, args.run_date, receipt, len(summary_rows), len(eligible))
+    with open(args.output + ".subject.txt", "w", encoding="ascii", errors="replace") as fh:
+        fh.write(subject)
     print(f"[build_email] Saved: {args.output}")
-    print(f"[build_email] REMINDER: pass body with is_html=true in GMAIL_SEND_EMAIL")
+    print(f"EMAIL_SUBJECT: {subject}")
+    print(f"[build_email] REMINDER: send with the subject above and is_html=true in GMAIL_SEND_EMAIL")
+    if receipt is None:
+        print("NO_COMPLETION_RECEIPT: a normal success email is refused; the body built is an INCIDENT notice "
+              "(run screen_completion.py --write first). Send it - suppressing it would hide the incident.")
+        sys.exit(EXIT_NO_RECEIPT)
+    sys.exit(EXIT_COMPLETE if receipt.get("state") == "COMPLETE" else EXIT_INCIDENT)
 
+
+def _selftest() -> int:
+    """ISA-0582 (26-Sep-2026): the email renders currency only from evidence."""
+    n = 0
+    assert _currency_sym({"ticker": "MU", "currency": "USD"}) == "$", "positive control"; n += 1
+    assert _currency_sym({"ticker": "ISS.CO", "currency": "DKK"}) == "DKK ", \
+        "negative control: ISS.CO DKK must not render $ (reproduced on demand from the 26-Sep STOXX600 email)"; n += 1
+    assert _currency_sym({"ticker": "ZAB.WA", "currency": "PLN"}) == "PLN ", "negative control: PLN is not $"; n += 1
+    assert _currency_sym({"ticker": "FRO", "currency": ""}) == "", "negative control: missing must not assert USD"; n += 1
+    assert _currency_sym({"ticker": "ABI.BR", "currency": "EUR"}) == "&euro;", "positive control"; n += 1
+    # ISA-0763: evidenced currency beats suffix inference
+    assert _currency_sym({"ticker": "NESN.SW", "currency": "CHF"}) == "CHF ", \
+        "negative control: a CHF .SW listing must not render EUR"; n += 1
+    # ── ISA-0762 / ISA-0755 — the institutional layout and the receipt gate ──
+    row = {"ticker": "TST", "company": "Test Co", "final_status": "CANDIDATE_RANKABLE",
+           "part_a_score": 24, "part_b_score": 18, "forward_axis_score": 90, "revision_stage": "Accelerating",
+           "expected_return_12_24m": 30.0, "implied_upside_fv": 0.25, "screen_source": 85,
+           "val_hist_pe_premium_disc": 5.0, "business_summary": "Test Co makes widgets."}
+    tbl = build_top10_table([row], hurdle=15.0)
+    for col in ("Source", "E[r]", "Hurdle", "Margin", "What the company does", "Screen status"):
+        assert ">%s<" % col in tbl, "primary column missing: %s" % col; n += 1
+    for bad in ("Strong Buy", "Top Picks", "Top 3 Picks", "Actionable", ">Part A<", ">Part B<", ">Total<"):
+        assert bad not in tbl, "negative control: misleading/legacy label in the primary table: %s" % bad; n += 1
+    assert "+15.0pp" in tbl and "Test Co makes widgets." in tbl, "margin and description render"; n += 1
+    assert business_line({"ticker": "X"}) == "DESCRIPTION_UNAVAILABLE", \
+        "negative control: an absent description is typed UNAVAILABLE, never invented"; n += 1
+    c_bad = {**row, "expected_return_12_24m": 30.0, "implied_upside_fv": -0.2}
+    assert signal_consistency(c_bad, hurdle=15.0)[0] == "CONFLICTED", \
+        "must-fire: E[r] above hurdle with a negative FV composite is CONFLICTED"; n += 1
+    assert signal_consistency({**row, "implied_upside_fv": ""}, hurdle=15.0)[0] in ("REVIEW_REQUIRED", "CONSISTENT"), \
+        "a missing FV input is never silently CONFLICTED"; n += 1
+    assert signal_consistency(row, hurdle=15.0)[0] == "CONSISTENT", "positive control"; n += 1
+    assert email_subject("G", "d", None, 1, 1).startswith("[INCIDENT: NO_RECEIPT]"), \
+        "negative control: no receipt can never produce a normal subject"; n += 1
+    assert email_subject("G", "d", {"state": "INCOMPLETE"}, 1, 1).startswith("[INCIDENT: INCOMPLETE]"); n += 1
+    ok_subj = email_subject("G", "d", {"state": "COMPLETE"}, 1, 1)
+    assert "INCIDENT" not in ok_subj and "RETRO SAVED" not in ok_subj, "COMPLETE subject is clean and retires RETRO SAVED"; n += 1
+    ex = build_executive_section(None, "G", "d", [row], [row], {"scored": 1}, 15.0)
+    assert "RUN INTEGRITY: NO_RECEIPT" in ex and NOT_CAPITAL_AUTHORITY.split(":")[0] in ex, \
+        "negative control: a missing receipt is unmissable in Section 1"; n += 1
+    ex2 = build_executive_section({"state": "COMPLETE", "population": {"state": "UNRECONCILED", "universe": 5,
+                                   "gate_rejected": 1, "scored": 3, "scored_by_status": {}}}, "G", "d", [], [], {}, 15.0)
+    assert "Population (UNRECONCILED)" in ex2, "an unreconciled waterfall is stated, not hidden"; n += 1
+    # SCREEN_ELIGIBLE is a rendering label: no other module may consume it as authority
+    import glob as _g
+    _here = os.path.dirname(os.path.abspath(__file__))
+    consumers = [os.path.basename(f) for f in _g.glob(os.path.join(_here, "*.py"))
+                 if os.path.basename(f) not in ("build_email.py", "consistency_check.py")
+                 and "SCREEN_ELIGIBLE" in open(f, encoding="utf-8", errors="ignore").read()]
+    assert not consumers, "negative control: SCREEN_ELIGIBLE consumed outside the renderer: %s" % consumers; n += 1
+    print("build_email selftest: %d assertions, 0 failed" % n)
+    return n
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

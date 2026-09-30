@@ -30,6 +30,7 @@ RUNTIME_JSON = {"yfinance_metric_label_map.json",
                 "email_data_monthly_isa_TEMPLATE.json",
                 "vci_base_rates.json",     # VCI v2 E1 probability-weighted-floor priors (fallback needs it)
                 "vci_fv_inputs.json",      # VCI v2 E2 structured §10.2 win-case inputs per watchlist name
+                "vci_fv_input_records.jsonl",  # ISA-0771: the append-only journal the projection above is generated from
                 # ── P0 ENFORCEMENT REGISTERS (28-Aug-2026, ISA-0467) ──────────────────────
                 # ⚑ THESE ARE INPUTS, NOT OUTPUTS, and omitting them would be a live defect
                 # rather than an untidiness. `local_py` auto-discovers new .py, so a fallback
@@ -102,6 +103,15 @@ FALLBACK_WRITTEN = {
 # Referenced by fallback code but not needed on the fallback path, each with its reason.
 FALLBACK_EXCLUDED = {
     "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
+    # ISA-0483 (26-Sep-2026): source_performance_writer entered the closure via the capture-time runs[]
+    # append; the measured PARALLEL log is written only by its --rebuild CLI on OneDrive (ISA-0379).
+    "source_performance_log_measured.json": ("ISA-0379 parallel measured log; rebuilt on OneDrive by "
+                                             "source_performance_writer --rebuild, never read on the fallback path"),
+    # ISA-0765 (26-Sep-2026): the completion receipt is evaluated (step 17b) and read (step 18) LOCALLY
+    # from the canonical OneDrive stores. A fallback-built email without it renders an honest
+    # NO_RECEIPT incident; publishing the store to the public repo would add nothing.
+    "screen_completion_receipts.json": ("ISA-0755 completion receipts; evaluated and read locally from "
+                                        "canonical stores - absent on the fallback path by design"),
     # ISA-0465/ISA-0700 (16-Sep-2026): the declared multi-label theme taxonomy is read only by
     # concentration_control on the MONTHLY router path (capital_destination), never by the weekly
     # screen fallback. Not on the RUNTIME_JSON allow-list, so not published (the repo is public and
@@ -136,6 +146,19 @@ FALLBACK_EXCLUDED = {
     "position_underwriting.json": ("ISA-0418 immutable entry-underwriting store, WRITTEN on "
                                    "the monthly path; the fallback neither reads nor writes "
                                    "it. PERSONAL — not on the allow-list, not pushed"),
+    # ISA-0760 (27-Sep-2026): thesis_state.first_entry_date reads the FIRST broker BUY through
+    #   position_alerts.min_hold_from_ledger, which pulls these three into the static closure.
+    #   All are MONTHLY-path and PERSONAL; the weekly screen fallback never reaches that call.
+    "transaction_ledger.json": ("broker execution truth (ISA-0645); read on the monthly path "
+                                "only (first-entry / min-hold). PERSONAL — not pushed"),
+    "position_alerts.json": ("weekly position-alert output (position_alerts); monthly/alert "
+                             "path, not the screen fallback. PERSONAL — not pushed"),
+    "eps_trend_snapshots.json": ("EPS-trend snapshot store read by position_alerts; not an "
+                                 "input of the screen fallback. PERSONAL — not pushed"),
+    "thesis_records.jsonl": ("ISA-0760 append-only thesis contract/evaluation journal, "
+                             "WRITTEN only by thesis_state.record on the monthly review path; "
+                             "the weekly screen fallback neither reads nor writes it. PERSONAL "
+                             "— not on the allow-list, not pushed"),
     "thesis_states.json": ("declared judgement overlay per held position (ISA-0466); read by "
                            "the monthly pre-run and the capital router, not by the weekly "
                            "screen fallback. PERSONAL — not on the allow-list, not pushed"),
@@ -162,6 +185,23 @@ FALLBACK_EXCLUDED = {
     #   a dated VCI deployment record. Safe because RUNTIME_JSON is an ALLOW-LIST and neither is
     #   on it. If either is ever genuinely needed on the fallback path it goes to
     #   ONEDRIVE_BOOTSTRAP (which also adds it to NEVER) and NEVER to RUNTIME_JSON.
+    # ⚑ ISA-0783 (30-Sep-2026, production parallel for 03-Oct): three names the October pre-run makes
+    #   EXIST beside the scripts for the first time, so the literal scan starts naming them and 9d
+    #   raises three A18/ISA-0498 ERRORs on the first October pass. underwriting_cases.jsonl is the
+    #   ISA-0722 append-only case store (written by underwriting.capture_month at Step 8u, monthly
+    #   path only); the two month-stamped names are SELFTEST FIXTURE literals in position_sizing and
+    #   concentration_control that collide with the real October artefacts. None is read by the
+    #   weekly screen fallback. All PERSONAL - never RUNTIME_JSON.
+    "underwriting_cases.jsonl": ("ISA-0722 append-only underwriting case store, WRITTEN by "
+                                 "underwriting.capture_month on the MONTHLY pre-run (Step 8u); the "
+                                 "weekly screen fallback reaches underwriting only as a static import "
+                                 "edge and never reads it. PERSONAL - not pushed"),
+    "capital_destination_oct_2026.json": ("month-stamped monthly router artefact; the name is a "
+                                          "position_sizing SELFTEST FIXTURE literal that collides with "
+                                          "the real October output. Monthly path only. PERSONAL - not pushed"),
+    "run_context_oct_2026.json": ("month-stamped monthly pre-run staging file; the name is a "
+                                  "concentration_control SELFTEST FIXTURE literal that collides with the "
+                                  "real October output. Monthly path only. PERSONAL - not pushed"),
     "decision_ledger.json": ("ISA-0686/ISA-0685 canonical capital-decision ledger, read and "
                              "written on the MONTHLY path (decision_ledger.record/"
                              "current_decision, sleeve_membership.classify). Reachable from the "
@@ -301,6 +341,12 @@ def _selftest(verbose=True):
         check("not_on_disk.json" not in g, "a name with no file beside the scripts is not a gap")
         os.remove(os.path.join(d, "brand_new_input.json"))
         check(not fallback_input_gaps(d), "positive control: a fully classified tree yields no gaps")
+        # ISA-0765: a run-time store the build creates only later (the completion receipts) is scanned
+        # once it exists, and is classified - the gap was invisible to a Candidate without the file.
+        w("build_email.py", "R = 'screen_completion_receipts.json'\n")
+        w("screen_completion_receipts.json", "{}")
+        check("screen_completion_receipts.json" not in fallback_input_gaps(d),
+              "ISA-0765: the completion-receipt store is classified (negative control: it exists and is named)")
         check(all(f in NEVER for f in ONEDRIVE_BOOTSTRAP),
               "negative control: a private bootstrap file must not be pushable (it is in NEVER)")
         check(not (set(ONEDRIVE_BOOTSTRAP) & RUNTIME_JSON), "no file is both public-synced and private")

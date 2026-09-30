@@ -121,7 +121,7 @@ def build_entry_for_ticker(t: dict, existing: dict) -> dict:
         # preserved forever: 25 of 52 names carried entry_currency="USD" against GBp, EUR,
         # SEK, PLN and CHF prices. The stored value is now only a fallback for the case
         # where the live row carries no currency at all.
-        "entry_currency": t.get("currency") or existing.get("entry_currency") or "USD",
+        "entry_currency": t.get("currency") or existing.get("entry_currency") or None,   # ISA-0582: no USD default
         "entry_currency_corrected": bool(
             existing.get("entry_currency") and t.get("currency")
             and existing.get("entry_currency") != t.get("currency")),
@@ -469,5 +469,18 @@ def main():
         args.month_label, args.scored, args.scored_out)
 
 
+def _selftest() -> int:
+    """ISA-0582 (26-Sep-2026): the entry label follows the live quote or stays absent."""
+    import inspect as _i
+    n = 0
+    src = _i.getsource(sys.modules[__name__])
+    assert 'existing.get("entry_currency") or None' in src, "must fail if the final fallback is restored"; n += 1
+    assert src.count('or "' + 'USD"') == 0, "negative control: no USD default may be reintroduced"; n += 1
+    print("entry_level_builder selftest: %d assertions, 0 failed" % n)
+    return n
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

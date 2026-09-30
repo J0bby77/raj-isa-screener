@@ -3594,6 +3594,10 @@ def overlay_coverage(scored_rows, mode=None):
 
 FIELD_MAP = [
     "ticker", "company", "sector", "industry", "index", "final_status",
+    # ISA-0762 (26-Sep-2026): what the company does - captured ONCE from the provider profile the
+    # screen already fetched (ticker.info longBusinessSummary), with its source; never synthesised.
+    # Stamped by stamp_business_profile() OUTSIDE the score-definition roots (display only).
+    "business_summary", "business_summary_source",
     "part_a_score", "part_b_score", "total_score", "part_a_status", "part_b_status",
     "rev_cagr", "recent_rev_growth", "eps_cagr", "share_count_change",
     "fcf_positive_years", "fcf_cagr", "fcf_margin", "gross_margin",
@@ -3786,6 +3790,45 @@ def measure_formation_frictions(scored, info):
     return out
 
 
+BUSINESS_SUMMARY_MAX_CHARS = 240
+_ABBREV_END = re.compile(r"(?:\b(?:Inc|Corp|Co|Ltd|plc|S\.A|N\.V|AG|SE|Mr|Dr|St|No|U\.S|e\.g|i\.e|approx|incl))\.$", re.I)
+
+
+def business_summary_from_info(info) -> tuple:
+    """ISA-0762. -> (one_sentence_or_None, source_label). The FIRST sentence of the provider's
+    own business description, deterministically cut (no LLM, no web lookup, no extra fetch).
+    Absent/blank -> (None, 'DESCRIPTION_UNAVAILABLE') - never invented."""
+    raw = ""
+    try:
+        raw = str((info or {}).get("longBusinessSummary") or "").strip()
+    except Exception:                                                  # noqa: BLE001
+        raw = ""
+    if not raw or raw.lower() in ("none", "nan"):
+        return None, "DESCRIPTION_UNAVAILABLE"
+    raw = re.sub(r"\s+", " ", raw)
+    cut = None
+    for m in re.finditer(r"\.(?=\s+[A-Z])", raw):
+        if not _ABBREV_END.search(raw[: m.end()]):
+            cut = raw[: m.end()]
+            break
+    sent = cut or raw
+    if len(sent) > BUSINESS_SUMMARY_MAX_CHARS:
+        sent = sent[: BUSINESS_SUMMARY_MAX_CHARS - 3].rsplit(" ", 1)[0] + "..."
+    return sent, "yfinance.info.longBusinessSummary (first sentence)"
+
+
+def stamp_business_profile(row, info):
+    """Stamp business_summary + its source on a scored row. Never raises; never touches a score."""
+    try:
+        txt, src = business_summary_from_info(info)
+        row["business_summary"] = txt
+        row["business_summary_source"] = src
+    except Exception:                                                  # noqa: BLE001
+        row["business_summary"] = None
+        row["business_summary_source"] = "DESCRIPTION_UNAVAILABLE"
+    return row
+
+
 def save_full_data(rows, outputs_dir, run_date, group):
     df   = pd.DataFrame(rows, columns=FIELD_MAP)
     path = os.path.join(outputs_dir, f"{run_date}_{group}_full_data.csv")
@@ -3863,6 +3906,7 @@ def save_full_data(rows, outputs_dir, run_date, group):
         _rg = _r.get("regime", {}) or {}
         _cap["regime_stamp_basis"] = _rg.get("stamp_basis")
         _cap["regime_pit"] = _rg.get("pit")
+        _cap["source_performance"] = (_r.get("source_performance") or {}).get("state")   # ISA-0483
         if not _cap["ok"]:
             _cap["reason"] = _fd.get("reason", "unknown")
         log.info(f"§Q capture: {_cap['action']} -> {_cap['dest']} | "
@@ -4556,6 +4600,9 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
     Returns (scored_rows: list[dict], run_qa: dict)
     """
     start_time = time.time()
+    # ISA-0755/0483: this entry point is the Composio FALLBACK route (screener_local is primary);
+    # stamped on the run ledger and read by the completion receipt. setdefault: an explicit caller wins.
+    os.environ.setdefault("ISA_SCREEN_ROUTE", "composio_fallback")
     is_nasdaq  = (group == "NASDAQ")
     run_qa = {
         "group": group, "run_date": run_date,
@@ -4624,6 +4671,7 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                         else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
                 row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+                stamp_business_profile(row, info)   # ISA-0762 (display only)
                 apply_overlays_inline(row, ticker, info, inc, cf, bal, d)
                 scored_rows.append(row)
             except Exception as e:
@@ -4687,6 +4735,7 @@ def run_scheduled(group: str, run_date: str, outputs_dir: str, inv_analysis_dir:
                 inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                         else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
                 row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+                stamp_business_profile(row, info)   # ISA-0762 (display only)
                 apply_overlays_inline(row, ticker, info, inc, cf, bal, d)
                 scored_rows.append(row)
             except Exception as e:
@@ -4889,6 +4938,7 @@ def run_intramonth(tickers: list, run_date: str, outputs_dir: str, inv_analysis_
             inc_q = _inc_q_d if (_inc_q_d is not None and not (hasattr(_inc_q_d, "empty") and _inc_q_d.empty)) \
                     else stmt_map.get(ticker, {}).get("income_stmt_quarterly")
             row   = _score_ticker(ticker, info, inc, cf, bal, inc_q, constituents_df)
+            stamp_business_profile(row, info)   # ISA-0762 (display only)
             # Intramonth has ALWAYS overlaid every ticker it looks at — it is the existing
             # precedent for the population the weekly screen now adopts. It re-fetched to do it;
             # it no longer needs to.

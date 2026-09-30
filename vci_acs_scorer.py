@@ -151,6 +151,19 @@ class MR:
 # ---------------------------------------------------------------------------
 # Data pull
 # ---------------------------------------------------------------------------
+def _scoring_venue(d, sym):
+    """ISA-0588 — ONE constructor (vci_deploy_eval.scoring_venue); typed UNKNOWN when absent."""
+    import datetime as _dt
+    try:
+        import vci_deploy_eval as _vde
+        return _vde.scoring_venue(d.get('exchange'), d.get('listing_currency'),
+                                  'vci_acs_scorer.pull_data(%s)' % sym,
+                                  _dt.date.today().isoformat())
+    except Exception:                                                   # noqa: BLE001
+        return {"exchange": None, "currency": None, "status": "UNKNOWN_NOT_CAPTURED",
+                "source": "vci_acs_scorer (constructor unavailable)", "captured_on": None}
+
+
 def pull_data(sym):
     """Pull all yfinance data needed for Part A scoring. Returns dict."""
     t = yf.Ticker(sym)
@@ -169,6 +182,19 @@ def pull_data(sym):
         d['sector'] = info.get('sector') or 'Unknown'
         d['industry'] = info.get('industry') or 'Unknown'
         d['name'] = info.get('longName') or info.get('shortName') or sym
+        # ISA-0588: the venue of the SCORED listing, captured at scoring (None when absent).
+        d['exchange'] = info.get('exchange') or None
+        d['listing_currency'] = info.get('currency') or None
+        # ISA-0770: the LISTING date, so a balance-sheet quantity from before the listing (IPO/SPAC
+        # proceeds not yet reflected) is never scored as current. Absent -> None (typed downstream).
+        _ft = info.get('firstTradeDateEpochUtc') or info.get('firstTradeDateMilliseconds')
+        try:
+            _ft = float(_ft)
+            if _ft > 1e11:
+                _ft = _ft / 1000.0
+            d['listing_date'] = datetime.utcfromtimestamp(_ft).date().isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            d['listing_date'] = None
     except Exception as e:
         d['error'] = f'info: {e}'
         return d
@@ -231,8 +257,23 @@ def pull_data(sym):
             d['debt'][yr] = safe(bs.loc['Total Debt', col] if 'Total Debt' in bs.index else None)
             d['assets'][yr] = safe(bs.loc['Total Assets', col] if 'Total Assets' in bs.index else None)
             d['cur_liab'][yr] = safe(bs.loc['Current Liabilities', col] if 'Current Liabilities' in bs.index else None)
+            d.setdefault('bs_period_end', {})[yr] = (col.date().isoformat() if hasattr(col, 'date') else str(col)[:10])
     except Exception:
         d['cash'] = {}; d['debt'] = {}; d['assets'] = {}; d['cur_liab'] = {}
+
+    # ISA-0770: the most recent QUARTERLY balance sheet - a post-listing/post-financing cash state
+    # is often only visible here (INFQ Sep-2026: FY2024 annual $47.9M vs Q2-2026 $582M).
+    d['q_cash'] = None; d['q_bs_period_end'] = None
+    try:
+        qbs = t.quarterly_balance_sheet
+        if qbs is not None and len(qbs.columns):
+            col = qbs.columns[0]
+            c = safe(qbs.loc['Cash And Cash Equivalents', col] if 'Cash And Cash Equivalents' in qbs.index else None)
+            sti = safe(qbs.loc['Other Short Term Investments', col] if 'Other Short Term Investments' in qbs.index else None)
+            d['q_cash'] = (c or 0) + (sti or 0) if (c is not None or sti is not None) else None
+            d['q_bs_period_end'] = col.date().isoformat() if hasattr(col, 'date') else str(col)[:10]
+    except Exception:
+        d['q_cash'] = None; d['q_bs_period_end'] = None
 
     # Quarterly revenue for A2 (TTM acceleration)
     try:
@@ -492,17 +533,73 @@ def score_a7(d):
     return MR(0, f'FCF mixed/deteriorating [{raw_fcf_str}]')
 
 
+# ── ISA-0770 (VCI-B, 27-Sep-2026): LISTING / CAPITAL-EVENT-AWARE BALANCE-SHEET ADMISSIBILITY ─────
+# BuildSpec §9: a balance-sheet / runway / dilution-sensitive quantity must reflect the latest admissible
+# state after a listing that changed it. The scorer used the latest ANNUAL statement whatever its date,
+# so INFQ (listed Feb-2026) scored A8 = 1 ("13-month runway") on pre-IPO FY2024 cash of $47.9M while its
+# Q2-2026 report showed $582M. Metric-class rule (not a blanket ban): the NEWEST balance sheet (quarterly
+# or annual) is used; if even that predates the listing, the metric is REFUSED (N/A, enters the N/A
+# denominator honestly) - never scored from the stale quantity. Flow metrics (revenue, FCF burn) may
+# still use comparable pre-listing periods and say so. Material financings between a post-listing
+# period end and the decision are NOT detectable from this source: recorded as a known limitation.
+try:   # ISA-0699 execution-ledger observation (never raises into the caller)
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                                       # noqa: BLE001
+    def _fi_mark(*_a, **_k):                                            # noqa: D103
+        return None
+
+
+BS_ADMISSIBLE, BS_LISTING_UNKNOWN, BS_REFUSED_PRE_LISTING, BS_UNAVAILABLE = (
+    "ADMISSIBLE", "ADMISSIBLE_LISTING_DATE_UNKNOWN", "REFUSED_STALE_PRE_LISTING", "UNAVAILABLE")
+
+
+def balance_sheet_basis(d):
+    """THE one home for 'which cash/balance-sheet observation may be scored'. -> dict with state, cash,
+    period_end, source (quarterly|annual), listing_date, reason."""
+    _fi_mark("vci_acs_scorer", "balance_sheet_basis")   # ISA-0699 execution-ledger observation
+    cash = d.get('cash', {}) or {}
+    ends = d.get('bs_period_end', {}) or {}
+    obs = []
+    for yr, v in cash.items():
+        if v is not None:
+            obs.append({'cash': v, 'period_end': ends.get(yr) or ('%s-12-31' % yr), 'source': 'annual'})
+    if d.get('q_cash') is not None and d.get('q_bs_period_end'):
+        obs.append({'cash': d['q_cash'], 'period_end': d['q_bs_period_end'], 'source': 'quarterly'})
+    listing = d.get('listing_date')
+    if not obs:
+        return {'state': BS_UNAVAILABLE, 'cash': None, 'period_end': None, 'source': None,
+                'listing_date': listing, 'reason': 'no balance-sheet cash observation'}
+    best = sorted(obs, key=lambda o: str(o['period_end']))[-1]
+    out = dict(best, listing_date=listing)
+    if not listing:
+        out.update(state=BS_LISTING_UNKNOWN,
+                   reason='listing date not provided by the source - newest balance sheet used, listing check not evaluable')
+    elif str(best['period_end']) < str(listing):
+        out.update(state=BS_REFUSED_PRE_LISTING,
+                   reason='newest balance sheet (%s, %s) predates the listing (%s): listing proceeds are not '
+                          'reflected - refused, not scored' % (best['period_end'], best['source'], listing))
+    else:
+        out.update(state=BS_ADMISSIBLE, reason='%s balance sheet %s is on/after listing %s'
+                                              % (best['source'], best['period_end'], listing))
+    return out
+
+
 def score_a8(d):
-    """A8: Cash Runway. FCF+: score 2. Negative: runway=(cash+STI)/|annual FCF burn|. >24mo=2, 12-24mo=1, <12mo=0."""
-    fcf = d.get('fcf', {}); cash = d.get('cash', {})
+    """A8: Cash Runway. FCF+: score 2. Negative: runway=(cash+STI)/|annual FCF burn|. >24mo=2, 12-24mo=1, <12mo=0.
+    ISA-0770: cash comes from balance_sheet_basis (newest admissible observation), never a pre-listing annual."""
+    fcf = d.get('fcf', {})
     # Most recent FCF and cash
     fcf_yrs = sorted([y for y in fcf if fcf.get(y) is not None])
-    cash_yrs = sorted([y for y in cash if cash.get(y) is not None])
+    _bsb = balance_sheet_basis(d)
+    d['_bs_basis'] = _bsb
 
     if not fcf_yrs:
         return MR(0, 'N/A — no FCF data')
     latest_fcf = fcf[fcf_yrs[-1]]
-    latest_cash = cash[cash_yrs[-1]] if cash_yrs else None
+    if _bsb['state'] == BS_REFUSED_PRE_LISTING and not (latest_fcf is not None and latest_fcf >= 0):
+        return MR(None, 'N/A — STALE_PRE_LISTING: ' + _bsb['reason'], na=True,
+                  note='ISA-0770: runway not scored from a pre-listing balance sheet; refused into the N/A denominator')
+    latest_cash = _bsb['cash']
 
     if latest_fcf is not None and latest_fcf >= 0:
         return MR(2, f'FCF positive ({fmt_b(latest_fcf)}) — no burn', 'No runway concern')
@@ -519,7 +616,9 @@ def score_a8(d):
         return MR(2, 'No meaningful burn rate')
 
     runway_months = (latest_cash / avg_burn) * 12
-    raw = f'Cash+STI {fmt_b(latest_cash)}, avg burn {fmt_b(avg_burn)}/yr → {runway_months:.0f}mo runway'
+    raw = (f'Cash+STI {fmt_b(latest_cash)} ({_bsb.get("source")} {_bsb.get("period_end")}; {_bsb["state"]}), '
+           f'avg burn {fmt_b(avg_burn)}/yr (annual FCF, flow basis) → {runway_months:.0f}mo runway')
+
     if runway_months > 24:
         return MR(2, raw)
     elif runway_months >= 12:
@@ -533,6 +632,13 @@ def score_a9(d, a9_strategic_tickers=None):
     a9_strategic_tickers = a9_strategic_tickers or []
     shares = d.get('shares', {}); sym = d.get('sym', '')
     yrs = sorted([y for y in shares if shares.get(y) and shares[y] > 0])
+    # ISA-0770: a share-count window that spans the LISTING compares pre-IPO and post-IPO capital
+    # structures - IPO issuance is not dilution discipline. Refused (N/A), never scored.
+    _lst = d.get('listing_date')
+    if _lst and len(yrs) >= 2 and int(yrs[0]) < int(str(_lst)[:4]):
+        return MR(None, 'N/A — PRE_LISTING_SHARE_BASIS: share window %s→%s includes pre-listing years '
+                  '(listed %s)' % (yrs[0], yrs[-1], _lst), na=True,
+                  note='ISA-0770: dilution-sensitive metric refused across a listing')
     if len(yrs) < 2:
         return MR(1, 'N/A — single year shares data (stable assumed)', note='Insufficient history')
     oldest_s = shares[yrs[0]]
@@ -1003,7 +1109,15 @@ def build_json_output(sym, d, scores, totals, override_check=None):
         'industry': d.get('industry', ''),
         'mktcap_usd': d.get('mktcap'),
         'price': d.get('price'),
-        'currency': 'GBP' if d.get('uk') else 'USD',
+        'currency': d.get('listing_currency') or None,   # ISA-0582: the scored quote currency; d['uk'] was never set, so this was always a manufactured 'USD'
+        'scoring_venue': _scoring_venue(d, sym),
+        # ISA-0770: per-name financial basis provenance (what the balance-sheet metrics were scored on)
+        'financial_admissibility': {'listing_date': d.get('listing_date'),
+                                    'balance_sheet': d.get('_bs_basis') or balance_sheet_basis(d),
+                                    'annual_bs_period_ends': d.get('bs_period_end'),
+                                    'quarterly_bs_period_end': d.get('q_bs_period_end'),
+                                    'known_limitation': 'a material financing after the newest balance-sheet '
+                                                        'period end is not detectable from this source'},
         'part_a': {k: {'score': r.score, 'na': r.na, 'raw': r.raw, 'note': r.note}
                    for k, r in scores.items()},
         'raw_score': totals['raw_score'],
@@ -1211,5 +1325,85 @@ def main():
         print(f'Use with build_vci_email.py --json to populate E2 candidates section.')
 
 
+def check_financial_admissibility_states():
+    """CAP-vci_financial_admissibility must-fire through score_a8 (the consumer): ADMISSIBLE (post-listing
+    quarterly used), REFUSED_STALE_PRE_LISTING (N/A, never stale numeric), ADMISSIBLE_LISTING_DATE_UNKNOWN.
+    RAISES on a miss."""
+    base = {'fcf': {'2023': -30e6, '2024': -45e6}, 'cash': {'2024': 47.9e6},
+            'bs_period_end': {'2024': '2024-12-31'}, 'listing_date': '2026-02-14',
+            'q_cash': 582e6, 'q_bs_period_end': '2026-06-30'}
+    d1 = dict(base); r1 = score_a8(d1)
+    assert d1['_bs_basis']['state'] == BS_ADMISSIBLE and r1.score == 2
+    d2 = dict(base, q_cash=None, q_bs_period_end=None); r2 = score_a8(d2)
+    assert d2['_bs_basis']['state'] == BS_REFUSED_PRE_LISTING and r2.na and r2.score is None
+    d3 = dict(base, listing_date=None); score_a8(d3)
+    assert d3['_bs_basis']['state'] == BS_LISTING_UNKNOWN
+    return True
+
+
+def _selftest():
+    """ISA-0588 — offline. The venue of the SCORED listing is captured at scoring, typed when
+    absent; never inferred from the ticker or the currency."""
+    n = 0
+    sv = _scoring_venue({'exchange': 'NMS', 'listing_currency': 'USD'}, 'QBTS')
+    assert sv['exchange'] == 'NMS' and sv['status'] == 'CAPTURED_AT_SCORING', sv; n += 1
+    # MUST-FIRE: no exchange in the pull -> typed UNKNOWN, exchange None
+    sv = _scoring_venue({}, 'SATL')
+    assert sv['exchange'] is None and sv['status'] == 'UNKNOWN_NOT_CAPTURED', \
+        ('MUST-FIRE: a pull with no exchange must be typed UNKNOWN_NOT_CAPTURED', sv); n += 1
+    # NEGATIVE CONTROL: a '.L' suffix or a GBP currency is NOT a captured venue
+    sv = _scoring_venue({'uk': True, 'listing_currency': 'GBp'}, 'ONT.L')
+    assert sv['status'] == 'UNKNOWN_NOT_CAPTURED', \
+        ('NEGATIVE CONTROL: a .L suffix / GBp currency is not a captured venue', sv); n += 1
+    class _R:
+        score, na, raw, note = 0, True, None, 'fixture'
+
+    class _Scores(dict):
+        def __missing__(self, k):
+            return _R()
+    try:
+        _tot = compute_totals(_Scores())
+    except Exception:                                                   # noqa: BLE001
+        _tot = {}
+    _tot = type('T', (dict,), {'__missing__': lambda self, k: 0})(_tot)
+    out = build_json_output('QBTS', {'name': 'D-Wave', 'exchange': 'NMS', 'listing_currency': 'USD'},
+                            _Scores(), _tot)
+    assert out['scoring_venue']['exchange'] == 'NMS', out.get('scoring_venue'); n += 1
+    # ── ISA-0770 financial admissibility (the INFQ Sep-2026 shape; synthetic fixture, offline) ──
+    infq = {'fcf': {'2023': -30e6, '2024': -45e6}, 'cash': {'2024': 47.9e6},
+            'bs_period_end': {'2024': '2024-12-31'}, 'listing_date': '2026-02-14',
+            'q_cash': 582e6, 'q_bs_period_end': '2026-06-30'}
+    r = score_a8(dict(infq))
+    assert r.score == 2 and 'quarterly 2026-06-30' in r.raw and not r.na, \
+        ('MUST-FIRE (ISA-0770): a post-listing quarterly balance sheet must replace the pre-IPO annual', r.raw); n += 1
+    r = score_a8(dict(infq, q_cash=None, q_bs_period_end=None))
+    assert r.na and r.score is None and 'STALE_PRE_LISTING' in r.raw, \
+        ('MUST-FIRE (ISA-0770): with no post-listing balance sheet the runway is REFUSED (N/A), never '
+         'scored from stale cash and never 0', r.raw); n += 1
+    old_co = {'fcf': {'2023': -30e6, '2024': -45e6}, 'cash': {'2024': 47.9e6},
+              'bs_period_end': {'2024': '2024-12-31'}, 'listing_date': '2015-06-01'}
+    r = score_a8(dict(old_co))
+    assert r.score == 1 and not r.na, \
+        ('NEGATIVE CONTROL (ISA-0770): a long-listed company is scored exactly as before', r.raw); n += 1
+    r = score_a8(dict(old_co, listing_date=None))
+    assert r.score == 1 and 'LISTING_DATE_UNKNOWN' in r.raw, ('listing unknown is TYPED, not assumed', r.raw); n += 1
+    a9 = score_a9({'sym': 'INFQ', 'shares': {'2024': 100e6, '2026': 300e6}, 'listing_date': '2026-02-14'})
+    assert a9.na and 'PRE_LISTING_SHARE_BASIS' in a9.raw, \
+        ('MUST-FIRE (ISA-0770): a share window spanning the listing is refused, not scored as dilution', a9.raw); n += 1
+    a9p = score_a9({'sym': 'INFQ', 'shares': {'2023': 216.5e6, '2024': 216.5e6}, 'listing_date': '2026-02-17'})
+    assert a9p.na, ('MUST-FIRE (ISA-0770): an all-pre-listing share window (live INFQ shape) is refused', a9p.raw); n += 1
+    a9b = score_a9({'sym': 'X', 'shares': {'2023': 100e6, '2025': 100e6}, 'listing_date': '2015-06-01'})
+    assert a9b.score == 2 and not a9b.na, 'NEGATIVE CONTROL: a pre-window listing leaves A9 unchanged'; n += 1
+    a1 = score_a1({'rev': {'2023': 5e6, '2025': 20e6}, 'listing_date': '2026-02-14'})
+    assert not a1.na and a1.score == 2, 'flow metrics keep comparable pre-listing periods (BuildSpec §9)'; n += 1
+    assert check_financial_admissibility_states(), 'CAP must-fire (ISA-0770)'; n += 1
+    print('vci_acs_scorer selftest: %d assertions, 0 failed' % n)
+    return n
+
+
 if __name__ == '__main__':
+    import sys as _sys
+    if '--selftest' in _sys.argv:
+        _selftest()
+        _sys.exit(0)
     main()

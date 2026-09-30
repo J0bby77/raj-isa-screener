@@ -189,6 +189,41 @@ def find_latest_xlsx(folder: str) -> str:
 # ---------------------------------------------------------------------------
 # Classification helpers
 # ---------------------------------------------------------------------------
+ACCOUNT_ID_RE = __import__("re").compile(r"\b(ACB[0-9A-Z]{4,})\b")
+
+
+def account_ids_in(text) -> set:
+    """AJ Bell account ids (e.g. ACB8G2I) appearing in a text - a sheet title, a PDF header, a
+    cash-statement description."""
+    return set(ACCOUNT_ID_RE.findall(str(text or "").upper()))
+
+
+def account_identity_verdict(portfolio_ids, reference_ids) -> dict:
+    """ISA-0779: is the portfolio export the SAME account as the reference (cash statement)?
+    MISMATCH when both carry ids and they share none; UNVERIFIED when either side carries none."""
+    p, r = set(portfolio_ids or ()), set(reference_ids or ())
+    if not p or not r:
+        return {"state": "UNVERIFIED", "portfolio": sorted(p), "reference": sorted(r),
+                "why": "an account id is absent on %s - identity not provable, not assumed"
+                       % ("the portfolio export" if not p else "the reference")}
+    if p & r:
+        return {"state": "MATCH", "portfolio": sorted(p), "reference": sorted(r), "why": "same account"}
+    return {"state": "MISMATCH", "portfolio": sorted(p), "reference": sorted(r),
+            "why": "portfolio export account %s is not the cash-statement account %s" % (sorted(p), sorted(r))}
+
+
+def statement_is_stale(cs_last_iso, data_date_iso, closing_gbp, broker_cash_ex_mmf_gbp) -> bool:
+    """ISA-0785: the cash statement is STALE only when its last activity row predates the broker file
+    AND its closing balance does not reconcile (to 1p) with the broker's cash line excluding the MMF.
+    A reconciled balance means no movement is unseen on either side, whatever the last row's date."""
+    if str(cs_last_iso) >= str(data_date_iso):
+        return False
+    try:
+        return not abs(float(closing_gbp) - float(broker_cash_ex_mmf_gbp)) < 0.01
+    except (TypeError, ValueError):
+        return True
+
+
 def _iso_or(d):
     """'31-Aug-2026' | '2026-08-31' -> ISO. Returns the input unchanged if unparseable, so a
     comparison against it fails CLOSED (the statement is treated as not-newer) rather than open."""
@@ -503,6 +538,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
     """
     wb = openpyxl.load_workbook(xlsx_path)
     ws = wb.active
+    _account_ids = sorted(account_ids_in(ws.title))              # ISA-0779
 
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
@@ -705,7 +741,11 @@ def parse_portfolio(xlsx_path: str) -> dict:
         elif _close is None or _cs_last is None:
             deployable_note = ("the cash statement carries no closing balance or no dated rows — "
                                "deployable falls back to the month-end broker cash line.")
-        elif _cs_last < _iso_or(data_date):
+        elif statement_is_stale(_cs_last, _iso_or(data_date), _close, float(cash_value) - float(mmf_value or 0.0)):
+            # ⚑ ISA-0785 (30-Sep-2026): the last ACTIVITY row predating the broker file does not make
+            #   the statement stale. When its closing balance EQUALS the broker cash line, no movement
+            #   is unseen on either side and the statement is current (30-Sep: last row 18-Sep,
+            #   GBP 346.81 on both; the broker line's MMF is compared out, ISA-0564). Only an unreconciled balance with an older last row falls back.
             deployable_note = ("the cash statement's last row (%s) PREDATES the broker file (%s), "
                                "so the statement is the stale side here — deployable stays on the "
                                "month-end broker cash line." % (_cs_last, _iso_or(data_date)))
@@ -747,7 +787,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
                 raise _MMFHandled
             deployable_cash = round(float(_close) + float(mmf_value or 0.0), 2)
             deployable_basis = "cash_statement_closing_balance_plus_mmf"
-            deployable_as_of = _cs_last
+            deployable_as_of = max(_cs_last, _iso_or(data_date))   # ISA-0785: reconciled to the broker file
             deployable_note = ("Run_Context Step 1b-2 declares the cash statement the golden "
                                "source for the daily cash balance. Closing GBP %.2f as at %s, "
                                "plus GBP %.2f held in the money-market ETF (cash to this "
@@ -806,6 +846,8 @@ def parse_portfolio(xlsx_path: str) -> dict:
 
     return {
         "_meta": {
+            "account_ids":                    _account_ids,          # ISA-0779 (sheet title)
+            "sheet_title":                    ws.title,
             "source_file":                    os.path.basename(xlsx_path),
             "file_date":                      file_date_str or "unknown",
             "data_date":                      data_date or "unknown",
@@ -1031,5 +1073,37 @@ def main():
     return out_path
 
 
+def _selftest(verbose: bool = True) -> int:
+    """ISA-0785 - the cash-statement staleness rule (the deployable-cash basis switch)."""
+    fails = []
+
+    def ok(name, cond):
+        if verbose:
+            print(("  ok   " if cond else "  FAIL ") + name)
+        if not cond:
+            fails.append(name)
+
+    ok("ISA-0779 MUST-FIRE: a SIPP export (ACB8G2S) against the ISA cash statement (ACB8G2I) is MISMATCH",
+       account_identity_verdict(account_ids_in("portfolio-ACB8G2S-SIPP (4)"),
+                                account_ids_in("Account charge for funds - Apr 2026 - ACB8G2I"))["state"] == "MISMATCH")
+    ok("ISA-0779 NEGATIVE CONTROL: the ISA export against the ISA statement is MATCH",
+       account_identity_verdict(account_ids_in("portfolio-ACB8G2I-ISA (12)"), {"ACB8G2I"})["state"] == "MATCH")
+    ok("ISA-0779: a renamed sheet with no id is UNVERIFIED, never MATCH",
+       account_identity_verdict(account_ids_in("AJ Bell ISA Portfolio 31-Aug-26"), {"ACB8G2I"})["state"] == "UNVERIFIED")
+    ok("ISA-0785 MUST-FIRE: last activity 18-Sep, broker file 30-Sep, balances reconcile -> CURRENT",
+       statement_is_stale("2026-09-18", "2026-09-30", 346.81, 346.81) is False)
+    ok("ISA-0785 NEGATIVE CONTROL: an older last row with an UNRECONCILED balance is STALE",
+       statement_is_stale("2026-09-18", "2026-09-30", 346.81, 1346.81) is True)
+    ok("ISA-0785: a statement as new as the broker file is never stale by date",
+       statement_is_stale("2026-09-30", "2026-09-30", 1.0, 2.0) is False)
+    ok("ISA-0785 FAIL-CLOSED: an unreadable balance with an older last row is STALE",
+       statement_is_stale("2026-09-18", "2026-09-30", None, 346.81) is True)
+    if verbose:
+        print("extract_portfolio selftest: %d failure(s)" % len(fails))
+    return 1 if fails else 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

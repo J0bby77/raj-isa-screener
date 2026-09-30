@@ -207,6 +207,67 @@ def write(log: dict, path=None) -> str:
 
 
 # ── selftest ──────────────────────────────────────────────────────────────────────────────────
+# ── ISA-0483 (26-Sep-2026): THE RUN LEDGER APPEND, WIRED INTO PRODUCING THE FRAME ─────────────
+# runs[] was appended by a prose step ("Update source_performance_log.json", Run_Context step 17)
+# and silently stopped after 14-Aug; it recurred on 25/26-Sep. The append is now a property of
+# capturing the frame (capture_screen_artefacts.capture_one calls append_run), idempotent per
+# (run_date, group), MEASURED from the frame, and it never overwrites a hand-entered entry.
+RUN_ENTRY_BASIS = "measured_from_frame"
+
+
+def _run_key(run_date: str, group: str) -> tuple:
+    return (str(run_date)[:10], str(group or "").strip().upper())
+
+
+def run_logged(run_date: str, group: str, log=None, path=None) -> dict | None:
+    """The runs[] entry for (run_date, group), or None. `run_date` is YYYY-MM-DD."""
+    try:
+        log = log if log is not None else load_log(path)
+    except (OSError, ValueError):
+        return None
+    k = _run_key(run_date, group)
+    for e in (log.get("runs") or []):
+        if _run_key(e.get("run_date"), e.get("group")) == k:
+            return e
+    return None
+
+
+def run_entry(frame_path: str, group: str, route: str | None = None) -> dict:
+    """A runs[] entry MEASURED from the frame (never typed): counts come from the rows."""
+    rows = read_frame(frame_path)
+    fsb = {}
+    for r in rows:
+        k = (r.get("final_status") or "UNKNOWN").strip() or "UNKNOWN"
+        fsb[k] = fsb.get(k, 0) + 1
+    return {"run_date": frame_run_date(frame_path), "group": str(group).strip().upper(),
+            "basis": RUN_ENTRY_BASIS, "frame": os.path.basename(frame_path),
+            "scored": len(rows), "final_status_breakdown": fsb,
+            "run_mode": route or "UNDECLARED",
+            "appended_on": dt.date.today().isoformat()}
+
+
+def append_run(frame_path: str, group: str, *, route: str | None = None, path=None,
+               dry_run: bool = False) -> dict:
+    """Append this run to runs[] ONCE. -> {state: APPENDED|ALREADY_LOGGED|REFUSED, ...}.
+    A missing log is REFUSED (never created in an arbitrary directory); a failure is RETURNED as a
+    typed state, never swallowed (R4.12)."""
+    path = path or LOG_FILE
+    if not os.path.exists(path):
+        return {"state": "REFUSED", "why": "source_performance_log.json absent at %s" % path}
+    try:
+        log = load_log(path)
+        entry = run_entry(frame_path, group, route)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "REFUSED", "why": "%s: %s" % (type(exc).__name__, exc)}
+    prior = run_logged(entry["run_date"], entry["group"], log=log)
+    if prior is not None:
+        return {"state": "ALREADY_LOGGED", "entry": prior}
+    log.setdefault("runs", []).append(entry)
+    if not dry_run:
+        write(log, path)
+    return {"state": "APPENDED", "entry": entry}
+
+
 def selftest(verbose=True) -> int:
     fails = []
     def ok(cond, msg):
@@ -263,6 +324,21 @@ def selftest(verbose=True) -> int:
         frame_run_date(bad); ok(False, "NEGATIVE CONTROL: an undateable frame must refuse")
     except ValueError:
         ok(True, "NEGATIVE CONTROL: an undateable frame refuses rather than stamping today")
+
+    # ISA-0483 — the run-ledger append: idempotent, measured, refuses an absent log
+    lp = os.path.join(d, "source_performance_log.json")
+    with open(lp, "w", encoding="utf-8") as fh:
+        json.dump({"indices": {}, "runs": [{"run_date": "2026-08-14", "group": "NASDAQ"}]}, fh)
+    r1 = append_run(fp, "TEST", route="local_primary", path=lp)
+    ok(r1["state"] == "APPENDED" and r1["entry"]["scored"] == 3 and r1["entry"]["run_date"] == "2026-08-15",
+       "must-fire: a new (run_date, group) is appended, measured from the frame")
+    r2 = append_run(fp, "TEST", path=lp)
+    ok(r2["state"] == "ALREADY_LOGGED" and len(load_log(lp)["runs"]) == 2,
+       "NEGATIVE CONTROL: re-appending the same run is a no-op, not a duplicate")
+    ok(run_logged("2026-08-15", "test", path=lp) is not None and run_logged("2026-08-16", "TEST", path=lp) is None,
+       "run_logged finds exactly the (run_date, group) key")
+    ok(append_run(fp, "TEST", path=os.path.join(d, "absent.json"))["state"] == "REFUSED",
+       "NEGATIVE CONTROL: an absent log is REFUSED, never created in an arbitrary directory")
 
     if verbose:
         print("\nsource_performance_writer selftest: %d failure(s)%s"

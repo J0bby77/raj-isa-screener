@@ -535,7 +535,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             "name":            entry.get("name", t),
             "exchange":        entry.get("exchange", ""),
             "entry_level":     entry.get("entry_level"),
-            "entry_currency":  entry.get("entry_currency", "USD"),
+            "entry_currency":  entry.get("entry_currency"),
             "sector_hint":     entry.get("sector", ""),
             "status":          entry.get("status", ""),
             "thesis_break":    entry.get("thesis_break_summary", ""),
@@ -557,7 +557,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             "name":            entry.get("name", t),
             "exchange":        entry.get("exchange", ""),
             "entry_level":     entry.get("entry_level"),
-            "entry_currency":  entry.get("entry_currency", "USD"),
+            "entry_currency":  entry.get("entry_currency"),
             "sector_hint":     entry.get("sector", ""),
             "status":          entry.get("status", ""),
             "thesis_break":    entry.get("thesis_break_summary", ""),
@@ -585,7 +585,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             "note":            s.get("note", ""),
             # Preserve watchlist entry_level if already set
             "entry_level":     existing.get("entry_level"),
-            "entry_currency":  existing.get("entry_currency", "USD"),
+            "entry_currency":  existing.get("entry_currency"),
         })
         ticker_meta[t] = existing
 
@@ -612,7 +612,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             "name":            entry.get("name", t),
             "exchange":        entry.get("exchange", ""),
             "entry_level":     entry.get("entry_level"),
-            "entry_currency":  entry.get("entry_currency", "USD"),
+            "entry_currency":  entry.get("entry_currency"),
             "sector_hint":     entry.get("sector", ""),
             "status":          "candidate_pool",
             "thesis_break":    "",
@@ -668,7 +668,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
             scored["_source_pipeline"] = pipeline
             scored["_rank"]            = meta.get("rank")
             scored["_entry_level"]     = meta.get("entry_level")
-            scored["_entry_currency"]  = meta.get("entry_currency", "USD")
+            scored["_entry_currency"]  = meta.get("entry_currency")
             scored["_status"]          = meta.get("status", "")
             scored["_thesis_break"]    = meta.get("thesis_break", "")
             scored["_purchase_date"]   = meta.get("purchase_date")
@@ -685,7 +685,7 @@ def run(watchlist_path: str, out_path: str, month_label: str) -> dict:
 
             # In-window check (works for all pipelines — uses current_price vs entry_level)
             window = check_in_window(
-                data, meta.get("entry_level"), meta.get("entry_currency", "USD"), threshold_pct
+                data, meta.get("entry_level"), meta.get("entry_currency"), threshold_pct
             )
             # Override current_price in scored dict if window check produced a value
             # (in case the scoring function returned None for current_price)

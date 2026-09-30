@@ -145,8 +145,12 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
                 "threshold_pct": round(thr, 4),
                 "detail": ("sigma_p is not positive — the decomposition REFUSES rather than "
                            "dividing by it (P2-A4)")}
-    mctr = {a: sum(float(weights[b]) * usable[a] * usable[b] * rho(a, b)
-                   for b in names) / sigma_p for a in names}
+    # ⚑ ISA-0708 (25-Sep-2026): this module's MCTR is a LOCAL DIAGNOSTIC, not the registered
+    #   `mctr` (whose one computer is sleeve_risk.risk_shares). It is published as
+    #   `mctr_local_diagnostic` so a reader can see it; it decides nothing when an authority is
+    #   supplied.
+    mctr_local = {a: sum(float(weights[b]) * usable[a] * usable[b] * rho(a, b)
+                         for b in names) / sigma_p for a in names}
     mean_risk = sigma_p / n
 
     # ⚑ P2.3 PARTIAL COVERAGE, NOT REFUSAL (C3 — a correction to the 26-Aug design).
@@ -163,7 +167,7 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
     share_divergence = []
     rows = {}
     for k in names:
-        s, w, m = usable[k], float(weights[k]), mctr[k]
+        s, w, m = usable[k], float(weights[k]), mctr_local[k]
         flag_suppressed = k in unmeasured_for and matrix is not None
         own_share = round(w * m / sigma_p, 6)
         if auth_id and k in auth_shares:
@@ -177,17 +181,29 @@ def contributions(weights: Dict[str, float], sigmas: Dict[str, float],
                                          "delta": round(share - own_share, 6)})
         else:
             share = own_share
+        # ⚑ ISA-0708 — THE REVIEW FLAG CONSUMES THE AUTHORITY. risk_weight_i = (sigma_p/N)/MCTR_i
+        #   and rc_i = w_i*MCTR_i/sigma_p give the IDENTITY risk_weight_i = w_i / (N * rc_i), so the
+        #   flag is computed from the authoritative share with no formula change; without an
+        #   authority the previous (local) computation stands, labelled UNAUTHORITATIVE.
+        if auth_id and k in auth_shares and share > 0:
+            _rw = w / (n * share)
+            _rw_src = "sleeve_risk.risk_share_authority (w / (N * rc_share))"
+        else:
+            _rw = (mean_risk / m) if m > 0 else None
+            _rw_src = "risk_contribution local MCTR (UNAUTHORITATIVE)"
         rows[k] = {
             "weight_pct": round(w, 4), "sigma": round(s, 6),
-            "mctr": round(m, 6),
+            "mctr_local_diagnostic": round(m, 6),
+            "risk_weight_source": _rw_src,
+            "risk_weight_pct_locally_computed": round(mean_risk / m, 4) if m > 0 else None,
             "rc_share": share,
             "rc_share_locally_computed": own_share,
             "risk_share_calc_id": auth_id,
             "risk_share_source": ("sleeve_risk.risk_share_authority" if auth_id
                                   else "risk_contribution.contributions (UNAUTHORITATIVE)"),
             "fair_share": round(1.0 / n, 6),
-            "risk_weight_pct": round(mean_risk / m, 4) if m > 0 else None,
-            "below_tolerance": (bool((mean_risk / m) < thr) if (m > 0 and not flag_suppressed)
+            "risk_weight_pct": round(_rw, 4) if _rw is not None else None,
+            "below_tolerance": (bool(_rw < thr) if (_rw is not None and not flag_suppressed)
                                 else False),
             "flag_suppressed_unmeasured_pair": flag_suppressed,
         }
@@ -560,7 +576,29 @@ def _selftest():
         ("ISA-0708 NEGATIVE CONTROL: an authority blob with no risk_share_calc_id must NOT be "
          "consumed - an unnamed calculation cannot be the one both consumers quote")
 
-    print("risk_contribution selftest OK (25 assertions, incl. ISA-0708 negative controls)")
+    # ══ ISA-0708 (25-Sep-2026) — the REVIEW FLAG consumes the authority ════════════════════
+    # risk_weight_i = w_i / (N * rc_share_i) is an identity of (sigma_p/N)/MCTR_i:
+    for _k, _r in _own["rows"].items():
+        assert abs(_r["risk_weight_pct"] - _r["weight_pct"] / (len(_own["rows"]) * _r["rc_share"])) < 1e-3, \
+            ("ISA-0708 NEGATIVE CONTROL: with no authority the local formula is unchanged and "
+             "equals the w/(N*share) identity", _k, _r)
+    _thr = FLAG_FRACTION_OF_STARTER * 3.5
+    _wf = {"A": 3.0, "B": 3.0}
+    _sf = {"A": 0.40, "B": 0.40}
+    _loc = contributions(_wf, _sf, starter_pct=3.5)                 # equal names: shares 0.5/0.5
+    _hi_share = {"risk_share_calc_id": "RSHR-flagflagfla", "authority": "sleeve_risk.risk_share_authority",
+                 "shares": {"A": 0.95, "B": 0.05}}
+    _fl = contributions(_wf, _sf, starter_pct=3.5, authority=_hi_share)
+    _rw_expected = 3.0 / (2 * 0.95)
+    assert abs(_fl["rows"]["A"]["risk_weight_pct"] - round(_rw_expected, 4)) < 1e-9 \
+        and _fl["rows"]["A"]["below_tolerance"] == (_rw_expected < _thr) \
+        and _fl["rows"]["A"]["risk_weight_source"].startswith("sleeve_risk.risk_share_authority") \
+        and _fl["rows"]["A"]["risk_weight_pct_locally_computed"] == _loc["rows"]["A"]["risk_weight_pct"], \
+        ("ISA-0708 MUST-FIRE: with an authority the flag's risk_weight is w/(N*authoritative share); "
+         "the local figure is published beside it as a diagnostic", _fl["rows"]["A"])
+    assert "mctr" not in _fl["rows"]["A"] and "mctr_local_diagnostic" in _fl["rows"]["A"], \
+        "ISA-0708 NEGATIVE CONTROL: this module no longer publishes the registered `mctr` key"
+    print("risk_contribution selftest OK (28 assertions, incl. ISA-0708 negative controls)")
 
 
 if __name__ == "__main__":

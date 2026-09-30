@@ -902,11 +902,14 @@ def build_s7(data):
         inner += para("<strong>" + se(_hu["line"]) + "</strong>")
     if _hu.get("rows"):
         inner += table_start(["Stock", "Original E[r]", "Current E[r]", "\u0394E[r]", "Horizon",
-                              "Validity", "Current case"])
+                              "Validity", "Current case", "Signal 1 (diagnostic)",
+                              "Thesis contract"])
         for i, r in enumerate(_hu["rows"]):
             inner += table_row([f'<strong>{se(r.get("ticker",""))}</strong>', se(r.get("original")),
                                 se(r.get("current")), se(r.get("delta")), se(r.get("horizon")),
-                                se(r.get("validity")), se(r.get("case"))],
+                                se(r.get("validity")), se(r.get("case")),
+                                se(r.get("valuation_diag") or "\u2014"),
+                                se(r.get("thesis") or "\u2014")],
                                last=(i == len(_hu["rows"]) - 1))
         inner += table_end()
 
@@ -1765,7 +1768,10 @@ def main():
             # ISA-0722: the held-underwriting table, on EVERY path (renderer only, R20.2)
             import email_prefill as _ep_uw
             data.setdefault("s7_stock_sleeve", {})["held_underwriting"] = \
-                _ep_uw.build_held_underwriting_block((_rc.get("summary") or {}).get("held_underwriting"))
+                _ep_uw.build_held_underwriting_block(
+                    (_rc.get("summary") or {}).get("held_underwriting"),
+                    (((_rc.get("summary") or {}).get("held_position_review") or {})
+                     .get("thesis_lineage")))
         except FileNotFoundError:
             _errs.append(f"run_context_{_month}.json does not exist — the router plan and its "
                          f"judgement scope cannot be read")

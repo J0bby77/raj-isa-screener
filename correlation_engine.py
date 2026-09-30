@@ -130,6 +130,44 @@ def shrink(rho_sample: float, rho_bar: Optional[float]) -> float:
     return SHRINK_W_SAMPLE * rho_sample + SHRINK_W_TARGET * tgt
 
 
+def sleeve_rho(per: Dict[str, Optional[float]], weights: Optional[Dict[str, float]] = None, *,
+               abs_weights: bool = False, zero_weight: str = "mean",
+               unmeasured_value: Optional[float] = None) -> dict:
+    """ISA-0714 — THE ONE COMPUTER OF `rho_sleeve`: a candidate's weight-averaged correlation to
+    a NAME SET, from per-name correlations already measured (`per[name] = rho | None`).
+
+    Both callers use it: `candidate_correlation` (the set = the current sleeve, feeding the sizing
+    cap) and `deployment_sequencer.rho_to_set` (the set = the sleeve AS IT WILL THEN STAND, P6.4,
+    feeding REPLACEMENT_ONLY and the noise gate). Same quantity, different SET — so one formula,
+    one home, and each caller RELAYS `result["rho_sleeve"]` (quantity_register: rho_sleeve).
+    Their two historical edge conventions are kept EXPLICIT rather than silently unified:
+      * weights empty/None             -> the plain mean of the measured rhos (both callers);
+      * abs_weights                    -> |w| (the sequencer) or signed w (the engine);
+      * zero_weight 'mean' | 'none'    -> total measured weight 0 falls back to the plain mean
+                                          (engine) or returns None (sequencer);
+      * nothing measured               -> `unmeasured_value` (the engine's A2.3 adverse default)
+                                          or None (the sequencer: unmeasured is not a number)."""
+    _fi_mark("correlation_engine", "sleeve_rho")
+    got = [(h, float(v)) for h, v in (per or {}).items() if v is not None]
+    if not got:
+        return {"rho_sleeve": unmeasured_value, "n_measured": 0, "weight_covered": 0.0,
+                "basis": "UNMEASURED"}
+    if weights:
+        wf = (lambda h: abs(weights.get(h, 0.0))) if abs_weights else (lambda h: weights.get(h, 0.0))
+        tw = sum(wf(h) for h, _ in got)
+        if tw > 0:
+            rs = sum(wf(h) * v for h, v in got) / tw
+        elif zero_weight == "mean":
+            rs = statistics.fmean([v for _, v in got])
+        else:
+            rs = None
+    else:
+        tw = 0.0
+        rs = sum(v for _, v in got) / len(got)
+    return {"rho_sleeve": rs, "n_measured": len(got), "weight_covered": tw,
+            "basis": "MEASURED"}
+
+
 def candidate_correlation(candidate: str, returns_by_name: Dict[str, Dict[str, float]],
                           weights: Dict[str, float], matrix: Optional[dict] = None) -> dict:
     """rho_max_pairwise and rho_sleeve for ONE candidate against the existing sleeve.
@@ -157,9 +195,10 @@ def candidate_correlation(candidate: str, returns_by_name: Dict[str, Dict[str, f
         # A2.3 — the whole point of this module today.
         adverse = max(rho_bar if rho_bar is not None else RHO_BAR_FALLBACK,
                       RHO_UNMEASURED_FLOOR)
+        _agg0 = sleeve_rho({}, weights, unmeasured_value=adverse)     # ISA-0714: one computer
         return {
             "candidate": candidate, "measured": False,
-            "rho_max_pairwise": round(adverse, 6), "rho_sleeve": round(adverse, 6),
+            "rho_max_pairwise": round(adverse, 6), "rho_sleeve": round(_agg0["rho_sleeve"], 6),
             "rho_basis": "UNMEASURED_ADVERSE_DEFAULT",
             "size_ceiling": "STARTER",
             "per_holding": per, "rho_bar": rho_bar,
@@ -171,14 +210,14 @@ def candidate_correlation(candidate: str, returns_by_name: Dict[str, Dict[str, f
         }
 
     vals = [v["rho"] for v in per.values() if v["rho"] is not None]
-    tot_w = sum(weights.get(h, 0.0) for h in holdings if per[h]["rho"] is not None)
-    rho_sleeve = (sum(weights.get(h, 0.0) * per[h]["rho"]
-                      for h in holdings if per[h]["rho"] is not None) / tot_w
-                  if tot_w > 0 else statistics.fmean(vals))
+    # ISA-0714: the weighted mean is computed ONCE, by sleeve_rho, and relayed here.
+    _agg = sleeve_rho({h: per[h]["rho"] for h in holdings}, weights,
+                      abs_weights=False, zero_weight="mean")
+    tot_w = _agg["weight_covered"]
     n_unmeasured = sum(1 for v in per.values() if v["rho"] is None)
     return {
         "candidate": candidate, "measured": True,
-        "rho_max_pairwise": round(max(vals), 6), "rho_sleeve": round(rho_sleeve, 6),
+        "rho_max_pairwise": round(max(vals), 6), "rho_sleeve": round(_agg["rho_sleeve"], 6),
         "rho_basis": "MEASURED_SHRUNK", "size_ceiling": None,
         "per_holding": per, "rho_bar": rho_bar,
         "holdings_measured": usable, "holdings_unmeasured": n_unmeasured,
@@ -344,7 +383,22 @@ def _selftest():
         ("ISA-0680 MUST-FIRE: the pair must use exactly the declared window", r_win)
     assert r_full > 0.6, ("ISA-0680 NEGATIVE CONTROL: the full-history rho is high, so the "
                           "window is what moved the answer", r_full)
-    print("correlation_engine selftest OK (18 assertions)")
+    # ── ISA-0714 — ONE computer of rho_sleeve, both callers' conventions explicit ─────────
+    _per = {"A": 0.5, "B": 0.2, "C": None}
+    assert abs(sleeve_rho(_per, {"A": 2.0, "B": 1.0})["rho_sleeve"] - 0.4) < 1e-12, \
+        "ISA-0714 POSITIVE CONTROL: weighted mean over the measured names only"
+    assert abs(sleeve_rho(_per, {"C": 1.0})["rho_sleeve"] - 0.35) < 1e-12 and \
+        sleeve_rho(_per, {"C": 1.0}, zero_weight="none")["rho_sleeve"] is None, \
+        ("ISA-0714 NEGATIVE CONTROL: zero measured weight falls back to the mean (engine) and "
+         "must not be invented for the sequencer (None)")
+    assert sleeve_rho({"A": None}, {}, unmeasured_value=0.7)["rho_sleeve"] == 0.7 and \
+        sleeve_rho({"A": None}, {})["rho_sleeve"] is None, \
+        "ISA-0714 NEGATIVE CONTROL: nothing measured -> the caller's declared value, never 0"
+    assert abs(sleeve_rho({"A": 0.5, "B": 0.2}, {"A": -1.0, "B": 2.0})["rho_sleeve"] + 0.1) < 1e-12 \
+        and abs(sleeve_rho({"A": 0.5, "B": 0.2}, {"A": -1.0, "B": 2.0},
+                           abs_weights=True)["rho_sleeve"] - 0.3) < 1e-12, \
+        "ISA-0714 MUST-FIRE: signed vs |w| weighting are distinct, explicit conventions"
+    print("correlation_engine selftest OK (22 assertions)")
 
 
 if __name__ == "__main__":

@@ -72,8 +72,31 @@ SYMBOL_MAP: Dict[str, str] = {
     # held sleeve
     "AVGO": "AVGO", "MU": "MU", "ONT.L": "ONT.L", "ONT": "ONT.L",
     "ABCL": "ABCL", "QBTS": "QBTS", "COCO": "COCO",
+    # ⚑ ISA-0585 (Raj decision 25-Sep-2026): the STOXX600-derived FRO is the OSLO line. Issuer
+    # identity in LISTING_IDENTITY below. Declaration is PROVENANCE, never verification (ISA-0725):
+    # refresh_symbol_map still exchange-verifies FRO.OL against the .OL venue (OSL) every run.
+    "FRO": "FRO.OL", "FRO.OL": "FRO.OL",
     # benchmarks used by E4 and by the ratchet legs
     "VUAG.L": "VUAG.L", "IWMO.L": "IWMO.L", "SWDA.L": "SWDA.L", "VWRL.L": "VWRL.L",
+}
+
+# ── ISA-0585 / ISA-0725 — DECLARED LISTING IDENTITY for aliases whose issuer has more than one
+# real listing. The ISIN is the ISSUER identity the declaration relies on; a provider answer that
+# disagrees is PRESERVED here as conflicting raw evidence and is never silently reconciled (R2.10).
+# Consumed by verify_declared_aliases(), which copies it onto the alias's verified[] record.
+LISTING_IDENTITY: Dict[str, dict] = {
+    "FRO": {
+        "listing": "FRO.OL", "venue": "OSL", "issuer": "Frontline plc",
+        "isin": "CY0200352116",
+        "isin_evidence": ["STOXX600 index-screen rows 25-Jul/22-Aug/27-Aug-2026 "
+                          "(<date>_STOXX600_yf_gate_results.csv isin column)",
+                          "Euronext Oslo Bors product page CY0200352116-XOSL",
+                          "Frontline annual report: post-2022 redomiciliation, NYSE and Oslo "
+                          "lines share CY0200352116"],
+        "conflicting_raw": {"yfinance FRO.OL isin (25-Sep-2026)": "PLCTHQM00018"},
+        "decided_by": "Raj 25-Sep-2026 (candidate entered via the STOXX600 route)",
+        "register_item": "ISA-0585",
+    },
 }
 
 # ── P1.4 FX. Pairs are GBP-BASE: the number is <foreign> per 1 GBP. ───────────────────
@@ -1120,6 +1143,10 @@ VENUE_EXCHANGES = {
 }
 
 
+YAHOO_VENUE_CODES = frozenset(US_EXCHANGES) | frozenset(
+    c for _codes in SUFFIX_EXCHANGE.values() for c in _codes)
+
+
 def expected_exchanges(ticker: str, group: str = "", broker_currency: str = "",
                        declared_venue: str = "") -> set:
     """The exchanges this ticker's DECLARED venue permits. Empty set ⇒ REFUSE.
@@ -1146,6 +1173,10 @@ def expected_exchanges(ticker: str, group: str = "", broker_currency: str = "",
     # Trusting it would be the ONT/Onterris defect with a new source (ISA-0582).
     dv = (declared_venue or "").strip().upper()
     if dv:
+        # ⚑ ISA-0588 — a venue captured AT SCORING is the Yahoo exchange CODE of the listing
+        # that was scored (e.g. NMS, NYQ, OSL). A code admits exactly itself; it never widens.
+        if dv in YAHOO_VENUE_CODES:
+            return {dv}
         return set(VENUE_EXCHANGES.get(dv, ()))
     if (group or "").upper() in US_GROUPS:
         return set(US_EXCHANGES)
@@ -1221,12 +1252,16 @@ def _provenance(root: str = HERE) -> Dict[str, dict]:
                         out[tk] = {"source": src, "group": "VCI" if "vci" in fn else "SCREEN",
                                    "company": ((n.get("name") or n.get("company") or "")[:80]
                                                if isinstance(n, dict) else "")}
+                    if tk and isinstance(n, dict):
+                        _attach_scoring_venue(out[tk], n, src)
             elif isinstance(v, dict):
                 for tk, n in v.items():
                     if tk and tk not in out:
                         out[tk] = {"source": src, "group": "VCI" if "vci" in fn else "SCREEN",
                                    "company": ((n.get("name") or n.get("company") or "")[:80]
                                                if isinstance(n, dict) else "")}
+                    if tk and isinstance(n, dict):
+                        _attach_scoring_venue(out[tk], n, src)
     # ── ISA-0577 / ISA-0582 — watchlist_tickers.json. THE TWO LISTS IN THIS ONE FILE CARRY
     # DIFFERENT AUTHORITY AND CONFLATING THEM WOULD BE THE ONT/ONTERRIS DEFECT WITH A NEW SOURCE.
     #   IDENTITY (all lists): the framework itself promoted the name, so it can never be refused
@@ -1252,8 +1287,151 @@ def _provenance(root: str = HERE) -> Dict[str, dict]:
                 # not be shadowed by the artefact that happened to name the ticker first. It
                 # overwrites NEITHER the source NOR the group.
                 if venue:
+                    _sv = out[tk].get("scoring_venue")
+                    if _sv and not (set(expected_exchanges(tk, "", "", venue))
+                                    & {_sv}) and "." not in tk:
+                        # ⚑ ISA-0588: two venue records DISAGREE. Both are preserved and the
+                        # name is refused by name — never silently reconciled (R2.10).
+                        out[tk]["venue_conflict"] = {"scoring_venue": _sv,
+                                                     "watchlist_venue": venue}
                     out[tk]["declared_venue"] = venue
     return out
+
+
+def _attach_scoring_venue(rec: dict, row: dict, src: str) -> None:
+    """ISA-0588 — read a venue captured AT SCORING (row["scoring_venue"]). Only a record whose
+    status is CAPTURED_AT_SCORING and whose code is a known Yahoo venue code is admitted; an
+    UNKNOWN_NOT_CAPTURED record, a missing one, or an unrecognised code adds NOTHING (typed
+    absence stays absence). Two scoring records that disagree are a conflict, not a choice."""
+    sv = row.get("scoring_venue")
+    if not isinstance(sv, dict) or sv.get("status") != "CAPTURED_AT_SCORING":
+        return
+    code = str(sv.get("exchange") or "").strip().upper()
+    if code not in YAHOO_VENUE_CODES:
+        return
+    prev = rec.get("scoring_venue")
+    if prev and prev != code:
+        rec["venue_conflict"] = {"scoring_venue": prev, "other_scoring_venue": code,
+                                 "source": src}
+        return
+    rec["scoring_venue"] = code
+    rec.setdefault("scoring_venue_source", src)
+
+
+def expected_for(ticker: str, p: dict) -> set:
+    """ONE venue-identity contract for every verifier (ISA-0725/0588/0582). A recorded venue
+    conflict REFUSES. A scoring venue and a declared venue must BOTH admit the answer (their
+    intersection), so the tighter record governs and neither can widen the other."""
+    if not p or p.get("venue_conflict"):
+        return set()
+    exp = expected_exchanges(ticker, p.get("group", ""), p.get("broker_currency") or "",
+                             p.get("declared_venue") or "")
+    sv = p.get("scoring_venue")
+    if sv and "." not in ticker:
+        sexp = expected_exchanges(ticker, "", "", sv)
+        if exp and not (exp & sexp):
+            p["venue_conflict"] = {"scoring_venue": sv, "provenance_expected": sorted(exp)}
+            return set()
+        exp = (exp & sexp) if exp else sexp
+    return exp
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ISA-0725 — A DECLARED ALIAS IS PROVENANCE, NEVER VERIFICATION
+# ══════════════════════════════════════════════════════════════════════════════════════
+ALIAS_STATES = ("VERIFIED", "CONTRADICTED", "NO_VENUE_EXPECTATION", "FETCH_FAILED",
+                "NOT_VERIFIED")
+
+
+def alias_expectation(alias: str, symbol: str, prov: Dict[str, dict]) -> set:
+    """The venue a DECLARED alias must answer from. The target's suffix asserts it (ONT.L ->
+    LSE, FRO.OL -> OSL); a bare target needs provenance that asserts a venue for the ALIAS or
+    the TARGET (broker truth in USD, a US index group, a scoring or watchlist venue). A
+    declaration alone asserts nothing a fetch could contradict, so it forms no expectation."""
+    exp = expected_exchanges(symbol)
+    if exp:
+        return exp
+    for key in (alias, symbol):
+        p = prov.get(key)
+        if p:
+            e = expected_for(symbol, dict(p))
+            if e:
+                return e
+    return set()
+
+
+def verify_declared_aliases(*, root: str = HERE, verify: bool = True,
+                            aliases: Optional[Dict[str, str]] = None,
+                            fetch=None, today: Optional[str] = None) -> dict:
+    """Exchange-verify EVERY `SYMBOL_MAP` declaration exactly like a provenance name.
+
+    -> {"records": [{alias, symbol, state, exchange, currency, expected_exchanges, ...}],
+        "verified": [...verified[] records for VERIFIED targets...], "refused": [...]}
+
+    ⚑ THE DEFECT (ISA-0725). `load_symbol_map()` starts from `dict(SYMBOL_MAP)` and
+    `refresh_symbol_map()` only verified UNMAPPED names, so a hand-declared alias was
+    'mapped' without ever being checked: held QBTS had no verified venue and broker
+    dealability refused it as UNKNOWN_VENUE. Declaration and verification were one state.
+    Now every declaration is re-verified every refresh; a contradiction is REFUSED BY NAME and
+    `load_symbol_map()` drops the alias, so nothing downstream fetches the wrong listing."""
+    aliases = dict(SYMBOL_MAP if aliases is None else aliases)
+    fetch = fetch or _fetch_daily
+    today = today or datetime.date.today().isoformat()
+    prov = _provenance(root)
+    records, verified, refused = [], [], []
+    for alias, symbol in sorted(aliases.items()):
+        rec = {"alias": alias, "symbol": symbol, "declared_in": "stock_price_fetch.SYMBOL_MAP",
+               "verified_on": today}
+        ident = LISTING_IDENTITY.get(alias)
+        if ident:
+            rec["identity"] = ident
+        exp = alias_expectation(alias, symbol, prov)
+        rec["expected_exchanges"] = sorted(exp)
+        if not exp:
+            rec["state"] = "NO_VENUE_EXPECTATION"
+            rec["reason"] = ("a declaration with no venue-asserting provenance cannot be "
+                             "contradicted by any fetch, so it is not verified")
+        elif not verify:
+            rec["state"] = "NOT_VERIFIED"
+            rec["reason"] = "verify=False (offline refresh) — declaration recorded, not verified"
+        else:
+            try:
+                d = fetch(symbol, rng="5d")
+                rec["exchange"] = d.get("exchange") or ""
+                rec["currency"] = d.get("currency") or ""
+                if rec["exchange"] in exp:
+                    rec["state"] = "VERIFIED"
+                else:
+                    rec["state"] = "CONTRADICTED"
+                    rec["reason"] = ("DECLARED ALIAS ANSWERS FROM AN UNEXPECTED EXCHANGE — %s "
+                                     "answered from %s, its declared venue permits %s. The "
+                                     "ONT/Onterris falsifier applied to a hand declaration."
+                                     % (symbol, rec["exchange"] or "?", sorted(exp)))
+            except Exception as exc:                                    # noqa: BLE001
+                rec["state"] = "FETCH_FAILED"
+                rec["reason"] = "fetch failed: %s" % str(exc)[:120]
+        records.append(rec)
+        if rec["state"] == "VERIFIED":
+            v = {"ticker": symbol, "currency": rec["currency"], "exchange": rec["exchange"],
+                 "expected_exchanges": rec["expected_exchanges"],
+                 "source": "declared alias %s -> %s (stock_price_fetch.SYMBOL_MAP)"
+                           % (alias, symbol),
+                 "declared_alias_of": alias,
+                 "verified_by": "declared_alias_exchange_verified",
+                 "admitted_on": today}
+            if ident:
+                v["identity"] = ident
+            verified.append(v)
+        elif rec["state"] == "CONTRADICTED":
+            refused.append({"ticker": alias, "symbol": symbol, "source": "SYMBOL_MAP declaration",
+                            "fetched_exchange": rec.get("exchange"),
+                            "expected_exchanges": rec["expected_exchanges"],
+                            "reason": rec["reason"],
+                            "fix": ("correct the declaration in stock_price_fetch.SYMBOL_MAP "
+                                    "to the listing the framework means")})
+    return {"records": records, "verified": verified, "refused": refused,
+            "n_verified": sum(1 for r in records if r["state"] == "VERIFIED"),
+            "n_contradicted": len(refused)}
 
 
 def build_symbol_map(tickers: Sequence[str], *, root: str = HERE, rng: str = "5d",
@@ -1271,15 +1449,23 @@ def build_symbol_map(tickers: Sequence[str], *, root: str = HERE, rng: str = "5d
             refused.append({"ticker": t, "reason": "NO PROVENANCE — no index screen, broker "
                                                    "holding or VCI artefact has ever named it"})
             continue
-        exp = expected_exchanges(t, p.get("group", ""), p.get("broker_currency") or "",
-                                 p.get("declared_venue") or "")
+        exp = expected_for(t, p)
+        if not exp and p.get("venue_conflict"):
+            refused.append({"ticker": t, "group": p.get("group"), "source": p.get("source"),
+                            "company": p.get("company"),
+                            "venue_conflict": p.get("venue_conflict"),
+                            "reason": ("VENUE RECORDS CONFLICT — two venue records for this name "
+                                       "disagree; both are preserved and neither is chosen "
+                                       "(ISA-0588, R2.10)")})
+            continue
         if not exp:
             refused.append({"ticker": t, "group": p.get("group"), "source": p.get("source"),
                             "company": p.get("company"),
                             "declared_venue": p.get("declared_venue"),
                             "fix": ("declare the intended listing in "
-                                    "stock_price_fetch.SYMBOL_MAP, one line, e.g. "
-                                    "\"%s\": \"%s.L\" — deliberately, never guessed" % (t, t)),
+                                    "stock_price_fetch.SYMBOL_MAP, one line, "
+                                    "\"%s\": \"<symbol>.<venue suffix>\" — deliberately, "
+                                    "never guessed" % t),
                             "reason": ("CANNOT FORM A VENUE EXPECTATION — its provenance "
                                        "asserts no exchange, so nothing the fetch returns "
                                        "could contradict it. A bare ticker admitted on the "
@@ -1306,10 +1492,13 @@ def build_symbol_map(tickers: Sequence[str], *, root: str = HERE, rng: str = "5d
                                        "from NYQ; Oxford Nanopore is on LSE).")})
             continue
         smap[t] = t
-        verified.append({"ticker": t, "currency": cur, "exchange": exch,
-                         "expected_exchanges": sorted(exp),
-                         "source": p.get("source"), "company": p.get("company"),
-                         "verified_by": "exchange_vs_declared_venue"})
+        _vr = {"ticker": t, "currency": cur, "exchange": exch,
+               "expected_exchanges": sorted(exp),
+               "source": p.get("source"), "company": p.get("company"),
+               "verified_by": "exchange_vs_declared_venue"}
+        if p.get("scoring_venue"):
+            _vr["scoring_venue"] = p["scoring_venue"]
+        verified.append(_vr)
     return {"map": smap, "refused": refused, "verified": verified,
             "n_map": len(smap), "n_refused": len(refused),
             "basis": ("A symbol MATCH is not a check — requesting a bare `ONT` returns "
@@ -1322,9 +1511,36 @@ SYMBOL_MAP_STORE = os.path.join(HERE, "stock_symbol_map.json")
 
 def load_symbol_map() -> Dict[str, str]:
     """SYMBOL_MAP plus any VERIFIED entries persisted by `refresh_symbol_map()` (Step 5x)."""
+    return _load_symbol_map_from(SYMBOL_MAP_STORE)
+
+
+def _alias_summary(al: dict) -> dict:
+    by = {}
+    for r in al.get("records") or []:
+        by.setdefault(r["state"], []).append(r["alias"])
+    return {"by_state": by, "n_verified": al.get("n_verified"),
+            "n_contradicted": al.get("n_contradicted")}
+
+
+def alias_states(path: Optional[str] = None) -> Dict[str, str]:
+    """alias -> ALIAS_STATES value, from the persisted refresh. {} when never refreshed."""
+    d = _read_json(path or SYMBOL_MAP_STORE)
+    if not isinstance(d, dict):
+        return {}
+    return {r.get("alias"): r.get("state") for r in (d.get("alias_verification") or [])
+            if isinstance(r, dict) and r.get("alias")}
+
+
+def _load_symbol_map_from(path: str) -> Dict[str, str]:
     out = dict(SYMBOL_MAP)
-    d = _read_json(SYMBOL_MAP_STORE)
+    d = _read_json(path)
     if isinstance(d, dict):
+        # ⚑ ISA-0725 — a DECLARED alias whose live listing CONTRADICTED its venue is not an
+        # identity anything downstream may consume. It leaves the map, becomes unmapped, and is
+        # refused by name through symbol_map_refusals.json (never fetched on a wrong listing).
+        for r in (d.get("alias_refused") or []):
+            if isinstance(r, dict) and r.get("state") == "CONTRADICTED":
+                out.pop(r.get("alias"), None)
         for k, v in (d.get("map") or {}).items():
             out.setdefault(k, v)
     return out
@@ -1382,17 +1598,39 @@ def refresh_symbol_map(*, store: Optional[dict] = None, portfolio_data: Optional
         return {"state": "DISABLED", "flag": "symbol_map_refresh", "as_of": today,
                 "detail": "rollback: the map is whatever is on disk; 5y unchanged"}
 
-    smap = load_symbol_map()
+    # ⚑ ISA-0725 — declared aliases are verified FIRST, every refresh, and the result is
+    # persisted before anything reads the map, so a contradicted alias never reaches 5y.
+    _al = verify_declared_aliases(root=root, verify=verify, today=today)
+    _doc0 = _read_json(map_path)
+    if not isinstance(_doc0, dict):
+        _doc0 = {"_what": "", "built_on": today, "map": {}, "verified": [], "refused": []}
+    _vi0 = {v.get("ticker"): v for v in (_doc0.get("verified") or []) if isinstance(v, dict)}
+    for _v in _al["verified"]:
+        _old = _vi0.get(_v["ticker"])
+        if _old is None or _old.get("verified_by") == "declared_alias_exchange_verified":
+            _vi0[_v["ticker"]] = _v             # a provenance-verified record is never replaced
+    _doc0["verified"] = [_vi0[k] for k in sorted(_vi0)]
+    _doc0["alias_verification"] = _al["records"]
+    _doc0["alias_refused"] = [dict(r, alias=r["alias"]) for r in _al["records"]
+                              if r["state"] == "CONTRADICTED"]
+    _tmp0 = map_path + ".tmp"
+    with open(_tmp0, "w", encoding="utf-8") as fh:
+        json.dump(_doc0, fh, indent=1, sort_keys=False)
+    os.replace(_tmp0, map_path)
+    _alias_refused = list(_al["refused"])
+
+    smap = _load_symbol_map_from(map_path)
     store = store if store is not None else srs.load()
     uni = build_universe(store=store, portfolio_data=portfolio_data, symbol_map=smap,
                          strict=False)
     unmapped = list(uni.get("unmapped") or [])
     n_before = len(unmapped)
     if not unmapped:
-        _write_refusals(refusals_path, [], today, uni)
+        _write_refusals(refusals_path, _alias_refused, today, uni)
         return {"state": "NO_CHANGE", "as_of": today, "n_universe": uni["n"],
-                "n_unmapped_before": 0, "n_admitted": 0, "n_refused": 0,
-                "admitted": [], "refused": [], "n_unmapped_after": 0,
+                "n_unmapped_before": 0, "n_admitted": 0, "n_refused": len(_alias_refused),
+                "admitted": [], "refused": _alias_refused, "n_unmapped_after": 0,
+                "alias_verification": _alias_summary(_al),
                 "detail": "every universe name already carries a verified Yahoo symbol"}
 
     res = build_symbol_map(unmapped, root=root, verify=verify)
@@ -1416,7 +1654,9 @@ def refresh_symbol_map(*, store: Optional[dict] = None, portfolio_data: Optional
             ver_index[v["ticker"]] = v
     doc["map"] = existing
     doc["verified"] = [ver_index[k] for k in sorted(ver_index)]
-    doc["refused"] = res.get("refused") or []
+    doc["refused"] = (res.get("refused") or []) + [
+        r for r in _alias_refused
+        if r["ticker"] not in {x.get("ticker") for x in (res.get("refused") or [])}]
     doc["n_map"] = len(existing)
     doc["n_refused"] = len(doc["refused"])
     doc["refreshed_on"] = today
@@ -1438,7 +1678,7 @@ def refresh_symbol_map(*, store: Optional[dict] = None, portfolio_data: Optional
     os.replace(tmp, map_path)
 
     after = build_universe(store=store, portfolio_data=portfolio_data,
-                           symbol_map=load_symbol_map(), strict=False)
+                           symbol_map=_load_symbol_map_from(map_path), strict=False)
     _write_refusals(refusals_path, doc["refused"], today, after)
     return {"state": "REFRESHED", "as_of": today, "n_universe": after["n"] + after["n_unmapped"],
             "n_unmapped_before": n_before, "n_admitted": len(admitted), "admitted": admitted,
@@ -1446,6 +1686,7 @@ def refresh_symbol_map(*, store: Optional[dict] = None, portfolio_data: Optional
             "n_refused": len(doc["refused"]), "refused": doc["refused"],
             "n_unmapped_after": after["n_unmapped"], "unmapped_after": after["unmapped"],
             "n_mapped_after": after["n"], "map_path": map_path,
+            "alias_verification": _alias_summary(_al),
             "refusals_path": refusals_path,
             "detail": ("append-only: %d admitted, %d already present and NOT re-decided, %d "
                        "REFUSED and NAMED in %s (R4.8, R4.9)"
@@ -1716,8 +1957,82 @@ def _selftest() -> dict:
         srs._SMAP_CACHE.clear(); srs._SMAP_CACHE.update(_cache)
     n += 5
 
+    # ── I. DECLARED ALIASES ARE VERIFIED; VENUE IS ONE TYPED CONTRACT (ISA-0725/0588/0582) ─
+    def _fake(table):
+        def f(sym, rng="5d"):
+            if sym not in table:
+                raise RuntimeError("no fixture for %s" % sym)
+            return {"exchange": table[sym][0], "currency": table[sym][1], "daily": {}}
+        return f
+    with tempfile.TemporaryDirectory() as d:
+        json.dump({"stocks": [{"ticker": "QBTS", "full_name": "D-Wave Quantum Inc (NASDAQ:QBTS)",
+                               "name": "D-Wave", "currency": "USD"}]},
+                  open(os.path.join(d, "portfolio_data_sep_2026.json"), "w"))
+        good = _fake({"ONT.L": ("LSE", "GBp"), "QBTS": ("NMS", "USD"), "FRO.OL": ("OSL", "NOK"),
+                      "BARE": ("NMS", "USD")})
+        al = verify_declared_aliases(root=d, fetch=good, today="2026-09-25",
+                                     aliases={"ONT": "ONT.L", "QBTS": "QBTS", "FRO": "FRO.OL",
+                                              "BARE": "BARE"})
+        st = {r["alias"]: r["state"] for r in al["records"]}
+        # POSITIVE CONTROLS
+        assert st["ONT"] == "VERIFIED", al["records"]
+        assert st["QBTS"] == "VERIFIED", "held QBTS (broker USD) must verify on NMS"
+        assert st["FRO"] == "VERIFIED", "FRO -> FRO.OL must verify on OSL"
+        _fro = next(v for v in al["verified"] if v["declared_alias_of"] == "FRO")
+        assert _fro["identity"]["isin"] == "CY0200352116"
+        assert _fro["identity"]["conflicting_raw"], "a provider ISIN conflict is PRESERVED"
+        assert _fro["verified_by"] == "declared_alias_exchange_verified"
+        # NEGATIVE CONTROL: a declaration with no venue-asserting provenance is NOT verified
+        assert st["BARE"] == "NO_VENUE_EXPECTATION", st
+        assert all(v["declared_alias_of"] != "BARE" for v in al["verified"])
+        # ⚑ MUST-FIRE: a declared alias answering from an unexpected exchange is REFUSED
+        bad = _fake({"ONT.L": ("NYQ", "USD")})
+        al2 = verify_declared_aliases(root=d, fetch=bad, today="2026-09-25",
+                                      aliases={"ONT": "ONT.L"})
+        assert al2["records"][0]["state"] == "CONTRADICTED", al2
+        assert al2["refused"] and al2["refused"][0]["ticker"] == "ONT"
+        # and a contradicted alias LEAVES the map (nothing downstream may fetch it)
+        mp = os.path.join(d, "m.json")
+        json.dump({"map": {}, "verified": [],
+                   "alias_refused": [{"alias": "ONT", "state": "CONTRADICTED"}]}, open(mp, "w"))
+        assert "ONT" not in _load_symbol_map_from(mp) and "ONT.L" in _load_symbol_map_from(mp)
+        # NEGATIVE CONTROL: offline refresh records NOT_VERIFIED, never VERIFIED
+        al3 = verify_declared_aliases(root=d, verify=False, fetch=good, today="2026-09-25",
+                                      aliases={"ONT": "ONT.L"})
+        assert al3["records"][0]["state"] == "NOT_VERIFIED" and not al3["verified"]
+        # ⚑ ISA-0582 NEGATIVE CONTROL: a candidate_pool / watchlist 'NASDAQ' is NEVER a venue
+        json.dump({"candidate_pool": [{"ticker": "POOLX", "exchange": "NASDAQ"}],
+                   "watchlist": [{"ticker": "WLX", "exchange": "NASDAQ"}]},
+                  open(os.path.join(d, "watchlist_tickers.json"), "w"))
+        pv = _provenance(d)
+        assert "declared_venue" not in pv["POOLX"] and not expected_for("POOLX", pv["POOLX"])
+        assert "declared_venue" not in pv["WLX"] and not expected_for("WLX", pv["WLX"])
+        # ⚑ ISA-0588: a venue CAPTURED AT SCORING forms an expectation; UNKNOWN forms none
+        json.dump([{"ticker": "SCOR", "scoring_venue": {"exchange": "NMS",
+                                                         "status": "CAPTURED_AT_SCORING"}},
+                   {"ticker": "UNKV", "scoring_venue": {"exchange": None,
+                                                         "status": "UNKNOWN_NOT_CAPTURED"}},
+                   {"ticker": "NOVN"}],
+                  open(os.path.join(d, "vci_deploy_sep_2026.json"), "w"))
+        pv = _provenance(d)
+        assert expected_for("SCOR", pv["SCOR"]) == {"NMS"}, pv["SCOR"]
+        assert expected_for("UNKV", pv["UNKV"]) == set(), "typed UNKNOWN stays refused"
+        assert expected_for("NOVN", pv["NOVN"]) == set(), "no venue field stays refused"
+        # a scoring venue and a typed watchlist venue that DISAGREE are a named conflict
+        json.dump({"vci_watchlist": [{"ticker": "SCOR", "exchange": "NYSE"}]},
+                  open(os.path.join(d, "watchlist_tickers.json"), "w"))
+        pv = _provenance(d)
+        assert pv["SCOR"].get("venue_conflict") and expected_for("SCOR", pv["SCOR"]) == set()
+        r = build_symbol_map(["SCOR"], root=d, verify=False)
+        assert r["refused"] and "CONFLICT" in r["refused"][0]["reason"], r
+        # a code declares exactly itself; an unknown code widens to nothing
+        assert expected_exchanges("X", declared_venue="NMS") == {"NMS"}
+        assert expected_exchanges("X", declared_venue="ZZZ") == set()
+    n += 22
+
     return {"ok": True, "assertions": n, "network": False,
             "covers": ["month resolution (ISA-0579)", "venue expectation / ONT (ISA-0577)",
+                       "declared-alias verification + typed venue contract (ISA-0725/0588/0582)",
                        "Friday alignment, no forward-fill (ISA-0455)",
                        "FX direction (ISA-0429)", "GBp 0.01 arithmetic (ISA-0499)",
                        "universe incl. vci_deploy + refusal contract (ISA-0581)",

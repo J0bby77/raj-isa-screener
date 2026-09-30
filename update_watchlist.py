@@ -196,14 +196,20 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
         # Consensus target / current price (for provisional entry level)
         target_price   = safe_float(col(row_vals, "Target Price", "Consensus Target", "Price Target", "Fair Value"))
         current_price  = safe_float(col(row_vals, "Price", "Current Price", "Last Price"))
-        currency       = col(row_vals, "Currency") or "USD"
+        # ⚑ ISA-0582 (26-Sep-2026): the listing/quote currency is EVIDENCE or it is absent. The
+        #   workbook's "Listing Currency" column (build_excel, from the scoring fetch) is read first,
+        #   a legacy "Currency" column second; an absent/UNKNOWN value stays None - never "USD".
+        currency       = _typed_currency(col(row_vals, "Listing Currency", "Currency"))
 
         rows.append({
             "ticker":       ticker,
             "company":      str(company).strip() if company else ticker,
             "sector":       str(sector).strip() if sector else "",
-            "exchange":     str(exchange).strip() if exchange else "NASDAQ",
-            "currency":     str(currency).strip() if currency else "USD",
+            # ⚑ ISA-0582: an absent venue is TYPED absent, never the plausible constant NASDAQ.
+            "exchange":     str(exchange).strip() if exchange else None,
+            "exchange_status": EXCH_DECLARED if exchange else EXCH_UNKNOWN,
+            "currency":     currency,
+            "currency_status": CCY_QUOTE if currency else CCY_UNKNOWN,
             "part_a":       part_a,
             "part_b":       part_b,
             "total":        total,
@@ -225,6 +231,109 @@ def read_xlsx_summary_tab(xlsx_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Phase 1: Path classification
 # ---------------------------------------------------------------------------
+
+# ── ISA-0582 — THE EXCHANGE FIELD IS TYPED. ─────────────────────────────────────────────
+# Until 25-Sep-2026 three writers here defaulted a missing venue to the literal "NASDAQ", so
+# 124/124 candidate_pool rows read NASDAQ (incl. GFRD.L, ENR.DE, ENX.PA, FRO/Oslo) and an
+# absence was byte-identical to an answer (R4.1). Every row now carries `exchange_status`:
+#   DECLARED_IN_SOURCE      the screen workbook carried an Exchange/Market column value
+#   BROKER_LABEL            read from the broker's "(VENUE:TICKER)" label
+#   UNKNOWN_NOT_CAPTURED    nothing asserted a venue: `exchange` is None
+#   LEGACY_DEFAULT_DISCARDED a pre-fix "NASDAQ" with no status: the value was the default, so
+#                           it is discarded, never promoted to a declaration
+# ⚑ No verifier reads this field as a venue (stock_price_fetch / broker_dealability read only
+# exchange-verified listings); typing it removes the fabricated constant from every reader.
+# ISA-0582 (26-Sep-2026) — the listing/quote CURRENCY is typed the same way as the venue.
+#   QUOTE_CCY_AT_SCORING   the screen workbook carried the scoring fetch's quote currency
+#   UNKNOWN_NOT_CAPTURED   nothing evidenced a currency: the value is None, never "USD"
+# Pre-run Step 7.25 (entry_level_builder) later overwrites entry_currency from the LIVE quote of the
+# scored listing; that is the only enrichment path for a historical row (a current typed record).
+CCY_QUOTE = "QUOTE_CCY_AT_SCORING"
+CCY_UNKNOWN = "UNKNOWN_NOT_CAPTURED"
+
+
+def _typed_currency(v):
+    t = "" if v is None else str(v).strip()
+    return None if (not t or t.upper() in ("N/A", "NAN", "NONE", "UNKNOWN", "—")) else t
+
+
+EXCH_DECLARED = "DECLARED_IN_SOURCE"
+EXCH_BROKER = "BROKER_LABEL"
+EXCH_UNKNOWN = "UNKNOWN_NOT_CAPTURED"
+EXCH_LEGACY = "LEGACY_DEFAULT_DISCARDED"
+
+
+def broker_label_venue(full_name):
+    """'Micron Technology Inc (NASDAQ:MU)' -> ('NASDAQ', BROKER_LABEL); else (None, UNKNOWN)."""
+    import re as _re
+    m = _re.search(r"\(([A-Z][A-Z ]{1,15}):[A-Z0-9.\-]+\)\s*$", str(full_name or ""))
+    if m:
+        return m.group(1).strip(), EXCH_BROKER
+    return None, EXCH_UNKNOWN
+
+
+def type_exchange(entry: dict) -> dict:
+    """Give a row a typed exchange. A legacy untyped 'NASDAQ' is the old default: discarded."""
+    if not isinstance(entry, dict):
+        return entry
+    if entry.get("exchange_status"):
+        return entry
+    ex = entry.get("exchange")
+    if ex in (None, ""):
+        entry["exchange"], entry["exchange_status"] = None, EXCH_UNKNOWN
+    elif str(ex).strip().upper() == "NASDAQ":
+        entry["exchange"], entry["exchange_status"] = None, EXCH_LEGACY
+    else:
+        entry["exchange_status"] = EXCH_DECLARED
+    return entry
+
+
+def _selftest() -> int:
+    """Offline. ISA-0582 must-fire / negative controls for the typed exchange field."""
+    n = 0
+    assert broker_label_venue("Micron Technology Inc (NASDAQ:MU)") == ("NASDAQ", EXCH_BROKER); n += 1
+    assert broker_label_venue("Oxford Nanopore Technologies PLC (LSE:ONT)") == ("LSE", EXCH_BROKER); n += 1
+    # MUST-FIRE: no label -> typed UNKNOWN, never NASDAQ, never inferred from currency
+    assert broker_label_venue("Some Fund Name") == (None, EXCH_UNKNOWN); n += 1
+    assert broker_label_venue(None) == (None, EXCH_UNKNOWN); n += 1
+    # MUST-FIRE: a historical untyped NASDAQ never counts as a declaration
+    e = type_exchange({"ticker": "FRO", "exchange": "NASDAQ"})
+    assert e["exchange"] is None and e["exchange_status"] == EXCH_LEGACY, e; n += 1
+    e = type_exchange({"ticker": "X"})
+    assert e["exchange"] is None and e["exchange_status"] == EXCH_UNKNOWN; n += 1
+    # POSITIVE: a typed value is left alone; an explicit non-default value is declared
+    e = type_exchange({"ticker": "MU", "exchange": "NASDAQ", "exchange_status": EXCH_BROKER})
+    assert e["exchange"] == "NASDAQ" and e["exchange_status"] == EXCH_BROKER; n += 1
+    e = type_exchange({"ticker": "Y", "exchange": "LSE"})
+    assert e["exchange_status"] == EXCH_DECLARED; n += 1
+    # the three writers no longer carry the literal default (source scan, AST-free, exact text)
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    assert src.count('else "' + 'NASDAQ"') == 0 and src.count('"exchange", "' + 'NASDAQ")') == 0; n += 1
+    # ── ISA-0582 listing CURRENCY (26-Sep-2026) ─────────────────────────────────────────
+    assert _typed_currency("DKK") == "DKK" and _typed_currency(" GBp ") == "GBp"; n += 1
+    # MUST-FIRE: absence / UNKNOWN / N/A stay None - the pre-fix reader returned "USD"
+    assert _typed_currency(None) is None and _typed_currency("") is None; n += 1
+    assert _typed_currency("UNKNOWN") is None and _typed_currency("N/A") is None; n += 1
+    try:
+        import openpyxl, tempfile
+        for hdr, val, want, st in ((["Ticker", "Listing Currency"], "DKK", "DKK", CCY_QUOTE),
+                                   (["Ticker", "Listing Currency"], "UNKNOWN", None, CCY_UNKNOWN),
+                                   (["Ticker", "Currency"], "EUR", "EUR", CCY_QUOTE),     # legacy header
+                                   (["Ticker", "Company"], "Acme", None, CCY_UNKNOWN)):    # historical workbook
+            wb = openpyxl.Workbook(); ws = wb.active; ws.title = "SUMMARY"
+            ws.append(hdr); ws.append(["ISS.CO", val])
+            fd, pth = tempfile.mkstemp(suffix=".xlsx"); os.close(fd); wb.save(pth)
+            r = read_xlsx_summary_tab(pth)[0]
+            os.remove(pth)
+            assert r["currency"] == want and r["currency_status"] == st, (hdr, val, r); n += 1
+    except ImportError:
+        print("  [selftest] openpyxl absent - workbook controls NOT RUN (never reported as pass)")
+        return -1
+    # no writer in this module may default a currency to USD (exact-text scan)
+    assert src.count('"currency", "' + 'USD")') == 0 and src.count('or "' + 'USD"') == 0; n += 1
+    print("update_watchlist ISA-0582 selftest: %d assertions, 0 failed" % n)
+    return n
+
 
 def classify_path(row: dict, filename: str) -> str:
     """
@@ -495,7 +604,9 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             qty = hs.get("quantity") or 0
             cost = hs.get("cost_gbp")
             cps = round(cost / qty, 4) if (cost and qty) else None
-            exch = "LSE" if (hs.get("currency") == "GBP") else "NASDAQ"
+            # ⚑ ISA-0582: the venue is READ from the broker label "(NASDAQ:MU)", never inferred
+            # from the currency; no label -> typed UNKNOWN.
+            exch, exch_status = broker_label_venue(hs.get("full_name"))
             # ⚑ CARRY THE PATH ACROSS THE MOVE (ISA-0567, 02-Sep-2026). A name is deleted from
             # the watchlist and the VCI list the moment the broker file shows it held, and this
             # auto-added sleeve entry replaced it WITHOUT `path` or `source_pipeline`. So every
@@ -513,6 +624,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             _prior = _prior_path_for(b, wl_data)
             _entry = {
                 "ticker": b, "name": hs.get("name", ""), "exchange": exch,
+                "exchange_status": exch_status,
                 "purchase_date": None, "cost_per_share_usd": None,
                 "cost_total_gbp": cost, "shares": qty,
                 "include_in_metrics_pull": True,
@@ -979,9 +1091,11 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         new_candidates[ticker] = {
             "ticker":                  ticker,
             "name":                    row.get("company", ticker),
-            "exchange":                row.get("exchange", "NASDAQ"),
+            "exchange":                row.get("exchange"),
+            "exchange_status":         row.get("exchange_status") or EXCH_UNKNOWN,
             "entry_level":             entry_level,
-            "entry_currency":          row.get("currency", "USD"),
+            "entry_currency":          row.get("currency") or None,
+            "entry_currency_status":   CCY_QUOTE if row.get("currency") else CCY_UNKNOWN,
             "entry_level_provisional": True,
             "sector":                  row.get("sector", ""),
             "source_pipeline":         "growth_stock",
@@ -1117,7 +1231,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
         pool_entries.append({
             "ticker":                  ticker,
             "name":                    row.get("company", ticker),
-            "exchange":                row.get("exchange", "NASDAQ"),
+            "exchange":                row.get("exchange"),
+            "exchange_status":         row.get("exchange_status") or EXCH_UNKNOWN,
             "path":                    row.get("path", "A"),
             "source_pipeline":         "growth_stock",
             "normalised_score":        round(ns, 1),
@@ -1125,7 +1240,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
             "part_a":                  row.get("part_a"),
             "part_b":                  row.get("part_b"),
             "entry_level":             entry_level,
-            "entry_currency":          row.get("currency", "USD"),
+            "entry_currency":          row.get("currency") or None,
+            "entry_currency_status":   CCY_QUOTE if row.get("currency") else CCY_UNKNOWN,
             "entry_level_provisional": True,
             "sector":                  row.get("sector", ""),
             "candidate_pool_month":    month_label,
@@ -1144,6 +1260,8 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     # Phase 7: Write outputs
     # -----------------------------------------------------------------------
     if not dry_run:
+        for _e in list(new_wl) + list(pool_entries):
+            type_exchange(_e)
         wl_data["watchlist"] = new_wl
 
         # --- Membership is fresh-screen-driven (anti-stickiness, design decision 2026-06-07) ---
@@ -1228,6 +1346,9 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
 # ---------------------------------------------------------------------------
 
 def main():
+    if "--selftest" in sys.argv:
+        _selftest()
+        return
     parser = argparse.ArgumentParser(
         description=(
             "Watchlist promotion, score refresh, and ranking. "

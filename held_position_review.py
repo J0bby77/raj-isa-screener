@@ -476,6 +476,25 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
         "lifecycle_capital_authority": capital_authority,
         "thesis_states": {r["ticker"]: (r.get("thesis") or {}).get("state") for r in rows},
     }
+    # ── ISA-0760 — the thesis contract/evaluation identity per held name, STAGED for Sunday ──
+    #   Saturday stages ids and typed absence only; it never fabricates a qualitative judgement.
+    #   Sunday Step 5 evaluates against these contracts and records via `thesis_state.py --record`.
+    try:
+        _lin = {r["ticker"]: _ts.lineage_for(r["ticker"], root) for r in rows} if _ts else {}
+        summary["thesis_lineage"] = {
+            "rows": _lin,
+            "n_held": len(rows),
+            "n_contracted": sum(1 for v in _lin.values() if v.get("thesis_contract_id")),
+            "n_not_captured": sum(1 for v in _lin.values()
+                                  if v.get("state") == _ts.NOT_CAPTURED),
+            "projection_drift": _ts.projection_drift(root) if _ts else None,
+            "qualitative_overdue": _ts.qualitative_overdue(root, today) if _ts else None,
+            "basis": "ISA-0760: the thesis journal via thesis_state.lineage_for; legacy "
+                     "holdings are NOT_CAPTURED_CONTEMPORANEOUSLY, never reconstructed"}
+    except Exception as _le:                                         # noqa: BLE001
+        summary["thesis_lineage"] = {"state": "UNAVAILABLE",
+                                     "why": "%s: %s" % (type(_le).__name__, _le)}
+        warn.append("Step 6.5 (ISA-0760): thesis lineage UNAVAILABLE — %s" % _le)
     # ── ISA-0685 — membership, on every held row and as a population ───────────────────
     # ⚑ ADMITTED_UNDECIDED must be VISIBLE, RISK-COUNTED and REPORTABLE. This is where
     #   "reportable" becomes true in fact rather than in prose: the review is what Raj reads.
@@ -546,6 +565,11 @@ def _selftest(verbose: bool = True) -> int:
        "the 182-day min-hold must be ENFORCED, not silently absent (ISA-0645)")
     ok(all(v for v in r["summary"]["thesis_states"].values()),
        "every held name carries a declared thesis_state or is named as refused (ISA-0466)")
+    _tl = r["summary"].get("thesis_lineage") or {}
+    ok(_tl.get("n_held") == len(r["rows"]) and len(_tl.get("rows") or {}) == len(r["rows"])
+       and all(v.get("state") for v in (_tl.get("rows") or {}).values()),
+       "ISA-0760: thesis lineage staged N of N held names, each typed (contract id or "
+       "NOT_CAPTURED_CONTEMPORANEOUSLY)")
 
     # ⚑ MUST-FIRE (R5.10) — ISA-0646. On the live book every VCI size is UNEVALUATED
     #   because QBTS cannot be priced and the budget is therefore WITHHELD, which is correct

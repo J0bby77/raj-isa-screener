@@ -275,6 +275,17 @@ def capture_one(full_data_path, dest_root, run_date=None, group=None):
     out["constituents"] = capture_constituents(
         full_data_path, dest_root, rd, gp, os.path.join(dest_root, "gate_variables.csv"))
     out["regime"] = capture_regime(dest_root, rd)   # PIT-guarded; skips non-today dates
+    # ISA-0483 (26-Sep-2026) — the source-performance RUN LEDGER append is a property of
+    # retaining the frame, like the capture itself. Idempotent per (run_date, group); a failure is
+    # a typed state on the capture record, never silent (R4.12).
+    try:
+        sys.path.insert(0, dest_root)
+        import source_performance_writer as _spw
+        out["source_performance"] = _spw.append_run(
+            full_data_path, gp, route=os.environ.get("ISA_SCREEN_ROUTE"),
+            path=os.path.join(dest_root, "source_performance_log.json"))
+    except Exception as e:                                             # noqa: BLE001
+        out["source_performance"] = {"state": "REFUSED", "why": f"{type(e).__name__}: {e}"}
     # §Q2 survivorship — runs off the constituent history just written, so it always sees the
     # newest run. Acquired names are disproportionately WINNERS; without this a ticker that
     # stops appearing is indistinguishable from a fetch failure, and every study inherits the

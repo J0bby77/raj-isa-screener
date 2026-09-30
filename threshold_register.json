@@ -22,7 +22,8 @@
     "retention.step_down_ratchet"
    ],
    "gbp_exposure": 0.0,
-   "register_item": "ISA-0458",
+   "register_item": "ISA-0709",
+   "register_item_history": "ISA-0458 until 2026-09 (D19 conjunction assurance delivered TB-2026-09-25-03; residual R12.3/R13.1 provenance is the ISA-0709 class, owner moved on ISA-0458 supersession)",
    "note": "⚑ The spec measured 35.2%/yr TE on 27-Aug, which puts -5pp at 0.14 SD and a 44% false-fire rate on ZERO true alpha — at 6, 12 AND 24 months. The window was never the lever. Seeded null here on purpose: P1 re-measures it rather than this build copying a number across (R4.4).",
    "basis_class": "DECLARED_POLICY",
    "authority_trace": "clean spec V2.1 D19 leg (a) (-5pp trail vs VUAG), one of three legs of Raj's D19 conjunction (retention.PROBATION_LEGS); single-leg diagnostic retained as published information",

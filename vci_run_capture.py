@@ -69,7 +69,7 @@ def _vci_capital_authority():
                 "build_id": None, "why": "release_gate unavailable — %s: %s" % (type(e).__name__, e)}
 
 
-def new_run(month_label, run_date=None, trusted_build=None):
+def new_run(month_label, run_date=None, trusted_build=None, require_review_universe=True):
     """Empty vci_run_[mmm]_[yyyy].json skeleton, stamped with the run's capital authority.
 
     ⚑ ISA-0629 (16-Sep-2026): the VCI run is a capital-decision run and no VCI surface asked
@@ -86,7 +86,27 @@ def new_run(month_label, run_date=None, trusted_build=None):
         "overrides": [],
         "discards": [],
         "fast_screen_discards": [],   # §7.6B.4: Section 2 / Checkpoint B discards, same shape
+        # ISA-0769 (27-Sep-2026): the canonical review population this run must conserve. Attached with
+        # attach_review_universe(); write() refuses a production run without it.
+        "review_universe": None,
+        "require_review_universe": bool(require_review_universe),
     }
+
+
+def attach_review_universe(run, universe):
+    """ISA-0769 — attach the canonical review universe (vci_prescore --universe-out file or the dict
+    vci_review_universe.build returned). The stage-conservation check in validate() reads it."""
+    if isinstance(universe, str):
+        with open(universe, encoding="utf-8") as fh:
+            universe = json.load(fh)
+    if not isinstance(universe, dict) or not isinstance(universe.get("members"), list):
+        raise ValueError("attach_review_universe: not a review-universe document (ISA-0769)")
+    run["review_universe"] = {"as_of": universe.get("as_of"), "counts": universe.get("counts"),
+                              "held_authority": universe.get("held_authority"),
+                              "members": [{"key": m.get("key"), "ticker": m.get("ticker"),
+                                           "roles": m.get("roles"), "holding_state": m.get("holding_state")}
+                                          for m in universe["members"]]}
+    return run["review_universe"]
 
 
 # ── candidates (§7.6B.2) ────────────────────────────────────────────────────────────────
@@ -121,6 +141,12 @@ def add_candidate(run, *, ticker, theme, layer, market_cap, part_a_score,
         "catalyst": catalyst,
         "decision": decision,
     }
+    # VCI-A (27-Sep-2026): the typed decision-grade states travel with the candidate, verbatim from
+    # the verdict (never re-derived here): identity, ACS/source-score measurement, FV lineage.
+    for _k in ("scoring_venue", "security_identity", "acs_state", "vci_source_score_state",
+               "structured_fv_state", "fv_input_id", "refusals"):
+        if _k in verdict:
+            entry[_k] = verdict.get(_k)
     run["candidates"].append(entry)
     for ov in detect_overrides(entry):
         run["overrides"].append(ov)
@@ -240,6 +266,42 @@ def validate(run):
     for i, o in enumerate(run.get("overrides", [])):
         if o.get("override_type") not in OVERRIDE_TYPES:
             errs.append(f"override[{i}] unknown override_type: {o.get('override_type')}")
+    # ⚑ ISA-0771 / ISA-0588 (VCI-A, 27-Sep-2026) — the POST-RUN LINEAGE ASSERTION. A candidate
+    #   carrying a deploy verdict must reference the structured FV record it was evaluated on and a
+    #   VERIFIED security identity. The Aug-2026 run recorded a deploy for a name whose inputs lived
+    #   in a memory note; this refuses that document instead of persisting it.
+    for i, c in enumerate(run.get("candidates", [])):
+        if c.get("deploy_eligible"):
+            if not c.get("fv_input_id") or c.get("structured_fv_state") != "PRESENT":
+                errs.append(f"candidate[{i}] ({c.get('ticker', '?')}) is deploy-eligible with no structured "
+                            f"FV lineage (fv_input_id={c.get('fv_input_id')!r}) - ISA-0771")
+            if (c.get("security_identity") or {}).get("state") != "VERIFIED":
+                errs.append(f"candidate[{i}] ({c.get('ticker', '?')}) is deploy-eligible without a VERIFIED "
+                            f"security identity - ISA-0588")
+    # ⚑ ISA-0769 (VCI-B, 27-Sep-2026) — STAGE CONSERVATION. input = scored + named refusals/rejections,
+    #   zero unexplained; a CURRENT_HELD_VCI member neither scored nor named is the September failure.
+    if run.get("require_review_universe"):
+        uni = run.get("review_universe")
+        if not uni:
+            errs.append("review_universe not attached (ISA-0769): run vci_prescore.py ... --advance N "
+                        "--universe-out <path> and VRC.attach_review_universe(run, <path>) before writing")
+        else:
+            try:
+                import vci_review_universe as _vru
+                _c = _vru.conservation(uni, {
+                    "scored": [c.get("ticker") for c in run.get("candidates", [])],
+                    "named": [d.get("ticker") for d in run.get("discards", []) + run.get("fast_screen_discards", [])]})
+                run["review_universe_conservation"] = _c
+                for t in _c["missing_held"]:
+                    errs.append(f"CURRENT_HELD_VCI {t} is in the review universe but was neither scored nor "
+                                f"given a named discard/refusal - capital at risk went unreviewed (ISA-0769)")
+                for t in _c["unexplained"]:
+                    if t not in _c["missing_held"]:
+                        errs.append(f"review-universe member {t} was neither scored nor discarded with a named "
+                                    f"reason - unexplained drop (ISA-0769)")
+            except Exception as _e:                                   # noqa: BLE001
+                errs.append(f"review-universe conservation could not run ({type(_e).__name__}: {_e}) - "
+                            f"UNVERIFIED, refused (ISA-0769)")
     # ⚑ R18.5 / ISA-0629 — no capital decision on an untrusted tree. The authority is read
     #   through release_gate's one reader shape; absence is REFUSED (R4.3). A deploy-eligible
     #   candidate must carry a decision that STARTS with "REFUSED" while it is not AUTHORISED.
@@ -328,7 +390,10 @@ def _capture_to_ledger(run, path, here, ledger_path, held):
 
 # ── selftest ─────────────────────────────────────────────────────────────────────────────
 
-CANDIDATE_REQUIRED_FIXTURE = {k: None for k in CANDIDATE_REQUIRED}
+CANDIDATE_REQUIRED_FIXTURE = dict({k: None for k in CANDIDATE_REQUIRED},
+                                  # VCI-A lineage a real evaluate_candidate() verdict carries
+                                  fv_input_id="FVI-FIXTURE-000000000000", structured_fv_state="PRESENT",
+                                  security_identity={"state": "VERIFIED"})
 CANDIDATE_REQUIRED_FIXTURE.update({"ticker": "ABS"})
 
 
@@ -340,14 +405,16 @@ def _selftest():
         if not cond:
             fails.append(label)
 
-    run = new_run("aug_2026", run_date="2026-08-09")
+    run = new_run("aug_2026", run_date="2026-08-09", require_review_universe=False)
     ok("VRC1 skeleton has all top-level keys",
        all(k in run for k in ("schema_version", "month_label", "run_date", "candidates",
                               "overrides", "discards", "fast_screen_discards")))
 
     verdict = {"bottleneck_fv_per_share": 19.6, "fv_asymmetry": 2.4168, "fv_asymmetry_p25": 1.8571,
               "fv_source": "modeled", "fv_floor": 2.0, "deploy_eligible": False,
-              "require_manual_confirm": False, "vci_source_score": 51.0, "size_pct": 0.0}
+              "require_manual_confirm": False, "vci_source_score": 51.0, "size_pct": 0.0,
+              "fv_input_id": "FVI-ABCL-000000000000", "structured_fv_state": "PRESENT",
+              "security_identity": {"state": "VERIFIED"}, "refusals": []}
     entry = add_candidate(run, ticker="ABCL", theme="Genomic AI", layer="Layer 3",
                           market_cap=1.2e9, part_a_score=15, part_a_threshold_verdict="PASS",
                           acs_dimensions={"A12": {"score": 0, "note": "CONSENSUS LAG — not a "
@@ -370,7 +437,7 @@ def _selftest():
        not any(o["override_type"] == "nvidia_class_bypass" for o in run["overrides"]))
 
     # NVIDIA-class + exception-track + pending-review cases
-    run2 = new_run("aug_2026")
+    run2 = new_run("aug_2026", require_review_universe=False)
     v2 = dict(verdict, fv_source="estimated", require_manual_confirm=True)
     e2 = add_candidate(run2, ticker="HYP", theme="Test", layer="Layer 1", market_cap=60e9,
                        part_a_score=9, part_a_threshold_verdict="PRE_INFLECTION_OVERRIDE",
@@ -408,7 +475,7 @@ def _selftest():
     v_ok, v_errs = validate(run2)
     ok("VRC12 a complete document validates clean", v_ok, str(v_errs))
 
-    bad = new_run("aug_2026")
+    bad = new_run("aug_2026", require_review_universe=False)
     bad["candidates"].append({"ticker": "X"})   # missing everything else
     v_ok2, v_errs2 = validate(bad)
     ok("VRC13 an incomplete candidate FAILS validation (not silently accepted)",
@@ -430,12 +497,12 @@ def _selftest():
 
     # ── ISA-0629 / R18.5 — a capital decision on an untrusted tree is refused at capture ───────
     ok("VRC17 new_run stamps a capital authority from the release gate (never absent)",
-       (new_run("aug_2026").get("trusted_build") or {}).get("authority")
+       (new_run("aug_2026", require_review_universe=False).get("trusted_build") or {}).get("authority")
        in ("AUTHORISED", "REFUSED", "NOT_ENFORCED"))
     v_dep = dict(verdict, deploy_eligible=True, size_pct=0.75)
     def _run_with(auth, decision):
         r = new_run("aug_2026", run_date="2026-08-09",
-                    trusted_build={"authority": auth, "live_state": "FIXTURE"})
+                    trusted_build={"authority": auth, "live_state": "FIXTURE"}, require_review_universe=False)
         add_candidate(r, ticker="DEP", theme="T", layer="L1", market_cap=1e9, part_a_score=15,
                       part_a_threshold_verdict="PASS", acs_dimensions={}, acs_total=80,
                       acs_ex_acs8=76, fv_inputs={}, verdict=v_dep, signals=[], catalyst=None,
@@ -445,7 +512,7 @@ def _selftest():
        not _run_with("REFUSED", "DEPLOY 0.75% starter")[0])
     ok("VRC18b NEGATIVE CONTROL: an ABSENT authority is treated as REFUSED",
        any("capital authority" in e for e in
-           validate(dict(new_run("aug_2026", trusted_build={}),
+           validate(dict(new_run("aug_2026", trusted_build={}, require_review_universe=False),
                          candidates=[dict(CANDIDATE_REQUIRED_FIXTURE, deploy_eligible=True,
                                           decision="DEPLOY")]))[1]))
     ok("VRC19 POSITIVE CONTROL: AUTHORISED + the same DEPLOY decision validates",
@@ -461,7 +528,7 @@ def _selftest():
         _elig = _run_with("AUTHORISED", "DEPLOY 0.75% starter")[2] \
             if len(_run_with("AUTHORISED", "DEPLOY 0.75% starter")) > 2 else None
         r = new_run("oct_2026", run_date="2026-10-11",
-                    trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"})
+                    trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"}, require_review_universe=False)
         add_candidate(r, ticker="TSTA", theme="T", layer="Layer 3", market_cap=1e9,
                       part_a_score=12, part_a_threshold_verdict="pass",
                       acs_dimensions={"a": 1}, acs_total=80, acs_ex_acs8=75,
@@ -470,9 +537,20 @@ def _selftest():
                                "fv_asymmetry_p25": 2.4, "fv_source": "modeled",
                                "fv_floor": 2.0, "deploy_eligible": True,
                                "require_manual_confirm": False, "vci_source_score": 60.0,
-                               "size_pct": 0.75},
+                               "size_pct": 0.75, "fv_input_id": "FVI-TSTA-000000000000",
+                               "structured_fv_state": "PRESENT",
+                               "security_identity": {"state": "VERIFIED"}, "refusals": []},
                       signals=["s1"], catalyst="named catalyst",
                       decision="DEPLOY 0.75% starter")
+        # ⚑ VCI-A NEGATIVE CONTROL (ISA-0771/0588): the same deploy-eligible candidate WITHOUT lineage
+        #   must be refused at write - the Aug-2026 shape (inputs in a memory note, no record).
+        _nolin = json.loads(json.dumps(r))
+        for _c in _nolin["candidates"]:
+            _c.pop("fv_input_id", None); _c["structured_fv_state"] = "MISSING_STRUCTURED_FV_INPUT"
+            _c["security_identity"] = {"state": "AMBIGUOUS"}
+        _okv, _errs = validate(_nolin)
+        ok("VRC-A1 NEGATIVE CONTROL: a deploy-eligible candidate with no FV lineage / unverified identity must not validate",
+           (not _okv) and any("ISA-0771" in e for e in _errs) and any("ISA-0588" in e for e in _errs), _errs)
         path = write(r, here=td2, month_label="oct_2026", ledger_path=_lp)
         _cur = _dl.current_decision(_lp, "TSTA", "vci")
         ok("⚑ ISA-0686 MUST-FIRE THROUGH THE REAL WRITE POINT: persisting the VCI run "
@@ -501,7 +579,7 @@ def _selftest():
     with _tf.TemporaryDirectory() as td3:
         _lp3 = os.path.join(td3, "decision_ledger.json")
         r2 = new_run("oct_2026", run_date="2026-10-11",
-                     trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"})
+                     trusted_build={"authority": "AUTHORISED", "build_id": "TB-TEST-99"}, require_review_universe=False)
         add_candidate(r2, ticker="TSTB", theme="T", layer="Layer 3", market_cap=1e9,
                       part_a_score=12, part_a_threshold_verdict="pass",
                       acs_dimensions={"a": 1}, acs_total=80, acs_ex_acs8=75,
@@ -510,7 +588,9 @@ def _selftest():
                                "fv_asymmetry_p25": 2.4, "fv_source": "modeled",
                                "fv_floor": 2.0, "deploy_eligible": True,
                                "require_manual_confirm": False, "vci_source_score": 60.0,
-                               "size_pct": 0.75},
+                               "size_pct": 0.75, "fv_input_id": "FVI-TSTB-000000000000",
+                               "structured_fv_state": "PRESENT",
+                               "security_identity": {"state": "VERIFIED"}, "refusals": []},
                       signals=["s1"], catalyst="c", decision="DEPLOY 0.75% starter")
         write(r2, here=td3, month_label="oct_2026", ledger_path=_lp3,
               capture_decisions=False)
@@ -525,6 +605,29 @@ def _selftest():
            {"ZZZ": {"ticker": "ZZZ", "deploy_eligible": True,
                     "require_manual_confirm": False}})["ok"])
 
+    # ══ ISA-0769 (VCI-B) — stage conservation against the review universe ═══════════════
+    import vci_review_universe as _vru
+    _uni = _vru.build([{"ticker": "IONQ", "qms": 80}], 1, watchlist=["IONQ"],
+                      held={"state": "OK", "why": "fixture", "authority": {},
+                            "members": [{"key": "QBTS", "ticker": "QBTS", "holding_state": "HELD",
+                                         "vci_provenance": ["fixture"]}]})
+    _r = new_run("oct_2026", run_date="2026-10-11", trusted_build={"authority": "AUTHORISED"})
+    _ok0, _e0 = validate(_r)
+    ok("VRC-B0 MUST-FIRE: a production run with NO review universe attached is refused (ISA-0769)",
+       (not _ok0) and any("review_universe not attached" in e for e in _e0), _e0)
+    attach_review_universe(_r, _uni)
+    _cand_kw = dict(theme="T", layer="L", market_cap=1e9, part_a_score=12, part_a_threshold_verdict="pass",
+                    acs_dimensions={}, acs_total=70, acs_ex_acs8=66, fv_inputs=None,
+                    verdict={"deploy_eligible": False, "require_manual_confirm": True},
+                    signals=[], catalyst=None, decision="WATCHLIST")
+    add_candidate(_r, ticker="IONQ", **_cand_kw)
+    _ok1, _e1 = validate(_r)
+    ok("VRC-B1 NEGATIVE CONTROL: the September shape - held QBTS never re-scored - must NOT validate",
+       (not _ok1) and any("CURRENT_HELD_VCI QBTS" in e for e in _e1), _e1)
+    add_candidate(_r, ticker="QBTS", **_cand_kw)
+    _ok2, _e2 = validate(_r)
+    ok("VRC-B2 POSITIVE CONTROL: every member scored -> conservation PASS",
+       _ok2 and _r["review_universe_conservation"]["counts"]["unexplained"] == 0, _e2)
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)}) {fails}")
     return 0 if not fails else 1
 
@@ -541,7 +644,8 @@ def main():
     if a.new:
         if not a.month:
             ap.error("--month required with --new")
-        run = new_run(a.month)
+        # skeleton only: the real run attaches its review universe before its single write (ISA-0769)
+        run = new_run(a.month, require_review_universe=False)
         path = write(run, here=a.out, month_label=a.month)
         print(f"VCI_RUN_CAPTURE new skeleton -> {path}")
         return 0

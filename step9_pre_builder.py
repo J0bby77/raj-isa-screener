@@ -959,7 +959,7 @@ def main():
         pipeline = wt_entry.get("source_pipeline", ts.get("_pipeline", "growth_stock"))
         current_price = ts.get("current_price")
         entry_level = ts.get("_entry_level") or wt_entry.get("entry_level")
-        entry_currency = wt_entry.get("entry_currency", "USD")
+        entry_currency = wt_entry.get("entry_currency")   # ISA-0582: typed absent (None), never a USD default
         path = wt_entry.get("path", "A")
         rank = wt_entry.get("rank") or cr_lookup.get(ticker, {}).get("rank", 99)
         delta_score = cr_lookup.get(ticker, {}).get("delta_score", 0)

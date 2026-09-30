@@ -36,6 +36,12 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 WEEKS_PER_YEAR = 52.0
 DIMSON_LAGS = 1
 # ISA-0680: the window and its minimum live in isa_policy (RISK_WINDOW_WEEKS / RISK_MIN_WEEKS) and are
@@ -392,13 +398,20 @@ def gate_add(store: dict, portfolio: dict, ticker: str) -> dict:
 #   says so at every ceiling from 20% to 40%, so the conclusion does not rest on the constant.
 
 
-def risk_shares(store: dict, portfolio: dict, dates=None) -> dict:
+def risk_shares(store: dict, portfolio: Optional[dict], dates=None, *,
+                weights: Optional[Dict[str, float]] = None) -> dict:
     """Each name's share of TOTAL SLEEVE RISK (Euler decomposition; shares sum to 1).
 
     REFUSES rather than returning shares over a subset: a concentration statistic quoted over
     part of a sleeve and read as covering it is how a concentration goes unnoticed (the 77.5%
-    coverage lesson from 6.07). Every excluded name is NAMED with its weight."""
-    w = sleeve_weights(portfolio)
+    coverage lesson from 6.07). Every excluded name is NAMED with its weight.
+
+    ⚑ ISA-0708 (25-Sep-2026) — THE ONE COMPUTER OF `mctr` (quantity_register). `weights=` lets
+    `weight_at_ceiling` evaluate the SAME decomposition on a hypothetical weight vector instead
+    of re-deriving the Euler share inline (it was the second home). The shares are homogeneous
+    of degree 0 in the weights, so an un-normalised vector gives the same answer."""
+    _fi_mark("sleeve_risk", "risk_shares")
+    w = dict(weights) if weights is not None else sleeve_weights(portfolio)
     names = [t for t, x in w.items() if x]
     if not names:
         raise RiskRefused("no weighted names in the sleeve")
@@ -416,11 +429,9 @@ def risk_shares(store: dict, portfolio: dict, dates=None) -> dict:
                           % (n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
     S = sigma(store, w, dates)
-    out = {}
-    for a in names:
-        mctr = sum(w[b] * _cov(R[a], R[b]) for b in names) * WEEKS_PER_YEAR / S
-        out[a] = w[a] * mctr / S
-    return {"shares": out, "sleeve_sigma_ann": S, "weights": dict(w),
+    mctr = {a: sum(w[b] * _cov(R[a], R[b]) for b in names) * WEEKS_PER_YEAR / S for a in names}
+    out = {a: w[a] * mctr[a] / S for a in names}
+    return {"shares": out, "mctr": mctr, "sleeve_sigma_ann": S, "weights": dict(w),
             "n_names": len(names), "n_weeks": n_returns(dates), "dates": list(dates),
             "risk_window": window_of(dates), "coverage_pct": 100.0}
 
@@ -457,6 +468,7 @@ def risk_share_authority(store: dict, portfolio: dict, dates=None) -> dict:
     calc_id = "RSHR-%s" % _hl.sha256(snapshot.encode("utf-8")).hexdigest()[:12]
     return {"risk_share_calc_id": calc_id,
             "shares": rs["shares"], "weights": rs["weights"],
+            "mctr": rs["mctr"],             # relayed: the marginal contribution, same call
             "sleeve_sigma_ann": rs["sleeve_sigma_ann"],
             "n_names": rs["n_names"], "coverage_pct": rs["coverage_pct"],
             "window": window, "dates": d,
@@ -479,14 +491,13 @@ def weight_at_ceiling(store: dict, portfolio: dict, ticker: str, ceiling_pct: fl
     w0 = sleeve_weights(portfolio)
     names = sorted(set([t for t, x in w0.items() if x]) | {ticker})
     d = dates or window_dates(store, names)
-    R = {t: returns_on(store, t, d) for t in names}
 
     def share(x: float) -> float:
+        # ISA-0708: the SAME decomposition (risk_shares), on the hypothetical weight vector -
+        # never a second inline derivation of the Euler share.
         w = dict(w0)
         w[ticker] = x
-        S = sigma(store, w, d)
-        mctr = sum(w[b] * _cov(R[ticker], R[b]) for b in names if w.get(b)) * WEEKS_PER_YEAR / S
-        return w[ticker] * mctr / S
+        return risk_shares(store, None, d, weights=w)["shares"][ticker]
 
     # ⚑ ISA-0736 (23-Sep-2026): the bracket was a FIXED [0, 0.30] of the sleeve, so a ceiling lying
     #   above 30% sleeve weight converged on the bracket and was reported AS the ceiling (AVGO read
@@ -713,6 +724,23 @@ def _selftest(verbose: bool = True) -> int:
        "⚑ NEGATIVE CONTROL (ISA-0736, R5.2): the returned weight must REPRODUCE the 35%% share "
        "(independent recomputation gives %.4f)" % _sh)
 
+    # ⚑ ISA-0708 — ONE computer: risk_shares(weights=hypothetical) reproduces the pre-0708
+    #   inline Euler share that weight_at_ceiling used to compute for itself.
+    _hw = dict(sleeve_weights(pf)); _hw["AVGO"] = 0.5
+    _hd = window_dates(store, [t for t, x in _hw.items() if x])
+    _hR = {t: returns_on(store, t, _hd) for t in _hw if _hw[t]}
+    _hS = sigma(store, _hw, _hd)
+    _legacy = (_hw["AVGO"] * sum(_hw[b] * _cov(_hR["AVGO"], _hR[b]) for b in _hR)
+               * WEEKS_PER_YEAR / _hS / _hS)
+    _one = risk_shares(store, None, _hd, weights=_hw)["shares"]["AVGO"]
+    ok(abs(_one - _legacy) < 1e-12,
+       "ISA-0708 NEGATIVE CONTROL: the one decomposition on a hypothetical vector equals the "
+       "legacy inline share (%.12f vs %.12f)" % (_one, _legacy))
+    _auth = risk_share_authority(store, pf)
+    ok(set(_auth["mctr"]) == set(_auth["shares"]) and all(
+        abs(_auth["shares"][t] - _auth["weights"][t] * _auth["mctr"][t] / _auth["sleeve_sigma_ann"]) < 1e-12
+        for t in _auth["shares"]),
+       "ISA-0708 MUST-FIRE: the authority publishes the SAME mctr its shares were built from")
     if verbose:
         print("sleeve_risk._selftest: %d assertions, 0 failed" % n)
     return n

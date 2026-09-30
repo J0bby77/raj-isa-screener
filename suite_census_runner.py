@@ -48,7 +48,129 @@ STATE_REL = os.path.join("Dashboard", "state")
 STATUS_REL = os.path.join(STATE_REL, "suite_status.json")
 HISTORY_REL = os.path.join(STATE_REL, "suite_census_history.jsonl")
 META = "census_runner_meta.json"
-DEFAULT_SANDBOX = os.path.join(os.path.expanduser("~"), ".isa_census_sandbox")
+# ⚑ ISA-0786 (30-Sep-2026) — THE CENSUS MUST NOT RUN ON A FULL DISK AND CALL THE RESULT RED.
+#   The Cowork host mounts every session HOME (and TMPDIR = ~/tmp) on ONE shared /sessions volume that
+#   runs at 99-100% (measured 30-Sep: 24-164 MB free of 9.8 GB), while / (/tmp) has GBs free. The
+#   sandbox (~100 MB tree + ~10 MB parent inputs) and every suite's tempfiles landed on /sessions; the
+#   30-Sep 07:31Z lead census published FRESH_RED with suites failing on missing fixtures/temp writes
+#   that are GREEN on a roomy filesystem (test_xray_tiling, test_anchor_cadence_d2d3d4,
+#   test_d23_retrospective_section_c, test_return_architecture). A red suite caused by the host's disk
+#   is an ENVIRONMENT fact (R2.9/R5.12), and it REFUSED capital authority. The sandbox and the suites'
+#   TMPDIR now go to the first candidate volume with CENSUS_MIN_FREE_MB free (uid-private /tmp first),
+#   and prepare() REFUSES - typed ENVIRONMENT, never a published RED - when no candidate has room.
+CENSUS_MIN_FREE_MB = 400          # placement preference for the real tree (~110 MB copied)
+CENSUS_MARGIN_MB = 50
+
+
+def census_space_needed_mb(live: str) -> float:
+    """2 x (the tree the sandbox copies + the parent folder's top-level inputs) + margin - the suites
+    write artefacts and tempfiles of the same order as the tree they run in."""
+    tot = 0
+    for dp, dn, fn in os.walk(live):
+        dn[:] = [d for d in dn if not any(d == x or d.startswith(x) for x in IGNORE_PREFIXES)]
+        for f in fn:
+            try:
+                tot += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    par = os.path.dirname(os.path.realpath(live))
+    for f in os.listdir(par) if os.path.isdir(par) else []:
+        fp = os.path.join(par, f)
+        if os.path.isfile(fp):
+            tot += os.path.getsize(fp)
+    return 2 * tot / 1e6 + CENSUS_MARGIN_MB
+
+
+def _free_mb(path: str) -> float:
+    p = os.path.abspath(path)
+    while not os.path.exists(p) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    try:
+        st = os.statvfs(p)
+        return st.f_bavail * st.f_frsize / 1e6
+    except (OSError, AttributeError):
+        return -1.0
+
+
+def sandbox_candidates() -> list:
+    uid = getattr(os, "getuid", lambda: 0)()
+    return [os.path.join(os.path.sep, "tmp", "isa_census_sandbox_%s" % uid),
+            os.path.join(os.path.expanduser("~"), ".isa_census_sandbox")]
+
+
+def default_sandbox(candidates=None, free_fn=None) -> str:
+    """ISA_CENSUS_SANDBOX wins; else the first candidate whose volume has CENSUS_MIN_FREE_MB free;
+    else the roomiest (prepare() then refuses it, typed, if it is still too small)."""
+    env = os.environ.get("ISA_CENSUS_SANDBOX")
+    if env:
+        return env
+    free_fn = free_fn or _free_mb
+    cands = list(candidates or sandbox_candidates())
+    room = [(free_fn(c), c) for c in cands]
+    for mb, c in room:
+        if mb >= CENSUS_MIN_FREE_MB:
+            return c
+    return max(room)[1]
+
+
+DEFAULT_SANDBOX = default_sandbox()
+
+
+# ⚑ ISA-0786 (30-Sep-2026) — THE CENSUS RUNS IN THE DECLARED ENVIRONMENT OR SAYS WHY NOT.
+#   yfinance (requirements.txt) is not in the host base image. The lead census runs the suites directly
+#   and the 28-Sep / 30-Sep lead censuses recorded 8 ENVIRONMENT_UNKNOWN suites for it - a FRESH_RED that
+#   REFUSED capital while the code was fine. The pre-run's own `pip install yfinance` wrote to ~/.local on
+#   the same near-full /sessions volume. One installer now puts the package set the pre-run SKILL already
+#   uses (--no-deps --only-binary, base image supplies the heavy deps) into a uid-private dir on the roomy
+#   volume, on sys.path AND PYTHONPATH so every suite subprocess sees it; failure stays typed.
+RUNTIME_PACKAGES = ("yfinance",)
+RUNTIME_PIP_SET = ("yfinance", "curl_cffi", "frozendict", "multitasking", "peewee", "platformdirs",
+                   "protobuf", "websockets", "pytz")
+
+
+def pylibs_dir() -> str:
+    uid = getattr(os, "getuid", lambda: 0)()
+    return os.path.join(os.path.dirname(os.path.abspath(DEFAULT_SANDBOX)), "isa_pylibs_%s" % uid)
+
+
+def _activate_pylibs(target: str) -> None:
+    import importlib
+    if target not in sys.path:
+        sys.path.insert(0, target)
+    pp = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
+    if target not in pp:
+        os.environ["PYTHONPATH"] = os.pathsep.join([target] + pp)
+    importlib.invalidate_caches()
+
+
+def ensure_runtime_packages(target: str = None, runner=None) -> dict:
+    """-> {"state": PRESENT|INSTALLED|UNAVAILABLE, "missing": [...], "target": path, "why": str}."""
+    import importlib.util
+    import subprocess
+    target = target or pylibs_dir()
+    if os.path.isdir(target):
+        _activate_pylibs(target)
+    missing = [p for p in RUNTIME_PACKAGES if importlib.util.find_spec(p) is None]
+    if not missing:
+        return {"state": "PRESENT", "missing": [], "target": target, "why": "declared runtime packages importable"}
+    runner = runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=150))
+    os.makedirs(target, exist_ok=True)
+    base = [sys.executable, "-m", "pip", "install", "--target", target, "--no-cache-dir", "-q"]
+    tries = [base + ["--no-deps", "--only-binary=:all:"] + list(RUNTIME_PIP_SET), base + list(RUNTIME_PACKAGES)]
+    why = []
+    for argv in tries:
+        try:
+            r = runner(argv)
+            why.append("rc=%s %s" % (getattr(r, "returncode", "?"), (getattr(r, "stderr", "") or "")[-160:]))
+        except Exception as exc:                                        # noqa: BLE001
+            why.append("%s: %s" % (type(exc).__name__, exc))
+        _activate_pylibs(target)
+        missing = [p for p in RUNTIME_PACKAGES if importlib.util.find_spec(p) is None]
+        if not missing:
+            return {"state": "INSTALLED", "missing": [], "target": target, "why": "; ".join(why)}
+    return {"state": "UNAVAILABLE", "missing": missing, "target": target,
+            "why": "install failed - suites needing %s will read ENVIRONMENT_UNKNOWN (typed, R2.9): %s"
+                   % (missing, "; ".join(why))}
 IGNORE_PREFIXES = ("archive", "_bak", "_to_delete", "__pycache__", "_baseline", "register_archive",
                    "_dryrun_outputs", "_candidate_evidence", ".git")
 PREPARE_MAX_AGE_H = 24
@@ -94,6 +216,13 @@ def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
                                            "vouch for a Trusted build (R18.5)" % (v.get("state"), v.get("build_id"))}
     if os.path.isdir(sandbox):
         shutil.rmtree(sandbox)
+    _room, _need = _free_mb(sandbox), census_space_needed_mb(live)
+    if _room < _need:
+        return {"state": "REFUSED", "environment": True,
+                "why": ("ENVIRONMENT (ISA-0786): %.0f MB free on the volume holding %s, below the %.0f MB this "
+                        "census needs (2 x tree + parent inputs + %d MB margin) - REFUSED rather than run suites "
+                        "that would fail on the disk and publish a false RED (R2.9). Set ISA_CENSUS_SANDBOX to a "
+                        "roomy path." % (_room, sandbox, _need, CENSUS_MARGIN_MB))}
     os.makedirs(sandbox)
     tree = _tree(sandbox)
 
@@ -153,10 +282,18 @@ def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150
         if p["state"] != "PREPARED":
             return {"state": "REFUSED", "why": p["why"]}
     tree = _tree(sandbox)
+    _deps = ensure_runtime_packages()                                   # ISA-0786
     spent = (_now() - t0).total_seconds()
-    env_old = {k: os.environ.get(k) for k in ("ISA_SUITE_PROTECT", "ISA_CENSUS_KIND")}
+    env_old = {k: os.environ.get(k) for k in ("ISA_SUITE_PROTECT", "ISA_CENSUS_KIND", "TMPDIR")}
     os.environ["ISA_SUITE_PROTECT"] = os.pathsep.join([live, os.path.dirname(live)])
     os.environ["ISA_CENSUS_KIND"] = kind
+    # ISA-0786: every suite's tempfiles go to the sandbox's (roomy) volume, never the session TMPDIR.
+    _suite_tmp = os.path.join(sandbox, "_tmp")
+    os.makedirs(_suite_tmp, exist_ok=True)
+    os.environ["TMPDIR"] = _suite_tmp
+    import tempfile as _tf786
+    _tf_old = _tf786.tempdir
+    _tf786.tempdir = _suite_tmp
     # an already-installed guard (e.g. this selftest running inside the census) is left as it is: installing
     # would widen it and uninstalling would remove the OUTER guard (the ISA-0704 lesson).
     outer = bool(wg._STATE.get("installed"))
@@ -170,6 +307,7 @@ def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150
         blocked = wg.manifest().get("n_blocked", 0) if wg._STATE.get("installed") else 0
         if not outer:
             wg.uninstall()
+        _tf786.tempdir = _tf_old
         for k, val in env_old.items():
             if val is None:
                 os.environ.pop(k, None)
@@ -333,6 +471,32 @@ def _selftest(verbose: bool = True) -> int:
         if not cond:
             fails.append(name)
 
+    # ── ISA-0786: sandbox placement and the typed disk refusal ─────────────────────────────────
+    _fake = {"/roomy/a": 5000.0, "/full/b": 20.0}
+    ok("ISA-0786 MUST-FIRE: a full first candidate is skipped for a roomy one",
+       default_sandbox(["/full/b", "/roomy/a"], free_fn=lambda p: _fake[p]) == "/roomy/a")
+    ok("ISA-0786: with no roomy candidate the roomiest is returned (prepare then refuses it, typed)",
+       default_sandbox(["/full/b", "/x"], free_fn=lambda p: {"/full/b": 20.0, "/x": 30.0}[p]) == "/x")
+    _saved_min = globals()["CENSUS_MARGIN_MB"]
+    _saved_vl = rg.verify_live
+    try:
+        globals()["CENSUS_MARGIN_MB"] = 10 ** 12
+        rg.verify_live = lambda *_a, **_k: {"state": "TRUSTED", "build_id": "TB-SELFTEST"}
+        _pr = prepare(HERE, os.path.join(tempfile.mkdtemp(prefix="isa0786_"), "sb"))
+        ok("ISA-0786 NEGATIVE CONTROL: on a TRUSTED tree, too little disk is REFUSED typed ENVIRONMENT, "
+           "never run as a census", _pr.get("state") == "REFUSED" and _pr.get("environment") is True
+           and "ENVIRONMENT (ISA-0786)" in str(_pr.get("why")), _pr)
+    finally:
+        globals()["CENSUS_MARGIN_MB"] = _saved_min
+        rg.verify_live = _saved_vl
+    _calls = []
+    _st = ensure_runtime_packages(target=tempfile.mkdtemp(prefix="isa0786p_"),
+                                  runner=lambda a: _calls.append(a))
+    import importlib.util as _iu786
+    ok("ISA-0786 dependency installer: a present package is PRESENT with no pip call; an absent one is "
+       "attempted and, if still absent, typed UNAVAILABLE (never silently green)",
+       (_st["state"] == "PRESENT" and not _calls) if _iu786.find_spec("yfinance") else
+       (_st["state"] == "UNAVAILABLE" and len(_calls) == 2 and "--target" in _calls[0]), _st)
     saved_core = cc.BATTERY_SELFTEST_MODULES
     cc.BATTERY_SELFTEST_MODULES = ()                     # the mini tree carries no core battery modules
     base = tempfile.mkdtemp(prefix="census_runner_selftest_")

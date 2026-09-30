@@ -393,7 +393,7 @@ def _f_run_surfaces(root: str) -> dict:
         import framework_atlas as fa
         wb = fa.run_surface_texts(with_basis=True)
         bases = {k: v[1] for k, v in wb.items()}
-        n_exec = sum(1 for b in bases.values() if b == "executed")
+        n_exec = sum(1 for b in bases.values() if b in ("executed", "canonical_loaded"))
         live_dir = fa.scheduled_skills_dir()
         return _field(
             "GREEN" if live_dir is not None else "PARTIAL",

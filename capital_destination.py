@@ -1695,6 +1695,29 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                     except Exception as _se:                            # noqa: BLE001
                         out["concentration"] = {"mode": "SHADOW", "impact": {
                             "state": "UNAVAILABLE", "reason": "%s: %s" % (type(_se).__name__, _se)}}
+                # ⚑ ISA-0714 (26-Sep-2026) — SHADOW ONLY, AFTER the authoritative allocation exists.
+                #   The proposed order is re-run on the sequencer's exact inputs with each in-run
+                #   admitted name at min(position_sizing.target_pct pre-correlation target, remaining
+                #   stock capital / NAV); its funding uses the SAME allocate() arguments. Published
+                #   beside the plan; nothing reads it for capital; a failure is UNAVAILABLE, never raised.
+                try:
+                    import prospective_weight_shadow as _pws
+                    def _pws_alloc(_po, _prepl):
+                        return _ps.allocate(
+                            sm.get("qualifying_uses") or [], capital_gbp=stock_max, nav_gbp=total1,
+                            ranking_basis=(order_basis or "source_score"), policy=policy,
+                            sequencer_order=_po, obligations=_ps.load_fill_obligations(),
+                            replacement_only=_prepl, donor_releases=_donors, membership=membership,
+                            underwriting=underwriting,
+                            concentration=(_hook["fn"] if _cmode == "LIVE" else None))
+                    out["prospective_weight_shadow"] = _pws.evaluate(
+                        (sequence or {}).get("prospective_shadow_token"), candidates=cands,
+                        nav_gbp=total1, capital_gbp=stock_max, current_sequence=sequence,
+                        current_allocation=out["allocation"], allocate=_pws_alloc, policy=policy)
+                except Exception as _pwe:                               # noqa: BLE001
+                    out["prospective_weight_shadow"] = {"mode": "SHADOW", "authoritative": False,
+                                                        "state": "UNAVAILABLE",
+                                                        "reason": "%s: %s" % (type(_pwe).__name__, _pwe)}
                 # one envelope shape across all three branches, so a reader can tell
                 # "allocated" from "refused" by one key rather than by absence
                 out["allocation"]["state"] = "OK"
@@ -2519,6 +2542,17 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
         seq = _ds.sequence(cands, held=held, matrix=mtx, sigmas=_sig, weights=_nav_w,
                            se_rho=_rse.get("se"),
                            ranking_basis=cands.get("ranking_basis", "source_score"))
+        # ⚑ ISA-0714 (26-Sep-2026) — SHADOW ONLY. Retain the sequencer's EXACT inputs (process-local)
+        #   so sleeve_split can re-run it with prospective weights from the sizing authority once the
+        #   stock capital on offer is known, and publish current vs proposed. Never raises here.
+        try:
+            import prospective_weight_shadow as _pws
+            seq["prospective_shadow_token"] = _pws.remember(
+                cands=cands, held=held, matrix=mtx, sigmas=_sig, weights=_nav_w,
+                se_rho=_rse.get("se"), ranking_basis=cands.get("ranking_basis", "source_score"))
+        except Exception as _pwe:                                       # noqa: BLE001
+            notes.append("ISA-0714 SHADOW inputs not retained (%s: %s) - the shadow record will read "
+                         "UNAVAILABLE; the authoritative order is unaffected" % (type(_pwe).__name__, _pwe))
         seq["score_se"] = se
         seq["rho_se"] = _rse
         seq["correlation_inputs"] = {

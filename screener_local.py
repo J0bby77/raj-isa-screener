@@ -165,6 +165,8 @@ def screen_batch_nasdaq(core, cdf, info_map, stmt_map):
 
 
 def main():
+    # ISA-0755/0483: the route is stamped on the run ledger and read by the completion receipt.
+    os.environ.setdefault("ISA_SCREEN_ROUTE", "local_primary")
     ap = argparse.ArgumentParser(description="Local resumable growth screener runner.")
     ap.add_argument("--group")
     ap.add_argument("--tickers", nargs="+")
@@ -313,6 +315,7 @@ def main():
                     inc_q = _iq if (_iq is not None and not (hasattr(_iq, "empty") and _iq.empty)) \
                         else stmt_map.get(t, {}).get("income_stmt_quarterly")
                     row = core._score_ticker(t, info, inc, cf, bal, inc_q, cdf)
+                    core.stamp_business_profile(row, info)   # ISA-0762 (display only)
                     core.apply_overlays_inline(row, t, info, inc, cf, bal, d)
                     scored.append(row)
                 except Exception as e:
@@ -533,5 +536,42 @@ def main():
           f"accounted={accounted} gate4_conc={bool(g4.get('_concentration_warning'))}")
 
 
+def _stamp_contract_errors(src: str) -> list:
+    """ISA-0762/0755 wiring on the LIVE screen path, asserted on this module's own source:
+    the business profile is stamped on every scored row right after _score_ticker, and the run
+    declares its route for the run ledger / completion receipt."""
+    errs = []
+    i_score = src.find("row = core._score_ticker(")
+    i_stamp = src.find("core.stamp_business_profile(row, info)")
+    if i_score < 0 or i_stamp < 0 or i_stamp < i_score:
+        errs.append("business profile not stamped after _score_ticker")
+    if 'os.environ.setdefault("ISA_SCREEN_ROUTE", "local_primary")' not in src:
+        errs.append("route not declared for the run ledger")
+    return errs
+
+
+def _selftest(verbose: bool = True) -> int:
+    fails = []
+
+    def ck(name, cond):
+        if verbose:
+            print(("  ok   " if cond else "  FAIL ") + name)
+        if not cond:
+            fails.append(name)
+
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    ck("the live path stamps the business profile after scoring and declares its route",
+       not _stamp_contract_errors(src))
+    ck("negative control: removing the stamp call must fail the contract",
+       bool(_stamp_contract_errors(src.replace("core.stamp_business_profile(row, info)", "pass"))))
+    ck("negative control: removing the route declaration must fail the contract",
+       bool(_stamp_contract_errors(src.replace('"ISA_SCREEN_ROUTE", "local_primary"', '"X", "y"'))))
+    if verbose:
+        print("screener_local selftest: %d failure(s)" % len(fails))
+    return 1 if fails else 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

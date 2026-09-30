@@ -383,6 +383,14 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     ("position_sizing", "target_pct", "live_run", "the fixed ladder rung for one position"),
     ("position_sizing", "apply_correlation", "live_run",
      "A2.3 unmeasured-correlation STARTER cap"),
+    ("vci_deploy_eval", "evaluate_candidate", "live_run",
+     "VCI-A: typed identity / ACS+score measurement / FV lineage on every VCI verdict (ISA-0588/0667/0771)"),
+    ("vci_review_universe", "build", "live_run",
+     "ISA-0769: the canonical VCI review population (held + watchlist + QMS + overrides, conserved)"),
+    ("vci_acs_scorer", "balance_sheet_basis", "live_run",
+     "ISA-0770: listing-aware balance-sheet admissibility for VCI Part A (A8 runway)"),
+    ("task_authority", "launch", "live_run",
+     "ISA-0537: invocation authority - which canonical workflow a scheduled capital task executes"),
     # --- measurement ---------------------------------------------------------------------
     ("stock_return_store", "record_level", "live_run",
      "the capture instrument. Pre-P1 this reports REACHABLE_NOT_LIVE — it has never captured "
@@ -390,6 +398,8 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     ("stock_return_store", "coverage", "live_run", "per-name measurement status, every run"),
     ("correlation_engine", "assess", "live_run", "the A2.1 admission gate"),
     ("risk_contribution", "contributions", "live_run", "risk share of each held position"),
+    ("sleeve_risk", "risk_shares", "live_run",
+     "ISA-0708: THE one mctr/risk-share computer (authority via risk_share_authority; D27 ceiling)"),
     ("evidence_state", "classify", "live_run", "the counted-channel evidence classifier"),
     # --- selection / lifecycle -----------------------------------------------------------
     ("retention", "ratchet_eligible", "live_run",
@@ -399,6 +409,8 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     #   position_sizing.allocate via capital_destination (SHADOW until Raj's LIVE decision).
     # --- ISA-0699 (16-Sep-2026): the capability-registry producers that carried NO observation ---
     ("correlation_engine", "candidate_correlation", "live_run", "CAP-rho_sleeve producer (A2.1 rho vs sleeve)"),
+    ("correlation_engine", "sleeve_rho", "live_run",
+     "ISA-0714: THE one rho_sleeve computer (relayed by candidate_correlation and deployment_sequencer.rho_to_set)"),
     # --- ISA-0685 (20-Sep-2026): a holding is not an admission ---------------------------
     ("sleeve_membership", "classify", "live_run",
      "CAP-sleeve_membership producer — binds a holding to an admission DECISION so that being "

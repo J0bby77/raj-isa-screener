@@ -317,6 +317,106 @@ def registrability(title: str, raw: str = "", criticality: str = "MEDIUM") -> di
                       "than being dropped silently (R4.9)."}
 
 
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# R7.7 PROMOTION POLICY (ISA-0764, Raj-approved 26-Sep-2026) — ONE HOME, extending ISA-0336
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# 100% of retrospective findings are DURABLY CAPTURED (the run's findings ledger in
+# retro_ingest_log.json + retro_nonregistrable_log.json) and RENDERED in the email. PROMOTION to
+# the canonical register is a separate decision, made here and nowhere else:
+#   P-1  work requested / to be undertaken (work_required / raj_requested)      -> promote, any severity
+#   P-2  severity undeclared -> MEDIUM; a finding NO rule classifies is promoted (ISA-0336 fail-open)
+#   AR-1 CRITICAL / HIGH                                                          -> promote always
+#   P-3  a declared escalation (ESCALATIONS) or RECURRENCE of the observation    -> promote
+#   P-4  MEDIUM -> ISA-0336 registrability (promote unless an NR rule shows it is an observation)
+#   P-5  LOW    -> observation by default; promoted only if an AR-2..AR-6 rule names work, an
+#               execution failure, a data-source gap, a contract deviation or an inert mechanism
+# An observation keeps a CONTENT-DERIVED observation_id (run- and number-independent), its
+# disposition/reason and its recurrence history. It is evidence, never a second work register:
+# NO WORK may start from an observation - work creates an item first (P-1).
+PROMOTION_POLICY = "R7.7/ISA-0764 (26-Sep-2026)"
+SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+ESCALATIONS = ("recurrence", "contract_or_invariant_failure", "capital_impact",
+               "data_integrity_impact", "evidence_persistence_impact", "release_impact",
+               "decision_effectiveness_impact", "systemic", "pattern", "classification_uncertain",
+               "raj_request", "work_required")
+_OBS_NORM = re.compile(r"[^a-z]+")
+
+
+def observation_id(title: str) -> str:
+    """Run-independent, number-independent identity of an observation (recurrence key)."""
+    t = _clean(title or "")
+    t = re.sub(r"^\[[^\]]*\]\s*", "", t)                  # drop a "[20260926_GROUP]" prefix
+    t = re.sub(r"\b(critical|high|medium|low)\b\s*[-:\u2014\u2013]*", " ", t, flags=re.I)
+    return "OBS-" + hashlib.sha256(_OBS_NORM.sub(" ", t.lower()).strip().encode("utf-8")).hexdigest()[:12]
+
+
+def _prior_sightings(obs_id: str, run_label: str | None) -> list:
+    """Runs (other than this one) in which the same observation was recorded."""
+    runs = set()
+    for r in (load_nonregistrable().get("findings") or {}).values():
+        if r.get("observation_id") == obs_id and r.get("run_label") and r.get("run_label") != run_label:
+            runs.add(r["run_label"])
+    for lbl, e in ((load_log().get("runs") or {}).items()):
+        if lbl == run_label:
+            continue
+        for x in (e.get("findings_ledger") or []):
+            if x.get("observation_id") == obs_id:
+                runs.add(lbl)
+    return sorted(runs)
+
+
+def promotion_decision(finding: dict, *, run_label: str | None = None, sightings=None) -> dict:
+    """THE R7.7 promotion decision for one retrospective finding (ISA-0764).
+
+    -> {registrable, rule, reason, severity, escalations, observation_id, recurrence}.
+    `registrable` keeps its ISA-0336 meaning (promote to the register). Fails OPEN."""
+    title = _clean(finding.get("title", ""))
+    sev = finding.get("severity") if finding.get("severity") in SEVERITIES else None
+    sev_basis = "DECLARED" if sev else None
+    if sev is None:
+        for rx, level in SEVERITY:
+            if rx.search(title):
+                sev, sev_basis = level, "INFERRED_FROM_TITLE"
+                break
+    if sev is None:
+        # Undeclared and uninferable: MEDIUM, the ISA-0336 default. MEDIUM is then decided by
+        # the registrability rules, whose DEFAULT is registrable - that is the fail-open (P-2).
+        sev, sev_basis = "MEDIUM", "DEFAULT_MEDIUM"
+    esc = [e for e in (finding.get("escalations") or []) if e in ESCALATIONS]
+    if finding.get("work_required"):
+        esc.append("work_required")
+    if finding.get("raj_requested"):
+        esc.append("raj_request")
+    oid = observation_id(title)
+    prior = list(sightings) if sightings is not None else _prior_sightings(oid, run_label)
+    if prior:
+        esc.append("recurrence")
+    esc = sorted(set(esc))
+    out = {"severity": sev, "severity_basis": sev_basis, "escalations": esc, "observation_id": oid,
+           "recurrence": prior, "policy": PROMOTION_POLICY}
+    if "work_required" in esc or "raj_request" in esc:
+        return {**out, "registrable": True, "rule": "P-1-work",
+                "reason": "Work was requested or will be undertaken: an item is required BEFORE work (R7.7)."}
+    if sev in ("CRITICAL", "HIGH"):
+        return {**out, "registrable": True, "rule": "AR-1-severity", "reason": _ALWAYS[0][2]}
+    if esc:
+        return {**out, "registrable": True, "rule": "P-3-escalation",
+                "reason": "Escalation condition(s): %s." % ", ".join(esc)}
+    reg = registrability(title, "", sev)
+    if sev == "MEDIUM":
+        return {**out, "registrable": reg["registrable"], "rule": reg["rule"], "reason": reg["reason"]}
+    # LOW: an observation unless an ALWAYS rule (other than severity) names a real defect class
+    for rid, rx, reason in _ALWAYS[1:]:
+        if rx.search(title):
+            return {**out, "registrable": True, "rule": rid,
+                    "reason": "LOW but escalated: " + reason}
+    if not reg["registrable"]:
+        return {**out, "registrable": False, "rule": reg["rule"], "reason": reg["reason"]}
+    return {**out, "registrable": False, "rule": "P-5-low-observation",
+            "reason": "LOW, local and non-recurring with no escalation condition: retained as an "
+                      "observation (evidence, not a work item). Any work on it creates an item first."}
+
+
 def is_registrable_title(title: str, criticality: str = "MEDIUM") -> bool:
     """Used by the battery to assert no informational finding is sitting in the register."""
     return registrability(title, "", criticality)["registrable"]
@@ -352,12 +452,14 @@ def build_items(path: Path, backfill: bool, split: bool = False):
     out, informational = [], []
     for f in parsed["findings"]:
         cls = _classify(f)
-        reg = registrability(f["title"], f["raw"], cls["criticality"])
+        reg = promotion_decision({"title": f["title"], "severity": cls["criticality"]},
+                                 run_label=stem)
         if not reg["registrable"]:
             informational.append({
                 "file": path.name, "line": f["line"], "section": f["section"],
                 "title": f"[{stem}] {f['title']}"[:300],
-                "rule": reg["rule"], "reason": reg["reason"],
+                "rule": reg["rule"], "reason": reg["reason"], "run_label": stem,
+                "severity": reg["severity"], "observation_id": reg["observation_id"],
                 "fingerprint": _sha(f"{stem}|{f['section']}|{f['n']}|{f['title']}")})
             continue
         alias = f"RETRO:{stem}#{f['section'][:24]}#{f['n']}"
@@ -559,31 +661,26 @@ def coverage(root=None) -> list:
 
 def record_findings(run_label: str, findings: list, *, group: str = None,
                     run_date: str = None, dry_run: bool = False) -> dict:
-    """Write findings straight to the register. `findings` is a list of dicts:
+    """Capture EVERY finding of a run durably, and promote to the register per R7.7 (ISA-0764).
 
         {"title": str, "detail": str, "severity": "CRITICAL|HIGH|MEDIUM|LOW" (optional),
-         "kind": "DEFECT|RESEARCH" (optional), "claims_fix": bool (optional),
-         "context": str, "cause_proximate": str, "cause_systemic": str,
-         "consequence": str, "corrective_action": str}
+         "escalations": [one of ESCALATIONS] (optional), "work_required": bool (optional),
+         "raj_requested": bool (optional), "kind": "DEFECT|RESEARCH" (optional),
+         "claims_fix": bool (optional),
+         "context", "cause_proximate", "cause_systemic", "consequence", "corrective_action"}
 
-    Ids are content-derived from (run_label, index, title), so calling this twice for one run
-    cannot inflate the record.
+    Every finding gets one row in the run's FINDINGS LEDGER (retro_ingest_log.json runs[label].
+    findings_ledger): finding_id, severity, title, disposition PROMOTED|OBSERVATION, the ISA id
+    when promoted, the rule, escalations and recurrence. The email renders that ledger - all
+    findings, not only registered ones.
 
-    TWO GATES, both added 13-Aug-2026:
-
-    * REGISTRABILITY (ISA-0336). A finding that reports what the screen SAW rather than what
-      the framework got wrong is returned under `informational` and never written. It stays on
-      the retrospective and in the email; it is excluded from the REGISTER, not from the record.
-
-    * THE 4Cs (ISA-0337). This is the LIVE capture path, and it RAISES if a registrable
-      finding does not carry all five. That cost lands exactly where the knowledge is: whoever
-      is writing the retrospective at the end of the run knows the context, the cause and the
-      consequence, and writing them down then is the only moment they are cheap. "Not yet
-      known" is a permitted answer - "UNKNOWN at intake: the fetch path has not been traced" -
-      but silence is not.
+    GATES: the R7.7 promotion decision (promotion_decision, extending ISA-0336) runs FIRST; only
+    a PROMOTED finding must carry all five Cs (ISA-0337) - an observation needs none because it
+    creates no work. Ids are content-derived from (run_label, index, title): a re-run cannot
+    inflate the record, and a re-run keeps the ledger (it resolves the existing id).
     """
     existing = {a for it in R.read_all() for a in it.get("aliases", [])}
-    written, informational = [], []
+    written, informational, ledger = [], [], []
     for i, f in enumerate(findings, 1):
         title = _clean(f.get("title", ""))
         if len(title) < 8:
@@ -591,17 +688,24 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
                              f"an untitled finding cannot be triaged (R4.1)")
         fingerprint = _sha(f"{run_label}|{i}|{title}")
         alias_h = f"RETROHASH:{fingerprint}"
-        if alias_h in existing:
-            continue
         detail = f.get("detail") or ""
-        sev_hint = f.get("severity") if f.get("severity") in (
-            "CRITICAL", "HIGH", "MEDIUM", "LOW") else "MEDIUM"
-        reg = registrability(title, detail, sev_hint)
-        if not reg["registrable"]:
+        dec = promotion_decision({**f, "title": title}, run_label=run_label)
+        row = {"finding_id": f"{run_label}#{i}", "fingerprint": fingerprint, "title": title[:300],
+               "severity": dec["severity"], "rule": dec["rule"], "reason": dec["reason"],
+               "escalations": dec["escalations"], "observation_id": dec["observation_id"],
+               "recurrence": dec["recurrence"], "policy": dec["policy"]}
+        if alias_h in existing:
+            ledger.append({**row, "disposition": "PROMOTED",
+                           "isa_id": R.resolve_alias(alias_h), "note": "already registered (re-run)"})
+            continue
+        if not dec["registrable"]:
             informational.append({"file": f"weekly screen {run_label}", "line": i,
                                   "section": group or "", "title": f"[{run_label}] {title}"[:300],
-                                  "rule": reg["rule"], "reason": reg["reason"],
+                                  "rule": dec["rule"], "reason": dec["reason"],
+                                  "run_label": run_label, "severity": dec["severity"],
+                                  "observation_id": dec["observation_id"],
                                   "fingerprint": fingerprint})
+            ledger.append({**row, "disposition": "OBSERVATION", "isa_id": None})
             continue
         gaps = [c for c in R.FOURC_MANDATORY
                 if not R._fourc_captured({c: f.get(c)}, c)]
@@ -614,14 +718,7 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
                 "non-negotiable (ISA-0337). Write them now, while the run is in front of you. "
                 "'UNKNOWN at intake: <what has not been established>' is a permitted answer; "
                 "an empty field is not.")
-        blob = title + " " + detail
-        crit = f.get("severity")
-        if crit not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
-            crit = "MEDIUM"
-            for rx, level in SEVERITY:
-                if rx.search(blob):
-                    crit = level
-                    break
+        crit = dec["severity"] if dec["severity"] in SEVERITIES else "MEDIUM"
         rec = {
             "title": f"[{run_label}] {title}"[:300],
             "aliases": [f"RETRO:{run_label}#{i}", alias_h],
@@ -634,7 +731,9 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
             "detected_on": run_date or _run_date(run_label) or R._today(),
             "introduced_basis": "unknown",
             "provenance": "captured_live",
-            "narrative": (title + "\n\n" + detail).strip()[:8000],
+            "narrative": (title + "\n\n" + detail).strip()[:7600]
+                         + "\n\n[R7.7 promotion: %s; escalations: %s]" % (
+                             dec["rule"], ", ".join(dec["escalations"]) or "none"),
             "context": f["context"], "cause_proximate": f["cause_proximate"],
             "cause_systemic": f["cause_systemic"], "consequence": f["consequence"],
             "corrective_action": f["corrective_action"],
@@ -645,44 +744,64 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
         }
         if f.get("claims_fix") or FIX_CLAIM.search(title):
             rec["claim_status"] = "HYPOTHESIS"
-            # Append, never replace: the author's C4 is the more informative of the two, and
-            # silently overwriting a mandatory field with boilerplate is the null-vs-missing
-            # class wearing a different hat.
             rec["corrective_action"] = (
                 rec["corrective_action"].rstrip() + "  ⚑ The run states this was fixed. No "
                 "liveness reference was named, so R7.3 refuses closure: confirm the recurrence "
                 "test, then close.")
+        new_id = None
         if not dry_run:
             rec["id"] = R.next_id()
             R.write(rec)
             for a in rec["aliases"]:
                 R.register_alias(a, rec["id"], source="screen_central_capture")
+            new_id = rec["id"]
         existing.add(alias_h)
         written.append(rec["title"])
+        ledger.append({**row, "disposition": "PROMOTED", "isa_id": new_id})
     if informational and not dry_run:
         save_nonregistrable(informational)
-    _stamp_run(run_label, len(written), group, run_date, dry_run)
+    _stamp_run(run_label, len(written), group, run_date, dry_run, ledger=ledger)
     return {"run": run_label, "created": len(written), "titles": written, "dry_run": dry_run,
             "informational": len(informational),
-            "informational_detail": [(x["rule"], x["title"]) for x in informational]}
+            "informational_detail": [(x["rule"], x["title"]) for x in informational],
+            "ledger": ledger}
 
 
 def record_no_findings(run_label: str, *, group: str = None, run_date: str = None,
                        dry_run: bool = False) -> dict:
     """State explicitly that a screen produced no findings. Silence is not that statement."""
-    _stamp_run(run_label, 0, group, run_date, dry_run, clean=True)
+    _stamp_run(run_label, 0, group, run_date, dry_run, clean=True, ledger=[])
     return {"run": run_label, "created": 0, "declared_clean": True}
 
 
-def _stamp_run(run_label, n, group, run_date, dry_run, clean=False):
+def _stamp_run(run_label, n, group, run_date, dry_run, clean=False, ledger=None):
     if dry_run:
         return
     log = load_log()
+    prev = (log.get("runs") or {}).get(run_label) or {}
+    led = list(ledger or [])
+    if not led and prev.get("findings_ledger") and not clean:
+        led = prev["findings_ledger"]          # a no-op re-run never erases the recorded ledger
     log.setdefault("runs", {})[run_label] = {
-        "findings": n, "group": group, "run_date": run_date or _run_date(run_label),
+        "findings": sum(1 for x in led if x.get("disposition") == "PROMOTED") if led else n,
+        "observations": sum(1 for x in led if x.get("disposition") == "OBSERVATION"),
+        "findings_ledger": led, "promotion_policy": PROMOTION_POLICY,
+        "group": group, "run_date": run_date or _run_date(run_label),
         "declared_clean": bool(clean), "recorded_on": R._today(),
         "intake_version": INTAKE_VERSION}
     save_log(log)
+
+
+def run_findings(run_label: str) -> dict:
+    """-> {state: CAPTURED|NO_FINDINGS_CAPTURED|MISSING, ledger: [...]} for one run. Absence is
+    MISSING, never 'no findings' (R2.10)."""
+    e = (load_log().get("runs") or {}).get(run_label)
+    if e is None:
+        return {"state": "MISSING", "ledger": [], "run": run_label}
+    if e.get("declared_clean"):
+        return {"state": "NO_FINDINGS_CAPTURED", "ledger": [], "run": run_label}
+    return {"state": "CAPTURED", "ledger": list(e.get("findings_ledger") or []), "run": run_label,
+            "legacy_count_only": not e.get("findings_ledger") and bool(e.get("findings"))}
 
 
 def run_coverage(screens: list) -> list:
@@ -1052,6 +1171,57 @@ def selftest(verbose=True) -> int:
         record_no_findings("20260815_SP500", group="SP500")
         ok(not run_coverage(["20260815_SP500"]),
            "an EXPLICIT no-findings declaration satisfies coverage; silence does not")
+        # ── ISA-0764 — the R7.7 promotion policy on the LIVE capture path ─────────────────
+        _obs = "LOW - workbook column headers use mixed case for two labels"
+        r1 = record_findings("20260920_EUA", [
+            {"title": "HIGH - the retrospective capture step was skipped on this run", "detail": "b",
+             "severity": "HIGH", **_cs},
+            {"title": "OPEN - point-in-time constituents captured only the scored names",
+             "detail": "b", "severity": "MEDIUM", **_cs},
+            {"title": "SUMMARY pool: 56 eligible pre-cap, 15 selected under the 40-cap/70-floor",
+             "detail": "b", "severity": "MEDIUM"},
+            {"title": _obs, "detail": "b", "severity": "LOW"},
+            {"title": "LOW - overlay fetch failed for three EU names", "detail": "b", "severity": "LOW", **_cs},
+            {"title": "LOW - date column header wording differs between tabs", "detail": "b",
+             "severity": "LOW", "escalations": ["systemic"], **_cs},
+            {"title": "LOW - rename the workbook tab to match the email", "detail": "b",
+             "severity": "LOW", "work_required": True, **_cs},
+        ], group="EUA")
+        _led = {x["finding_id"]: x for x in r1["ledger"]}
+        ok(len(r1["ledger"]) == 7, "ISA-0764: EVERY finding is in the ledger, promoted or not")
+        ok(_led["20260920_EUA#1"]["disposition"] == "PROMOTED" and _led["20260920_EUA#1"]["isa_id"],
+           "ISA-0764 MUST-FIRE: HIGH always promotes, with its ISA id in the ledger")
+        ok(_led["20260920_EUA#2"]["disposition"] == "PROMOTED", "an actionable MEDIUM promotes")
+        ok(_led["20260920_EUA#3"]["disposition"] == "OBSERVATION",
+           "NEGATIVE CONTROL: an informational MEDIUM (pool composition) stays an observation")
+        ok(_led["20260920_EUA#4"]["disposition"] == "OBSERVATION" and _led["20260920_EUA#4"]["isa_id"] is None,
+           "NEGATIVE CONTROL: a LOW with no escalation is an observation - and carries NO item id")
+        ok(_led["20260920_EUA#5"]["disposition"] == "PROMOTED", "a LOW naming an execution/data failure escalates")
+        ok(_led["20260920_EUA#6"]["disposition"] == "PROMOTED" and "systemic" in _led["20260920_EUA#6"]["escalations"],
+           "a LOW with a declared escalation (systemic) promotes")
+        ok(_led["20260920_EUA#7"]["disposition"] == "PROMOTED" and _led["20260920_EUA#7"]["rule"] == "P-1-work",
+           "ISA-0764 MUST-FIRE: work on ANY finding requires an item first (P-1)")
+        rf = run_findings("20260920_EUA")
+        ok(rf["state"] == "CAPTURED" and len(rf["ledger"]) == 7, "the ledger is durable and readable by the email")
+        # recurrence: the same observation in a LATER run escalates (the first run is its history)
+        r2 = record_findings("20260927_EUA", [{"title": _obs.replace("mixed", "mixed"), "detail": "b",
+                                               "severity": "LOW", **_cs}], group="EUA")
+        ok(r2["ledger"][0]["disposition"] == "PROMOTED" and "recurrence" in r2["ledger"][0]["escalations"]
+           and r2["ledger"][0]["recurrence"] == ["20260920_EUA"],
+           "ISA-0764 MUST-FIRE: a recurring LOW observation is promoted, naming the prior run")
+        ok(promotion_decision({"title": "LOW - a brand new cosmetic wording nit", "severity": "LOW"},
+                              sightings=[])["registrable"] is False,
+           "NEGATIVE CONTROL: the same shape with no prior sighting stays an observation")
+        # re-run keeps the ledger (no inflation, no erasure)
+        r3 = record_findings("20260920_EUA", [
+            {"title": "HIGH - the retrospective capture step was skipped on this run", "detail": "b",
+             "severity": "HIGH", **_cs}], group="EUA")
+        ok(r3["created"] == 0 and r3["ledger"][0]["isa_id"] == _led["20260920_EUA#1"]["isa_id"],
+           "a re-run resolves the existing id rather than minting or dropping it")
+        ok(run_findings("20269999_NONE")["state"] == "MISSING",
+           "NEGATIVE CONTROL: an unrecorded run is MISSING, never 'no findings' (R2.10)")
+        ok(run_findings("20260815_SP500")["state"] == "NO_FINDINGS_CAPTURED",
+           "an explicit clean declaration reads as NO_FINDINGS_CAPTURED")
         raised = False
         try:
             record_findings("20260816_X", [{"title": "tiny"}])

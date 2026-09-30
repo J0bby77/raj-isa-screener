@@ -95,7 +95,7 @@ SCRIPTS = {
     "calibration_report":     os.path.join(SCRIPT_DIR, "calibration_report.py"),   # Jul-26 Part 9c
 }
 
-# Memory files (read by analytics for prior portfolio and trades log)
+# Memory files (read for the VCI watchlist; purchase dates come from transaction_ledger.json)
 # These paths use the Windows path as passed through the bash mount.
 def _resolve_memory_base() -> str:
     """Locate the Cowork memory dir. The previous relative ".." climb from
@@ -557,6 +557,29 @@ def _plan_stability_only(args) -> int:
     return 0 if ok else 1
 
 
+# ⚑ ISA-0778 (30-Sep-2026): errors[] carries TWO meanings - the run's STATUS and "a required input
+#   failed". Step 0a appends a non-AUTHORISED capital authority to errors[] so the status reflects it,
+#   and every data step gated on `if errors:` then skipped as though the portfolio extraction had
+#   failed - contradicting Step 0a's own contract that a REFUSED run still computes its diagnostic
+#   artefacts (measured 30-Sep: Steps 1.5/3/4/6/9 skipped on a valid GBP 160,812.87 extraction).
+#   Data steps now gate on DATA errors only; status and the _meta stamp still carry the refusal.
+CAPITAL_AUTHORITY_ERROR_PREFIX = "R18.5 CAPITAL AUTHORITY "
+
+
+def _data_errors(errors: list) -> list:
+    """The errors that mean a REQUIRED INPUT failed - everything except the Step 0a authority entry."""
+    return [e for e in (errors or []) if not str(e).startswith(CAPITAL_AUTHORITY_ERROR_PREFIX)]
+
+
+def _action_stack_coverage(dpr: list):
+    """ISA-0782: source_score coverage over the forward-ELIGIBLE ranking population. A row that is
+    forward-ineligible WITH a typed reason carries no source_score by design (CAP-4); one that is
+    ineligible with NO reason still counts as missing (R2.10). None when there is no population."""
+    elig = [e for e in (dpr or []) if not (e.get("forward_eligible") is False
+                                           and str(e.get("forward_ineligible_reason") or "").strip())]
+    return (sum(1 for e in elig if e.get("source_score") is not None) / len(elig)) if elig else None
+
+
 def _capital_authority_step(errors: list, warnings: list, root: str = None) -> dict:
     """Step 0a (R18.5, ISA-0629). Returns the authority record and escalates a non-AUTHORISED
     verdict into BOTH lists: warnings carry the declared escalation prefix (ISA-0447) and errors
@@ -575,7 +598,7 @@ def _capital_authority_step(errors: list, warnings: list, root: str = None) -> d
         # the literal prefix is the declared ISA-0447 escalation (email_prefill.SUMMARY_ESCALATED)
         warnings.append("R18.5 CAPITAL AUTHORITY " + _tail)
         if ta.get("authority") != "NOT_ENFORCED":
-            errors.append("R18.5 CAPITAL AUTHORITY " + _tail)
+            errors.append(CAPITAL_AUTHORITY_ERROR_PREFIX + _tail)
     return ta
 
 
@@ -948,14 +971,22 @@ def main():
     print("=" * 65)
 
     # Ensure yfinance is available (not pre-installed in fresh Cowork sessions)
+    # ⚑ ISA-0786 (30-Sep-2026): the declared runtime packages go to a uid-private dir on the roomy
+    #   volume and onto sys.path + PYTHONPATH, so Step 0a's census suites and every later subprocess see
+    #   them. The old `pip install yfinance` wrote ~/.local on the near-full shared /sessions volume.
     try:
         import yfinance  # noqa: F401
     except ImportError:
-        print("  Installing yfinance...")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "yfinance", "--break-system-packages", "-q"],
-            capture_output=True
-        )
+        print("  Installing yfinance (declared runtime package, ISA-0786)...")
+        try:
+            import suite_census_runner as _scr0
+            _dep = _scr0.ensure_runtime_packages()
+            summary["runtime_packages"] = _dep
+            print("  runtime packages: %s -> %s" % (_dep["state"], _dep["target"]))
+            if _dep["state"] == "UNAVAILABLE":
+                warnings.append("ISA-0786 RUNTIME PACKAGES UNAVAILABLE: " + str(_dep["why"])[:300])
+        except Exception as _dpe:                                     # noqa: BLE001
+            warnings.append("ISA-0786 RUNTIME PACKAGES install raised %s: %s" % (type(_dpe).__name__, _dpe))
 
     # Output paths
     portfolio_path          = os.path.join(SCRIPT_DIR, f"portfolio_data_{month_label}.json")
@@ -983,17 +1014,15 @@ def main():
     if not os.path.isdir(MEMORY_BASE):
         warnings.append(
             "MEMORY BASE ABSENT: %r does not exist, so every memory read returns None — the "
-            "VCI watchlist (Step 5) and the trades log (purchase dates for analytics) are "
-            "UNAVAILABLE, not empty. Set ISA_MEMORY_DIR to the memory directory and re-run, or "
+            "VCI watchlist (Step 5) is UNAVAILABLE, not empty. Set ISA_MEMORY_DIR to the memory directory and re-run, or "
             "treat this run's memory-derived fields as UNMEASURED." % MEMORY_BASE)
         print("  ⚑ MEMORY BASE ABSENT: %s — memory-derived inputs are UNAVAILABLE, not empty"
               % MEMORY_BASE)
-    trades_log_path  = find_memory_file("project_isa_trades_log.md")
-    if not trades_log_path:
-        warnings.append(
-            "project_isa_trades_log.md NOT FOUND under MEMORY_BASE (%s). analytics runs with no "
-            "purchase dates: holding periods, the 182-day min-hold and entry-basis figures "
-            "degrade to UNMEASURED. Absent is not empty (R2.10)." % MEMORY_BASE)
+    # ⚑ ISA-0124 / ISA-0759 (26-Sep-2026): purchase dates come from the TRANSACTION LEDGER
+    #   (ISA-0645 authority; appended by Step 1b before Step 3 reads it). The former
+    #   `project_isa_trades_log.md` lookup is RETIRED: that file never existed, so every run
+    #   warned and degraded Step 3 on an input nobody wrote. Do not reintroduce it
+    #   (consistency_check.pair_monthly_no_trades_log). `txn_ledger_path` is bound above.
     prior_port_path  = args.prior_portfolio
 
     if not prior_port_path:
@@ -1019,7 +1048,7 @@ def main():
 
     # ⚑ ISA-0589 — the accumulators are bound at the TOP of main(), not here. A second
     # initialisation at this point would silently DISCARD everything the guards above appended
-    # (the absent memory base, the missing trades log) — one home per rule (R4.4).
+    # (e.g. the absent memory base) — one home per rule (R4.4).
 
     # CAPTURE LAYER ITEM 2 — open the run manifest before any step runs.
     global MANIFEST
@@ -1137,6 +1166,30 @@ def main():
             print(f"  Validation FAILED: {vmsg}")
         else:
             val_ok, val_msg = validate_portfolio_value(portfolio_path)
+            # ⚑ ISA-0779 (30-Sep-2026): the portfolio export must be the SAME account as the cash
+            #   statement. On 30-Sep the SIPP (ACB8G2S) was saved under the ISA filename and only a
+            #   value sanity check stopped it; a same-sized wrong-account file would have passed.
+            try:
+                import extract_portfolio as _ep779
+                import extract_cash_statement as _ecs779
+                with open(portfolio_path, encoding="utf-8") as _f779:
+                    _pm779 = (json.load(_f779).get("_meta") or {})
+                _cs779 = _ecs779.parse(folder=isa_folder)
+                _ref779 = set()
+                for _r779 in (_cs779.get("rows") or []):
+                    _ref779 |= _ep779.account_ids_in(_r779.get("description"))
+                _acct = _ep779.account_identity_verdict(_pm779.get("account_ids"), _ref779)
+                summary["account_identity"] = _acct
+                if _acct["state"] == "MISMATCH":
+                    errors.append("Step 1 ACCOUNT IDENTITY (ISA-0779): " + _acct["why"] +
+                                  " - the portfolio export is a different AJ Bell account; replace it "
+                                  "with the ISA export before any review.")
+                    print("  ACCOUNT IDENTITY MISMATCH: " + _acct["why"])
+                elif _acct["state"] == "UNVERIFIED":
+                    warnings.append("ACCOUNT IDENTITY UNVERIFIED (ISA-0779): " + _acct["why"])
+            except Exception as _e779:                                  # noqa: BLE001
+                warnings.append("ACCOUNT IDENTITY UNVERIFIED (ISA-0779): check raised %s: %s"
+                                % (type(_e779).__name__, _e779))
             if not val_ok:
                 errors.append(f"Step 1 sanity: {val_msg}")
                 print(f"  Sanity check FAILED: {val_msg}")
@@ -1263,7 +1316,7 @@ def main():
     # The system never assumes a prior recommendation was executed; it confirms from THIS month's
     # actual holdings (broker file). Additive — no-op until a decision ledger exists.
     # ---------------------------------------------------------------------------
-    if not errors and os.path.exists(portfolio_path):
+    if not _data_errors(errors) and os.path.exists(portfolio_path):
         ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
         if os.path.exists(ledger_path):
             print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
@@ -1503,7 +1556,7 @@ def main():
             print(f"  Validation WARNING: {vmsg}")
         else:
             print(f"  Validation: {vmsg}")
-            if not errors:  # only if portfolio step succeeded
+            if not _data_errors(errors):  # only if portfolio step succeeded (ISA-0778)
                 with open(xray_path, encoding="utf-8") as f:
                     xray_data = json.load(f)
                 tr = xray_data.get("trailing_returns", {})
@@ -1518,7 +1571,7 @@ def main():
     _mf_probe_json(xray_path, "country_exposure", "equity_pct", "X-Ray country rows")
     print(f"\n[3/9] Running portfolio analytics...")
     _mf_begin("3", "portfolio_analytics")
-    if errors:
+    if _data_errors(errors):
         print("  SKIPPED -- portfolio extraction failed (required input).")
         warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
     else:
@@ -1539,18 +1592,16 @@ def main():
                 "which reported AVGO 4.04% against a published 4.31%.")
         if prior_port_path:
             analytics_args += ["--prior-portfolio", prior_port_path]
-        if trades_log_path:
-            analytics_args += ["--trades-log", trades_log_path]
+        if os.path.exists(txn_ledger_path):
+            analytics_args += ["--transaction-ledger", txn_ledger_path]
         else:
-            # 01-Aug-26: previously a SILENT omission. Without the trades log,
-            # parse_trades_log_positions() returns [] and the stock-sleeve return is
-            # computed with no purchase dates, and the Step 8 thesis-break conditions are
-            # absent -- with nothing printed. Degraded data must be visible.
+            # Absent is not empty (R2.10): without the ledger the stock-sleeve return has no
+            # purchase dates, so it is stated as degraded rather than computed silently.
             warnings.append(
-                "Step 3 (analytics): project_isa_trades_log.md not found at MEMORY_BASE "
-                f"({MEMORY_BASE}) -- stock-sleeve return computed WITHOUT purchase dates and "
-                "Step 8 thesis-break conditions are unavailable. Treat sleeve return as indicative.")
-            print(f"  WARNING: trades log not found -- sleeve return degraded. MEMORY_BASE={MEMORY_BASE}")
+                "Step 3 (analytics): transaction_ledger.json not found -- stock-sleeve return "
+                "computed WITHOUT purchase dates (ISA-0645 authority absent). Treat Section B "
+                "as indicative.")
+            print("  WARNING: transaction_ledger.json not found -- sleeve return degraded.")
             degraded = True
 
         ok, stdout, stderr = run_script(
@@ -1584,7 +1635,7 @@ def main():
     _mf_probe_json(analytics_path, "fund_drift_table.rows", "ticker", "drift rows")
     print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
     _mf_begin("4", "update_watchlist")
-    if errors:
+    if _data_errors(errors):
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
     elif not os.path.exists(watchlist_config_path):
@@ -1915,7 +1966,7 @@ def main():
         with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
             json.dump({"_meta": {"month_label": month_label}, "tickers": {},
                        "_warning": "watchlist_tickers.json missing -- metrics not pulled"}, f)
-    elif errors:
+    elif _data_errors(errors):
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
         with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
@@ -2297,7 +2348,8 @@ def main():
                     _rr = _vde.refusal_report(_ranked)
                     summary["vci_refusals"] = {k: _rr[k] for k in
                                                ("n_rows", "n_eligible", "n_unmeasured",
-                                                "n_measured_reject", "unmeasured_tickers")}
+                                                "n_measured_reject", "unmeasured_tickers",
+                                                "named_refusals")}     # VCI-A 27-Sep-2026
                     for _w in _rr["warnings"]:
                         warnings.append("Step 6.5: " + _w)
                 except Exception as _e:
@@ -2305,6 +2357,15 @@ def main():
                                     "(%s: %s), so candidate refusals were NOT classified this "
                                     "run — treat vci_deploy_eligible as UNVERIFIED."
                                     % (type(_e).__name__, _e))
+                # ISA-0667 R5.1: the write-boundary contract - no placeholder ACS or unmeasured
+                # score is persisted as a number. A breach is NAMED (never silently written) and
+                # never blocks the pre-run: the rows are candidates, not capital.
+                try:
+                    for _b in _vde.vci_watchlist_contract_breaches(_ranked):
+                        warnings.append("Step 6.5 (ISA-0667 write-boundary contract): " + _b)
+                except Exception as _e:
+                    warnings.append("Step 6.5 (ISA-0667): write-boundary contract could not run "
+                                    "(%s: %s) - UNVERIFIED, not clean" % (type(_e).__name__, _e))
                 # write recomputed deployability fields back, preserve one canonical order
                 for i, e in enumerate(_ranked, 1):
                     e["vci_rank"] = i
@@ -3394,7 +3455,12 @@ def main():
             with open(_as_path, encoding="utf-8") as _fa:
                 _asj = json.load(_fa)
             _stack = _asj.get("stack", _asj if isinstance(_asj, list) else []) or []
-            _cov_a = (_scored8 / len(_dpr)) if _dpr else None
+            # ⚑ ISA-0782 (30-Sep-2026): the ranking population is the FORWARD-ELIGIBLE rows. CAP-4
+            #   (Raj + build, 02-Aug-2026) made a forward-ineligible row carry NO source_score BY DESIGN
+            #   (rank_basis normalised_score_fallback + a typed forward_ineligible_reason); counting those
+            #   rows as missing data refused the October stack at 54% (32/59) while every eligible row was
+            #   scored. A row that is ineligible WITHOUT a typed reason still counts as missing (R2.10).
+            _cov_a = _action_stack_coverage(_dpr)
             _allowed, _why = _RM.gate_emission("action_stack", coverage=_cov_a,
                                                rows_out=len(_stack), raise_on_refuse=False)
             if not _allowed:
@@ -3970,7 +4036,7 @@ def main():
 
     print(f"\n[9/9] Pre-populating email JSON...")
     _mf_begin("9", "email_prefill")
-    if errors:
+    if _data_errors(errors):
         print("  SKIPPED -- prior step(s) failed.")
         warnings.append("Step 9 (email_prefill) skipped -- prior step failures.")
     else:
@@ -5195,6 +5261,38 @@ def _selftest(verbose: bool = True) -> int:
     ctx3 = _stamp_capital_authority(dict(ctx))
     ok("idempotent: a second stamp does not prepend the R18.5 note twice",
        ctx3["error"].count("R18.5:") == 1)
+    # ── ISA-0778: a REFUSED authority is a STATUS, not a failed input ────────────────────────────
+    ok("ISA-0778 MUST-FIRE: the Step 0a refusal alone leaves NO data error, so the data steps still "
+       "compute their diagnostic artefacts", errs and _data_errors(errs) == [])
+    ok("ISA-0778 NEGATIVE CONTROL: a real input failure (Step 1 sanity) is still a data error and "
+       "still skips the data steps",
+       _data_errors(errs + ["Step 1 sanity: Portfolio value suspiciously low"])
+       == ["Step 1 sanity: Portfolio value suspiciously low"])
+    _rows782 = ([{"source_score": 70.0}] * 32
+                + [{"source_score": None, "forward_eligible": False,
+                    "forward_ineligible_reason": "forward gate: revision_stage='Maturing'"}] * 27)
+    ok("ISA-0782 MUST-FIRE: 32 scored eligible + 27 typed-ineligible rows is FULL coverage, not 54%",
+       _action_stack_coverage(_rows782) == 1.0)
+    ok("ISA-0782 NEGATIVE CONTROL: an ineligible row with NO typed reason still counts as missing",
+       abs(_action_stack_coverage([{"source_score": 70.0},
+                                   {"source_score": None, "forward_eligible": False}]) - 0.5) < 1e-9)
+    ok("ISA-0782: an eligible row lacking source_score is missing data",
+       _action_stack_coverage([{"source_score": None, "forward_eligible": True}]) == 0.0)
+    import ast as _ast778
+    _src778 = open(os.path.abspath(__file__), encoding="utf-8").read()
+    _main778 = next(n for n in _ast778.parse(_src778).body
+                    if isinstance(n, _ast778.FunctionDef) and n.name == "main")
+    _bare778 = [n.lineno for n in _ast778.walk(_main778)
+                if isinstance(n, (_ast778.If,)) and (
+                    (isinstance(n.test, _ast778.Name) and n.test.id == "errors") or
+                    (isinstance(n.test, _ast778.UnaryOp) and isinstance(n.test.operand, _ast778.Name)
+                     and n.test.operand.id == "errors") or
+                    (isinstance(n.test, _ast778.BoolOp) and any(
+                        (isinstance(v, _ast778.UnaryOp) and isinstance(v.operand, _ast778.Name)
+                         and v.operand.id == "errors") for v in n.test.values)))]
+    ok("ISA-0778 STRUCTURE: only the two STATUS-level `if errors:` remain in main() (status word and "
+       "exit code) - any data step reading bare errors[] fails here (found at lines %s)" % _bare778,
+       len(_bare778) == 2)
     if verbose:
         print("monthly_isa_prerun selftest: %d failure(s)" % len(fails))
     return 1 if fails else 0

@@ -11,7 +11,7 @@
       "fetch_failure",
       "UNKNOWN"
     ],
-    "updated": "2026-09-19T08:15:38+00:00"
+    "updated": "2026-09-26T08:15:19+00:00"
   },
   "names": {
     "F250-SPI|AAS.L": {
@@ -3380,6 +3380,19 @@
       "terminal_return_pct": null,
       "ticker": "AAL.L"
     },
+    "STOXX600|ABF.L": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "ABF.L"
+    },
     "STOXX600|ABN.AS": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3403,7 +3416,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ABVX.PA"
@@ -3436,6 +3449,19 @@
       "terminal_return_pct": null,
       "ticker": "ALV.DE"
     },
+    "STOXX600|AMV0.DE": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "AMV0.DE"
+    },
     "STOXX600|AV.L": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3449,6 +3475,19 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AV.L"
+    },
+    "STOXX600|BAKKA.OL": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "BAKKA.OL"
     },
     "STOXX600|BARC.L": {
       "first_missing": "2026-08-27",
@@ -3562,6 +3601,19 @@
       "terminal_return_pct": null,
       "ticker": "BNP.PA"
     },
+    "STOXX600|BNR.DE": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "BNR.DE"
+    },
     "STOXX600|BP.L": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3576,6 +3628,19 @@
       "terminal_return_pct": null,
       "ticker": "BP.L"
     },
+    "STOXX600|BUCN.SW": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "BUCN.SW"
+    },
     "STOXX600|CABK.MC": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3589,6 +3654,32 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CABK.MC"
+    },
+    "STOXX600|CLNX.MC": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "CLNX.MC"
+    },
+    "STOXX600|CNA.L": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "CNA.L"
     },
     "STOXX600|CS.PA": {
       "first_missing": "2026-08-27",
@@ -3697,7 +3788,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EBP.WA"
@@ -3912,6 +4003,19 @@
       "terminal_return_pct": null,
       "ticker": "FBK.MI"
     },
+    "STOXX600|FER.AS": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "FER.AS"
+    },
     "STOXX600|FER.MC": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3920,7 +4024,7 @@
       "last_seen": "2026-08-22",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "FER.MC"
@@ -3953,6 +4057,19 @@
       "terminal_return_pct": null,
       "ticker": "FNTN.DE"
     },
+    "STOXX600|FRA.DE": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "FRA.DE"
+    },
     "STOXX600|FRE.DE": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -3961,7 +4078,7 @@
       "last_seen": "2026-08-22",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "FRE.DE"
@@ -4241,7 +4358,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ICG.L"
@@ -4297,7 +4414,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "INDU-C.ST"
@@ -4414,6 +4531,19 @@
       "terminal_return_pct": null,
       "ticker": "ITV.L"
     },
+    "STOXX600|JD.L": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "JD.L"
+    },
     "STOXX600|JMAT.L": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -4470,6 +4600,19 @@
       "terminal_return_pct": null,
       "ticker": "KBCA.BR"
     },
+    "STOXX600|KEMIRA.HE": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "KEMIRA.HE"
+    },
     "STOXX600|KER.PA": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -4484,6 +4627,19 @@
       "terminal_return_pct": null,
       "ticker": "KER.PA"
     },
+    "STOXX600|KESKOB.HE": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "KESKOB.HE"
+    },
     "STOXX600|KGH.WA": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -4497,6 +4653,19 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KGH.WA"
+    },
+    "STOXX600|KMAR.OL": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "KMAR.OL"
     },
     "STOXX600|KOG.OL": {
       "first_missing": "2026-08-27",
@@ -4554,6 +4723,19 @@
       "terminal_return_pct": null,
       "ticker": "LGEN.L"
     },
+    "STOXX600|LIGHT.AS": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "LIGHT.AS"
+    },
     "STOXX600|LLOY.L": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -4591,7 +4773,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "LU2290522684.SG"
@@ -4717,7 +4899,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MNG.L"
@@ -4787,7 +4969,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NDA-FI.HE"
@@ -5109,7 +5291,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "QGEN"
@@ -5137,7 +5319,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "RBI.VI"
@@ -5155,6 +5337,19 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "REP.MC"
+    },
+    "STOXX600|RI.PA": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "RI.PA"
     },
     "STOXX600|RILBA.CO": {
       "first_missing": "2026-08-27",
@@ -5333,7 +5528,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SCA-B.ST"
@@ -5375,7 +5570,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SDLF.L"
@@ -5393,6 +5588,19 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SEB-A.ST"
+    },
+    "STOXX600|SESG.PA": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "SESG.PA"
     },
     "STOXX600|SGO.PA": {
       "first_missing": "2026-08-27",
@@ -5473,7 +5681,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SKF-B.ST"
@@ -5730,6 +5938,19 @@
       "terminal_return_pct": null,
       "ticker": "TEL.OL"
     },
+    "STOXX600|THULE.ST": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "THULE.ST"
+    },
     "STOXX600|TIT.MI": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -5757,6 +5978,19 @@
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TLX.DE"
+    },
+    "STOXX600|TPE.WA": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "TPE.WA"
     },
     "STOXX600|TRN.MI": {
       "first_missing": "2026-08-27",
@@ -5935,7 +6169,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VAR.OL"
@@ -5968,6 +6202,19 @@
       "terminal_return_pct": null,
       "ticker": "VER.VI"
     },
+    "STOXX600|VIS.MC": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "VIS.MC"
+    },
     "STOXX600|VK.PA": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -5991,7 +6238,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VNA.DE"
@@ -6024,6 +6271,32 @@
       "terminal_return_pct": null,
       "ticker": "WDP.BR"
     },
+    "STOXX600|WIE.VI": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "WIE.VI"
+    },
+    "STOXX600|WIHL.ST": {
+      "first_missing": "2026-09-26",
+      "first_seen": "2026-07-25",
+      "group": "STOXX600",
+      "last_price": null,
+      "last_seen": "2026-08-27",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "WIHL.ST"
+    },
     "STOXX600|WISE.L": {
       "first_missing": "2026-08-27",
       "first_seen": "2026-07-25",
@@ -6033,7 +6306,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-22",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WISE.L"

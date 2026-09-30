@@ -92,7 +92,9 @@ def _parse_by_header(table_lines):
         acs_m = re.search(r"\d+", g("acs_score", ""))
         exchange = ticker.split(".")[-1] if "." in ticker else g("exchange").upper()
         entry_str = g("entry_level_str")
-        currency = "GBP" if ("p" in entry_str.lower() or "£" in entry_str or ".L" in ticker) else "USD"
+        # ISA-0582: evidenced symbol/suffix or None - never a manufactured "USD"
+        currency = ("GBP" if ("p" in entry_str.lower() or "£" in entry_str or ".L" in ticker)
+                    else "USD" if "$" in entry_str else None)
         rows.append({
             "rank": rank, "ticker": ticker, "company": g("company"),
             "exchange": exchange,
@@ -204,7 +206,9 @@ def parse_vci_watchlist_md(md_path: str) -> list[dict]:
         note = cols[10 + offset] if len(cols) > 10 + offset else ""
 
         # Parse entry level — handle ranges like "130p–145p" or "$12–$15" or "£1.30–£1.45"
-        entry_currency = "USD"
+        # ISA-0582 (26-Sep-2026): a currency is read from the entry string's own symbol or the
+        # listing suffix; with neither it stays None (UNKNOWN) instead of a manufactured "USD".
+        entry_currency = None
         if "p" in entry_level_str.lower() or "£" in entry_level_str or ".L" in ticker:
             entry_currency = "GBP"
         elif "$" in entry_level_str:
@@ -495,7 +499,8 @@ def main():
         else:
             # Carry forward stored values
             print(f"    Scorer failed — carrying forward stored ACS for {ticker}")
-            new_acs = old_acs or md_entry.get("acs_score") or 0
+            # ISA-0667 (27-Sep-2026): no manufactured 0 - an ACS nobody computed stays None (UNMEASURED)
+            new_acs = old_acs or md_entry.get("acs_score") or None
             new_breakdown = existing.get("acs_breakdown", "")
             fresh_part_a_score = existing.get("part_a_score")
 
@@ -535,6 +540,14 @@ def main():
             "three_yr_pos_pct": (round(scorer_result["three_yr_pos_pct"], 1)
                                  if (scorer_result and scorer_result.get("three_yr_pos_pct") is not None)
                                  else existing.get("three_yr_pos_pct")),
+            # ISA-0588 (27-Sep-2026, VCI-B): the venue of the listing the Step-5 scorer ACTUALLY scored is
+            # carried onto the row, so the Step 6.5 re-price can verify identity (vci_deploy_eval.
+            # security_identity) instead of reading a declared-only exchange as AMBIGUOUS.
+            "scoring_venue":    ((scorer_result.get("scoring_venue") if scorer_result else None)
+                                 or existing.get("scoring_venue")),
+            # ISA-0770: what the balance-sheet metrics were scored on (listing-aware basis)
+            "financial_admissibility": ((scorer_result.get("financial_admissibility") if scorer_result else None)
+                                        or existing.get("financial_admissibility")),
             "acs8_catalyst_premium": existing.get("acs8_catalyst_premium", False),
             "floor_applied":    existing.get("floor_applied", False),
             "floor_reason":     existing.get("floor_reason", ""),
@@ -559,6 +572,8 @@ def main():
                   or _fv_inputs_lib(args.inv_dir).get(str(ticker).split(".")[0]) or {})
         updated_entry["asset_structure"]         = _fvrec.get("asset_structure") or existing.get("asset_structure", "single_asset")
         updated_entry["fv_inputs"]               = _fvrec.get("fv_inputs") or existing.get("fv_inputs", {})
+        # ISA-0771: carry the lineage id of the structured record the inputs came from
+        updated_entry["fv_input_id"]             = _fvrec.get("fv_input_id") or existing.get("fv_input_id")
         # bottleneck FV per share in the entry currency == the win-case FV used for asymmetry
         updated_entry["bottleneck_fv_per_share"] = fv_val if fv_val is not None else existing.get("bottleneck_fv_per_share")
         updated_entry["fv_source"]               = existing.get("fv_source", "modeled" if fv_val is not None else "estimated")
@@ -659,5 +674,23 @@ def main():
         print(f"  Validation: all {len(updated_entries)} entries have acs_score populated.")
 
 
+def _selftest() -> int:
+    """ISA-0582 (26-Sep-2026): a VCI entry level with no symbol carries no currency."""
+    import inspect as _i
+    n = 0
+    src = _i.getsource(sys.modules[__name__])
+    assert 'else "' + 'USD")' not in src, "negative control: the manufactured-USD branch must not return"; n += 1
+    assert 'entry_currency = ' + '"USD"\n        if' not in src, "must not default entry_currency to USD"; n += 1
+    assert '.get("acs_score") or ' + '0\n' not in src, \
+        "ISA-0667 negative control: a failed scorer must not manufacture an ACS of 0"; n += 1
+    assert '"scoring_venue":    ((scorer_result.get("scoring_venue")' in src, \
+        "ISA-0588 MUST-FIRE: the Step-5 scorer's captured venue must be carried onto the watchlist row"; n += 1
+    assert '"fv_input_id"' in src, "ISA-0771: the FV lineage id must be carried onto the row"; n += 1
+    print("sync_vci_watchlist selftest: %d assertions, 0 failed" % n)
+    return n
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

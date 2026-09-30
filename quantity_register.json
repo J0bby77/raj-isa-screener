@@ -91,7 +91,7 @@
   },
   {
    "name": "rho_sleeve",
-   "computer": "correlation_engine.candidate_correlation",
+   "computer": "correlation_engine.sleeve_rho",
    "units": "correlation",
    "surface": [
     "email.s7.correlation_matrix"
@@ -113,17 +113,17 @@
    "finding_dispositions": {
     "FI-Q3-rho_sleeve": {
      "disposition": "EXPECTED_NONLIVE",
-     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): its only caller correlation_engine.assess has 38 live_run calls in execution_ledger_sep_2026 (last flush 2026-09-12T19:57); candidate_correlation's _mark was added by ISA-0699(a) in TB-2026-09-16-05 (16-Sep), after the last real pre-run, so no live call could be recorded yet. First observation: 03-Oct-2026 pre-run.",
+     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): its only caller correlation_engine.assess has 38 live_run calls in execution_ledger_sep_2026 (last flush 2026-09-12T19:57); candidate_correlation's _mark was added by ISA-0699(a) in TB-2026-09-16-05 (16-Sep), after the last real pre-run, so no live call could be recorded yet. First observation: 03-Oct-2026 pre-run. || 25-Sep-2026 (ISA-0714): the declared computer is now correlation_engine.sleeve_rho (carries _fi_mark), called by candidate_correlation and deployment_sequencer.rho_to_set; first live observation 03-Oct-2026 pre-run.",
      "owner": "ISA-0699",
      "on": "2026-09-17",
      "by": "CLAUDE_BUILD ISA-0695"
     },
     "FI-Q1OOS-rho_sleeve-deployment_sequencer.rho_to_set": {
-     "disposition": "SECOND_HOME",
-     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): deployment_sequencer.rho_to_set (L235-259) computes rho against the sleeve AS IT WILL THEN STAND (P6.4) and that value decides REPLACEMENT_ONLY admission, while correlation_engine.candidate_correlation's rho_sleeve decides the sizing cap. Two computations of candidate-to-sleeve correlation feed two capital decisions; unification belongs to the Wave 2 final capital-authorisation work.",
-     "owner": "ISA-0705",
-     "on": "2026-09-17",
-     "by": "CLAUDE_BUILD ISA-0695"
+     "disposition": "SUPERSEDED",
+     "evidence": "25-Sep-2026 ISA-0714 build: SAME quantity, different set; rho_to_set now relays correlation_engine.sleeve_rho(...)['rho_sleeve'] and computes no rho_sleeve (Q1 re-run on the Candidate).",
+     "owner": "ISA-0714",
+     "on": "2026-09-25",
+     "by": "CLAUDE_BUILD ISA-0714"
     },
     "FI-Q1OOS-rho_sleeve-stock_price_fetch.window_stability": {
      "disposition": "NOT_THIS_QUANTITY",
@@ -132,14 +132,17 @@
      "on": "2026-09-17",
      "by": "CLAUDE_BUILD ISA-0695"
     }
-   }
+   },
+   "note": "ISA-0714 (25-Sep-2026): ONE computer, correlation_engine.sleeve_rho - a candidate's weight-averaged correlation to a NAME SET. candidate_correlation (set = current sleeve; sizing cap) and deployment_sequencer.rho_to_set (set = the sleeve AS IT WILL THEN STAND, P6.4; REPLACEMENT_ONLY + noise gate) both RELAY it; each passes its historical edge conventions explicitly (|w|, zero-weight fallback, unmeasured value)."
   },
   {
    "name": "mctr",
-   "computer": "risk_contribution.contributions",
+   "computer": "sleeve_risk.risk_shares",
    "units": "fraction_of_sigma_p",
    "surface": [
-    "email.s7.risk_contribution_mctr"
+    "email.s7.risk_contribution_mctr",
+    "run_context.summary.v21.risk_contribution.rows[].rc_share (relayed from the authority)",
+    "held_position_review.ceiling.risk_share_pct"
    ],
    "assertion": "pair_risk_contribution_basis",
    "vocabulary": {
@@ -150,9 +153,9 @@
     ]
    },
    "gbp_exposure": 5471.24,
-   "note": "The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3).",
+   "note": "ISA-0708 (25-Sep-2026): ONE computer. sleeve_risk.risk_shares computes the Euler MCTR and share (the capital authority, published by risk_share_authority with its risk_share_calc_id); weight_at_ceiling evaluates the SAME function on a hypothetical weight vector; risk_contribution consumes the authoritative share for rc_share AND the review flag (risk_weight = w/(N*rc_share), an identity of the old formula). Its own covariance MCTR is published as the distinct DIAGNOSTIC quantity mctr_local_diagnostic and decides nothing when an authority is supplied. PREVIOUS NOTE: The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3).",
    "key_scope": [
-    "risk_contribution"
+    "sleeve_risk"
    ],
    "finding_dispositions": {
     "FI-Q1OOS-mctr-concentration_clusters.build": {
@@ -163,20 +166,40 @@
      "by": "CLAUDE_BUILD ISA-0695"
     },
     "FI-Q1OOS-mctr-sleeve_risk.risk_shares": {
-     "disposition": "SECOND_HOME",
-     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): sleeve_risk.risk_shares L331-357 computes each held name's Euler share of stock-sleeve risk from weekly covariance and drives the D27 ceiling; risk_contribution.contributions computes the same share for the review flag. No declared authority between them.",
+     "disposition": "SUPERSEDED",
+     "evidence": "25-Sep-2026 ISA-0708 build: risk_shares is now the DECLARED in-scope computer; the finding no longer arises (Q1 re-run on the Candidate).",
      "owner": "ISA-0708",
-     "on": "2026-09-17",
-     "by": "CLAUDE_BUILD ISA-0695"
+     "on": "2026-09-25",
+     "by": "CLAUDE_BUILD ISA-0708"
     },
     "FI-Q1OOS-mctr-sleeve_risk.weight_at_ceiling": {
-     "disposition": "SECOND_HOME",
-     "evidence": "source read 17-Sep-2026 (TB-2026-09-17-03): sleeve_risk.weight_at_ceiling L363-382 re-derives the same Euler risk share while solving for the ceiling weight (capital consumer: ceiling_verdict REFUSE/IN_BREACH).",
+     "disposition": "SUPERSEDED",
+     "evidence": "25-Sep-2026 ISA-0708 build: weight_at_ceiling now calls risk_shares(weights=...) and computes no mctr; the finding no longer arises (Q1 re-run on the Candidate).",
      "owner": "ISA-0708",
-     "on": "2026-09-17",
-     "by": "CLAUDE_BUILD ISA-0695"
+     "on": "2026-09-25",
+     "by": "CLAUDE_BUILD ISA-0708"
+    },
+    "FI-Q3-mctr": {
+     "disposition": "EXPECTED_NONLIVE",
+     "evidence": "25-Sep-2026: the declared computer moved from risk_contribution.contributions (live 28 calls, Sep ledger) to sleeve_risk.risk_shares, which gained its _fi_mark in this build; the pre-run already calls it every run via risk_share_authority (Step 6.12e) and held_position_review ceilings, so the first live observation is the 03-Oct-2026 pre-run.",
+     "owner": "ISA-0708",
+     "on": "2026-09-25",
+     "by": "CLAUDE_BUILD ISA-0708"
     }
    }
+  },
+  {
+   "name": "mctr_local_diagnostic",
+   "computer": "risk_contribution.contributions",
+   "units": "annualised sigma units (MCTR on stock_price_fetch.matrix rho/sigma)",
+   "surface": [
+    "run_context.summary.v21.risk_contribution.rows[].mctr_local_diagnostic"
+   ],
+   "gbp_exposure": 0.0,
+   "key_scope": [
+    "risk_contribution"
+   ],
+   "note": "ISA-0708 (25-Sep-2026): DIAGNOSTIC ONLY - risk_contribution's own covariance MCTR, retained beside the authoritative share so divergence stays visible (risk_share_divergence). It decides nothing when sleeve_risk.risk_share_authority is supplied; with no authority the previous behaviour stands, labelled UNAUTHORITATIVE. A different register name from `mctr` so the two can never be read as one."
   },
   {
    "name": "evidence_state",

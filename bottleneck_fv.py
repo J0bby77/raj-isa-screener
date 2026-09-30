@@ -259,7 +259,11 @@ def evaluate_deploy_eligibility(*, acs_total: Optional[float], fv: BottleneckFV,
         blocked = True; reasons.append("F3 price_falls_on_beat:NO_DEPLOY")
     if not has_catalyst:
         blocked = True; reasons.append("F2 catalyst_unconfirmed")
-    if adj < thr:
+    if acs_total is None:
+        # ISA-0667 (27-Sep-2026): an UNMEASURED ACS refuses and SAYS so. It used to be coerced to
+        # 0.0 and read "acs 0.0 < 75 floor" - the sentence a genuinely weak name produces (R2.10).
+        blocked = True; reasons.append("acs UNMEASURED:refused_not_rejected")
+    elif adj < thr:
         blocked = True; reasons.append(f"acs {adj:.1f} < {thr:g} floor")
     if asym is None:
         blocked = True; reasons.append("fv_asymmetry unavailable")
@@ -302,7 +306,8 @@ def compression_cause(fv_now: Optional[float], fv_prev: Optional[float],
 
 
 # --- inline self-test -----------------------------------------------------------------------
-if __name__ == "__main__":
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 selftest (census-visible; was an inline __main__ block until 27-Sep-2026, VCI-A)."""
     abcl = dict(latent_tam_usd_bn=20.0, capture_share=0.12, steady_margin=0.35,
                 exit_multiple=7.0, fully_diluted_shares=300e6, fx_to_local=1.0, asset_structure="platform")
     fv = compute_bottleneck_fv_ci(abcl, 8.11, asset_structure="platform")
@@ -327,7 +332,21 @@ if __name__ == "__main__":
                                      falls_on_beat=False, has_structured_inputs=False)
     assert e2.require_manual_confirm and not e2.deploy_eligible
 
+    # ISA-0667 MUST-FIRE / NEGATIVE CONTROL: unmeasured ACS is refused as UNMEASURED; a measured low
+    # ACS is still an ordinary measured rejection.
+    eu = evaluate_deploy_eligibility(acs_total=None, fv=fv, has_catalyst=True, mgmt_unstable=False, falls_on_beat=False)
+    assert not eu.deploy_eligible and "acs UNMEASURED:refused_not_rejected" in eu.reasons \
+        and not any(r.startswith("acs 0.0") for r in eu.reasons), \
+        "ISA-0667 MUST-FIRE: an unmeasured ACS must read UNMEASURED, never 'acs 0.0 < floor'"
+    el = evaluate_deploy_eligibility(acs_total=40, fv=fv, has_catalyst=True, mgmt_unstable=False, falls_on_beat=False)
+    assert any(r.startswith("acs 40.0 <") for r in el.reasons), \
+        "ISA-0667 NEGATIVE CONTROL: a measured low ACS must still be an ordinary measured rejection"
     # E7 cause
     assert compression_cause(14.0, 14.0, 8.11, 5.25) == "price_up"      # price rose, FV flat
     assert compression_cause(11.0, 14.0, 8.0, 8.0) == "fv_down"          # FV revised down 21%
     print("bottleneck_fv v2 self-test PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    _selftest()

@@ -174,28 +174,58 @@ def k12(items, since=None, until=None, ids=None) -> dict:
 
 
 # ── KR3 — controls able to return PASS on a null input ────────────────────────────────────
+# ── KR3 v2 (ISA-0524, 26-Sep-2026) ───────────────────────────────────────────────────────
+# ⚑ THE MEASUREMENT DEFECT THIS FIXES. v1 passed `{}` to EVERY parameter, including `root`, and most
+#   controls read `root or HERE` - so `{}` meant "scan the LIVE tree", and a clean live scan was
+#   reported as "PASS on nothing". EMPTY_EXPLICIT and USE_LIVE_DEFAULT were aliased by truthiness.
+#   v2 separates them:
+#   * only CORPUS parameters (the population a control evaluates) receive a typed empty;
+#   * ENVIRONMENT parameters (root, paths, stores, resolvers, globbers) are pointed at an EMPTY
+#     sandbox directory, and the module's HERE and the register store are redirected there too, so
+#     an empty corpus cannot fall through to live data;
+#   * a control with NO corpus parameter has no null-input surface (it reads its environment only)
+#     and is reported as LIVE_DEFAULT_ONLY, never counted as null-tolerant;
+#   * a control that refuses in isolation but returns [] when its environment is left at the live
+#     default is reported as ALIASES_LIVE_DEFAULT: its explicit empty fell through to the live tree.
+KR3_CORPUS_EXACT = {"src": "", "tw": {}, "cfg": {}, "step9_pre": {}, "plan": {}, "checkpoint": {},
+                    "run_ctx": {}, "email_data": {}, "module_texts": {}, "py_texts": {},
+                    "receipts": {}, "ledger_runs": set(), "code": {}, "reporter_texts": {}}
+KR3_CORPUS_SUFFIX = (("texts", {}), ("surfaces", {}), ("sources", {}), ("items", []), ("rows", []),
+                     ("list", []), ("frames", []), ("_text", ""), ("_src", ""), ("_doc", ""))
+KR3_ENV_PATHLIKE = ("root", "store", "path", "dir")
+
+
+def _kr3_param_role(name: str):
+    n = name.lower()
+    if n in KR3_CORPUS_EXACT:
+        return "CORPUS", KR3_CORPUS_EXACT[n]
+    for suf, empty in KR3_CORPUS_SUFFIX:
+        if n.endswith(suf) or n == suf.lstrip("_"):
+            return "CORPUS", empty
+    return "ENV", None
+
+
 def kr3(module=None) -> dict:
-    """MEASURED, not declared: every `pair_*` in consistency_check is called with EMPTY inputs
-    and asked whether it returns [] — a clean pass on nothing.
-
-    ⚑ Empty, not None. Most pairs treat `None` as *"read the live tree"*, which is their
-    documented default and not a null input at all; feeding None would measure the default
-    path and report it as null-tolerance. The distinction is the whole measurement.
-
-    ⚑ Raising is a PASS for the control (it refused). Returning [] is the KR3 violation."""
-    if module is None and "kr3" in _CACHE:
+    """KR3 v2 (ISA-0524) — see the block comment above. Target 0; counted = null-tolerant +
+    live-default aliases (an explicit empty that fell through to the live tree is also a false
+    green of the empty-input contract)."""
+    import os as _os
+    import shutil as _sh
+    import tempfile as _tf
+    _cache_it = module is None
+    if _cache_it and "kr3" in _CACHE:
         return _CACHE["kr3"]
     if module is None:
         try:
             import consistency_check as module                       # noqa: N813
         except Exception as e:                                       # noqa: BLE001
             return _missing("consistency_check not importable (%s) — KR3 is BLIND" % e)
-    pairs = [(n, f) for n, f in vars(module).items()
-             if n.startswith("pair_") and callable(f)]
+    pairs = [(n, f) for n, f in vars(module).items() if n.startswith("pair_") and callable(f)]
     if not pairs:
         return _missing("no pair_* functions found in consistency_check — KR3 is BLIND, and a "
                         "BLIND scan must not report 0 violations")
-    tolerant, refused, no_args = [], [], []
+    tolerant, refused, no_args, live_only, alias, typed, env_empty = [], [], [], [], [], [], []
+    probe = {}
     for name, fn in pairs:
         try:
             sig = inspect.signature(fn)
@@ -204,42 +234,113 @@ def kr3(module=None) -> dict:
         params = [p for p in sig.parameters.values()
                   if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
         if not params:
-            no_args.append(name)          # reads the live tree only; not a null-input surface
+            no_args.append(name)
             continue
-        empties = {}
+        decl = getattr(fn, "_empty_semantics", None) or {}
+        if decl.get("class") == "ENV":
+            live_only.append(name)
+            probe[name] = "declared ENV (ISA-0524): %s" % decl.get("reason")
+            continue
+        roles = {p.name: _kr3_param_role(p.name) for p in params}
+        env_population = bool(decl) and not decl.get("corpus")
+        if env_population:
+            # declared (ISA-0524): the population is ENUMERATED from the environment, so the probe
+            # is the isolated environment itself; name-based "corpus" parameters are vestigial.
+            roles = {k: ("ENV", None) for k in roles}
+        corpus = {k: v[1] for k, v in roles.items() if v[0] == "CORPUS"}
+        if not corpus and not env_population:
+            # no corpus parameter: the population is the ENVIRONMENT. Probe it EMPTY (sandbox root,
+            # HERE and register store redirected); a [] there is an environment false-green unless
+            # the control declares ENV with a reason (it reads through another module's own tree).
+            env_population = True
+            roles = {k: ("ENV", None) for k in roles}
+        tmp = _tf.mkdtemp(prefix="kr3_")
+        iso_env, live_env = {}, {}
         for p in params:
+            if roles[p.name][0] != "ENV":
+                continue
             n = p.name.lower()
-            if n.endswith("texts") or n.endswith("surfaces") or n in ("module_texts", "rows"):
-                empties[p.name] = {}
-            elif n.endswith("items") or n.endswith("list"):
-                empties[p.name] = []
-            elif "text" in n or n.endswith("_src") or n.endswith("_doc"):
-                empties[p.name] = ""
-            else:
-                empties[p.name] = {}
+            required = p.default is inspect.Parameter.empty
+            if any(t in n for t in KR3_ENV_PATHLIKE):
+                iso_env[p.name] = _os.path.join(tmp, "absent") if ("path" in n or "store" in n) else tmp
+            elif "exists" in n:
+                iso_env[p.name] = (lambda _p: False)
+            elif "glob" in n:
+                iso_env[p.name] = (lambda *a, **k: [])
+            elif required:
+                iso_env[p.name] = False
+            if required:
+                live_env[p.name] = iso_env.get(p.name, False)
+        old_here = getattr(module, "HERE", None)
+        old_store = _os.environ.get("ISA_REGISTER_STORE")
         try:
-            out = fn(**empties)
-        except Exception:                                            # noqa: BLE001
-            refused.append(name)          # refusing on nothing is correct
+            if old_here is not None:
+                module.HERE = tmp
+            _os.environ["ISA_REGISTER_STORE"] = _os.path.join(tmp, "state")
+            _er = getattr(module, "EMPTY_RESULTS", None)
+            _before = dict(_er) if isinstance(_er, dict) else None
+            try:
+                iso = fn(**{**{k: (type(v)() if isinstance(v, (dict, list, set)) else v)
+                               for k, v in corpus.items()}, **iso_env})
+                iso_state = "EMPTY_PASS" if (isinstance(iso, list) and not iso) else "REFUSED"
+            except Exception:                                        # noqa: BLE001
+                iso_state = "RAISED"
+        finally:
+            if old_here is not None:
+                module.HERE = old_here
+            if old_store is None:
+                _os.environ.pop("ISA_REGISTER_STORE", None)
+            else:
+                _os.environ["ISA_REGISTER_STORE"] = old_store
+            _sh.rmtree(tmp, ignore_errors=True)
+        _typed = (isinstance(_er, dict) and _er.get(name) and _er.get(name) != (_before or {}).get(name))
+        if iso_state == "EMPTY_PASS" and _typed:
+            typed.append(name)
+            probe[name] = "typed %s on the empty probe" % _er[name].get("state")
             continue
-        if isinstance(out, list) and not out:
-            tolerant.append(name)         # ⚑ a clean PASS on nothing — the KR3 violation
+        if iso_state == "EMPTY_PASS" and env_population:
+            env_empty.append(name)
+            probe[name] = "environment population: [] on an EMPTY sandbox - absent evidence read as clean"
+            continue
+        if iso_state == "EMPTY_PASS":
+            tolerant.append(name)
+            probe[name] = "EMPTY_EXPLICIT -> [] in isolation"
+            continue
+        if env_population:
+            refused.append(name)
+            probe[name] = "environment population: refused on an empty sandbox (%s)" % iso_state
+            continue
+        live_state = None
+        try:
+            lv = fn(**{**{k: (type(v)() if isinstance(v, (dict, list, set)) else v)
+                          for k, v in corpus.items()}, **live_env})
+            live_state = "EMPTY_PASS" if (isinstance(lv, list) and not lv) else "REFUSED"
+        except Exception:                                            # noqa: BLE001
+            live_state = "RAISED"
+        if live_state == "EMPTY_PASS":
+            alias.append(name)
+            probe[name] = "refused in isolation, [] with the live environment: the empty fell through"
         else:
             refused.append(name)
-    checked = len(tolerant) + len(refused)
-    _out = {"value": len(tolerant), "n": len(tolerant), "d": checked,
-            "target": 0,
-            "basis": ("consistency_check.pair_* called with EMPTY (not None) arguments; a "
-                      "control returning [] on nothing is null-tolerant, one that raises or "
-                      "reports errors has refused"),
+    checked = len(tolerant) + len(refused) + len(alias) + len(typed) + len(env_empty)
+    _bad = len(tolerant) + len(alias) + len(env_empty)
+    _res = {"value": _bad, "n": _bad, "d": checked, "target": 0,
+            "basis": ("KR3 v2 (ISA-0524): consistency_check.pair_* called with TYPED EMPTY corpus "
+                      "arguments and an ISOLATED environment (empty sandbox root, HERE and register "
+                      "store redirected); EMPTY_EXPLICIT can no longer alias USE_LIVE_DEFAULT"),
             "null_tolerant": sorted(tolerant),
+            "aliases_live_default": sorted(alias),
+            "live_default_only": sorted(live_only),
             "not_applicable_no_args": sorted(no_args),
-            "note": ("%d pair(s) take no arguments and read the live tree only — they have no "
-                     "null-input surface to test and are reported, not counted"
-                     % len(no_args))}
-    if module is None:
-        _CACHE["kr3"] = _out
-    return _out
+            "probe": probe,
+            "note": ("%d pair(s) have no corpus parameter (environment-only) and %d take no arguments: "
+                     "no null-input surface, reported not counted; %d fell through to the live "
+                     "default and are reported separately" % (len(live_only), len(no_args), len(alias))),
+            "empty_valid_typed": sorted(typed),
+            "environment_empty_pass": sorted(env_empty)}
+    if _cache_it:
+        _CACHE["kr3"] = _res
+    return _res
 
 
 # ── KR6 — rules living in more than one place ─────────────────────────────────────────────
@@ -559,6 +660,52 @@ def _selftest() -> int:
     ok("NEGATIVE CONTROL: a control that RAISES on an empty input is NOT counted — refusing is "
        "the correct behaviour and must not be scored as a defect",
        "pair_refuses" not in fake["null_tolerant"])
+
+    # ── ISA-0524 KR3 v2: the measurement contract itself ─────────────────────────────────
+    import os as _os2
+    import tempfile as _tf2
+    _live_dir = _tf2.mkdtemp(prefix="kr3_live_")
+    open(_os2.path.join(_live_dir, "x.txt"), "w").write("live")
+
+    class _V2:
+        HERE = _live_dir
+        EMPTY_RESULTS = {}
+
+        @staticmethod
+        def pair_env_reader(root=None):
+            # reads its ENVIRONMENT: clean on the live tree, but it must be probed EMPTY
+            return [] if _os2.listdir(root or _V2.HERE) else []
+
+        @staticmethod
+        def pair_env_refuses(root=None):
+            if not _os2.listdir(root or _V2.HERE):
+                return ["UNKNOWN: nothing to scan"]
+            return []
+
+        @staticmethod
+        def pair_truthy(items=None):
+            items = items or open(_os2.path.join(_V2.HERE, "x.txt")).read()   # truthiness alias
+            return []
+
+        @staticmethod
+        def pair_typed(rows=None):
+            _V2.EMPTY_RESULTS["pair_typed"] = {"state": "EMPTY_VALID", "n": len(rows or [])}
+            return []
+
+    v2 = kr3(module=_V2)
+    ok("KR3 v2 NEGATIVE CONTROL: an environment reader that is clean on an EMPTY sandbox is an "
+       "environment false-green", "pair_env_reader" in v2["environment_empty_pass"], v2)
+    ok("KR3 v2 POSITIVE CONTROL: an environment reader that refuses an empty sandbox is not counted",
+       "pair_env_refuses" not in v2["environment_empty_pass"] and "pair_env_refuses" not in v2["null_tolerant"])
+    ok("KR3 v2 MUST-FIRE: an explicit empty that falls through to the LIVE default is reported as an "
+       "alias, never as a clean empty-input pass", v2["aliases_live_default"] == ["pair_truthy"], v2)
+    ok("KR3 v2: a control that records a TYPED empty state (C-B/C-C) is not a violation",
+       v2["empty_valid_typed"] == ["pair_typed"] and "pair_typed" not in v2["null_tolerant"], v2)
+    ok("KR3 v2 counts every false-green class toward the target of zero",
+       v2["value"] == len(v2["null_tolerant"]) + len(v2["aliases_live_default"])
+       + len(v2["environment_empty_pass"]))
+    _live_real = open(_os2.path.join(_live_dir, "x.txt")).read()
+    ok("KR3 v2 never writes into the environment it probes", _live_real == "live")
 
     class _Empty:
         pass

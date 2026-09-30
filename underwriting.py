@@ -50,7 +50,7 @@ except Exception:                                       # noqa: BLE001  pragma: 
         return None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"   # 1.1.0 ISA-0760: observations.valuation_multiple
 STORE = "underwriting_cases.jsonl"
 
 # authority classes (§7.2) and the non-numeric states a case may carry (§6.3)
@@ -155,6 +155,14 @@ def case_from_row(ticker, row, *, as_of, purpose, route, source_artefact=None,
             "eps_growth_trailing_q": {"value": r.get("eps_growth_trailing_q"),
                                       "basis": "HISTORICAL_TRAILING_QUARTER_YOY",
                                       "used_in_er": False},
+            # ⚑ ISA-0760 (27-Sep-2026): the valuation multiple AT THIS CASE's date — the ONE home
+            #   of the retired trades-log `primary_valuation_metric` / `purchase_multiple`. Consumed
+            #   from the stamped row (expected_return: er_multiple_field / er_multiple_value), never
+            #   recomputed; absent -> None, typed downstream by valuation_comparability().
+            "valuation_multiple": {"field": r.get("er_multiple_field"),
+                                   "value": _num(r.get("er_multiple_value")),
+                                   "source_fields": "er_multiple_field/er_multiple_value",
+                                   "method_id": r.get("er_method_id")},
         },
         "price_basis": {"price": _num(r.get("current_price") or r.get("price")),
                         "currency": r.get("currency"), "as_of": as_of},
@@ -310,6 +318,47 @@ def delta(original: dict, current: dict) -> dict:
     return {"delta_pp": round(cv - ov, 1), "comparable": True, "why": "same method"}
 
 
+VALUATION_DIAGNOSTIC_AUTHORITY = ("NONE - diagnostic/attribution only. Raj DECISION 27-Sep-2026 "
+                                  "(ISA-0760): legacy Signal 1 is not a capital gate; it cannot by "
+                                  "itself emit HOLD/TOP_UP/TRIM/SELL, change ranking or force a "
+                                  "Step 10 escalation.")
+
+
+def valuation_comparability(original_case: Optional[dict], current_case: Optional[dict]) -> dict:
+    """ISA-0760 — `multiple_change_since_decision`, the successor of legacy Signal 1.
+
+    Computed ONLY when both cases carry the same metric field and the same E[r] method identity.
+    Otherwise typed: NOT_CAPTURED_CONTEMPORANEOUSLY (no decision-time case), UNKNOWN_REQUIRED_SOURCE
+    (a value is missing), NOT_COMPARABLE (different metric), METHOD_CHANGED (different method).
+    Never an input to any capital decision (VALUATION_DIAGNOSTIC_AUTHORITY)."""
+    base = {"capital_authority": VALUATION_DIAGNOSTIC_AUTHORITY,
+            "original_case_id": (original_case or {}).get("case_id"),
+            "current_case_id": (current_case or {}).get("case_id"),
+            "multiple_change_since_decision": None}
+    if not original_case:
+        return dict(base, state=NOT_CAPTURED,
+                    why="no decision-time underwriting case exists; the entry multiple is not "
+                        "reconstructed (R7.5)")
+    ov = ((original_case.get("observations") or {}).get("valuation_multiple") or {})
+    cv = (((current_case or {}).get("observations") or {}).get("valuation_multiple") or {})
+    if ov.get("value") is None or cv.get("value") is None or not ov.get("field") or not cv.get("field"):
+        return dict(base, state="UNKNOWN_REQUIRED_SOURCE",
+                    why="original %s=%s / current %s=%s" % (ov.get("field"), ov.get("value"),
+                                                            cv.get("field"), cv.get("value")))
+    if ov.get("field") != cv.get("field"):
+        return dict(base, state="NOT_COMPARABLE",
+                    why="metric %s -> %s" % (ov.get("field"), cv.get("field")))
+    om = ov.get("method_id") or ((original_case.get("er") or {}).get("method_id"))
+    cm = cv.get("method_id") or (((current_case or {}).get("er") or {}).get("method_id"))
+    if om != cm:
+        return dict(base, state="METHOD_CHANGED", why="method %s -> %s" % (om, cm))
+    o, c = float(ov["value"]), float(cv["value"])
+    if o <= 0:
+        return dict(base, state="NOT_COMPARABLE", why="non-positive original multiple %s" % o)
+    return dict(base, state="COMPARABLE", metric=ov["field"], original_multiple=o,
+                current_multiple=c, multiple_change_since_decision=round(c / o - 1.0, 4))
+
+
 # ─────────────────────────────────────────── the monthly capture (pre-run, R4.11) ─────
 
 def _declared_binaries(root):
@@ -402,7 +451,11 @@ def capture_month(*, portfolio_path, scored_path=None, step9_path=None, as_of=No
                      "method_id": c["er"].get("method_id"),
                      "admissible_for_positive_size": c.get("admissible_for_positive_size"),
                      "event_state": c.get("event_state"),
-                     "delta": delta(orig, c)})
+                     "delta": delta(orig, c),
+                     # ISA-0760: diagnostic only - never read by a capital decision
+                     "valuation_comparability": valuation_comparability(
+                         next((x for x in load(root) if x.get("case_id") == orig.get("case_id")),
+                              None) if orig.get("case_id") else None, c)})
     # candidates: every T1-qualified stack row gets a case, so the decision can bind it
     n_cand = 0
     if step9_path and os.path.exists(step9_path):
@@ -529,6 +582,35 @@ def _selftest(verbose: bool = True) -> int:
            "back-fill", set(cap["not_captured_original"]) == set(st), cap["not_captured_original"])
         ok("NEGATIVE CONTROL: a dry run writes nothing", cap["write"]["n_written"] == 0)
     shutil.rmtree(td, ignore_errors=True)
+    # ── ISA-0760: valuation multiple lineage + comparability (Signal 1 successor) ─────────
+    _vr = dict(good, er_multiple_field="fwd_pe", er_multiple_value=20.0)
+    _o = case_from_row("VMX", _vr, as_of="2026-10-03", purpose="DECISION", route="growth")
+    _c = case_from_row("VMX", dict(_vr, er_multiple_value=25.0), as_of="2026-11-07",
+                       purpose="HELD_CURRENT", route="growth")
+    ok("V1 the case carries the valuation multiple field + value from the stamped row",
+       _o["observations"]["valuation_multiple"]["field"] == "fwd_pe"
+       and _o["observations"]["valuation_multiple"]["value"] == 20.0)
+    _v = valuation_comparability(_o, _c)
+    ok("V2 same metric + method -> COMPARABLE, change = 25/20-1", _v["state"] == "COMPARABLE"
+       and _v["multiple_change_since_decision"] == 0.25, _v)
+    ok("V3 it carries NO capital authority (Raj DECISION 27-Sep-2026)",
+       str(_v["capital_authority"]).startswith("NONE"))
+    ok("V4 no decision-time case -> NOT_CAPTURED_CONTEMPORANEOUSLY, no number",
+       valuation_comparability(None, _c)["state"] == NOT_CAPTURED
+       and valuation_comparability(None, _c)["multiple_change_since_decision"] is None)
+    _c_ev = case_from_row("VMX", dict(_vr, er_multiple_field="ev_ebitda", er_multiple_value=12.0),
+                          as_of="2026-11-07", purpose="HELD_CURRENT", route="growth")
+    ok("V5 a different metric -> NOT_COMPARABLE, no number",
+       valuation_comparability(_o, _c_ev)["state"] == "NOT_COMPARABLE"
+       and valuation_comparability(_o, _c_ev)["multiple_change_since_decision"] is None)
+    _c_m = case_from_row("VMX", dict(_vr, er_method_id="expected_return@bbb", er_multiple_value=25.0),
+                         as_of="2026-11-07", purpose="HELD_CURRENT", route="growth")
+    ok("V6 a different E[r] method -> METHOD_CHANGED, no number",
+       valuation_comparability(_o, _c_m)["state"] == "METHOD_CHANGED")
+    _c_x = case_from_row("VMX", dict(good), as_of="2026-11-07", purpose="HELD_CURRENT",
+                         route="growth")
+    ok("V7 a missing current value -> UNKNOWN_REQUIRED_SOURCE (never zero)",
+       valuation_comparability(_o, _c_x)["state"] == "UNKNOWN_REQUIRED_SOURCE")
     if verbose:
         print("underwriting selftest: %d FAIL(s)" % len(fails))
     return len(fails)

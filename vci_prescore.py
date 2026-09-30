@@ -115,6 +115,7 @@ def pull_raw(sym, theme_id, theme_opp):
         "inflection_flag": sc.inflection_flag(d),
         "pre_inflection_override": pre_inflection,
         "scored": datetime.now().strftime("%Y-%m-%d"),
+        "scoring_venue": sc._scoring_venue(d, sym),     # ISA-0588: venue at SCORING
     }
 
 
@@ -193,8 +194,9 @@ def print_table(rows, advance_n=None):
               f"{r['traj_pct']:>5.0f} {r['opp_pct']:>5.0f} {r['tract_pct']:>6.0f} {m6:>7} {note}")
     if advance_n:
         adv = stage1_advance(rows, advance_n)
-        print(f"\n  STAGE 1 ADVANCEMENT SET ({len(adv)} -> expensive ACS scoring): "
+        print(f"\n  QMS ADVANCEMENT (top-{advance_n} + pre-inflection; {len(adv)}): "
               + ", ".join(a["ticker"] for a in adv))
+        print("  ⚑ The Stage-1 set to score is the REVIEW UNIVERSE below (ISA-0769), not this list.")
         flagged = [r["ticker"] for r in rows if r.get("inflection_flag")]
         if flagged:
             print(f"  GRADUATION REVIEW (price already moved -- verify still pre-inflection, do NOT chase): "
@@ -242,6 +244,11 @@ def main():
     ap.add_argument("--rank-only", action="store_true", help="re-rank existing cache, no fetch")
     ap.add_argument("--advance", type=int, default=None, help="also print Stage-1 advancement set (top N)")
     ap.add_argument("--json-out", default=None, help="write ranked JSON to this path")
+    ap.add_argument("--universe-out", default=None,
+                    help="ISA-0769: write the canonical VCI REVIEW UNIVERSE (held + watchlist + QMS top-N + "
+                         "pre-inflection + overrides, with provenance) to this path. Requires --advance.")
+    ap.add_argument("--override", nargs="*", default=[],
+                    help="ISA-0769: authorised additions as TICKER:reason (e.g. NBIS:'hyperscaler cascade')")
     ap.add_argument("--budget", type=float, default=0.0,
                     help="Per-call fetch time budget in seconds; stop cleanly when exceeded so the "
                          "ephemeral 45s sandbox can resume next call. 0 = no limit (default).")
@@ -288,11 +295,70 @@ def main():
 
     rows = rank_cache(cache)
     print_table(rows, advance_n=args.advance)
+    if args.advance:
+        # ISA-0769: THE Stage-1 population. A failure here is a HARD failure of the VCI review path -
+        # the run cannot prove it reviews the capital already at risk.
+        import vci_review_universe as _vru
+        try:
+            uni = _vru.build(rows, args.advance, overrides=args.override, root=INV_DIR)
+        except _vru.ReviewUniverseError as exc:
+            print(f"\n  ✖ REVIEW UNIVERSE REFUSED: {exc}")
+            sys.exit(3)
+        print(f"\n  REVIEW UNIVERSE ({uni['counts']['members']} members; population check "
+              f"{uni['population_check']['state']}; held authority: {uni['held_why']}):")
+        for m in uni["members"]:
+            print(f"    {m['ticker']:<8} roles={'+'.join(m['roles'])}"
+                  + (f"  holding={m.get('holding_state')}" if m.get('holding_state') else "")
+                  + ("" if m["qms_row"] else "  [NOT IN QMS CACHE - score it: vci_prescore.py --tickers]"))
+        if args.universe_out:
+            json.dump(uni, open(args.universe_out, "w", encoding="utf-8"), indent=1, default=str)
+            print(f"  Review universe written: {args.universe_out}")
     if args.json_out:
         json.dump(rows, open(args.json_out, "w", encoding="utf-8"), indent=2, default=str)
         print(f"\nRanked JSON written: {args.json_out}")
     print(f"\nCache: {cache_path()}  ({len([r for r in cache.values() if 'error' not in r])} scored)")
 
 
+def _selftest():
+    """ISA-0588 — offline. Every prescore row carries the scoring venue, typed when absent."""
+    n = 0
+    _orig = (sc.score_candidate, sc.compute_totals, sc.check_pre_inflection_override,
+             sc.inflection_flag)
+    try:
+        sc.compute_totals = lambda scores: {"raw_score": 10, "effective_denom": 20}
+        sc.check_pre_inflection_override = lambda scores, d: (False, False, False)
+        sc.inflection_flag = lambda d, *a, **k: ""
+        sc.score_candidate = lambda sym: ({"name": "X", "mktcap": 1e9, "exchange": "NMS",
+                                           "listing_currency": "USD"}, {})
+        r = pull_raw("QBTS", 1, {})
+        assert r["scoring_venue"]["exchange"] == "NMS" and \
+            r["scoring_venue"]["status"] == "CAPTURED_AT_SCORING", r; n += 1
+        # MUST-FIRE: no venue in the pull -> typed UNKNOWN on the row, never a default
+        sc.score_candidate = lambda sym: ({"name": "Y", "mktcap": 1e9}, {})
+        r = pull_raw("SATL", 1, {})
+        assert r["scoring_venue"]["exchange"] is None and \
+            r["scoring_venue"]["status"] == "UNKNOWN_NOT_CAPTURED", \
+            ("MUST-FIRE: a pull with no venue must type the row UNKNOWN_NOT_CAPTURED", r); n += 1
+        # an errored pull carries no venue claim at all
+        sc.score_candidate = lambda sym: ({"error": "boom"}, {})
+        assert "scoring_venue" not in pull_raw("ERR", 1, {}), \
+            "NEGATIVE CONTROL: an errored pull makes no venue claim"; n += 1
+    finally:
+        (sc.score_candidate, sc.compute_totals, sc.check_pre_inflection_override,
+         sc.inflection_flag) = _orig
+    # ISA-0769: the CLI's Stage-1 population is the review universe (held + watchlist always present)
+    import vci_review_universe as _vru
+    _h = {"state": "OK", "members": [{"key": "QBTS", "ticker": "QBTS", "holding_state": "HELD",
+                                      "vci_provenance": ["fixture"]}], "authority": {}, "why": "fixture"}
+    _u = _vru.build([{"ticker": "ALAB", "qms": 90}], 1, held=_h, watchlist=["IONQ"])
+    assert {m["key"] for m in _u["members"]} == {"ALAB", "QBTS", "IONQ"}, \
+        ("MUST-FIRE (ISA-0769): QMS top-N alone must NEVER be the Stage-1 set - held/watchlist are in", _u); n += 1
+    print("vci_prescore selftest: %d assertions, 0 failed" % n)
+    return n
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+        sys.exit(0)
     main()

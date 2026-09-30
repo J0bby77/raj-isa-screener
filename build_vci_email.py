@@ -172,9 +172,54 @@ def build_e1(data):
     return html
 
 
+def _acs_num(c):
+    """ISA-0667: the ACS as a number, or None when UNMEASURED (never coerced to 0)."""
+    v = c.get('acs')
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# VCI-A (27-Sep-2026): named refusals rendered by NAME, never as a blank or a 0. The renderer computes
+# nothing - it prints the `refusals` list vci_deploy_eval.evaluate_candidate produced.
+_REFUSAL_BADGES = {
+    'UNRESOLVED_SECURITY_IDENTITY': 'ID?',
+    'UNMEASURED_ACS': 'ACS?',
+    'UNMEASURED_SOURCE_SCORE': 'SRC?',
+    'MISSING_STRUCTURED_FV_INPUT': 'FV-input?',
+}
+
+
+def _selftest(verbose: bool = True) -> int:
+    """R5.5 (VCI-A 27-Sep-2026): the renderer prints typed states and never turns UNMEASURED into 0."""
+    n = 0
+
+    def ok(cond, msg):
+        nonlocal n
+        n += 1
+        assert cond, msg
+    h = build_e2({'candidates': [
+        {'ticker': 'INFQ', 'acs': None, 'vci_source_score': None,
+         'refusals': ['UNMEASURED_ACS', 'UNMEASURED_SOURCE_SCORE', 'MISSING_STRUCTURED_FV_INPUT',
+                      'UNRESOLVED_SECURITY_IDENTITY']},
+        {'ticker': 'QBTS', 'acs': 76, 'vci_source_score': 55.2, 'deploy_eligible': True, 'refusals': []},
+        {'ticker': 'LOWX', 'acs': 30, 'vci_source_score': 12.0}]})
+    ok('UNMEASURED' in h and 'INFQ' in h,
+       "MUST-FIRE: an UNMEASURED ACS is rendered by name - it must not be dropped or shown as 0/100")
+    ok('0/100' not in h, "NEGATIVE CONTROL: no row may render a placeholder '0/100'")
+    ok('FV-input?' in h and 'ID?' in h, "named refusals render as badges, not blanks")
+    ok('LOWX' not in h, "a MEASURED ACS below 45 is still filtered (ordinary behaviour unchanged)")
+    ok(h.index('QBTS') < h.index('INFQ'), "an unrankable name sorts after measured scores, never as 0 among them")
+    if verbose:
+        print("build_vci_email selftest: %d checks PASS" % n)
+    return 0
+
+
 def build_e2(data):
-    """E2: Top Candidates table — ACS >=45 only, colour-coded by band."""
-    candidates = [c for c in data.get('candidates', []) if int(c.get('acs', 0)) >= 45]
+    """E2: Top Candidates table — ACS >=45 only (plus every UNMEASURED name, shown by name), colour-coded."""
+    candidates = [c for c in data.get('candidates', [])
+                  if _acs_num(c) is None or _acs_num(c) >= 45]
     if not candidates:
         return (
             '<div style="margin:16px 0;">'
@@ -222,10 +267,11 @@ def build_e2(data):
 
     rows_html = ''
     # rank by VCI Source Score desc (deployability), tiebreak ACS desc — NOT ACS-primary
-    for c in sorted(candidates, key=lambda x: (-(x.get('vci_source_score') or 0), -int(x.get('acs', 0)))):
-        acs = int(c.get('acs', 0))
-        bg = acs_row_bg(acs)
-        acs_colour = acs_label_color(acs)
+    for c in sorted(candidates, key=lambda x: (x.get('vci_source_score') is None, -(x.get('vci_source_score') or 0),
+                                               -(_acs_num(x) or 0))):
+        acs = _acs_num(c)
+        bg = acs_row_bg(acs if acs is not None else 0)
+        acs_colour = acs_label_color(acs if acs is not None else 0)
         action = c.get('action', '')
         action_bold = 'font-weight:bold;' if action in ('ACTIVE BUY', 'WATCHLIST') else ''
         action_color = '#16a34a' if action == 'ACTIVE BUY' else ('#1d4ed8' if action == 'WATCHLIST' else '#374151')
@@ -240,6 +286,9 @@ def build_e2(data):
             _flags += ' ~'
         if c.get('asymmetry_compression_cause') == 'fv_down':
             _flags += ' &darr;FV'
+        for _r in (c.get('refusals') or []):
+            _flags += ' &#10007;' + _REFUSAL_BADGES.get(_r, se(str(_r)))
+
         # E6: revision velocity badge (only shown when meaningfully up/down; neutral 0.5 = no badge)
         _rv = c.get('revision_velocity')
         if _rv is not None:
@@ -262,7 +311,7 @@ def build_e2(data):
             f'<td style="{td}">{se(str(c.get("rank", "")))}</td>'
             f'<td style="{td}font-weight:bold;">{se(c.get("ticker", ""))}</td>'
             f'<td style="{td}font-weight:bold;">{_fmt_src(c.get("vci_source_score"))}</td>'
-            f'<td style="{td}color:{acs_colour};">{acs}/100</td>'
+            f'<td style="{td}color:{acs_colour};">{(str(acs) + "/100") if acs is not None else "UNMEASURED"}</td>'
             f'<td style="{td}">{_fmt_asym(_asym)}</td>'
             f'<td style="{td}">{_fmt_floor(c)}</td>'
             f'<td style="{td}">{cat_txt}</td>'
@@ -280,6 +329,8 @@ def build_e2(data):
         'Floor = applied bar (2.0&times; platform / 2.5&times; single-asset; <sup>d</sup> = probability-weighted, E1). '
         'Deploy flags: &#9888; FV cross-check, ~ liquidity-capped, &darr;FV thesis-erosion, '
         '&uarr;Rev/&darr;Rev estimate-revision velocity. '
+        'Named refusals (not rejections): &#10007;ID? unresolved security identity, &#10007;ACS? ACS unmeasured, '
+        '&#10007;SRC? source score unmeasured, &#10007;FV-input? no structured FV record (MISSING_STRUCTURED_FV_INPUT). '
         'Entry levels are display-only (watchlist file). '
         'ACS colour: <span style="background:#fff5f5;padding:1px 4px;">&ge;85 NVIDIA-class</span>&nbsp;'
         '<span style="background:#fffbeb;padding:1px 4px;">75&ndash;84 High</span>&nbsp;'

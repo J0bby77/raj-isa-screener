@@ -450,14 +450,60 @@ def check_stock_sleeve_weight_now_pct():
 
 
 # ─────────────────────────────────────────────────────────────── held-book / review checks
+def _store_asof():
+    """ISA-0756 (26-Sep-2026): the date of the return store's own latest observation, + 1 day.
+
+    The 'frozen Sep-2026 book' checks were frozen in their PORTFOLIO but not in TIME: once the store is
+    older than stock_return_store.STALE_WEEKS, stock_price_fetch.matrix age-excludes every held name, the
+    realisation leg is UNEVALUATED and CAP-graduation_disposition flipped SELL -> SELL_PENDING_MIN_HOLD on
+    calendar alone (26-Sep: store last obs 2026-09-11). A must-fire must not depend on the day it runs, so the
+    frozen-book review is evaluated as of the store's own as-of. This pins the FIXTURE only; the production
+    freshness-policy divergence stays owned by ISA-0756."""
+    import datetime as _dt
+    import stock_return_store as _srs
+    last = None
+    for _rec in ((_srs.load() or {}).get("names") or {}).values():
+        for _d in ((_rec or {}).get("observations") or {}):
+            if last is None or _d > last:
+                last = _d
+    return (_dt.date.fromisoformat(last[:10]) + _dt.timedelta(days=1)) if last else None
+
+
+class _PinnedClock:
+    """Context manager: stock_return_store sees `asof` as today (fixture-local; restored on exit)."""
+    def __init__(self, asof):
+        self.asof = asof
+    def __enter__(self):
+        import datetime as _dt
+        import stock_return_store as _srs
+        self._srs, self._saved = _srs, _srs.datetime
+        if self.asof is None:
+            return self
+        _asof = self.asof
+        class _D(_dt.date):
+            @classmethod
+            def today(cls):
+                return _asof
+        class _Shim:
+            date, datetime, timedelta, timezone = _D, _dt.datetime, _dt.timedelta, _dt.timezone
+        _srs.datetime = _Shim
+        return self
+    def __exit__(self, *exc):
+        self._srs.datetime = self._saved
+        return False
+
+
 def _review(**patch):
     import held_position_review as _h
     import thesis_state as _ts
     saved = _ts.load_states
+    asof = _store_asof()
     try:
         if "states" in patch:
             _ts.load_states = lambda root=None: patch["states"]           # noqa: E731
-        return _h.review(os.path.join(HERE, patch.get("portfolio", "portfolio_data_sep_2026.json")), dry_run=True)
+        with _PinnedClock(asof):
+            return _h.review(os.path.join(HERE, patch.get("portfolio", "portfolio_data_sep_2026.json")),
+                             dry_run=True, today=(asof.isoformat() if asof else None))
     finally:
         _ts.load_states = saved
 
@@ -771,6 +817,50 @@ def check_vci_binary_risk_committed():
                   "NOT_DECISION_EFFECTIVE", expected, actual)
 
 
+def check_vci_size_pct():
+    """ISA-0699 residual (VCI-C, 27-Sep-2026) — vci_size_pct's three decision states reached THROUGH its
+    capital-deciding consumer, vci_lifecycle.assess (successor route -> target_gbp / top_up / EXIT), never
+    by a unit call: BUDGET_BOUND (binding expected_loss_budget, AUTHORISED), LADDER_BOUND (binding ladder
+    rung, AUTHORISED), REFUSED_SUB_FLOOR (budget-derived size below MIN_ENTRY -> FAILS_ECONOMICS -> EXIT).
+    Evidence/coverage only: no sizing policy is changed."""
+    import vci_lifecycle as _lc
+    import position_sizing as _ps
+    nav = 146000.0
+    dec = {"is_binary": True, "catalyst_status": "RESOLVED_POSITIVE_SUCCESSOR_PENDING",
+           "catalyst_date": "2026-08-10", "asset_structure": "platform",
+           "successor": {"state": "PENDING", "priceable": True, "type": "fixture", "p_thesis": 0.5,
+                         "L": 0.6, "fv_asymmetry": 2.6, "fv_floor": 2.0, "as_of": "2026-09-20"}}
+    floor_doc = _ps.min_entry_gbp(nav)          # the ONE declared computer (read, never re-derived)
+
+    def run(budget):
+        sizing = {"nav_gbp": nav, "budget_available_pct": budget, "evidence_state": "CONFIRMED",
+                  "budget_calc_id": "VCIB-FIXTURE"}
+        sizing.update({k: v for k, v in floor_doc.items() if k.startswith("min_entry")})
+        a = _lc.assess(ticker="FIXT", declared=dec, held={"value_gbp": 800.0, "in_profit": True},
+                       sizing=sizing, today="2026-10-03")
+        r = a["routes_evaluated"][0]
+        bind = (r.get("sizing") or {}).get("binding_constraint")
+        if r["outcome"] == "AUTHORISED" and bind == "expected_loss_budget":
+            st = "BUDGET_BOUND"
+        elif r["outcome"] == "AUTHORISED" and str(bind or "").startswith("ladder_"):
+            st = "LADDER_BOUND"
+        elif r["outcome"] == "FAILS_ECONOMICS" and "below MIN_ENTRY" in str(r.get("why")):
+            st = "REFUSED_SUB_FLOOR"
+        else:
+            st = "OTHER:%s/%s" % (r["outcome"], bind)
+        return st, a
+    got = {b: run(b) for b in (1.05, 3.0, 0.002)}
+    actual = {"budget_1.05": got[1.05][0], "budget_3.0": got[3.0][0], "budget_0.002": got[0.002][0],
+              "consumer_decisions": [got[b][1].get("decision") for b in (1.05, 3.0, 0.002)]}
+    expected = {"budget_1.05": "BUDGET_BOUND", "budget_3.0": "LADDER_BOUND", "budget_0.002": "REFUSED_SUB_FLOOR",
+                "consumer_decisions": ["top_up", "top_up", "sell"]}
+    return record("CAP-vci_size_pct", "vci_lifecycle.assess successor route, NAV 146k, p0.5 L0.6, CONFIRMED",
+                  {"budgets": [1.05, 3.0, 0.002], "nav": nav, "floor": floor_doc},
+                  {b: (got[b][1]["routes_evaluated"][0].get("sizing") or {}).get("w_vci_pct") for b in got},
+                  {b: got[b][1].get("target_gbp") for b in got},
+                  ",".join(sorted({got[b][0] for b in got})), expected, actual)
+
+
 CHECKS = {
     "CAP-stock_max_gbp": check_stock_max_gbp,
     "CAP-fund_max_gbp": check_fund_max_gbp,
@@ -793,6 +883,7 @@ CHECKS = {
     "CAP-mctr": check_mctr,
     "CAP-ratchet_route": check_ratchet_route,
     "CAP-vci_binary_risk_committed": check_vci_binary_risk_committed,
+    "CAP-vci_size_pct": check_vci_size_pct,
 }
 
 
@@ -813,7 +904,7 @@ def _selftest(verbose: bool = True) -> int:
     # check_gbp check_evidence_state check_underfilled_obligation_gbp check_stock_sleeve_weight_now_pct
     # check_held_position_review check_graduation_disposition check_thesis_state check_min_hold_verdict
     # check_mctr check_ratchet_route check_vci_lifecycle check_held_underwriting
-    # check_broker_dealability check_feasible_opportunity_set
+    # check_broker_dealability check_feasible_opportunity_set check_vci_size_pct
     recs = run_all()
     for cap, rec in recs.items():
         assert "error" not in rec, "%s: check raised %s" % (cap, rec.get("error"))
@@ -822,6 +913,34 @@ def _selftest(verbose: bool = True) -> int:
         assert rec["capability"] == cap, (cap, rec["capability"])
         assert rec["ok"], "%s MUST-FIRE FAILED: expected %s actual %s" % (cap, rec["expected"], rec["actual"])
         n += 3
+    # ISA-0756 NEGATIVE CONTROL (reproduced on demand): the frozen book evaluated 30 days AFTER the store's
+    # own as-of must lose the realisation leg (matrix age-excludes the held names) and ABCL must NOT read SELL -
+    # proving the clock pin in _review is load-bearing, not decorative.
+    import datetime as _dt0756
+    import held_position_review as _h0756
+    _asof = _store_asof()
+    if _asof is not None:
+        _late = _asof + _dt0756.timedelta(days=30)
+        with _PinnedClock(_late):
+            _r = _h0756.review(os.path.join(HERE, "portfolio_data_sep_2026.json"), dry_run=True,
+                               today=_late.isoformat())
+        assert (_r["summary"].get("dispositions") or {}).get("ABCL") != "SELL", \
+            "NEGATIVE CONTROL: a stale-store clock must not produce the fresh-store SELL (the pin must not be vacuous)"
+        n += 1
+    # ISA-0699 vci_size_pct NEGATIVE CONTROL: a successor with NO p_thesis must not size through the
+    # consumer (it is UNESTABLISHED -> EXIT, never a size computed from p = 0 - V-1).
+    import vci_lifecycle as _lcn
+    _dn = {"is_binary": True, "catalyst_status": "RESOLVED_POSITIVE_SUCCESSOR_PENDING", "catalyst_date": "2026-08-10",
+           "asset_structure": "platform", "successor": {"state": "PENDING", "priceable": True, "type": "f",
+                                                          "p_thesis": None, "L": 0.6, "fv_asymmetry": 2.6,
+                                                          "fv_floor": 2.0, "as_of": "2026-09-20"}}
+    import position_sizing as _psn
+    _szn = {"nav_gbp": 146000.0, "budget_available_pct": 3.0, "evidence_state": "CONFIRMED"}
+    _szn.update({k: v for k, v in _psn.min_entry_gbp(146000.0).items() if k.startswith("min_entry")})
+    _an = _lcn.assess(ticker="NEG", declared=_dn, held={"value_gbp": 800.0}, sizing=_szn, today="2026-10-03")
+    assert _an["routes_evaluated"][0]["outcome"] == "UNESTABLISHED" and _an.get("decision") == "sell", \
+        "NEGATIVE CONTROL (ISA-0699): a missing p_thesis must not produce a vci_size_pct-derived size"
+    n += 1
     # NEGATIVE: a record whose expected != actual is ok=False and still structurally valid
     neg = record("CAP-x", "neg", {}, {}, {}, "S", {"a": 1}, {"a": 2})
     assert neg["ok"] is False and not validate_record(neg)

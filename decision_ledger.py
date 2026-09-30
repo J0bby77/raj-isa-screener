@@ -433,6 +433,26 @@ def log_decision(path, ticker, route, decision, scores=None, gates=None, flags=N
             entry["underwriting_case_id"] = None
             entry["underwriting_case_error"] = "%s: %s" % (type(_uwe).__name__, _uwe)
             entry["flags_at_decision"].append("UNDERWRITING_CASE_LOOKUP_FAILED")
+        # ⚑ ISA-0760 (27-Sep-2026) — AND ITS THESIS CONTRACT / EVALUATION. The decision binds the
+        #   current contract version and the evaluation it was taken against, by explicit id, so a
+        #   later condition edit (a new version) never rewrites what this decision relied on.
+        #   Absence is RECORDED, never filled (R7.5); the capital consequence of a missing or
+        #   UNKNOWN thesis is owned by thesis_state / the D21 gate, not by this writer.
+        try:
+            import thesis_state as _tsm
+            _lin = _tsm.lineage_for(ticker, root=os.path.dirname(os.path.abspath(path)))
+            entry["thesis_contract_id"] = _lin.get("thesis_contract_id")
+            entry["thesis_contract_version"] = _lin.get("thesis_contract_version")
+            entry["thesis_evaluation_id"] = _lin.get("thesis_evaluation_id")
+            entry["thesis_lineage_state"] = _lin.get("state")
+            if not _lin.get("thesis_contract_id"):
+                entry["flags_at_decision"].append("NO_THESIS_CONTRACT_AT_DECISION")
+            elif not _lin.get("thesis_evaluation_id"):
+                entry["flags_at_decision"].append("THESIS_CONTRACT_NOT_EVALUATED_AT_DECISION")
+        except Exception as _tle:                                       # noqa: BLE001
+            entry["thesis_contract_id"] = None
+            entry["thesis_lineage_error"] = "%s: %s" % (type(_tle).__name__, _tle)
+            entry["flags_at_decision"].append("THESIS_LINEAGE_LOOKUP_FAILED")
     # ISA-0686: supersession is recorded on BOTH rows, so a reader that finds the old
     # decision learns immediately that it no longer authorises anything (§5.2: a stale or
     # superseded receipt cannot authorise).
@@ -1154,5 +1174,43 @@ def _selftest():
        _r8["counts"]["confirmed_executed"] == 1
        and [c["route"] for c in _r8["confirmed"]] == ["vci"])
 
+    # ── ISA-0760: a positive decision binds its thesis contract / evaluation by id ──────────
+    import shutil as _sh
+    import thesis_state as _tsm
+    _td = _tf.mkdtemp(prefix="dl0760_")
+    try:
+        _lp = os.path.join(_td, "decision_ledger.json")
+        _e0 = log_decision(_lp, "ZZL", "growth", "buy", date="2026-10-04")
+        ck("ISA-0760: no contract -> NO_THESIS_CONTRACT_AT_DECISION recorded, never filled",
+           _e0["thesis_contract_id"] is None
+           and "NO_THESIS_CONTRACT_AT_DECISION" in _e0["flags_at_decision"]
+           and _e0["thesis_lineage_state"] == _tsm.NOT_CAPTURED)
+        _c = _tsm.build_contract(ticker="ZZM", route_id="growth", effective_from="2026-10-04",
+                                 basis=_tsm.BASIS_REUNDERWRITTEN, thesis_summary="x",
+                                 conditions=[{"condition_id": "E1", "kind": "EVENT",
+                                              "description": "d", "event": "e",
+                                              "source_contract": "s"}],
+                                 contract_version=1, created_by="t", evidence_basis="t",
+                                 source_underwriting_case_id=None,
+                                 underwriting_case_absent_reason="selftest")
+        _tsm.record(_c, root=_td, project_after=False)
+        _ev = _tsm.build_evaluation(thesis_contract_id=_c["thesis_contract_id"], ticker="ZZM",
+                                    as_of="2026-10-04", run_id="R1",
+                                    condition_results=[{"condition_id": "E1", "result": "CLEAR",
+                                                        "reason": "r", "source": "s",
+                                                        "as_of": "2026-10-04"}],
+                                    aggregate_thesis_state="INTACT", state_rationale="fixture",
+                                    reviewer_or_automation="t")
+        _tsm.record(_ev, root=_td, project_after=False)
+        _e1 = log_decision(_lp, "ZZM", "growth", "buy", date="2026-10-04")
+        ck("ISA-0760: a contracted+evaluated name binds both ids on the decision",
+           _e1["thesis_contract_id"] == _c["thesis_contract_id"]
+           and _e1["thesis_evaluation_id"] == _ev["evaluation_id"]
+           and "NO_THESIS_CONTRACT_AT_DECISION" not in _e1["flags_at_decision"])
+        _e2 = log_decision(_lp, "ZZM", "growth", "sell", date="2026-10-05")
+        ck("ISA-0760: a risk-reducing decision is not gated on thesis lineage (no binding fields)",
+           "thesis_contract_id" not in _e2)
+    finally:
+        _sh.rmtree(_td, ignore_errors=True)
     print("decision_ledger._selftest: %d assertion(s) passed (ISA-0684 + ISA-0686 + ISA-0717)" % ok[0])
     return ok[0]

@@ -2114,6 +2114,12 @@ SUMMARY_ESCALATED = {
     # ISA-0696 A2 — the run-time census self-heal ESCALATES only when it could not leave a FRESH_GREEN census:
     #   a clean no-op/publication has nothing to tell the reader that summary.trusted_build does not.
     "census_ensure": "ISA-0696 CENSUS",
+    # ISA-0786 — runtime-package provisioning ESCALATES only when the declared packages stayed UNAVAILABLE
+    #   (the suites that need them then read ENVIRONMENT_UNKNOWN); PRESENT/INSTALLED has nothing to report.
+    "runtime_packages": "ISA-0786 RUNTIME PACKAGES",
+    # ISA-0779 — account identity ESCALATES only when UNVERIFIED (MISMATCH is a Step 1 error that stops
+    #   the data steps); MATCH has nothing to tell the reader.
+    "account_identity": "ACCOUNT IDENTITY",
     # ISA-0701 — activation outcomes ESCALATE: an activated/fulfilled first claim, or an execution
     #   that could NOT create one (deviation, blocked VCI, non-contemporaneous plan), is an exception.
     "obligation_activation": "Step 1.5 (ISA-0701)",
@@ -2789,7 +2795,25 @@ def main():
     print('  Claude fills: s1/s2/s3 narratives/s4/s5 detail/s7 thesis/s8 est_returns/s9/s11/conviction scores.')
 
 
-def build_held_underwriting_block(hu: dict) -> dict:
+def _valuation_diag_text(vc):
+    """ISA-0760 — the Signal-1 successor, FORMATTED only (diagnostic, no capital authority)."""
+    vc = vc or {}
+    st = vc.get("state")
+    if st == "COMPARABLE" and isinstance(vc.get("multiple_change_since_decision"), (int, float)):
+        return "%+.1f%% %s since decision (diagnostic)" % (
+            100.0 * vc["multiple_change_since_decision"], vc.get("metric") or "")
+    return st or "—"
+
+
+def _thesis_text(lin):
+    lin = lin or {}
+    if not lin.get("thesis_contract_id"):
+        return lin.get("state") or "—"
+    return "%s v%s · %s" % (lin.get("state"), lin.get("thesis_contract_version"),
+                            lin.get("aggregate_thesis_state") or lin.get("evaluation_state"))
+
+
+def build_held_underwriting_block(hu: dict, lineage: dict = None) -> dict:
     """ISA-0722 — the Original | Current | delta E[r] table for EVERY held direct stock (§6.4).
 
     ⚑ A RENDERER (R20.2). Every figure is read from `summary.held_underwriting`, i.e. from the
@@ -2819,7 +2843,10 @@ def build_held_underwriting_block(hu: dict) -> dict:
                      "horizon": ("%sm" % r["horizon_months"]) if r.get("horizon_months") else "—",
                      "validity": ("admissible" if r.get("admissible_for_positive_size")
                                   else "NO POSITIVE NEW SIZE"),
-                     "case": r.get("current_case_id")})
+                     "case": r.get("current_case_id"),
+                     # ISA-0760: read from the canonical rows, formatted only (R20.2)
+                     "valuation_diag": _valuation_diag_text(r.get("valuation_comparability")),
+                     "thesis": _thesis_text(((lineage or {}).get("rows") or {}).get(r.get("ticker")))})
     line = ("Held-stock underwriting (ISA-0722): %d of %d held names carry a current case (%s); "
             "original E[r] NOT_CAPTURED_CONTEMPORANEOUSLY for %d legacy holding(s)."
             % (hu.get("n_cases_held", 0), hu.get("n_expected", 0),
@@ -2843,8 +2870,20 @@ def _selftest():
                     "current_state": "NOT_DEFENSIBLY_QUANTIFIABLE", "horizon_months": None,
                     "admissible_for_positive_size": False, "delta": {"comparable": False},
                     "current_case_id": "UWC-b"}]}
-    b = build_held_underwriting_block(hu)
+    hu["rows"][0]["valuation_comparability"] = {"state": "COMPARABLE", "metric": "fwd_pe",
+                                                 "multiple_change_since_decision": 0.25}
+    hu["rows"][1]["valuation_comparability"] = {"state": "NOT_CAPTURED_CONTEMPORANEOUSLY",
+                                                 "multiple_change_since_decision": None}
+    _lin = {"rows": {"AAA": {"state": "ENTRY_CONTEMPORANEOUS", "thesis_contract_id": "TC-a",
+                             "thesis_contract_version": 1, "aggregate_thesis_state": "INTACT"},
+                     "BBB": {"state": "NOT_CAPTURED_CONTEMPORANEOUSLY", "thesis_contract_id": None}}}
+    b = build_held_underwriting_block(hu, _lin)
     by = {r["ticker"]: r for r in b["rows"]}
+    assert by["AAA"]["valuation_diag"].startswith("+25.0% fwd_pe") and "diagnostic" in by["AAA"]["valuation_diag"], by["AAA"]
+    assert by["BBB"]["valuation_diag"] == "NOT_CAPTURED_CONTEMPORANEOUSLY", (
+        "⚑ MUST-FIRE (ISA-0760): a missing entry multiple renders AS its state, never a number", by["BBB"])
+    assert by["AAA"]["thesis"] == "ENTRY_CONTEMPORANEOUS v1 · INTACT" and \
+        by["BBB"]["thesis"] == "NOT_CAPTURED_CONTEMPORANEOUSLY", (by["AAA"], by["BBB"])
     assert by["BBB"]["original"] == "NOT_CAPTURED_CONTEMPORANEOUSLY" and by["BBB"]["current"] == \
         "NOT_DEFENSIBLY_QUANTIFIABLE", ("⚑ MUST-FIRE: a non-numeric state renders AS the state", by["BBB"])
     assert by["AAA"]["delta"].startswith("METHOD_CHANGED"), (
