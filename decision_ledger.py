@@ -758,7 +758,11 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
         return min(ends) if ends else None
 
     for _idx, e in _all:
-        if e.get("execution_status") != "recommended":
+        # ⚑ ISA-0787 (30-Sep-2026): `execution_unconfirmed` means "the evidence did not cover this
+        #   yet" (ISA-0684) - it is NOT terminal. It is re-derived on every reconcile, so the 06-Sep
+        #   NTAP BUY confirms once the Sep export shows the 08-Sep trade instead of that trade being
+        #   reported OFF-FRAMEWORK. confirmed / not_executed / superseded remain terminal.
+        if e.get("execution_status") not in ("recommended", "execution_unconfirmed"):
             continue
         # Historic entries were written with mixed casing ("BUY", "HOLD"), so
         # normalise before matching -- a case-sensitive compare would route a
@@ -791,6 +795,7 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
         if cand:
             _stamp_execution(e, cand[0])
             e["execution_status"] = "confirmed_executed"
+            e.pop("execution_unconfirmed_reason", None)                 # ISA-0787: evidence arrived
             e["executed_confirmed_date"] = date
             counts["confirmed_executed"] += 1
             confirmed.append({"ticker": t, "decision": d,
@@ -1162,6 +1167,30 @@ def _selftest():
        _e7[("COCO", "buy")]["execution_status"] == "confirmed_executed"
        and any(c.get("decision_id") == _e7[("COCO", "buy")]["decision_id"]
                for c in _r7["confirmed"]))
+    # ── ISA-0787 — an UNCONFIRMED verdict is re-derived when the evidence arrives ──────────
+    _lp9 = os.path.join(_tf.mkdtemp(), "l9.json")
+    log_decision(_lp9, "NTAP", "growth", "buy", date="2026-09-06")
+    _r9a = reconcile_executions_from_transactions(
+        _lp9, [{"date": "2026-08-10", "ticker": "QBTS", "type": "buy", "quantity": 1, "price": 1.0,
+                "amount_gbp": 1.0, "reference": "R-OLD"}], {"NTAP": 37}, date="2026-09-12", persist=True)
+    _e9 = [e for e in load_ledger(_lp9)["entries"] if e["ticker"] == "NTAP"][0]
+    ck("ISA-0787 precondition: with an export that ends BEFORE the recommendation the verdict is "
+       "execution_unconfirmed (ISA-0684)", _e9["execution_status"] == "execution_unconfirmed")
+    _r9b = reconcile_executions_from_transactions(
+        _lp9, [{"date": "2026-09-08", "ticker": "NTAP", "type": "buy", "quantity": 37, "price": 137.0,
+                "amount_gbp": 5112.19, "reference": "R-NTAP"}], {"NTAP": 37}, date="2026-10-03", persist=True)
+    _e9 = [e for e in load_ledger(_lp9)["entries"] if e["ticker"] == "NTAP"][0]
+    ck("⚑ ISA-0787 MUST-FIRE: the next export carrying the trade CONFIRMS the unconfirmed decision, "
+       "clears the stale reason, and the trade is NOT off-framework",
+       _e9["execution_status"] == "confirmed_executed" and "execution_unconfirmed_reason" not in _e9
+       and not any(x["ticker"] == "NTAP" for x in _r9b["off_framework"]))
+    _r9c = reconcile_executions_from_transactions(
+        _lp9, [{"date": "2026-09-08", "ticker": "NTAP", "type": "buy", "quantity": 37, "price": 137.0,
+                "amount_gbp": 5112.19, "reference": "R-NTAP"}], {"NTAP": 37}, date="2026-10-04", persist=True)
+    ck("ISA-0787 NEGATIVE CONTROL: a CONFIRMED decision stays terminal - a re-run re-counts nothing",
+       _r9c["counts"]["confirmed_executed"] == 0
+       and [e for e in load_ledger(_lp9)["entries"] if e["ticker"] == "NTAP"][0]["execution_status"]
+       == "confirmed_executed")
     _lp8 = os.path.join(_tf.mkdtemp(), "l8.json")
     log_decision(_lp8, "DUP", "growth", "buy", date="2026-09-01")
     log_decision(_lp8, "DUP", "vci", "buy", date="2026-09-02")

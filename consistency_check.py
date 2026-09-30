@@ -1265,7 +1265,23 @@ def pair_rationale_ledger(ledger=None):
         except Exception as e:                                    # noqa: BLE001
             return [f"R12.3: isa_rationale_ledger unavailable ({e}) - rationale coverage "
                     f"reported as UNKNOWN, never as PASS"]
-    return [f"R12.3: {c}" for c in ledger.coverage()]
+    out = [f"R12.3: {c}" for c in ledger.coverage()]
+    # ⚑ ISA-0777 (Raj, 30-Sep-2026): an EXPIRED rationale carried as owned INTERIM policy is reported
+    #   on every run - honoured, never hidden - while an UNOWNED expiry is an ERROR here as well as in
+    #   the battery.
+    try:
+        for ip in (ledger.interim_policies() if hasattr(ledger, "interim_policies") else []):
+            out.append(warn("R12.3/ISA-0777 INTERIM POLICY: %s revalidate_by has PASSED and is NOT "
+                            "revalidated; the unchanged value continues as interim policy authorised by %s "
+                            "on %s, owned by %s (RETAIN / RECALIBRATE / SUPERSEDE pending)."
+                            % (ip.get("name"), ip.get("authorised_by"), ip.get("authorised_on"),
+                               ip.get("owner_item"))))
+        for u in (ledger.unowned_stale_revalidations() if hasattr(ledger, "unowned_stale_revalidations") else []):
+            out.append("R12.3/ISA-0777: " + u)
+    except Exception as e:                                        # noqa: BLE001
+        out.append(f"R12.3/ISA-0777: interim-policy state could not be read ({type(e).__name__}: {e}) "
+                   f"- UNKNOWN, never PASS")
+    return out
 
 @empty_semantics("C-B", population="register LOW items past the archive threshold", reason="an empty due-list is a clean state; an empty REGISTER is a producer failure")
 def pair_archive_backlog(reg=None):

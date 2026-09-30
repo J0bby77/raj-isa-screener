@@ -31,6 +31,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+from typing import Optional
 import ast
 import json
 import re
@@ -369,6 +370,7 @@ def refresh(root=None, today=None, dry_run=False) -> dict:
                              ("measured_consequence", "Measured consequence"),
                              ("falsifier_status", "Falsifier status"),
                              ("revalidate_basis", "Revalidation basis"),
+                             ("interim_policy", "INTERIM POLICY (ISA-0777 - not a revalidation)"),
                              ("capital_link_correction", "CORRECTION to capital_link"),
                              ("provenance_adjacency_defect", "Provenance adjacency")):
             if d.get(extra):
@@ -429,9 +431,62 @@ def refresh(root=None, today=None, dry_run=False) -> dict:
             "unchanged": sorted(unchanged), "stale": sorted(stale), "dry_run": dry_run}
 
 
+# ⚑ ISA-0777 (Raj, 30-Sep-2026) — AN EXPIRED RATIONALE IS HONOURED, NOT EXTENDED, AND IT DOES NOT
+#   SILENTLY STOP CAPITAL. A passed revalidate_by still RE-OPENS the rationale item (refresh) and is
+#   still REPORTED by stale_revalidations(); the date is NOT moved. The value may continue ONLY as an
+#   explicit INTERIM policy: `interim_policy` names who authorised the unchanged value, when, and the
+#   OPEN register item that owns the evidence-based RETAIN / RECALIBRATE / SUPERSEDE decision. Owned
+#   interim expiries leave the battery; an UNOWNED expiry, or one whose owner item is terminal or
+#   absent, still FAILS it (so the interim lapses the moment its owner closes).
+INTERIM_STATE = "INTERIM_AUTHORISED_PENDING_REVALIDATION"
+_TERMINAL = ("CLOSED_FIXED", "CLOSED_WONTFIX", "CLOSED_NOT_A_DEFECT", "SUPERSEDED", "DUPLICATE")
+
+
+def interim_owner_problem(d: dict, read_item=None) -> Optional[str]:
+    """None when the declaration carries a valid interim policy, else why not."""
+    ip = (d or {}).get("interim_policy")
+    if not isinstance(ip, dict) or ip.get("state") != INTERIM_STATE:
+        return "no interim_policy (state %s)" % INTERIM_STATE
+    for f in ("authorised_by", "authorised_on", "owner_item"):
+        if not ip.get(f):
+            return "interim_policy missing `%s`" % f
+    if ip.get("is_revalidation") is not False:
+        return "interim_policy must declare is_revalidation: false (an interim is not a revalidation)"
+    try:
+        it = (read_item or R.get)(ip["owner_item"])
+    except Exception as exc:                                            # noqa: BLE001
+        return "owner item %s unreadable (%s)" % (ip["owner_item"], type(exc).__name__)
+    if not it:
+        return "owner item %s absent" % ip["owner_item"]
+    if it.get("state") in _TERMINAL:
+        return "owner item %s is %s - the interim has lapsed" % (ip["owner_item"], it.get("state"))
+    return None
+
+
+def unowned_stale_revalidations(today=None, root=None, read_item=None) -> list:
+    """stale_revalidations() minus those carried under a valid, owned interim policy."""
+    decl = _declarations(root)
+    out = []
+    for line in stale_revalidations(today, root):
+        name = line.split(":")[0]
+        why = interim_owner_problem(decl.get(name) or {}, read_item=read_item)
+        if why:
+            out.append(line + " [no valid interim: %s]" % why)
+    return out
+
+
+def interim_policies(today=None, root=None) -> list:
+    """The expired declarations currently carried as owned interim policy - REPORTED, never hidden."""
+    decl = _declarations(root)
+    return [dict(name=l.split(":")[0], expiry=l, **(decl.get(l.split(":")[0]) or {}).get("interim_policy", {}))
+            for l in stale_revalidations(today, root)
+            if not interim_owner_problem(decl.get(l.split(":")[0]) or {})]
+
+
 def verify(today=None, root=None) -> list:
-    """Everything the routine battery asserts about the ledger, in one call."""
-    return declaration_errors(root) + coverage() + gaps() + stale_revalidations(today, root)
+    """Everything the routine battery asserts about the ledger, in one call. An expired declaration
+    fails it unless carried under a valid, OWNED interim policy (ISA-0777)."""
+    return declaration_errors(root) + coverage() + gaps() + unowned_stale_revalidations(today, root)
 
 
 def gaps() -> list:
@@ -542,6 +597,18 @@ def selftest(verbose=True) -> int:
         CAPITAL_GATING.clear()
         CAPITAL_GATING.update(saved)
     shutil.rmtree(tmp, ignore_errors=True)
+    # ── ISA-0777: an interim is valid only when OWNED by a live item and explicitly not a revalidation
+    _ip = {"interim_policy": {"state": INTERIM_STATE, "authorised_by": "Raj", "authorised_on": "2026-09-30",
+                              "owner_item": "ISA-X", "is_revalidation": False}}
+    ok(interim_owner_problem(_ip, read_item=lambda i: {"id": i, "state": "OPEN"}) is None,
+       "ISA-0777 MUST-FIRE: an owned interim on an OPEN item is valid")
+    ok("lapsed" in (interim_owner_problem(_ip, read_item=lambda i: {"id": i, "state": "CLOSED_FIXED"}) or ""),
+       "ISA-0777 NEGATIVE CONTROL: an interim whose owner item CLOSED has lapsed")
+    _bad = {"interim_policy": dict(_ip["interim_policy"], is_revalidation=True)}
+    ok(interim_owner_problem(_bad, read_item=lambda i: {"state": "OPEN"}) is not None,
+       "ISA-0777 NEGATIVE CONTROL: an interim that claims to be a revalidation is refused")
+    ok(interim_owner_problem({}, read_item=lambda i: {"state": "OPEN"}) is not None,
+       "ISA-0777 NEGATIVE CONTROL: no interim_policy -> the expiry stays a failure")
     if verbose:
         print(f"isa_rationale_ledger selftest: {n} assertions, 0 failed")
     return n
