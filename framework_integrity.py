@@ -141,6 +141,15 @@ def is_test_path(path: str) -> bool:
 
 def source_files(root: str = HERE, *, include_tests: bool = False,
                  exclude_self: bool = True) -> List[str]:
+    """ISA-0801: one enumeration per process while the pre-run snapshot is ON (isa_source_cache)."""
+    import isa_source_cache as _scs
+    return _scs.memo_listing(("fi.source_files", os.path.abspath(root), include_tests, exclude_self),
+                             lambda: _source_files_uncached(root, include_tests=include_tests,
+                                                            exclude_self=exclude_self))
+
+
+def _source_files_uncached(root: str = HERE, *, include_tests: bool = False,
+                           exclude_self: bool = True) -> List[str]:
     """Every .py in the framework, ordered. Backups, caches and archives are EXCLUDED and the
     exclusion is declared here rather than hidden in a walk filter."""
     # ⚑ ISA-0710 (25-Sep-2026): the exclusion is isa_tree_scope.excluded_dir - ONE predicate shared with

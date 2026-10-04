@@ -1099,7 +1099,24 @@ def main():
         _t1_detail = None
         if _t1 is not None:
             _ev_entry = {**wt_entry, **base_record}
-            _t1_detail = wt_entry.get("t1_gate_detail") or _t1.evaluate(_ev_entry, ts)
+            # ⚑ ISA-0803 (03-Oct-2026): screen_sightings is populated ONCE, HERE, at the record producer,
+            # for EVERY scored record - not only for the names rerank_watchlist re-ranks. 49 of 79 Oct
+            # records arrived without it although score_panel held 2-5 sightings (MEDP 4, EXEL 4, NVDA 5).
+            # Typed: an int is MEASURED from score_panel (unique run dates, spaced >= the D19 gap - a
+            # repeated occurrence is not a new sighting); None is UNMEASURED (panel unreadable), never 0.
+            _ss_state = "CARRIED_FROM_RERANK"
+            if _ev_entry.get("screen_sightings") is None:
+                try:
+                    _ev_entry["screen_sightings"] = _t1.screen_sightings_from_panel(ticker)
+                except Exception:                                   # noqa: BLE001
+                    _ev_entry["screen_sightings"] = None
+                _ss_state = ("MEASURED_AT_PRODUCER" if _ev_entry["screen_sightings"] is not None
+                             else "UNMEASURED_PANEL_UNREADABLE")
+            _t1_detail = wt_entry.get("t1_gate_detail")
+            if (not _t1_detail or (_t1_detail.get("screen_sightings") is None
+                                   and _ev_entry.get("screen_sightings") is not None)):
+                _t1_detail = _t1.evaluate(_ev_entry, ts)
+            base_record["screen_sightings_state"] = _ss_state
             base_record.update({
                 "t1_qualified":    bool(wt_entry.get("t1_qualified")
                                         if wt_entry.get("t1_qualified") is not None

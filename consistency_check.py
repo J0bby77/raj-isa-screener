@@ -401,6 +401,72 @@ def pair_membership_gates_first_claims(root=None, review=None):
     return errs
 
 
+def pair_stock_sleeve_policy_single_home(root=None, run_context_text=None, cd_src=None, ckd_src=None,
+                                         policy=None):
+    """ISA-0805 / ISA-0807 (03-Oct-2026) — ONE stock-sleeve policy, ONE new-capital control.
+
+    (a) `new_capital_control.stock_sleeve_policy()` must be RESOLVED on the signed config - a
+        POLICY_AUTHORITY_CONFLICT or UNKNOWN is an ERROR (it also blocks new stock capital);
+    (b) while the hard max is NOT_A_POLICY_LIMIT the executed Run_Context may not state the
+        Phase-1 15% band as a ceiling that a stock plan must not breach (the 03-Oct contradiction);
+    (c) BY AST: capital_destination.sleeve_split reads the control (via
+        _new_capital_control_status -> new_capital_control.status) and checkpoint_d.main reads it -
+        a consumer that stops reading it would silently re-open new stock capital."""
+    import ast as _ast
+    import re as _re
+    errs = []
+    base = root or HERE
+    try:
+        if policy is None:
+            import new_capital_control as _ncc
+            policy = _ncc.stock_sleeve_policy(root=str(base))
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_stock_sleeve_policy_single_home/ISA-0805: new_capital_control unavailable (%s) - "
+                "the one stock-sleeve policy cannot be read (R2.9)" % exc]
+    if policy.get("state") != "RESOLVED":
+        errs.append("pair_stock_sleeve_policy_single_home/ISA-0805: stock_sleeve_policy is %s (%s) - new "
+                    "stock capital is blocked until the authority is resolved"
+                    % (policy.get("state"), "; ".join((policy.get("conflicts") or []) +
+                                                      (policy.get("unknowns") or []))[:200]))
+    rc = run_context_text if run_context_text is not None else _read("Run_Context_Monthly_ISA_Review.md")
+    if not rc:
+        errs.append("pair_stock_sleeve_policy_single_home/ISA-0805: Run_Context_Monthly_ISA_Review.md "
+                    "unreadable - the executed surface could not be checked (R4.9)")
+    elif (policy.get("hard_max") or {}).get("state") == "NOT_A_POLICY_LIMIT":
+        for pat in (r"breach(?:es|ing)?\s+the\s+Phase\s*1\s+ceiling", r"Phase\s*1\s+ceiling\s*\(15%"):
+            m = _re.search(pat, rc, _re.I)
+            if m:
+                errs.append("pair_stock_sleeve_policy_single_home/ISA-0805: Run_Context states a Phase-1 "
+                            "15%% CEILING on the stock sleeve (%r) while the one policy's hard max is "
+                            "NOT_A_POLICY_LIMIT - two authorities for one limit (R4.4)" % m.group(0))
+                break
+
+    def _calls(src, fn_name):
+        try:
+            t = _ast.parse(src)
+        except Exception:                                               # noqa: BLE001
+            return None
+        f = next((n for n in _ast.walk(t) if isinstance(n, _ast.FunctionDef) and n.name == fn_name), None)
+        if f is None:
+            return None
+        return {getattr(c.func, "attr", getattr(c.func, "id", None))
+                for c in _ast.walk(f) if isinstance(c, _ast.Call)}
+    cd_src = cd_src if cd_src is not None else _read("capital_destination.py")
+    ckd_src = ckd_src if ckd_src is not None else _read("checkpoint_d.py")
+    ss = _calls(cd_src or "", "sleeve_split")
+    hp = _calls(cd_src or "", "_new_capital_control_status")
+    if not ss or "_new_capital_control_status" not in ss or not hp or "status" not in hp:
+        errs.append("pair_stock_sleeve_policy_single_home/ISA-0807: capital_destination.sleeve_split no "
+                    "longer reads the canonical new-capital control (sleeve_split -> "
+                    "_new_capital_control_status -> new_capital_control.status) - a block would be "
+                    "silently ignored by the router")
+    mn = _calls(ckd_src or "", "main")
+    if not mn or "status" not in mn:
+        errs.append("pair_stock_sleeve_policy_single_home/ISA-0807: checkpoint_d.main no longer reads the "
+                    "LIVE new-capital control - tick 10 would never fire in production")
+    return errs
+
+
 def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None, weights=None):
     """ISA-0680 (23-Sep-2026) — ONE risk window across the covariance producers, proven on the held sleeve.
 
@@ -6843,6 +6909,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_membership_gates_first_claims", pair_membership_gates_first_claims())  # ISA-0685
     errs += _tally("pair_broker_dealable_destinations", pair_broker_dealable_destinations())  # ISA-0607
     errs += _tally("pair_risk_window_single_basis", pair_risk_window_single_basis())      # ISA-0680
+    errs += _tally("pair_stock_sleeve_policy_single_home", pair_stock_sleeve_policy_single_home())  # ISA-0805/0807
     errs += _tally("pair_checkpoint_d_population", pair_checkpoint_d_population())  # ISA-0608
     errs += _tally("pair_rationale_ledger", pair_rationale_ledger())              # R12.3 / P2.5 (12-Aug-2026)
     errs += _tally("pair_archive_backlog", pair_archive_backlog())               # ageing policy (12-Aug-2026)

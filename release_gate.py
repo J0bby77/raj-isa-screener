@@ -130,6 +130,12 @@ def _sha(b: bytes) -> str:
 
 
 def _iter_source(root: str):
+    """ISA-0801: enumerated once per process while the pre-run snapshot is ON (isa_source_cache)."""
+    import isa_source_cache as _scs
+    return iter(_scs.memo_listing(("rg._iter_source", os.path.abspath(root)), lambda: list(_iter_source_uncached(root))))
+
+
+def _iter_source_uncached(root: str):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not excluded_dir(d)]      # ISA-0710: one predicate
         for fn in sorted(filenames):
@@ -144,13 +150,12 @@ def _fingerprint_files(paths, root: str) -> Dict[str, str]:
     keyed '../sessions/.../x.py') from anywhere else — and the scheduled pre-run invokes
     monthly_isa_prerun.py by absolute path with no declared cwd. `root` is now mandatory (R4.7:
     an un-updated caller fails rather than silently keeping the old keying)."""
+    import isa_source_cache as _scs
     out = {}
     for p in sorted(paths):
-        try:
-            with open(p, "rb") as fh:
-                out[os.path.relpath(p, root)] = _sha(fh.read())
-        except OSError:
-            continue
+        h = _scs.file_sha(p)            # ISA-0801: hashed once per (size, mtime_ns) while the snapshot is ON
+        if h is not None:
+            out[os.path.relpath(p, root)] = h
     return out
 
 
@@ -1223,6 +1228,57 @@ def apply_promotion(plan: dict, backup_dir: str, *, candidate_root: Optional[str
     with open(os.path.join(backup_dir, "_promotion_manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=True)
     return manifest
+
+
+def rollback(root: str, backup_dir: str, *, to_build_id: str, performed_by: str,
+             occurrence: str, quarantine_dir: Optional[str] = None) -> dict:
+    """R4.13 / BuildSpec T87 (ISA-0812, 03-Oct-2026) - the supported rollback of ONE promotion.
+    1. every file the promotion overwrote is restored from its backup;
+    2. every file the promotion CREATED is MOVED to a quarantine dir (the mount forbids unlink; a
+       `_bak*` dir is outside every fingerprint/atlas population);
+    3. the previous Trusted receipt `to_build_id` is restored atomically from the receipt history;
+    4. the canonical new-capital control records BLOCK_NEW_STOCK_CAPITAL - a rollback never re-opens
+       the old greedy queue to new stock capital; only a fresh system acceptance re-opens it (T87).
+    Then verify_live must read TRUSTED on `to_build_id`, else the rollback reports FAILED."""
+    import shutil as _sh
+    man_p = os.path.join(backup_dir, "_promotion_manifest.json")
+    man = json.load(open(man_p, encoding="utf-8"))
+    quarantine_dir = quarantine_dir or os.path.join(root, "_bak_rollback_%s" % to_build_id)
+    restored, moved = [], []
+    for c in man.get("copied") or []:
+        rel = c["path"]
+        b, dst = os.path.join(backup_dir, rel), os.path.join(root, rel)
+        if os.path.exists(b):
+            tmp = dst + ".rollback.tmp"
+            _sh.copy2(b, tmp)
+            os.replace(tmp, dst)
+            restored.append(rel)
+        elif os.path.exists(dst):
+            q = os.path.join(quarantine_dir, rel)
+            os.makedirs(os.path.dirname(q), exist_ok=True)
+            os.replace(dst, q)
+            moved.append(rel)
+    prev = os.path.join(state_dir(root), RECEIPT_DIR, "%s.json" % to_build_id)
+    if not os.path.exists(prev):
+        raise ReleaseRefused("rollback: no receipt history for %s" % to_build_id)
+    tmp = receipt_path(root) + ".tmp"
+    _sh.copy2(prev, tmp)
+    os.replace(tmp, receipt_path(root))
+    blk = None
+    try:
+        sys.path.insert(0, root)
+        import new_capital_control as _ncc
+        blk = _ncc.append_record(root, state="BLOCK_NEW_STOCK_CAPITAL", occurrence=occurrence,
+                                 reason="rollback to %s - new stock capital re-opens only after a fresh system acceptance" % to_build_id,
+                                 recorded_by=performed_by,
+                                 failed_contracts=["ROLLBACK: capital engine release withdrawn to %s" % to_build_id])
+    except Exception as exc:                                            # noqa: BLE001
+        blk = {"state": "FAILED_TO_BLOCK", "why": "%s: %s" % (type(exc).__name__, exc)}
+    v = verify_live(root)
+    return {"state": "ROLLED_BACK" if v.get("state") == "TRUSTED" and v.get("build_id") == to_build_id else "FAILED",
+            "to_build_id": to_build_id, "restored": restored, "quarantined_new_files": moved,
+            "quarantine_dir": quarantine_dir, "verify_live": v.get("state"), "live_build": v.get("build_id"),
+            "control_block": (blk or {}).get("record_id") or blk}
 
 
 def post_promotion_verify(root: str = HERE) -> dict:

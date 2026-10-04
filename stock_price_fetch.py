@@ -535,11 +535,15 @@ def is_current(store: dict, ticker: str, today: Optional[datetime.date] = None) 
     """
     rec = srs.record_of(store, ticker)                     # ISA-0549
     d = today or datetime.date.today()
-    if rec.get("last_fetched_on") == d.isoformat():
-        return True
     obs = rec.get("observations") or {}
+    # ⚑ ISA-0809 (03-Oct-2026): a name with NO observations is never current, whatever the
+    #   attempt stamp says. On 03-Oct 35 names were stamped "attempted today" after every weekly
+    #   observation was skipped for a missing FX rate, and this function then hid them for the
+    #   rest of the day - FN and GLBE were funded with sleeve risk UNMEASURED.
     if not obs:
         return False
+    if rec.get("last_fetched_on") == d.isoformat():
+        return True
     return max(obs) >= last_settled_friday(d).isoformat()
 
 
@@ -646,7 +650,6 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
             failed.append({"ticker": t, "symbol": smap[t],
                            "reason": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
             continue
-        store.setdefault("names", {}).setdefault(srs.canonical_name(t, smap), {})["last_fetched_on"] = rec_on.isoformat()
         cur = d["currency"] or "GBP"
         wk = to_friday(d["daily"])
         # `GBp` is PENCE. It is not a foreign currency and it needs no FX pair — it needs a
@@ -674,6 +677,17 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
             except ValueError:
                 skipped_obs += 1
         n_after = len(srs.record_of(store, t, smap).get("observations") or {})
+        # ⚑ ISA-0809: the attempt is stamped only when the name HOLDS data afterwards. A name whose
+        #   every observation was skipped (FX gap) or that returned nothing is a per-name FAILURE,
+        #   counted and named, unstamped so the next pass retries it (R2.10 / R4.9).
+        if n_after == 0:
+            failed.append({"ticker": t, "symbol": smap[t],
+                           "reason": ("NO_OBSERVATIONS_RECORDED: %d daily point(s) returned, every "
+                                      "weekly observation skipped (missing FX for %s?) - retried "
+                                      "next pass, never treated as current"
+                                      % (len(d.get("daily") or {}), cur))})
+            continue
+        store.setdefault("names", {}).setdefault(srs.canonical_name(t, smap), {})["last_fetched_on"] = rec_on.isoformat()
         ok.append({"ticker": t, "symbol": smap[t], "currency": cur,
                    "total_return": d["total_return"],
                    "observations_before": n_before, "observations_after": n_after})
@@ -1737,6 +1751,17 @@ def _selftest() -> dict:
     success, which is this project's second failure class."""
     import tempfile
     n = 0
+
+    # ── ISA-0809. A name with no observations is never current, whatever the attempt stamp says.
+    _d0 = datetime.date(2026, 10, 3)
+    _st = {"names": {"EMPTY": {"last_fetched_on": "2026-10-03"},
+                     "FULL": {"last_fetched_on": "2026-10-03",
+                              "observations": {"2026-10-02": {"level": 1.0}}}}}
+    assert is_current(_st, "EMPTY", _d0) is False, \
+        "MUST-FIRE ISA-0809: an attempted-today name with ZERO observations must be refetched"
+    assert is_current(_st, "FULL", _d0) is True, \
+        "NEGATIVE CONTROL ISA-0809: an attempted-today name WITH data stays current (no refetch storm)"
+    n += 2
 
     # ── A. MONTH RESOLUTION (ISA-0579). The literal-filename defect. ────────────────────
     assert _month_key("vci_deploy_aug_2026.json") == (2026, 8)

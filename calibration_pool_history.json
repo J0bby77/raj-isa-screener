@@ -65,6 +65,13 @@
    "config_hash": "7e6fc8157576"
   },
   {
+   "group": "PRERUN_POOL",
+   "run_date": "2026-10-03",
+   "pool_size": 90,
+   "eligible_size": null,
+   "config_hash": "7e6fc8157576"
+  },
+  {
    "group": "SP500",
    "run_date": "2026-07-18",
    "pool_size": 10,

@@ -53,7 +53,8 @@ def _norm_set(xs):
 
 
 def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
-                          step9_records=None, factor_state=None, opportunity_set=None):
+                          step9_records=None, factor_state=None, opportunity_set=None,
+                          new_capital_control=None, decision_receipt=None, engine_authority="SHADOW"):
     """Return {passed, blocks, chosen, top5}.
       top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
                           cases capped at 5 by the deploy-Source tiebreak — this is that list)
@@ -81,6 +82,27 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         chosen_set = set()
     pairwise = {str(k).strip().upper(): v for k, v in (decision.get("pairwise") or {}).items()}
 
+    # (0) ISA-0816 (03-Oct-2026): UNDER ENGINE AUTHORITY LIVE THE CONTEST POPULATION IS THE
+    #     RECEIPT'S. The legacy router is SHADOW (it refuses every feasible name, so its
+    #     checkpoint_d_top5 can be empty) and may no longer define who competes. With a VALID,
+    #     DECISION_COMPLETE receipt the contest is the engine's case scope (every funded, tied or
+    #     decision-relevant name - no fixed cap, s9.1) plus its selection; a hand-built list cannot
+    #     narrow it. Without such a receipt nothing changes here and tick 11 blocks every addition.
+    contest_basis = "SPEC_TOP5"
+    if engine_authority == "LIVE":
+        _rv0 = decision_receipt if isinstance(decision_receipt, dict) else {}
+        _rr0 = _rv0.get("receipt") or {}
+        if _rv0.get("state") == "VALID" and _rr0.get("state") == "DECISION_COMPLETE":
+            _pop = [str(t).strip().upper() for t in
+                    ((_rr0.get("case_scope") or {}).get("required_full_cases") or []) if str(t).strip()]
+            for _x in (_rr0.get("selected_actions") or []):
+                _xt = str(_x.get("ticker") or "").strip().upper()
+                if _xt and _xt not in _pop:
+                    _pop.append(_xt)
+            top5 = _pop
+            opportunity_set = None
+            contest_basis = "ENGINE_RECEIPT_CASE_SCOPE:%s" % _rr0.get("receipt_id")
+
     # (8) ISA-0608 (23-Sep-2026): when the run's feasible population is supplied (the router's
     #     `opportunity_set` view), the contest IS that population's first five in capital order -
     #     not a hand-built list. Fewer than five feasible names is a complete contest, so the
@@ -99,6 +121,8 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         if opportunity_set.get("state") == "PARITY_BREACH":
             blocks.append("ISA-0608: the router would fund main-route names outside the feasible "
                           f"population {opportunity_set.get('router_qualifying_not_feasible')}")
+    if contest_basis != "SPEC_TOP5":
+        _req = min(REQUIRED_TOP, len(top5))
     if len(top5) < _req:
         blocks.append(f"need {_req} top-T1 names for Checkpoint-D, got {len(top5)}")
 
@@ -236,6 +260,40 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
                 blocks.append(f"{c} has no ADMISSIBLE current C-1 verdict (c1_admissibility={_vv}) - "
                               f"new capital refused (ISA-0616); the holding itself is unaffected")
 
+    # (10) ISA-0807 (03-Oct-2026): THE CANONICAL NEW-STOCK-CAPITAL CONTROL. When the control
+    #      blocks (or is UNKNOWN), no chosen action may ADD stock capital - new entry or top-up, any
+    #      route. A reduction is never blocked here. The CLI reads the LIVE control at run time;
+    #      the validator itself is pure (the reading is passed in), so fixtures stay hermetic.
+    if isinstance(new_capital_control, dict) and new_capital_control.get("blocks_new_stock_capital") is not False:
+        for c in sorted(chosen_set):
+            if (_acts.get(c) or _gact) in _REDUCE:
+                continue
+            blocks.append(f"{c}: NEW STOCK CAPITAL BLOCKED by the canonical control "
+                          f"(new_capital_control state={new_capital_control.get('state')}, "
+                          f"record={new_capital_control.get('record_id')}, failed contracts="
+                          f"{new_capital_control.get('failed_contracts')}) - no new entry or top-up "
+                          f"this occurrence (ISA-0807); reductions are unaffected")
+
+    # (11) ISA-0804 (03-Oct-2026): THE CAPITAL DECISION RECEIPT. Under engine authority LIVE every
+    #      chosen addition must be an action the ONE receipt selected, and the receipt must be VALID
+    #      (hash-bound to the current inputs), DECISION_COMPLETE and capital_authorised. Under SHADOW
+    #      the receipt is reported beside the decision (the review sees what the engine would do)
+    #      and blocks nothing - it has not earned authority (R18.2). Reductions are never blocked.
+    if engine_authority == "LIVE":
+        _rv = decision_receipt if isinstance(decision_receipt, dict) else {"state": "ABSENT"}
+        _rr = _rv.get("receipt") or {}
+        _sel = {str(x.get("ticker") or "").upper() for x in (_rr.get("selected_actions") or [])}
+        for c in sorted(chosen_set):
+            if (_acts.get(c) or _gact) in _REDUCE:
+                continue
+            if _rv.get("state") != "VALID" or _rr.get("state") != "DECISION_COMPLETE" or not _rr.get("capital_authorised"):
+                blocks.append(f"{c}: the Capital Decision Receipt is {_rv.get('state')}/{_rr.get('state')} "
+                              f"(capital_authorised={_rr.get('capital_authorised')}) - no addition without a VALID, "
+                              f"COMPLETE, authorised receipt (ISA-0804 tick 11)")
+            elif c not in _sel:
+                blocks.append(f"{c}: not an action selected by receipt {_rr.get('receipt_id')} (selected: "
+                              f"{sorted(_sel)}) - Step 10 may not substitute a different addition (ISA-0804 tick 11)")
+
     # (3) log all N (incl passes) — at minimum every top-5 name must be logged
     not_logged = [t for t in top5 if t not in logged]
     if not_logged:
@@ -243,7 +301,8 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
     if len(logged) < min(log_all_n, len(top5)):
         blocks.append(f"only {len(logged)} names logged; log all {log_all_n} (incl PASSES)")
 
-    return {"passed": not blocks, "blocks": blocks, "chosen": sorted(chosen_set) or None, "top5": top5}
+    return {"passed": not blocks, "blocks": blocks, "chosen": sorted(chosen_set) or None, "top5": top5,
+            "contest_basis": contest_basis}
 
 
 def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG_ALL_N, **ledger_kw):
@@ -367,7 +426,69 @@ def _selftest() -> int:
     r11 = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TOP_UP"}), cases, feas, step9_records=rs)
     assert any("NTAP has no ADMISSIBLE" in b for b in r11["blocks"]), \
         "MUST-FIRE (ISA-0616): the SAME verdict blocks a TOP-UP"
-    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9: must-fire, negative control, absent verdict)")
+    # ISA-0807 tick 10 — the canonical new-stock-capital control
+    _blk = {"state": "BLOCK_NEW_STOCK_CAPITAL", "blocks_new_stock_capital": True,
+            "record_id": "NCC-T", "failed_contracts": ["ISA-0804"]}
+    r12 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, new_capital_control=_blk)
+    assert any("NEW STOCK CAPITAL BLOCKED" in b for b in r12["blocks"]), \
+        "MUST-FIRE (ISA-0807): a BUY under a BLOCK control is blocked"
+    r13 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc,
+                                new_capital_control={"state": "OPEN", "blocks_new_stock_capital": False})
+    assert not any("ISA-0807" in b for b in r13["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0807): an OPEN control must not block %r" % r13["blocks"]
+    r14 = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TRIM"}), cases, feas,
+                                step9_records=rc, new_capital_control=_blk)
+    assert not any("ISA-0807" in b for b in r14["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0807): the block must not stop a REDUCTION"
+    r15 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc,
+                                new_capital_control={"state": "UNKNOWN"})
+    assert any("ISA-0807" in b for b in r15["blocks"]), \
+        "MUST-FIRE (ISA-0807): an UNKNOWN control (no explicit False) blocks, never reads OPEN"
+    # ISA-0804 tick 11 — the Capital Decision Receipt (LIVE only)
+    _open = {"state": "OPEN", "blocks_new_stock_capital": False}
+    _ok_r = {"state": "VALID", "receipt": {"receipt_id": "CDR-T", "state": "DECISION_COMPLETE",
+                                            "capital_authorised": True, "selected_actions": [{"ticker": "NTAP"}]}}
+    r16 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, new_capital_control=_open,
+                                decision_receipt=_ok_r, engine_authority="LIVE")
+    assert not any("tick 11" in b for b in r16["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0804): a receipt-selected addition passes tick 11 %r" % r16["blocks"]
+    _other = {"state": "VALID", "receipt": dict(_ok_r["receipt"], selected_actions=[{"ticker": "ZZZ"}])}
+    r17 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, new_capital_control=_open,
+                                decision_receipt=_other, engine_authority="LIVE")
+    assert any("not an action selected by receipt" in b for b in r17["blocks"]), \
+        "MUST-FIRE (ISA-0804): Step 10 may not substitute a name the receipt did not select"
+    r18 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, new_capital_control=_open,
+                                decision_receipt={"state": "STALE"}, engine_authority="LIVE")
+    assert any("tick 11" in b for b in r18["blocks"]), \
+        "MUST-FIRE (ISA-0804): a STALE/ABSENT receipt blocks every addition under LIVE"
+    r19 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, new_capital_control=_open,
+                                decision_receipt=None, engine_authority="SHADOW")
+    assert not any("tick 11" in b for b in r19["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0804): SHADOW authority never blocks on the receipt"
+    # ISA-0816: LIVE + VALID complete receipt -> contest = receipt case scope even when the legacy
+    # router published an EMPTY top-5; the selection passes, a substitution still blocks.
+    _rcpt = {"state": "VALID", "receipt": {"receipt_id": "CDR-x", "state": "DECISION_COMPLETE",
+             "capital_authorised": True, "case_scope": {"required_full_cases": ["A", "B", "C"]},
+             "selected_actions": [{"ticker": "A"}, {"ticker": "B"}]}}
+    _ops0 = {"state": "OK", "checkpoint_d_top5": [], "opportunity_set_id": "OPS-x"}
+    _cs = {t: "case" for t in ("A", "B", "C")}
+    _d0 = {"chosen_tickers": ["A", "B"], "pairwise": {"C": "why"},
+           "falsification": {t: "x" * FALSIFICATION_MIN_CHARS for t in ("A", "B")}}
+    r20 = validate_checkpoint_d([], _d0, _cs, ["A", "B", "C"], opportunity_set=_ops0,
+                                new_capital_control=_open, decision_receipt=_rcpt, engine_authority="LIVE")
+    assert r20["passed"] and r20["top5"] == ["A", "B", "C"] and r20["contest_basis"].startswith("ENGINE_RECEIPT"), r20
+    _d1 = dict(_d0, chosen_tickers=["A", "C"], pairwise={"B": "why"})
+    r21 = validate_checkpoint_d([], _d1, _cs, ["A", "B", "C"], opportunity_set=_ops0,
+                                new_capital_control=_open, decision_receipt=_rcpt, engine_authority="LIVE")
+    assert not r21["passed"] and any("C: not an action selected" in b for b in r21["blocks"]), r21
+    r22 = validate_checkpoint_d([], _d0, _cs, ["A", "B", "C"], opportunity_set=_ops0,
+                                new_capital_control=_open, decision_receipt={"state": "STALE", "receipt": _rcpt["receipt"]},
+                                engine_authority="LIVE")
+    assert not r22["passed"] and r22["contest_basis"] == "SPEC_TOP5", "NEGATIVE CONTROL: a STALE receipt never defines the contest"
+    r23 = validate_checkpoint_d([], _d0, _cs, ["A", "B"], opportunity_set=_ops0,
+                                new_capital_control=_open, decision_receipt=_rcpt, engine_authority="LIVE")
+    assert not r23["passed"] and any("not logged" in b for b in r23["blocks"]), "every contest name must be logged"
+    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11: must-fire, negative control, absent verdict)")
     return 0
 
 
@@ -381,10 +502,39 @@ def main():
     a = ap.parse_args()
     with open(a.spec, encoding="utf-8") as fh:
         s = json.load(fh)
+    # ISA-0807: the production CLI reads the LIVE control at run time (it may be set after the
+    # pre-run bundle was written). A failure to read it is UNKNOWN, which tick 10 treats as BLOCK.
+    try:
+        import new_capital_control as _ncc_m
+        _ncc = _ncc_m.status()
+    except Exception as _ncc_e:                                         # noqa: BLE001
+        _ncc = {"state": "UNKNOWN", "blocks_new_stock_capital": True,
+                "failed_contracts": ["control unreadable: %s" % _ncc_e]}
+    # ISA-0804: the ONE Capital Decision Receipt, verified against the CURRENT inputs (hash-bound).
+    try:
+        import isa_policy as _pol_e
+        _cea = _pol_e.V2_FLAGS.get("capital_engine_authority", "SHADOW")
+    except Exception:                                                   # noqa: BLE001
+        _cea = "SHADOW"
+    _rcv = {"state": "ABSENT", "why": "spec names no month"}
+    if s.get("month"):
+        try:
+            import capital_decision_engine as _cde
+            _rcv = _cde.verify_receipt(s["month"])
+        except Exception as _cde_e:                                     # noqa: BLE001
+            _rcv = {"state": "UNREADABLE", "why": str(_cde_e)}
     res = validate_checkpoint_d(s.get("top5"), s.get("decision"),
                                 s.get("comparative_cases"), s.get("logged_tickers"),
                                 step9_records=_step9_records(s),
-                                opportunity_set=_opportunity_set(s))
+                                opportunity_set=_opportunity_set(s),
+                                new_capital_control=_ncc, decision_receipt=_rcv, engine_authority=_cea)
+    _rr_ = _rcv.get("receipt") or {}
+    res["capital_decision_receipt"] = {"authority": _cea, "verification": _rcv.get("state"),
+                                       "receipt_id": _rr_.get("receipt_id"), "state": _rr_.get("state"),
+                                       "selected": [x.get("ticker") for x in _rr_.get("selected_actions") or []],
+                                       "capital_authorised": _rr_.get("capital_authorised")}
+    res["new_capital_control"] = {k: _ncc.get(k) for k in ("state", "blocks_new_stock_capital",
+                                                           "record_id", "failed_contracts")}
     print(json.dumps(res, indent=2))
     if not res["passed"]:
         print("\nBLOCKED — resolve the above before finalising the Step-10 decision.", file=sys.stderr)

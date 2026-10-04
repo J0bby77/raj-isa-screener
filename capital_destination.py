@@ -1098,7 +1098,8 @@ DEMAND_PULL_FREEZE_BASES = ("reallocation_only",)
 # the assertion was red on every correct run. The producer now asserts its own output against
 # this tuple and the selftest reads the same tuple (R4.4, R5.1).
 SLEEVE_SPLIT_STATES = ("STOCK_SLEEVE_BLOCKED", "STOCK_SLEEVE_OPEN", "STOCK_SLEEVE_DEMAND_PULL",
-                       "STOCK_SLEEVE_REFUSED")
+                       "STOCK_SLEEVE_REFUSED",
+                       "STOCK_SLEEVE_ENGINE_ALLOCATED")   # ISA-0811: allocated by the Capital Decision Receipt
 
 
 def _smallest_declared_position_gbp(policy: dict, total_gbp: float):
@@ -1150,6 +1151,59 @@ def _smallest_declared_position_gbp(policy: dict, total_gbp: float):
 # ⚑ AND THE BAND ITSELF IS NOT DELETED, ONLY ITS ROLE. D20: the Phase-1 band remains a
 # REPORTING and phase-transition measure. It is no longer a CAP on subscribed capital.
 # The pre-delivery copy of this function is in `_bak_isa0450_28aug2026/capital_destination.py`.
+
+
+# ISA-0807: the explicit reading a SIZING fixture passes when it asserts open-market behaviour.
+# Production never passes it (None -> the LIVE control is read).
+NCC_OPEN_FIXTURE = {"control": "new_capital_control", "state": "OPEN",
+                    "blocks_new_stock_capital": False, "failed_contracts": [],
+                    "record_id": "FIXTURE", "reasons": [], "policy_state": "RESOLVED",
+                    "policy_hard_max": "NOT_A_POLICY_LIMIT",
+                    # ISA-0811: these fixtures size the LEGACY demand-pull path (its own regression
+                    # suite). A fixture declares the engine authority it assumes; the production control
+                    # reading (new_capital_control.status) never carries this key.
+                    "fixture_engine_authority": "SHADOW"}
+
+
+def _sleeve_split_open(*a, **k):
+    """Selftest/fixture helper: sleeve_split under an explicit OPEN control (ISA-0807)."""
+    k.setdefault("new_capital_control", NCC_OPEN_FIXTURE)
+    return sleeve_split(*a, **k)
+
+
+def _new_capital_control_status() -> dict:
+    """ISA-0807: the canonical new-stock-capital control. A failure to READ it is UNKNOWN and
+    blocks (R4.3) - it is never treated as OPEN."""
+    try:
+        import new_capital_control as _ncc_m
+        return _ncc_m.status(str(HERE))
+    except Exception as exc:                                            # noqa: BLE001
+        return {"control": "new_capital_control", "state": "UNKNOWN",
+                "blocks_new_stock_capital": True, "failed_contracts": [],
+                "scope": "ALL_POSITIVE_NEW_STOCK_EXPOSURE",
+                "reasons": ["control unreadable: %s: %s" % (type(exc).__name__, exc)],
+                "policy_state": "UNKNOWN", "policy_hard_max": "UNKNOWN"}
+
+
+def _engine_receipt_status(month) -> dict:
+    """ISA-0811: the verified receipt for the RUN month (capital_decision_engine.verify_receipt).
+    Unreadable -> UNREADABLE (refuses)."""
+    try:
+        import capital_decision_engine as _cde
+        return _cde.verify_receipt(month or _mmm_yyyy_of(None), str(HERE))
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNREADABLE", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _capital_engine_authority() -> str:
+    """ISA-0804: "OFF" | "SHADOW" | "LIVE" from the ONE flag home. Unreadable -> "SHADOW" (the
+    receipt is formed and consumed by nothing - the safe, behaviour-neutral reading)."""
+    try:
+        import isa_policy as _pol
+        v = _pol.V2_FLAGS.get("capital_engine_authority", "SHADOW")
+        return v if v in ("OFF", "SHADOW", "LIVE") else "SHADOW"
+    except Exception:                                               # noqa: BLE001
+        return "SHADOW"
 
 
 def _demand_pull_live() -> bool:
@@ -1467,8 +1521,13 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                  new_subscription_gbp: float = 0.0,
                  candidates: Optional[list] = None,
                  sequence: Optional[dict] = None,
-                 membership=None, underwriting=None, input_state=None) -> dict:
+                 membership=None, underwriting=None, input_state=None,
+                 new_capital_control=None, decision_receipt=None, receipt_month=None,
+                 _engine_authority=None) -> dict:
     """Decide how much of the marginal pound may reach the stock sleeve.
+
+    `new_capital_control` (ISA-0807): None in production -> the LIVE canonical control is read
+    here; a fixture passes an explicit reading so a sizing test states the control it assumes.
 
     R2.14 — where the verdict turns on an unmade choice, state the choice. There is still no
     strategic asset allocation TARGET (ISA-0333), so this function does not invent a split: it
@@ -1531,7 +1590,167 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             "fund-disposal capital). Applying demand-pull anyway would silently ignore the declared "
             "basis (ISA-0683, R4.7)." % (basis, list(DEMAND_PULL_FREEZE_BASES)))
 
-    if not _demand_pull_live():
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑⚑ ISA-0807 / ISA-0805 (03-Oct-2026) — THE CANONICAL NEW-STOCK-CAPITAL CONTROL
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Read BEFORE any sizing. A block (or an UNKNOWN control / unresolved stock-sleeve policy)
+    # REFUSES every positive new stock exposure and HOLDS the stock-intended capital as cash:
+    # fund_max is 0, never the whole amount. The P4.7 rollback below routes everything to funds,
+    # which while the ISA-0390 recall leg is barred is itself an allocation decision - a deferral
+    # must defer (Integrated Capital BuildSpec s19.1). The reserve is still a placement (D23).
+    _ncc = (new_capital_control if isinstance(new_capital_control, dict)
+            else _new_capital_control_status())
+    out["new_capital_control"] = _ncc
+    if _ncc.get("blocks_new_stock_capital"):
+        stock_max = 0.0
+        _res = (policy.get("stock_sleeve") or {}).get("cash_reserve_gbp")
+        if _res is None:
+            raise DestinationRefused(
+                "ISA-0807: target_weights.stock_sleeve.cash_reserve_gbp is NOT DECLARED - the held "
+                "capital cannot be stated without the D23 reserve (R4.1).")
+        _res = float(_res)
+        _held = round(max(float(amount_gbp) - _res, 0.0), 2)
+        out["state"] = "STOCK_SLEEVE_REFUSED"
+        out["stock_max_gbp"] = 0.0
+        out["fund_max_gbp"] = 0.0
+        out["fund_max_basis"] = (
+            "ISA-0807: new stock capital is BLOCKED (%s); the stock-intended capital is HELD AS "
+            "CASH pending the stock decision (GBP %.2f) and is NOT offered to the fund sleeve - "
+            "the marginal-pound split is one joint decision, and routing it to funds while the "
+            "ISA-0390 recall leg is barred would pre-empt the stock decision the block defers."
+            % (_ncc.get("state"), _held))
+        out["held_pending_stock_decision_gbp"] = _held
+        _rows = [{"ticker": c.get("ticker"), "allocated_gbp": 0.0,
+                  "state": "REFUSED_NEW_STOCK_CAPITAL_BLOCKED",
+                  "skip_reason": ("new stock capital is blocked by the canonical control (%s); "
+                                  "failed contracts: %s" % (_ncc.get("state"),
+                                  ", ".join(_ncc.get("failed_contracts") or []) or
+                                  "; ".join(_ncc.get("reasons") or [])[:200]))}
+                 for c in (candidates or []) if isinstance(c, dict) and c.get("ticker")]
+        out["allocation"] = {
+            "state": "REFUSED_NEW_STOCK_CAPITAL_BLOCKED",
+            "allocated_gbp": 0.0,
+            "cash_reserve_gbp": _res,
+            "reserve_held_gbp": _res,
+            "held_pending_stock_decision_gbp": _held,
+            "rows": _rows,
+            "reason": "; ".join(_ncc.get("reasons") or [])[:600],
+        }
+        out["authorisation"] = {
+            "mode": "REFUSED_NEW_STOCK_CAPITAL",
+            "approval_binding": ({"input_snapshot_id": (input_state or {}).get("input_snapshot_id"),
+                                  "components": (input_state or {}).get("components"),
+                                  "materiality": (input_state or {}).get("materiality")}
+                                 if input_state else None),
+            "basis": "ISA-0807: no stock capital is authorised while the control blocks."}
+        out["reason"] = (
+            "NEW STOCK CAPITAL BLOCKED (ISA-0807 canonical control, state %s, record %s). "
+            "Scope: %s. Failed contracts: %s. GBP %.2f is HELD AS CASH pending the stock decision "
+            "and the GBP %.2f D23 reserve is retained; sells, trims, risk reduction and fund-sleeve "
+            "workflows funded inside the fund sleeve are unaffected. Stock-sleeve policy: %s "
+            "(hard max %s)."
+            % (_ncc.get("state"), _ncc.get("record_id"), _ncc.get("scope"),
+               ", ".join(_ncc.get("failed_contracts") or []) or "; ".join(_ncc.get("reasons") or [])[:300],
+               _held, _res, _ncc.get("policy_state"), _ncc.get("policy_hard_max")))
+        out["decision_owner"] = "new_capital_control"
+    elif (_engine_authority or _ncc.get("fixture_engine_authority") or _capital_engine_authority()) == "LIVE":
+        # ⚑⚑ ISA-0811 / ISA-0812 (Raj 03-Oct-2026) - THE CAPITAL DECISION RECEIPT IS THE ONE
+        # STOCK-CAPITAL AUTHORITY. Stock capital = exactly the receipt's selected actions, and only
+        # when the receipt verifies against the CURRENT inputs (hash-bound), is DECISION_COMPLETE and
+        # capital_authorised. Anything else REFUSES and HOLDS the stock-intended capital as cash - it
+        # never falls through to the legacy greedy demand-pull path, which now runs in SHADOW only
+        # (`legacy_greedy_shadow`) for the old-v-new comparison (spec s12, R4.3).
+        _res = (policy.get("stock_sleeve") or {}).get("cash_reserve_gbp")
+        if _res is None:
+            raise DestinationRefused("ISA-0811: target_weights.stock_sleeve.cash_reserve_gbp NOT DECLARED (D23, R4.1)")
+        _res = float(_res)
+        _rv = decision_receipt if isinstance(decision_receipt, dict) else _engine_receipt_status(receipt_month)
+        _rr = _rv.get("receipt") or {}
+        out["decision_receipt"] = {"verification": _rv.get("state"), "receipt_id": _rr.get("receipt_id"),
+                                   "state": _rr.get("state"), "capital_authorised": _rr.get("capital_authorised"),
+                                   "content_sha256": _rr.get("content_sha256"), "month": receipt_month}
+        try:
+            _lg = sleeve_split(amount_gbp, portfolio, policy, new_subscription_gbp, candidates=candidates,
+                               sequence=sequence, membership=membership, underwriting=underwriting,
+                               input_state=input_state, new_capital_control=new_capital_control,
+                               _engine_authority="SHADOW")
+            _la = _lg.get("allocation") or {}
+            out["legacy_greedy_shadow"] = {
+                "authority": "SHADOW - moves no capital (Raj 03-Oct-2026: the existing engine runs in shadow)",
+                "state": _lg.get("state"), "stock_max_gbp": _lg.get("stock_max_gbp"),
+                "allocated_gbp": _la.get("allocated_gbp"),
+                "rows": [{"ticker": r.get("ticker"), "gbp": r.get("allocated_gbp")} for r in (_la.get("rows") or [])
+                         if (r.get("allocated_gbp") or 0) > 0]}
+        except Exception as _lge:                                          # noqa: BLE001
+            out["legacy_greedy_shadow"] = {"state": "UNAVAILABLE", "why": "%s: %s" % (type(_lge).__name__, _lge)}
+        _ok = (_rv.get("state") == "VALID" and _rr.get("state") == "DECISION_COMPLETE"
+               and _rr.get("capital_authorised") is True)
+        _binding = ({"input_snapshot_id": (input_state or {}).get("input_snapshot_id"),
+                     "components": (input_state or {}).get("components"),
+                     "materiality": (input_state or {}).get("materiality")} if input_state else None)
+        if not _ok:
+            stock_max = 0.0
+            _held = round(max(float(amount_gbp) - _res, 0.0), 2)
+            _why = ("receipt %s is %s / %s (capital_authorised=%s)"
+                    % (_rr.get("receipt_id"), _rv.get("state"), _rr.get("state"), _rr.get("capital_authorised")))
+            out.update({
+                "state": "STOCK_SLEEVE_REFUSED", "stock_max_gbp": 0.0, "fund_max_gbp": 0.0,
+                "fund_max_basis": ("ISA-0811: no authorised Capital Decision Receipt (%s); stock-intended capital "
+                                   "GBP %.2f is HELD AS CASH until the decision completes - never routed by the "
+                                   "legacy path" % (_why, _held)),
+                "held_pending_stock_decision_gbp": _held,
+                "allocation": {"state": "REFUSED_RECEIPT_NOT_AUTHORISED", "allocated_gbp": 0.0,
+                               "cash_reserve_gbp": _res, "reserve_held_gbp": _res,
+                               "held_pending_stock_decision_gbp": _held, "rows": [],
+                               "reason": _why},
+                "authorisation": {"mode": "REFUSED_NEW_STOCK_CAPITAL", "basis": "ISA-0811: " + _why,
+                                  "approval_binding": _binding},
+                "reason": ("STOCK DECISION PENDING: %s. Complete the Step 10.0b case loop, re-run the engine and "
+                           "then `capital_destination.py --judgement-pass`; GBP %.2f held as cash meanwhile." % (_why, _held)),
+                "decision_owner": "capital_decision_engine"})
+        else:
+            _acts = [a for a in (_rr.get("selected_actions") or []) if float(a.get("gbp") or 0) > 0]
+            _spent = round(sum(float(a["gbp"]) for a in _acts), 2)
+            if _spent > float(amount_gbp) - _res + TOL_GBP:
+                raise DestinationRefused("ISA-0811: receipt %s spends GBP %.2f > available GBP %.2f after the "
+                                         "reserve - the receipt was formed on a different book"
+                                         % (_rr.get("receipt_id"), _spent, float(amount_gbp) - _res))
+            # ⚑ stock_max_gbp is the legacy DEMAND-PULL CAP quantity, computed only by
+            #   position_sizing.stock_max (one computer, ISA-0695) and now run in SHADOW. Under engine authority
+            #   the stock capital is the RECEIPT's allocation: published as engine_allocated_gbp, never written
+            #   into the cap quantity (that would make this function a second computer of it).
+            stock_max = 0.0
+            _held_set = {x.get("ticker") for x in (portfolio.get("stocks") or [])}
+            _rows = [{"ticker": a["ticker"], "allocated_gbp": round(float(a["gbp"]), 2),
+                      "state": ("TOP_UP_BY_ENGINE" if a["ticker"] in _held_set else "OPENED_BY_ENGINE"),
+                      "rung": a.get("action"), "target_pct": None, "obligation_gbp": None,
+                      "receipt_id": _rr.get("receipt_id"),
+                      "economic_max_price_major": a.get("economic_max_price_major"),
+                      "currency": a.get("currency")} for a in _acts]
+            out.update({
+                "state": "STOCK_SLEEVE_ENGINE_ALLOCATED", "stock_max_gbp": 0.0, "engine_allocated_gbp": _spent,
+                "stock_max_note": "under engine authority the cap quantity is not the authority; stock capital = engine_allocated_gbp (receipt)",
+                "fund_max_gbp": round(max(float(amount_gbp) - _spent - _res, 0.0), 2),
+                "fund_max_basis": ("amount - engine-selected stock GBP %.2f - D23 reserve GBP %.2f; the residual is "
+                                   "routed by the fund router (receipt %s)" % (_spent, _res, _rr.get("receipt_id"))),
+                "allocation": {"state": "OK", "allocated_gbp": _spent, "n_opened": len(_rows), "rows": _rows,
+                               "residual_gbp": round(max(float(amount_gbp) - _spent - _res, 0.0), 2),
+                               "cash_reserve_gbp": _res, "reserve_held_gbp": _res,
+                               "min_entry_gbp": (_rr.get("min_entry_gbp")), "starter_gbp": None,
+                               "source": "capital_decision_receipt"},
+                "authorisation": {"mode": "ENGINE_RECEIPT", "receipt_id": _rr.get("receipt_id"),
+                                  "receipt_sha256": _rr.get("content_sha256"), "approval_binding": _binding,
+                                  "receipts": [{"ticker": r["ticker"], "gbp": r["allocated_gbp"],
+                                                "approval_reference": "%s|%s|%.2f" % (_rr.get("receipt_id"), r["ticker"], r["allocated_gbp"]),
+                                                "execution_check": ("python3 capital_decision_engine.py --month %s --execution-check %s "
+                                                                    "--price <session quote, major units> --currency %s --quote-ts <ISO>"
+                                                                    % (receipt_month, r["ticker"], r.get("currency"))),
+                                                "state": "APPROVAL_PENDING"} for r in _rows],
+                                  "basis": "the receipt is the authority; approval and execution revalidation remain separate (s10/s11)"},
+                "reason": ("Stock capital allocated by Capital Decision Receipt %s (DECISION_COMPLETE, authorised): %s."
+                           % (_rr.get("receipt_id"), ", ".join("%s GBP %.2f" % (r["ticker"], r["allocated_gbp"]) for r in _rows) or "NO STOCK (cash)")),
+                "decision_owner": "capital_decision_engine"})
+    elif not _demand_pull_live():
         # ⚑⚑ P4.7 — THE ROLLBACK IS A REFUSAL, NOT AN ALTERNATIVE COMPUTATION (C5). The 26-Aug
         # design re-created the band-floor expression behind a flag — which is the re-pointing
         # ISA-0442 forbids, wearing a flag. A rollback that computes a DIFFERENT number is a
@@ -1938,7 +2157,8 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
     # to deploy, so the number he needs is where the sleeve ENDS UP if he does.
     # ⚑ ISA-0447's lesson in reverse: a constraint printed underneath the decision it
     # constrains has been published, not communicated. This sits in the same dict as the cap.
-    _sleeve_after = stock0 + float(out.get("stock_max_gbp") or 0.0)
+    _sleeve_after = stock0 + float(out.get("engine_allocated_gbp") if out.get("engine_allocated_gbp") is not None
+                                   else (out.get("stock_max_gbp") or 0.0))
     _w_after = (_sleeve_after / total1) if total1 else None
     out["post_deployment"] = {
         "stock_sleeve_gbp": round(_sleeve_after, 2),
@@ -2744,7 +2964,7 @@ def judgement_scope(doc: dict) -> dict:
 
 def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, universe_path=None,
           weights_path=None, nav_dir=None, out_path=None, as_of=None,
-          judgement_refusals=None, judgement_scope_doc=None):
+          judgement_refusals=None, judgement_scope_doc=None, new_capital_control=None):
     """`judgement_refusals` (ISA-0698): {ticker: reason} for REQUIRED names whose mandatory
     judgement is missing/invalid, or the string "ALL_REQUIRED_UNKNOWN_SCOPE". Each such candidate
     is refused new capital BY NAME and its pound flows through the existing demand-pull /
@@ -2808,7 +3028,8 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
                          candidates=pipe.get("candidates"),
                          sequence=dict(pipe.get("sequence") or {},
                                        population_binding=pipe.get("population_binding")),
-                         input_state=_istate)
+                         input_state=_istate, new_capital_control=new_capital_control,
+                         receipt_month=_mmm_yyyy_of(as_of))
     split["pipeline"] = {k: pipe.get(k) for k in
                          ("state", "step9_pre_source", "notes", "detail", "correlation")}
     _ac = pipe.get("all_candidates") or {}
@@ -3536,7 +3757,9 @@ def _fund_allocation_is_a_vector_when_funds_receive_capital() -> bool:
     vacuous."""
     import tempfile
     with _DemandPullOff():
-        d = build(out_path=tempfile.mktemp(suffix=".json"))
+        # ISA-0807: this clause tests the P4.7 rollback (funds offered the whole amount), which
+        # only exists under an OPEN new-capital control - a BLOCK holds the capital as cash.
+        d = build(out_path=tempfile.mktemp(suffix=".json"), new_capital_control=NCC_OPEN_FIXTURE)
     ss = d.get("sleeve_split") or {}
     if ss.get("state") != "STOCK_SLEEVE_REFUSED" or float(ss.get("fund_max_gbp") or 0) <= 0:
         return False
@@ -3559,13 +3782,13 @@ def _shadow_failure_cannot_alter_plan() -> bool:
     saved_flag, saved_hook = _ip.V2_FLAGS.get("concentration_gate"), _concentration_hook
     try:
         _ip.V2_FLAGS["concentration_gate"] = "OFF"
-        off = sleeve_split(20799.54, portfolio, p3, 11250.0, candidates=one_use, sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
+        off = _sleeve_split_open(20799.54, portfolio, p3, 11250.0, candidates=one_use, sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
 
         def _boom(*a, **k):
             raise RuntimeError("deliberately broken taxonomy")
         _concentration_hook = _boom
         _ip.V2_FLAGS["concentration_gate"] = "SHADOW"
-        sh = sleeve_split(20799.54, portfolio, p3, 11250.0, candidates=one_use, sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
+        sh = _sleeve_split_open(20799.54, portfolio, p3, 11250.0, candidates=one_use, sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
     finally:
         _ip.V2_FLAGS["concentration_gate"] = saved_flag
         _concentration_hook = saved_hook
@@ -3593,10 +3816,10 @@ def _live_refused_while_not_ready() -> bool:
     try:
         _ip.V2_FLAGS["concentration_gate"] = "LIVE"
         _concentration_readiness = lambda h, sm: {"state": "NOT_READY", "blockers": ["FIXTURE_BLOCKER"]}  # noqa: E731
-        refused = sleeve_split(20799.54, portfolio, p3, 11250.0, candidates=one_use,
+        refused = _sleeve_split_open(20799.54, portfolio, p3, 11250.0, candidates=one_use,
                                sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
         _concentration_readiness = lambda h, sm: {"state": "READY", "blockers": []}  # noqa: E731
-        ready = sleeve_split(20799.54, portfolio, p3, 11250.0, candidates=one_use,
+        ready = _sleeve_split_open(20799.54, portfolio, p3, 11250.0, candidates=one_use,
                              sequence={"order": ["FIXTURE"], "basis": "fixture_order"})
     finally:
         _ip.V2_FLAGS["concentration_gate"] = saved_flag
@@ -3626,7 +3849,7 @@ def _reporting_run_leaves_obligation_store_identical() -> bool:
         b0 = open(st, "rb").read()
         try:
             _psm.FILL_STORE = st
-            out = sleeve_split(9700.0, portfolio, p3, 11250.0, candidates=use,       # FB -> UNDERFILLED
+            out = _sleeve_split_open(9700.0, portfolio, p3, 11250.0, candidates=use,       # FB -> UNDERFILLED
                                sequence={"order": ["FA", "FB"], "basis": "fixture_order"})
         finally:
             _psm.FILL_STORE = saved
@@ -3652,7 +3875,7 @@ def _undeclared_demand_pull_basis_refuses() -> bool:
         p2["scaling_freeze"]["basis"] = bad
         p2["scaling_freeze"]["active"] = True
         try:
-            sleeve_split(20799.54, portfolio, p2, 11250.0, candidates=one_use)
+            _sleeve_split_open(20799.54, portfolio, p2, 11250.0, candidates=one_use)
             return False
         except DestinationRefused:
             pass
@@ -3660,7 +3883,7 @@ def _undeclared_demand_pull_basis_refuses() -> bool:
     p3["scaling_freeze"]["basis"] = "reallocation_only"
     p3["scaling_freeze"]["active"] = True
     try:
-        out = sleeve_split(20799.54, portfolio, p3, 11250.0, candidates=one_use)
+        out = _sleeve_split_open(20799.54, portfolio, p3, 11250.0, candidates=one_use)
     except DestinationRefused:
         return False
     return out.get("state") in SLEEVE_SPLIT_STATES
@@ -3689,7 +3912,7 @@ def _undeclared_basis_raises() -> bool:
                             if k != "basis"}
     p2["scaling_freeze"]["active"] = True
     try:
-        sleeve_split(20799.54, portfolio, p2, 11250.0)
+        _sleeve_split_open(20799.54, portfolio, p2, 11250.0)
         return False
     except DestinationRefused:
         return True
@@ -3762,6 +3985,13 @@ def summary_for_run_context(doc: dict) -> dict:
     "approval_binding": ((_sl.get("authorisation") or {}).get("approval_binding")),
     "allocation": _sl.get("allocation") or {},
     "post_deployment": _sl.get("post_deployment") or {},
+    # ISA-0807: the canonical new-stock-capital control as the router read it (render only)
+    "new_capital_control": _sl.get("new_capital_control") or {},
+    "held_pending_stock_decision_gbp": _sl.get("held_pending_stock_decision_gbp"),
+    # ISA-0811: the engine receipt the router consumed (or refused), its allocation and the SHADOW legacy plan
+    "engine_allocated_gbp": _sl.get("engine_allocated_gbp"),
+    "decision_receipt": _sl.get("decision_receipt"),
+    "legacy_greedy_shadow": _sl.get("legacy_greedy_shadow"),
     "sequencer": _sl.get("sequencer") or {},
     "demand_pull": _sl.get("demand_pull") or {},
     "ranking_order": _rk.get("order"),
@@ -4208,6 +4438,86 @@ def _selftest(verbose=True) -> int:
        _v1["checkpoint_d_top5"] == ["ONLY"] and _v1["checkpoint_d_required_n"] == 1)
     ck("ISA-0608: a pre-control step9_pre yields ABSENT_PRE_CONTROL, never a fabricated top-5",
        opportunity_set_view(None, _cands, {})["checkpoint_d_top5"] is None)
+    # ── ISA-0807 — the canonical new-stock-capital control through the REAL sleeve_split ────────
+    _pf7, _un7, _pol7 = _fixture()
+    _use7 = [{"ticker": "FIX7", "qualifies": True, "evidence_state": "THIN", "source_score": 70.0,
+              "current_value_gbp": 0.0, "disqualified_reason": None,
+              "correlation": {"measured": False, "rho_sleeve": None,
+                              "rho_basis": "UNMEASURED_ADVERSE_DEFAULT"}}]
+    _pol7 = json.loads(json.dumps(_pol7))
+    _pol7["scaling_freeze"]["basis"] = "reallocation_only"
+    _blk7 = {"state": "BLOCK_NEW_STOCK_CAPITAL", "blocks_new_stock_capital": True,
+             "record_id": "NCC-T", "failed_contracts": ["ISA-0804"], "reasons": ["fixture"],
+             "policy_state": "RESOLVED", "policy_hard_max": "NOT_A_POLICY_LIMIT"}
+    _o7 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_blk7)
+    _res7 = float(_pol7["stock_sleeve"]["cash_reserve_gbp"])
+    ck("MUST-FIRE ISA-0807: a BLOCK control refuses ALL stock capital and HOLDS it as cash, never routes it to funds",
+       _o7["state"] == "STOCK_SLEEVE_REFUSED" and _o7["stock_max_gbp"] == 0.0 and _o7["fund_max_gbp"] == 0.0
+       and abs(_o7["held_pending_stock_decision_gbp"] - (17970.94 - _res7)) <= TOL_GBP
+       and _o7["allocation"]["state"] == "REFUSED_NEW_STOCK_CAPITAL_BLOCKED"
+       and _o7["allocation"]["rows"][0]["ticker"] == "FIX7")
+    _u7 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7,
+                       new_capital_control={"state": "UNKNOWN", "blocks_new_stock_capital": True})
+    ck("MUST-FIRE ISA-0807: an UNKNOWN control blocks exactly like a recorded BLOCK (R4.3)",
+       _u7["state"] == "STOCK_SLEEVE_REFUSED" and _u7["fund_max_gbp"] == 0.0)
+    _n7 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=NCC_OPEN_FIXTURE,
+                       sequence={"order": ["FIX7"], "basis": "fixture_order"})
+    ck("NEGATIVE CONTROL ISA-0807: an OPEN control leaves the demand-pull router in charge",
+       _n7["state"] != "STOCK_SLEEVE_REFUSED" and _n7.get("held_pending_stock_decision_gbp") is None)
+    # ── ISA-0804 — engine authority LIVE fails CLOSED until the receipt consumer is certified ──
+    import isa_policy as _pol_e
+    _prev_e = _pol_e.V2_FLAGS.get("capital_engine_authority")
+    try:
+        _pol_e.V2_FLAGS["capital_engine_authority"] = "LIVE"
+        _open_prod = {k: v for k, v in NCC_OPEN_FIXTURE.items() if k != "fixture_engine_authority"}
+        _seq8 = {"order": ["FIX7"], "basis": "fixture_order"}
+        _l8 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                           sequence=_seq8, decision_receipt={"state": "ABSENT"}, receipt_month="oct_2026")
+        ck("MUST-FIRE ISA-0811: engine LIVE with NO receipt REFUSES and holds cash (no greedy fallback)",
+           _l8["state"] == "STOCK_SLEEVE_REFUSED" and _l8["stock_max_gbp"] == 0.0 and _l8["fund_max_gbp"] == 0.0
+           and _l8["allocation"]["state"] == "REFUSED_RECEIPT_NOT_AUTHORISED" and _l8.get("demand_pull") is None
+           and abs(_l8["held_pending_stock_decision_gbp"] - (17970.94 - _res7)) <= TOL_GBP)
+        ck("ISA-0811: the legacy greedy plan is still computed - in SHADOW, beside the refusal",
+           (_l8.get("legacy_greedy_shadow") or {}).get("state") == _n7["state"])
+        _rp = {"state": "VALID", "receipt": {"receipt_id": "CDR-T", "state": "RESEARCH_PENDING", "capital_authorised": False,
+                                             "selected_actions": [{"ticker": "FIX7", "gbp": 5000.0}]}}
+        _l9 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                           sequence=_seq8, decision_receipt=_rp, receipt_month="oct_2026")
+        ck("MUST-FIRE ISA-0811: a VALID but RESEARCH_PENDING receipt allocates nothing",
+           _l9["state"] == "STOCK_SLEEVE_REFUSED" and _l9["stock_max_gbp"] == 0.0)
+        _rc = {"state": "VALID", "receipt": {"receipt_id": "CDR-T", "content_sha256": "x", "state": "DECISION_COMPLETE",
+                                             "capital_authorised": True, "min_entry_gbp": 4490.95,
+                                             "selected_actions": [{"ticker": "FIX7", "gbp": 5000.0, "action": "START",
+                                                                   "currency": "USD", "economic_max_price_major": 10.0}]}}
+        _l10 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                            sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026")
+        ck("NEGATIVE CONTROL ISA-0811: a VALID, COMPLETE, authorised receipt allocates EXACTLY its actions",
+           _l10["state"] == "STOCK_SLEEVE_ENGINE_ALLOCATED" and abs(_l10["engine_allocated_gbp"] - 5000.0) <= TOL_GBP
+           and _l10["stock_max_gbp"] == 0.0
+           and [r["ticker"] for r in _l10["allocation"]["rows"]] == ["FIX7"]
+           and abs(_l10["fund_max_gbp"] - (17970.94 - 5000.0 - _res7)) <= TOL_GBP
+           and _l10["authorisation"]["mode"] == "ENGINE_RECEIPT")
+        ck("ISA-0811: the receipt's GBP reconcile to the penny (stock + funds + reserve = amount)",
+           abs(_l10["engine_allocated_gbp"] + _l10["fund_max_gbp"] + _res7 - 17970.94) <= TOL_GBP)
+        _rbig = json.loads(json.dumps(_rc)); _rbig["receipt"]["selected_actions"][0]["gbp"] = 99999.0
+        try:
+            sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                         sequence=_seq8, decision_receipt=_rbig, receipt_month="oct_2026")
+            ck("MUST-FIRE ISA-0811: a receipt that spends more than the book holds is REFUSED", False)
+        except DestinationRefused:
+            ck("MUST-FIRE ISA-0811: a receipt that spends more than the book holds is REFUSED", True)
+        _blk_live = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_blk7,
+                                 sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026")
+        ck("MUST-FIRE ISA-0811: a BLOCK control still wins over an authorised receipt",
+           _blk_live["state"] == "STOCK_SLEEVE_REFUSED" and _blk_live["stock_max_gbp"] == 0.0)
+        _pol_e.V2_FLAGS["capital_engine_authority"] = "SHADOW"
+        _s8 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                           sequence={"order": ["FIX7"], "basis": "fixture_order"})
+        ck("NEGATIVE CONTROL ISA-0804: engine SHADOW is behaviour-neutral (identical to the pre-engine router)",
+           _s8["state"] == _n7["state"] and _s8["stock_max_gbp"] == _n7["stock_max_gbp"]
+           and _s8["fund_max_gbp"] == _n7["fund_max_gbp"])
+    finally:
+        _pol_e.V2_FLAGS["capital_engine_authority"] = _prev_e
     print(f"\ncapital_destination selftest: {len(fails)} failure(s)"
           + (" -> " + ", ".join(fails) if fails else " — all assertions green"))
     OUTPUT_DIR = _saved_output_dir

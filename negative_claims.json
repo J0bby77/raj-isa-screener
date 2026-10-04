@@ -82,14 +82,14 @@
    "asserted_in": "retention.py",
    "asserted_on": "2026-08-26",
    "test_id": "framework_integrity.probe_ratchet_cannot_fire",
-   "last_tested": "2026-09-12",
+   "last_tested": "2026-10-03",
    "runs_since_tested": 0,
    "expires_after_runs": 1,
    "state": "ASSERTED_TRUE",
    "gates": [
     "retention.step_down_ratchet"
    ],
-   "evidence": "TRUE, and re-tested every run by P5. freeze_history holds ONE measured month against a required twelve, so the earliest possible fire is ~Aug-2027. The run must print WHICH condition binds — a rule that says 'cannot fire' without saying 'why this month' is ISA-0348's pattern in reporting form.",
+   "evidence": "TRUE, and re-tested every run by P5. freeze_history holds ONE measured month against a required twelve, so the earliest possible fire is ~Aug-2027. The run must print WHICH condition binds — a rule that says 'cannot fire' without saying 'why this month' is ISA-0348's pattern in reporting form. | RE-TESTED 03-Oct-2026 (ISA-0807 build, Candidate of TB-2026-09-30-10): framework_integrity.probe_ratchet_cannot_fire on run_context_oct_2026.json -> CLAIM_HOLDS_TODAY (months_measured 1 of 12; legs trail_pp/months_trailing/ex_largest all null; fires false).",
    "register_item": "ISA-0457",
    "site": {
     "module": "retention",

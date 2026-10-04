@@ -72,10 +72,22 @@ def _excluded_dir(name: str) -> bool:
 
 
 def _iter_py(root: Path):
-    for p in sorted(root.rglob("*.py")):
-        rel = p.relative_to(root)
-        if any(_excluded_dir(part) for part in rel.parts[:-1]):
-            continue
+    """Every framework .py under root. ISA-0801 (03-Oct-2026): the excluded directories are PRUNED
+    during the walk instead of rglob-ing every _bak*/archive tree and discarding it afterwards (the
+    same set - the exclusion predicate is unchanged - at a fraction of the mount stats), and the
+    listing is enumerated once per process while the pre-run snapshot is ON."""
+    import isa_source_cache as _scs
+    root = Path(root)
+
+    def _walk():
+        out = []
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if not _excluded_dir(d)]
+            for fn in fns:
+                if fn.endswith(".py"):
+                    out.append(Path(dp) / fn)
+        return sorted(out)
+    for p in _scs.memo_listing(("atlas._iter_py", str(root.resolve())), _walk):
         yield p
 
 

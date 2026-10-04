@@ -984,6 +984,15 @@ def main():
     # gracefully. R4.12: `log[...] = x` written before `log` exists. The guard was never
     # exercised because the case it guards was false in the session that wrote it (FC-K).
     _RUN_STARTED_AT = time.time()   # ISA-0590: the register gate's 'this run wrote it' test
+    # ISA-0801 (03-Oct-2026, P1): ONE path census + fingerprint context for this process. Every
+    # static scanner (atlas, integrity, release fingerprints, A18) enumerates each tree once instead
+    # of ~600 walks on the mount. Nothing is persisted; the final capital-authority BOUNDARY below
+    # re-fingerprints fresh, so mid-run source drift cannot keep authority.
+    try:
+        import isa_source_cache as _sc_snap
+        _sc_snap.enable_snapshot(True)
+    except Exception:                                                   # noqa: BLE001
+        pass
     errors: list = []
     warnings: list = []
     summary: dict = {}
@@ -3820,6 +3829,17 @@ def main():
                          % (_cdr["state"], _sl.get("stock_max_gbp") or 0.0,
                             (_sl.get("scaling_freeze") or {}).get("basis"), _fa.get("state"),
                             _fa.get("unallocated_gbp") or 0.0))
+            _ncc610 = _sl.get("new_capital_control") or {}
+            if _ncc610.get("blocks_new_stock_capital") is not False:
+                # ISA-0807: the canonical new-stock-capital control blocks this occurrence.
+                warnings.append(
+                    "Step 6.10b NEW STOCK CAPITAL BLOCKED (ISA-0807, control %s, record %s): no new "
+                    "stock position or top-up on any route; failed contracts: %s. GBP %.2f held as "
+                    "cash pending the stock decision (not routed to funds)."
+                    % (_ncc610.get("state"), _ncc610.get("record_id"),
+                       ", ".join(_ncc610.get("failed_contracts") or []) or
+                       "; ".join(_ncc610.get("reasons") or [])[:200],
+                       float(_sl.get("held_pending_stock_decision_gbp") or 0.0)))
             if (_sl.get("executability") or {}).get("state") == "NOT_EXECUTABLE":
                 warnings.append(
                     "Step 6.10b STOCK CAP IS NOT EXECUTABLE: GBP %.2f is below the smallest "
@@ -3884,6 +3904,36 @@ def main():
     except Exception as _e:
         warnings.append(f"Step 6.10c (waiting_room): {type(_e).__name__}: {_e}")
         print(f"  waiting_room FAILED (non-fatal): {_e}")
+
+    # ── 6.10e — THE INTEGRATED CAPITAL DECISION ENGINE (ISA-0804, 03-Oct-2026) ──────────────
+    # ⚑ Runs AFTER 6.10b so its old-v-new table compares with THIS run's governed plan, and with
+    #   fresh_after = this run's start so a step9_pre / horizon_value bundle from an earlier run
+    #   can never be consumed (STALE_INPUT refusal). SHADOW (isa_policy "capital_engine_authority"):
+    #   the receipt is formed, verified, rendered and ledgered - NOTHING consumes it for capital.
+    #   OFF: not invoked (reported UNKNOWN). Never raises into the run (R4.12).
+    try:
+        import isa_policy as _pol_e
+        _cea = _pol_e.V2_FLAGS.get("capital_engine_authority", "SHADOW")
+        if _cea == "OFF":
+            summary["capital_decision_engine"] = {"state": "DISABLED", "authority": "OFF"}
+        else:
+            import capital_decision_engine as _cde
+            _cdep = os.path.join(SCRIPT_DIR, f"capital_destination_{month_label}.json")
+            _cder = _cde.build(month_label, root=SCRIPT_DIR, fresh_after=_RUN_STARTED_AT,
+                               baseline_plan_path=(_cdep if os.path.exists(_cdep) else None))
+            summary["capital_decision_engine"] = _cde.summary(_cder)
+            summary["capital_decision_engine"]["ledger"] = (_cder.get("_ledger") or {}).get("state")
+            _s610.append("decision engine %s %s (%s)" % (_cder.get("receipt_id"), _cder.get("state"), _cea))
+            if _cder.get("state") != "DECISION_COMPLETE":
+                warnings.append(
+                    "Step 6.10e CAPITAL DECISION ENGINE (%s, %s): %s - required cases outstanding: %s. "
+                    "Capital authorised: %s." % (_cea, _cder.get("receipt_id"), _cder.get("state"),
+                    ", ".join((_cder.get("case_scope") or {}).get("outstanding") or []) or "none",
+                    _cder.get("capital_authorised")))
+    except Exception as _e:                                            # noqa: BLE001
+        summary["capital_decision_engine"] = {"state": "FAILED", "why": "%s: %s" % (type(_e).__name__, _e)}
+        warnings.append(f"Step 6.10e (capital_decision_engine): {type(_e).__name__}: {_e}")
+        print(f"  capital_decision_engine FAILED (non-fatal): {_e}")
 
     _mf_measure(status=("OK" if _s610 else "DEGRADED"),
                 note=("; ".join(_s610) if _s610 else "the marginal-pound router produced no result"))
@@ -5300,6 +5350,31 @@ def main():
     if watchlist_promotion_log:
         summary["watchlist_promotion_log"] = watchlist_promotion_log
 
+    # ── ISA-0801 BOUNDARY (P1, T70/T71): re-fingerprint LIVE FRESH (no snapshot memo) and require the
+    #    SAME trusted build Step 0a authorised. A source/config/run-surface byte changed during the run -
+    #    even with unchanged size and mtime - refuses capital authority on the artefact the review reads.
+    try:
+        import isa_source_cache as _scb
+        import release_gate as _rgb
+        with _scb.fresh_snapshot():
+            _vb = _rgb.verify_live(SCRIPT_DIR)
+        _tb = summary.get("trusted_build") or {}
+        _tb["boundary"] = {"state": _vb.get("state"), "build_id": _vb.get("build_id"),
+                           "checked_at": datetime.now().isoformat(timespec="seconds"),
+                           "basis": "fresh re-fingerprint at the end of the run (ISA-0801)"}
+        if (_tb.get("authority") == "AUTHORISED"
+                and (_vb.get("state") != "TRUSTED" or _vb.get("build_id") != _tb.get("build_id"))):
+            _tb["authority"] = "REFUSED"
+            _tb["why"] = ("ISA-0801 BOUNDARY: LIVE changed during the run (%s / %s vs Step 0a %s)"
+                          % (_vb.get("state"), _vb.get("build_id"), _tb.get("build_id")))
+            errors.append(CAPITAL_AUTHORITY_ERROR_PREFIX + _tb["why"])
+            warnings.append("R18.5 CAPITAL AUTHORITY REFUSED - " + _tb["why"])
+            status = "ERROR"
+            error_msg = "; ".join(errors)
+        summary["trusted_build"] = _tb
+    except Exception as _bxe:                                          # noqa: BLE001
+        warnings.append("ISA-0801 boundary re-fingerprint failed (%s: %s) - capital authority stands on "
+                        "Step 0a only" % (type(_bxe).__name__, _bxe))
     ctx_path = write_run_context(
         month_label, run_month, portfolio_path, xray_path, analytics_path,
         watchlist_metrics_path, watchlist_scored_path, step9_pre_path, email_path,

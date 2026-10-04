@@ -471,6 +471,12 @@ def _render_capital_router(d):
     if v.get("absent_line"):
         return h3("Marginal-pound router") + para(se(v["absent_line"]))
     out = h3("Marginal-pound router &mdash; where this month&#39;s capital is routed")
+    if v.get("new_capital_control_line"):                    # ISA-0807 — the binding refusal first
+        out += para("<strong>" + se(v["new_capital_control_line"]) + "</strong>")
+    if v.get("decision_engine_line"):                        # ISA-0804 — the engine receipt (SHADOW/LIVE)
+        out += para(se(v["decision_engine_line"]))
+    if v.get("engine_authority_line"):                       # ISA-0811 — receipt allocation + legacy SHADOW
+        out += para("<strong>" + se(v["engine_authority_line"]) + "</strong>")
     for k in ("split_line", "split_reason_line", "executability_line", "freeze_line",
               "ranking_line", "c1_line"):
         if v.get(k):
@@ -1860,6 +1866,8 @@ def main():
         else:
             import email_prefill as _ep
             _cds = (_rc.get("summary") or {}).get("capital_destination") or {}
+            _cde_sum = (_rc.get("summary") or {}).get("capital_decision_engine")
+            _cde_month = _month
             _blk = _ep.build_capital_router_block(_cds, (_rc.get("summary") or {}).get("waiting_room"))
             if _jg.get("rerouted"):
                 _blk["split_reason_line"] = (
@@ -1871,6 +1879,40 @@ def main():
                        ", ".join(_jg["refused_capital"])[:300]
                        if isinstance(_jg.get("refused_capital"), list) else "scope UNKNOWN",
                        _blk.get("split_reason_line") or ""))
+            # ISA-0807: re-read the LIVE control at build time - it may have been set after the
+            # pre-run bundle. A blocking control the bundle did not carry still renders.
+            try:
+                import new_capital_control as _ncc_m
+                _ncc_live = _ncc_m.status()
+            except Exception as _ncc_e:                                 # noqa: BLE001
+                _ncc_live = {"state": "UNKNOWN", "blocks_new_stock_capital": True,
+                             "reasons": ["control unreadable: %s" % _ncc_e]}
+            if _ncc_live.get("blocks_new_stock_capital") is not False and not _blk.get("new_capital_control_line"):
+                _blk["new_capital_control_line"] = _ep.new_capital_control_line(
+                    _ncc_live, _cds.get("held_pending_stock_decision_gbp"))
+                _blk.setdefault("warnings", []).append(
+                    "ISA-0807: the new-stock-capital control is %s at email build time but the "
+                    "pre-run plan was formed without it - re-run the pre-run router before relying "
+                    "on any stock figure in this section." % _ncc_live.get("state"))
+            # ISA-0804: the ONE Capital Decision Receipt, re-verified at build time against the
+            # CURRENT inputs (a receipt formed on other inputs renders STALE, never as current).
+            _cde_m = None
+            try:
+                import capital_decision_engine as _cde_m
+                _cdv = _cde_m.verify_receipt(_cde_month) if _cde_month else {"state": "NO_MONTH"}
+            except Exception as _cde_e:                                 # noqa: BLE001
+                _cdv = {"state": "UNREADABLE", "why": str(_cde_e)}
+            # ISA-0816: the review's case loop re-forms the receipt AFTER the pre-run bundle was
+            # written; the email renders the receipt that VERIFIES now, never the bundle's copy.
+            _cde_sum = _engine_summary_for_render(_cde_sum, _cdv,
+                                                  getattr(_cde_m, "summary", None))
+            _blk["decision_engine_line"] = _ep.decision_engine_line(_cde_sum, _cdv.get("state"))
+            data.setdefault("meta", {})["capital_decision_engine"] = {
+                "verification": _cdv.get("state"), "receipt_id": (_cde_sum or {}).get("receipt_id"),
+                "state": (_cde_sum or {}).get("state"), "authority": (_cde_sum or {}).get("engine_authority")}
+            data.setdefault("meta", {})["new_capital_control"] = {
+                k: _ncc_live.get(k) for k in ("state", "blocks_new_stock_capital", "record_id",
+                                              "failed_contracts", "policy_state", "policy_hard_max")}
             data.setdefault("s2_capital_allocation", {})["capital_router"] = _blk
             data.setdefault("meta", {})["judgement_gate"] = {
                 k: _jg.get(k) for k in ("scope_state", "counts", "refused_capital",
@@ -1954,9 +1996,36 @@ def main():
 
 
 
+def _engine_summary_for_render(bundle_sum, verification, summarise):
+    """ISA-0816: choose the receipt view the email renders. A receipt that VERIFIES at build time is
+    the source of truth (the review's case loop may have re-formed it after the pre-run bundle);
+    otherwise the bundle's view renders with the failed verification state beside it. Pure."""
+    rec = (verification or {}).get("receipt") if isinstance(verification, dict) else None
+    if (verification or {}).get("state") == "VALID" and isinstance(rec, dict) and callable(summarise):
+        out = dict(summarise(rec))
+        out["rendered_from"] = "VERIFIED_RECEIPT_AT_BUILD"
+        if isinstance(bundle_sum, dict) and bundle_sum.get("receipt_id") not in (None, out.get("receipt_id")):
+            out["superseded_bundle_receipt_id"] = bundle_sum.get("receipt_id")
+        return out
+    return bundle_sum
+
+
 def _selftest():
     """ISA-0722 — section 7 renders the held-underwriting table from the prefill block."""
     import email_prefill as _ep
+    # ISA-0804 — the engine receipt line reaches the rendered router section (renderer, not engine)
+    _h804 = _render_capital_router({"capital_router": {"split_line": "x",
+                                                       "decision_engine_line": "Capital decision engine (ISA-0804, SHADOW, receipt CDR-T)"}})
+    assert "CDR-T" in _h804, "MUST-FIRE ISA-0804: the receipt line must render in the router section"
+    assert "ISA-0804" not in _render_capital_router({"capital_router": {"split_line": "x"}}), \
+        "NEGATIVE CONTROL ISA-0804: no receipt line, nothing invented"
+    # ISA-0816 — the verified receipt supersedes the bundle's copy; a non-VALID one never does
+    _sm = lambda r: {"receipt_id": r["receipt_id"], "state": r["state"]}
+    _v = _engine_summary_for_render({"receipt_id": "OLD", "state": "RESEARCH_PENDING"},
+                                    {"state": "VALID", "receipt": {"receipt_id": "NEW", "state": "DECISION_COMPLETE"}}, _sm)
+    assert _v["receipt_id"] == "NEW" and _v["superseded_bundle_receipt_id"] == "OLD", "MUST-FIRE ISA-0816"
+    _v2 = _engine_summary_for_render({"receipt_id": "OLD"}, {"state": "STALE", "receipt": {"receipt_id": "NEW", "state": "X"}}, _sm)
+    assert _v2["receipt_id"] == "OLD", "NEGATIVE CONTROL ISA-0816: a STALE receipt never replaces the bundle view"
     blk = _ep.build_held_underwriting_block({
         "state": "OK", "n_cases_held": 1, "n_expected": 1, "by_state": {"MISSING_ROW": ["ZZZ"]},
         "not_captured_original": ["ZZZ"],

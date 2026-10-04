@@ -1717,6 +1717,47 @@ def _gbp(v):
     return "UNAVAILABLE" if v is None else ("GBP %s" % format(float(v), ",.2f"))
 
 
+def new_capital_control_line(ncc, held_gbp=None):
+    """ISA-0807: one sentence for a BLOCKING control, None otherwise. A control the router could
+    not read renders as blocking (its state is UNKNOWN), never as silence."""
+    if not isinstance(ncc, dict) or not ncc:
+        return None
+    if ncc.get("blocks_new_stock_capital") is False:
+        return None
+    return ("NEW STOCK CAPITAL BLOCKED (ISA-0807, control %s, record %s): no new stock position or "
+            "top-up on any route this occurrence. Failed contracts: %s. %s held as cash pending the "
+            "stock decision (not routed to funds); sells, trims, risk reduction and fund-sleeve "
+            "workflows are unaffected. Stock-sleeve policy %s, hard max %s (ISA-0805)."
+            % (ncc.get("state"), ncc.get("record_id") or "-",
+               ", ".join(ncc.get("failed_contracts") or []) or "; ".join(ncc.get("reasons") or [])[:240] or "-",
+               _gbp(held_gbp) if held_gbp is not None else "Deployable capital",
+               ncc.get("policy_state"), ncc.get("policy_hard_max")))
+
+
+def decision_engine_line(cde, verification=None):
+    """ISA-0804: one sentence rendering the ONE Capital Decision Receipt (the email never recomputes
+    selection, size or permission - R20.2). Absent/failed/stale receipts render as such, never as
+    silence. Under SHADOW the sentence says plainly that the receipt moves no capital."""
+    if not isinstance(cde, dict) or not cde:
+        return ("Capital decision engine (ISA-0804): NO RECEIPT in this pre-run bundle - the engine "
+                "did not run, so no engine view exists for this occurrence.")
+    if cde.get("state") in ("FAILED", "DISABLED"):
+        return "Capital decision engine (ISA-0804): %s - %s" % (cde.get("state"), (cde.get("why") or cde.get("authority") or "")[:240])
+    sel = cde.get("selected_actions") or []
+    sel_s = ", ".join("%s %s" % (a.get("ticker"), _gbp(a.get("gbp"))) for a in sel) or "NO NEW STOCK (cash)"
+    auth = cde.get("engine_authority")
+    return ("Capital decision engine (ISA-0804, %s, receipt %s, %s): selection %s; comparator %s; "
+            "ambition band %s; required cases outstanding: %s. Verification at email build: %s. %s"
+            % (auth, cde.get("receipt_id"), cde.get("state"), sel_s, cde.get("comparator_rule"),
+               cde.get("ambition_band") or "-",
+               ", ".join(cde.get("case_scope_outstanding") or []) or "none",
+               verification or "NOT_CHECKED",
+               ("SHADOW: this receipt moves NO capital; it is shown so the review can compare it with "
+                "the governed plan." if auth != "LIVE" else
+                ("capital authorised by the receipt." if cde.get("capital_authorised") else
+                 "capital NOT authorised by the receipt."))))
+
+
 def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
     """summary.capital_destination (+ summary.waiting_room) -> the rendered §2 sub-block.
 
@@ -1740,8 +1781,23 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
            cd.get("sleeve_weight_now_pct", "?"),
            ("%s-%s%%" % (band[0], band[1])) if len(band) == 2 else "?",
            _gbp(cd.get("gbp_to_reach_band_floor"))))
+    if cd.get("engine_allocated_gbp") is not None or (cd.get("decision_receipt") or {}).get("receipt_id"):
+        _dr = cd.get("decision_receipt") or {}
+        _lg = cd.get("legacy_greedy_shadow") or {}
+        out["engine_authority_line"] = (
+            "Stock capital authority: Capital Decision Receipt %s (%s, verification %s): %s allocated to stocks "
+            "by the engine. The legacy Source-Score router ran in SHADOW only (it would have allocated %s: %s)."
+            % (_dr.get("receipt_id") or "-", _dr.get("state") or "-", _dr.get("verification") or "-",
+               _gbp(cd.get("engine_allocated_gbp") or 0.0), _gbp(_lg.get("allocated_gbp") or 0.0),
+               ", ".join("%s %s" % (x.get("ticker"), _gbp(x.get("gbp"))) for x in (_lg.get("rows") or [])) or "none"))
     if cd.get("split_reason"):
         out["split_reason_line"] = cd["split_reason"]
+    # ISA-0807 — the canonical new-stock-capital control, rendered FIRST and as a refusal (R2.10).
+    _ncc_line = new_capital_control_line(cd.get("new_capital_control"),
+                                         cd.get("held_pending_stock_decision_gbp"))
+    if _ncc_line:
+        out["new_capital_control_line"] = _ncc_line
+        warns.append(_ncc_line)
 
     # ── 2. executability — a cap that cannot open a position is GBP 0 of executable capital ──
     ex = cd.get("executability") or {}
@@ -2050,6 +2106,8 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
 # email from analytics/scored rather than from the run context, and that is still rendered.
 SUMMARY_RENDERED = {
     "capital_destination":        "build_capital_router_block",   # s2 — ISA-0447
+    # ISA-0804 (03-Oct-2026): the ONE Capital Decision Receipt line, re-verified at email build.
+    "capital_decision_engine":    "decision_engine_line",         # s2 — router section
     "waiting_room":               "build_capital_router_block",   # s2 — ISA-0447
     "v21":                        "build_v21_block",              # s7 — ISA-0439
     "plan_stability":             "build_v21_block",              # s7 — routed into summary.v21
@@ -2946,6 +3004,35 @@ def build_held_underwriting_block(hu: dict, lineage: dict = None) -> dict:
 
 def _selftest():
     """ISA-0722 — the held-underwriting renderer renders states, never fabricates a figure."""
+    # ISA-0807 - a blocking new-capital control renders FIRST as a refusal; an OPEN one is silent
+    _blk_cd = {"state": "OK", "split_state": "STOCK_SLEEVE_REFUSED", "held_pending_stock_decision_gbp": 17720.94,
+               "new_capital_control": {"state": "BLOCK_NEW_STOCK_CAPITAL", "blocks_new_stock_capital": True,
+                                       "record_id": "NCC-T", "failed_contracts": ["ISA-0804"]}}
+    _bb = build_capital_router_block(_blk_cd)
+    assert "NEW STOCK CAPITAL BLOCKED" in (_bb.get("new_capital_control_line") or ""), \
+        "⚑ MUST-FIRE ISA-0807: a BLOCK control must render its refusal line"
+    assert "GBP 17,720.94" in _bb["new_capital_control_line"], "ISA-0807: the held capital is stated"
+    _ob = build_capital_router_block(dict(_blk_cd, new_capital_control={"state": "OPEN", "blocks_new_stock_capital": False}))
+    assert not _ob.get("new_capital_control_line"), \
+        "NEGATIVE CONTROL ISA-0807: an OPEN control must not render a refusal"
+    assert new_capital_control_line({"state": "UNKNOWN"}) is not None, \
+        "MUST-FIRE ISA-0807: an UNKNOWN control (no explicit False) renders as blocking, never silence"
+    # ISA-0804 - the engine receipt line: SHADOW says it moves no capital; absence is stated
+    _el = decision_engine_line({"receipt_id": "CDR-T", "state": "RESEARCH_PENDING", "engine_authority": "SHADOW",
+                                "selected_actions": [{"ticker": "MTDR", "gbp": 5613.69}],
+                                "case_scope_outstanding": ["DY"]}, "VALID")
+    assert "moves NO capital" in _el and "MTDR GBP 5,613.69" in _el and "DY" in _el, \
+        "ISA-0804: SHADOW receipt line states selection, outstanding cases and that it moves no capital %r" % _el
+    assert "NO RECEIPT" in decision_engine_line(None), "MUST-FIRE ISA-0804: an absent receipt renders as absent, never silence"
+    assert "FAILED" in decision_engine_line({"state": "FAILED", "why": "x"}), "MUST-FIRE ISA-0804: a failed engine renders FAILED"
+    # ISA-0811 - the receipt allocation and the SHADOW legacy plan are both stated
+    _eb = build_capital_router_block({"state": "OK", "split_state": "STOCK_SLEEVE_ENGINE_ALLOCATED", "engine_allocated_gbp": 16841.07,
+                                      "decision_receipt": {"receipt_id": "CDR-T", "state": "DECISION_COMPLETE", "verification": "VALID"},
+                                      "legacy_greedy_shadow": {"allocated_gbp": 16841.07, "rows": [{"ticker": "FN", "gbp": 5613.69}]}})
+    assert "CDR-T" in (_eb.get("engine_authority_line") or "") and "SHADOW" in _eb["engine_authority_line"], \
+        "MUST-FIRE ISA-0811: the engine allocation line names the receipt and the SHADOW legacy plan"
+    assert not build_capital_router_block({"state": "OK", "split_state": "STOCK_SLEEVE_DEMAND_PULL"}).get("engine_authority_line"), \
+        "NEGATIVE CONTROL ISA-0811: no receipt -> no engine line invented"
     # ISA-0795 - the subject names the review month, not the data month
     assert email_subject(date(2026, 10, 3)) == "Monthly ISA Portfolio Review - Oct 2026", \
         "⚑ MUST-FIRE ISA-0795: pre-run Sat 03-Oct-2026 -> 'Monthly ISA Portfolio Review - Oct 2026'"

@@ -131,7 +131,8 @@ def _split(uses, amount=20799.54, order=None, store=None, sequence=None, members
         "basis": "fixture_order"}
     with _TempFillStore(store):
         out = _cd.sleeve_split(amount, portfolio, policy, 11250.0, candidates=uses,
-                               sequence=seq, membership=membership, underwriting=underwriting)
+                               sequence=seq, membership=membership, underwriting=underwriting,
+                               new_capital_control=_cd.NCC_OPEN_FIXTURE)   # ISA-0807: sizing under an OPEN control
     al = out.get("allocation") or {}
     rows = {r["ticker"]: r for r in (al.get("rows") or [])}
     return out, al, rows
@@ -435,9 +436,11 @@ def check_stock_sleeve_weight_now_pct():
     heavy["summary"]["stock_sleeve_value_gbp"] = float(heavy["summary"]["stock_sleeve_value_gbp"]) * 1.5
     with _TempFillStore():
         a = _cd.sleeve_split(20799.54, portfolio, policy, 11250.0, candidates=[_use("FA")],
-                             sequence={"order": ["FA"], "basis": "fixture_order"})
+                             sequence={"order": ["FA"], "basis": "fixture_order"},
+                             new_capital_control=_cd.NCC_OPEN_FIXTURE)   # ISA-0807
         b = _cd.sleeve_split(20799.54, heavy, policy, 11250.0, candidates=[_use("FA")],
-                             sequence={"order": ["FA"], "basis": "fixture_order"})
+                             sequence={"order": ["FA"], "basis": "fixture_order"},
+                             new_capital_control=_cd.NCC_OPEN_FIXTURE)   # ISA-0807
     summ = _cd.summary_for_run_context({"state": "OK", "sleeve_split": a})
     actual = {"weight_differs": a["stock_sleeve_weight_now_pct"] != b["stock_sleeve_weight_now_pct"],
               "stock_max_identical": a["stock_max_gbp"] == b["stock_max_gbp"],
@@ -1005,7 +1008,8 @@ def _selftest(verbose: bool = True) -> int:
     import capital_destination as _cd705
     with _TempFillStore(None):
         _o705 = _cd705.sleeve_split(20799.54, _pf705, _pol705, 11250.0,
-                                    candidates=[_d705, _c705], sequence=_seq705)
+                                    candidates=[_d705, _c705], sequence=_seq705,
+                                    new_capital_control=_cd705.NCC_OPEN_FIXTURE)   # ISA-0807
     _r705 = {r["ticker"]: r for r in ((_o705.get("allocation") or {}).get("rows") or [])}
     assert (_r705.get("C") or {}).get("state") == "REPLACEMENT_FILL" \
         and (_r705["C"]["allocated_gbp"] == 3000.0) \

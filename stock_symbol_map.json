@@ -1,7 +1,7 @@
 {
  "_what": "P1.2c VERIFIED ticker->Yahoo symbol map. An entry exists ONLY where (a) an index screen, the broker, a VCI artefact, the VCI watchlist or the declared benchmark list named the ticker, AND (b) the live listing's EXCHANGE is one its declared venue permits. \u2691 A symbol match is NOT a check: a bare `ONT` returns meta.symbol 'ONT' for Onterris, Inc. The EXCHANGE is the falsifier. \u2691 REFRESHED BY THE RUN THAT CONSUMES IT (Step 5x, ISA-0577) \u2014 this file was a hand-run artefact frozen at 2026-08-28 while the universe grew every month, and 119 of 178 names (66.9%) were unmapped, unfetched and sized on A2.3's adverse 0.70. \u2691 APPEND-ONLY: an existing entry is never re-decided (R4.8). \u2691 GENERATED \u2014 never hand-edited (R14.3).",
  "built_on": "2026-08-28",
- "n_map": 178,
+ "n_map": 213,
  "n_refused": 1,
  "map": {
   "AVGO": "AVGO",
@@ -181,9 +181,63 @@
   "XPO": "XPO",
   "XYZ": "XYZ",
   "ZAB.WA": "ZAB.WA",
-  "IONQ": "IONQ"
+  "IONQ": "IONQ",
+  "A": "A",
+  "ABI.BR": "ABI.BR",
+  "ANA.MC": "ANA.MC",
+  "ANF": "ANF",
+  "BR": "BR",
+  "CMG": "CMG",
+  "COHR": "COHR",
+  "CRS": "CRS",
+  "CSCO": "CSCO",
+  "DELL": "DELL",
+  "DG": "DG",
+  "DSFIR.SW": "DSFIR.SW",
+  "DY": "DY",
+  "EXEL": "EXEL",
+  "FANG": "FANG",
+  "FIGR": "FIGR",
+  "FN": "FN",
+  "GETI-B.ST": "GETI-B.ST",
+  "GLBE": "GLBE",
+  "INCH.L": "INCH.L",
+  "ISS.CO": "ISS.CO",
+  "KNOS.L": "KNOS.L",
+  "LPP.WA": "LPP.WA",
+  "MTDR": "MTDR",
+  "NDSN": "NDSN",
+  "P": "P",
+  "PWR": "PWR",
+  "ROST": "ROST",
+  "SPI.L": "SPI.L",
+  "SWON.SW": "SWON.SW",
+  "TCAP.L": "TCAP.L",
+  "TJX": "TJX",
+  "VEON": "VEON",
+  "VIAV": "VIAV",
+  "WDAY": "WDAY"
  },
  "verified": [
+  {
+   "ticker": "A",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "AGILENT TECHNOLOGIES INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
   {
    "ticker": "AAON",
    "currency": "USD",
@@ -232,6 +286,18 @@
    "source": "constituents_history",
    "company": "AbCellera Biologics Inc. Common Shares",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "ABI.BR",
+   "currency": "EUR",
+   "exchange": "BRU",
+   "expected_exchanges": [
+    "BRU"
+   ],
+   "source": "constituents_history",
+   "company": "ANHEUSER-BUSCH INBEV SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "ABNB",
@@ -347,6 +413,18 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "ANA.MC",
+   "currency": "EUR",
+   "exchange": "MCE",
+   "expected_exchanges": [
+    "MCE"
+   ],
+   "source": "constituents_history",
+   "company": "ACCIONA SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "ANET",
    "currency": "USD",
    "exchange": "NYQ",
@@ -364,6 +442,25 @@
    "company": "ARISTA NETWORKS INC",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ANF",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Abercrombie & Fitch Co. Class A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "APH",
@@ -627,6 +724,25 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "BR",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "BROADRIDGE FINANCIAL SOLUTIO",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "CAKE",
    "currency": "USD",
    "exchange": "NMS",
@@ -769,6 +885,25 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "CMG",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "CHIPOTLE MEXICAN GRILL INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "COCO",
    "currency": "USD",
    "exchange": "NMS",
@@ -785,6 +920,25 @@
    "source": "constituents_history",
    "company": "The Vita Coco Company Inc. Common Stock",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "COHR",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "COHERENT CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "CORT",
@@ -824,6 +978,25 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "CRS",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Carpenter Technology Corporation",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "CRSP",
    "currency": "USD",
    "exchange": "NGM",
@@ -840,6 +1013,25 @@
    "source": "constituents_history",
    "company": "CRISPR Therapeutics AG Common Shares",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "CSCO",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Cisco Systems Inc. Common Stock (DE)",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "CTSH",
@@ -877,6 +1069,44 @@
    "source": "constituents_history",
    "company": "DELTA AIR LINES INC",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "DELL",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "DELL TECHNOLOGIES  C",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
+   "ticker": "DG",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "DOLLAR GENERAL CORP",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "DGII",
@@ -929,6 +1159,19 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "DSFIR.SW",
+   "currency": "CHF",
+   "exchange": "EBS",
+   "expected_exchanges": [
+    "EBS",
+    "VTX"
+   ],
+   "source": "constituents_history",
+   "company": "DSM FIRMENICH AG",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "DXPE",
    "currency": "USD",
    "exchange": "NMS",
@@ -946,6 +1189,25 @@
    "company": "DXP Enterprises Inc. Common Stock",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "DY",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Dycom Industries Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "EDEN.PA",
@@ -1035,6 +1297,25 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "EXEL",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Exelixis Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "EXPE",
    "currency": "USD",
    "exchange": "NMS",
@@ -1052,6 +1333,25 @@
    "company": "Expedia Group Inc. Common Stock",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FANG",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Diamondback Energy Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "FDX",
@@ -1073,6 +1373,25 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "FIGR",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Figure Technology Solutions Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "FIX",
    "currency": "USD",
    "exchange": "NYQ",
@@ -1090,6 +1409,25 @@
    "company": "COMFORT SYSTEMS USA INC",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "FN",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Fabrinet",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "FORM",
@@ -1133,7 +1471,7 @@
    "source": "declared alias FRO.OL -> FRO.OL (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "FRO.OL",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-09-25"
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "FROG",
@@ -1256,6 +1594,18 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "GETI-B.ST",
+   "currency": "SEK",
+   "exchange": "STO",
+   "expected_exchanges": [
+    "STO"
+   ],
+   "source": "constituents_history",
+   "company": "GETINGE CLASS B",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "GFRD.L",
    "currency": "GBp",
    "exchange": "LSE",
@@ -1267,6 +1617,25 @@
    "company": "GALLIFORD TRY PLC",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "GLBE",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Global-E Online Ltd. Ordinary Shares",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "GLW",
@@ -1556,6 +1925,19 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "INCH.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "INCHCAPE PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "INDT.ST",
    "currency": "SEK",
    "exchange": "STO",
@@ -1603,6 +1985,18 @@
    "company": "IPSEN SA",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ISS.CO",
+   "currency": "DKK",
+   "exchange": "CPH",
+   "expected_exchanges": [
+    "CPH"
+   ],
+   "source": "constituents_history",
+   "company": "ISS",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "ITT",
@@ -1702,6 +2096,19 @@
    "source": "constituents_history",
    "company": "KELLER GROUP PLC",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "KNOS.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "KAINOS GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "KRX.IR",
@@ -1812,6 +2219,18 @@
    "company": "LOTUS BAKERIES NV",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "LPP.WA",
+   "currency": "PLN",
+   "exchange": "WSE",
+   "expected_exchanges": [
+    "WSE"
+   ],
+   "source": "constituents_history",
+   "company": "LPP SA",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "LR.PA",
@@ -2076,6 +2495,25 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "MTDR",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Matador Resources Company",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "MTSI",
    "currency": "USD",
    "exchange": "NMS",
@@ -2111,6 +2549,25 @@
    "source": "portfolio_data(broker truth)",
    "company": "Micron Technology Inc",
    "verified_by": "exchange_vs_declared_venue"
+  },
+  {
+   "ticker": "NDSN",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Nordson Corporation Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "NESR",
@@ -2286,6 +2743,25 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "P",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Everpure Inc. Class A",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "PGNY",
    "currency": "USD",
    "exchange": "NMS",
@@ -2361,6 +2837,25 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "PWR",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "QUANTA SERVICES INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "QBTS",
    "currency": "USD",
    "exchange": "NMS",
@@ -2377,7 +2872,7 @@
    "source": "declared alias QBTS -> QBTS (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "QBTS",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-09-25"
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "RACE.MI",
@@ -2457,6 +2952,25 @@
    "company": "Roku Inc. Class A Common Stock",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "ROST",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Ross Stores Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "RPM",
@@ -2691,6 +3205,19 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "SPI.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "SPIRE HEALTHCARE GROUP PLCINARY",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "SPM.MI",
    "currency": "EUR",
    "exchange": "MIL",
@@ -2795,6 +3322,32 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "SWON.SW",
+   "currency": "CHF",
+   "exchange": "EBS",
+   "expected_exchanges": [
+    "EBS",
+    "VTX"
+   ],
+   "source": "constituents_history",
+   "company": "SOFTWAREONE HOLDING AG",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
+   "ticker": "TCAP.L",
+   "currency": "GBp",
+   "exchange": "LSE",
+   "expected_exchanges": [
+    "IOB",
+    "LSE"
+   ],
+   "source": "constituents_history",
+   "company": "TP ICAP GROUP PLC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "TER",
    "currency": "USD",
    "exchange": "NMS",
@@ -2842,6 +3395,25 @@
    "company": "Tenet Healthcare Corporation",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "TJX",
+   "currency": "USD",
+   "exchange": "NYQ",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "TJX COMPANIES INC",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "TRU",
@@ -2968,6 +3540,44 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "VEON",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "VEON Ltd. ADS",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
+   "ticker": "VIAV",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Viavi Solutions Inc",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
+  },
+  {
    "ticker": "VICR",
    "currency": "USD",
    "exchange": "NMS",
@@ -3065,6 +3675,25 @@
    "company": "WABTEC CORP",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "WDAY",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "ASE",
+    "BTS",
+    "NCM",
+    "NGM",
+    "NMS",
+    "NYQ",
+    "NYS",
+    "PCX"
+   ],
+   "source": "constituents_history",
+   "company": "Workday Inc. Class A Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "admitted_on": "2026-10-03"
   },
   {
    "ticker": "WDC",
@@ -3184,13 +3813,13 @@
    "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
   }
  ],
- "refreshed_on": "2026-09-25",
+ "refreshed_on": "2026-10-03",
  "alias_verification": [
   {
    "alias": "ABCL",
    "symbol": "ABCL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3209,7 +3838,7 @@
    "alias": "AVGO",
    "symbol": "AVGO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3228,7 +3857,7 @@
    "alias": "COCO",
    "symbol": "COCO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3247,7 +3876,7 @@
    "alias": "FRO",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "identity": {
     "listing": "FRO.OL",
     "venue": "OSL",
@@ -3275,7 +3904,7 @@
    "alias": "FRO.OL",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "OSL"
    ],
@@ -3287,7 +3916,7 @@
    "alias": "IWMO.L",
    "symbol": "IWMO.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3300,7 +3929,7 @@
    "alias": "MU",
    "symbol": "MU",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3319,7 +3948,7 @@
    "alias": "ONT",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3332,7 +3961,7 @@
    "alias": "ONT.L",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3345,7 +3974,7 @@
    "alias": "QBTS",
    "symbol": "QBTS",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3364,7 +3993,7 @@
    "alias": "SWDA.L",
    "symbol": "SWDA.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3377,7 +4006,7 @@
    "alias": "VUAG.L",
    "symbol": "VUAG.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3390,7 +4019,7 @@
    "alias": "VWRL.L",
    "symbol": "VWRL.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-09-25",
+   "verified_on": "2026-10-03",
    "expected_exchanges": [
     "IOB",
     "LSE"

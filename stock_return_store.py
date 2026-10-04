@@ -290,6 +290,14 @@ def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
     _rec_on = recorded_on or datetime.date.today()
     rec = doc["names"].setdefault(ticker, {"currency": cur, "total_return_basis": bool(total_return),
                                            "observations": {}})
+    # ⚑ ISA-0809 (03-Oct-2026): a STUB record (no observations, no currency - created when the
+    #   fetcher stamped `last_fetched_on` before converting) adopts the currency of its first
+    #   observation. It is not a currency CHANGE: there is no series to mix. Before this, every
+    #   new universe name raised here on every observation and stayed empty (35 names on 03-Oct).
+    if rec.get("currency") is None and not rec.get("observations"):
+        rec["currency"] = cur
+        rec.setdefault("total_return_basis", bool(total_return))
+        rec["observations"] = {}
     if rec.get("currency") != cur:
         raise ValueError(f"{ticker}: currency changed {rec.get('currency')} -> {cur}. Declare a "
                          f"new ticker rather than mixing two currencies in one series.")
@@ -469,6 +477,17 @@ def _selftest():
                      "selftest", fx_to_gbp=0.78)
     r, m = weekly_returns(d, "AAA")
     assert len(r) == 59 and m["gaps_skipped"] == 0, (len(r), m)
+    # ISA-0809 — a stub (attempt-stamped, no currency, no observations) adopts its first currency
+    d["names"]["STUB"] = {"last_fetched_on": "2026-10-03"}
+    record_level(d, "STUB", base.isoformat(), 100.0, "USD", "selftest", fx_to_gbp=0.78)
+    assert d["names"]["STUB"]["currency"] == "USD" and len(d["names"]["STUB"]["observations"]) == 1, \
+        "MUST-FIRE ISA-0809: a stub record must accept its first observation"
+    try:
+        record_level(d, "AAA", (base + datetime.timedelta(weeks=70)).isoformat(), 100.0, "EUR",
+                     "selftest", fx_to_gbp=0.85)
+        raise AssertionError("NEGATIVE CONTROL ISA-0809: a REAL currency change must still raise")
+    except ValueError:
+        pass
     assert all(abs(v - 0.01) < 1e-9 for v in r.values()), "constant 1% weekly"
     cov = coverage(d, ["AAA"])
     assert cov["names"]["AAA"]["status"] == "MEASURED_SHORT", cov

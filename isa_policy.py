@@ -138,6 +138,13 @@ V2_FLAGS: Dict[str, bool] = {
     # ISA-0465 (Raj 16-Sep-2026): "OFF" | "SHADOW" | "LIVE" — concentration_control. CANDIDATE ONLY:
     # SHADOW until Raj reviews the shadow impact; LIVE requires a certified promotion.
     "concentration_gate":         "SHADOW",
+    # ISA-0804/0811/0812 (03-Oct-2026): "OFF" | "SHADOW" | "LIVE". LIVE since TB-2026-10-03-03 by Raj risk acceptance (ISA-0812).
+    # SHADOW: capital_decision_engine forms the Capital Decision Receipt every pre-run (Step 6.10e),
+    # it is verified, rendered and ledgered, and NOTHING consumes it for capital - capital_destination
+    # keeps the governed path (today: ISA-0807 BLOCK). LIVE (certified promotion only): the receipt is
+    # the ONE stock-capital authority; no receipt / not VALID / not DECISION_COMPLETE -> REFUSAL,
+    # never the greedy fallback (spec s12). OFF: the engine is not invoked (UNKNOWN, never PASS).
+    "capital_engine_authority":   "LIVE",
     # ⚑ ISA-0490 (29-Aug-2026). The three flags above were ON and the three modules they
     # govern were GREEN, and `build()` still called none of them: it passed candidates=None
     # to sleeve_split, which read it as [] and routed every pound to funds. A flag that is ON
