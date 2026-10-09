@@ -114,11 +114,11 @@ def _stack_hash(rows):
 
 
 def _find(here, *names):
+    import month_artefacts as _MA                      # ISA-0832: the one home (was a local copy)
     for n in names:
-        for p in (os.path.join(here, n),
-                  os.path.join(here, "archive", "decision_capture", n)):
-            if os.path.exists(p):
-                return p
+        p = _MA.resolve(here, n)
+        if os.path.exists(p):
+            return p
     return None
 
 
@@ -704,6 +704,22 @@ def _selftest():
     ok("U-SL18 drawdown computed from the price path",
        _max_drawdown([100, 120, 60, 90]) == -0.5, str(_max_drawdown([100, 120, 60, 90])))
     ok("U-SL18b flat path has no drawdown", _max_drawdown([100, 100, 100]) == 0.0)
+
+    # ISA-0832: the frozen month's action stack is found in the archive after the post-review purge
+    import shutil as _sh, month_artefacts as _MA
+    _d = tempfile.mkdtemp(prefix="sl_0832_")
+    try:
+        os.makedirs(_MA.archive_dir(_d))
+        open(os.path.join(_MA.archive_dir(_d), "action_stack_zzz_2099.json"), "w").write("{}")
+        ok("ISA-0832 MUST-FIRE: _find resolves an archived month artefact",
+           _MA.is_archived(_find(_d, "action_stack_zzz_2099.json") or ""))
+        open(os.path.join(_d, "action_stack_zzz_2099.json"), "w").write("{}")
+        ok("ISA-0832 NEGATIVE CONTROL: a LIVE copy shadows the archived one",
+           _find(_d, "action_stack_zzz_2099.json") == os.path.join(_d, "action_stack_zzz_2099.json"))
+        ok("ISA-0832 NEGATIVE CONTROL: a month in neither place is None, never a guess",
+           _find(_d, "action_stack_yyy_2098.json") is None)
+    finally:
+        _sh.rmtree(_d, ignore_errors=True)
 
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)}) {fails}")
     return 0 if not fails else 1

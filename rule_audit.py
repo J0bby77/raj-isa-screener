@@ -44,6 +44,10 @@ CHECK_SURFACES = (
     "consistency_check.py", "framework_integrity.py", "isa_register.py",
     "isa_register_render.py", "isa_register_export.py", "framework_atlas.py",
     "register_callsites.py", "isa_register_metrics.py",
+    # ISA-0826 (04-Oct-2026): the modules that REFUSE at the release gate and the capital boundary are check
+    # surfaces too - release_gate's gates, the run-time contracts, the analysis/parameter/acceptance checks.
+    "release_gate.py", "run_contracts.py", "discussion_preflight.py", "isa_rationale_ledger.py",
+    "system_acceptance.py", "new_capital_control.py", "prerun_runner.py", "analysis_acceptance.py",
 )
 # ⚑⚑ AN OBSERVER MAY NOT MEASURE ITSELF (ISA-0382, and ISA-0526 one level down). `rule_audit.py`
 #    is NOT in the corpus above. With it included, this module's own negative-control labels —
@@ -359,6 +363,132 @@ def _named_by_enforcement(text: str, rid: str) -> bool:
     return any(pat.search(lit) for lit in _enforcement_strings(text))
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0826 (§17 ENFORCED, 04-Oct-2026) — A NEWLY CLAIMED ASSERTED RULE MUST PROVE THREE THINGS.
+#   §17 already said a rule moves left "only after a negative control proves the check can fail", but the
+#   traceability test above accepts any failing string that NAMES the rule. For every rule claimed ASSERTED
+#   that is NOT in the 04-Oct grandfathered set, ASSERTED_EVIDENCE must name, and this audit verifies by AST:
+#     check        a function that exists on disk;
+#     consumed_by  a function that CALLS the check (the real gate, or the step that feeds it);
+#     gate         a real gate entry point that calls consumed_by (or IS it) - release_gate.certify,
+#                  release_gate.capital_run_authority, isa_register.write, new_capital_control.status,
+#                  prerun_runner.stage_commit or monthly_isa_prerun.main;
+#     negative_fixture  a marker string that appears in `fixture_in` (a selftest/test file) - the case where
+#                  the obligation is broken and the check FAILS.
+#   A gap is reported in audit()["traceable"]["asserted_without_evidence"] and release_gate's
+#   `no_false_asserted` gate refuses on it. The 31 rules ASSERTED on 04-Oct-2026 keep the earlier test
+#   (R7.5: history is not re-litigated); an AMENDED rule loses its grandfathering (R12.3 is listed).
+# ════════════════════════════════════════════════════════════════════════════════════════
+GRANDFATHERED_ASSERTED = frozenset(
+    ["R4.%d" % i for i in range(1, 14)] +
+    ["R5.1", "R5.2", "R5.4", "R5.5", "R5.6", "R5.7", "R5.8", "R6.1", "R6.4", "R7.1", "R7.3", "R7.5",
+     "R7.6", "R13.1", "R14.3", "R15.2", "R15.3"])   # R12.3 deliberately absent: amended 04-Oct-2026 (ISA-0827)
+GATE_ENTRY_POINTS = ("release_gate.certify", "release_gate.capital_run_authority", "isa_register.write",
+                     "new_capital_control.status", "prerun_runner.stage_commit", "monthly_isa_prerun.main")
+ASSERTED_EVIDENCE = {
+    "R13.7": {"check": "analysis_acceptance.analysis_currency", "consumed_by": "release_gate.gate_analysis_binding",
+              "gate": "release_gate.certify", "negative_fixture": "case 1 MUST-FIRE: no North-Star link",
+              "fixture_in": "tests_jul2026/test_enforcement_hardening.py"},
+    "R19.3": {"check": "release_gate.gate_analysis_binding", "consumed_by": "release_gate.certify",
+              "gate": "release_gate.certify", "negative_fixture": "handoff case 7): a BuildSpec bound to a STALE analysis",
+              "fixture_in": "release_gate.py"},
+    "R7.8": {"check": "isa_register.analysis_gate_errors", "consumed_by": "isa_register.write",
+             "gate": "isa_register.write", "negative_fixture": "BUILD_READY bound to a STALE analysis is refused",
+             "fixture_in": "isa_register.py"},
+    "R12.3": {"check": "isa_rationale_ledger.form_contract_errors", "consumed_by": "release_gate.gate_parameter_contract",
+              "gate": "release_gate.certify", "negative_fixture": "a DECLARED change whose form is still REVIEW_PENDING",
+              "fixture_in": "release_gate.py"},
+    "R4.15": {"check": "release_gate.run_surface_dispositions", "consumed_by": "release_gate.certify",
+              "gate": "release_gate.certify", "negative_fixture": "VERIFIED_NO_CHANGE on a MIRROR-only executed surface",
+              "fixture_in": "release_gate.py"},
+    "R4.17": {"check": "run_contracts.classify_writes", "consumed_by": "prerun_runner.stage_commit",
+              "gate": "prerun_runner.stage_commit", "negative_fixture": "a run that rewrote SIGNED_IMMUTABLE_CONFIG is REFUSED",
+              "fixture_in": "prerun_runner.py"},
+    "R4.18": {"check": "run_contracts.failure_scope_gaps", "consumed_by": "release_gate.gate_failure_scope",
+              "gate": "release_gate.certify", "negative_fixture": "an emitted failure with no declared scope",
+              "fixture_in": "run_contracts.py"},
+    "R6.6": {"check": "run_contracts.input_identity_gaps", "consumed_by": "release_gate.gate_input_identity",
+             "gate": "release_gate.certify", "negative_fixture": "case 13 MUST-FIRE",
+             "fixture_in": "tests_jul2026/test_enforcement_hardening.py"},
+    "R5.14": {"check": "run_contracts.temporal_gaps", "consumed_by": "release_gate.gate_temporal_matrix",
+              "gate": "release_gate.certify", "negative_fixture": "a changed date-dependent module with no matrix fails",
+              "fixture_in": "run_contracts.py"},
+    "R18.6": {"check": "system_acceptance.acceptance_currency", "consumed_by": "new_capital_control.status",
+              "gate": "new_capital_control.status", "negative_fixture": "an OPEN record citing a STALE acceptance BLOCKS",
+              "fixture_in": "new_capital_control.py"},
+}
+
+
+def _fn_calls(module_path: str, fn: str) -> set:
+    """Names called (bare or attribute) inside function `fn` of a module - AST, never file text."""
+    import ast
+    try:
+        tree = ast.parse(open(module_path, encoding="utf-8").read())
+    except Exception:                                                   # noqa: BLE001
+        return set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn:
+            out = set()
+            for c in ast.walk(n):
+                if isinstance(c, ast.Call):
+                    f = c.func
+                    out.add(f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None)
+            out.discard(None)
+            return out
+    return set()
+
+
+def _defined(qname: str, root: str = HERE) -> bool:
+    import ast
+    mod, _, fn = qname.partition(".")
+    p = os.path.join(root, mod + ".py")
+    if not fn or not os.path.exists(p):
+        return False
+    try:
+        tree = ast.parse(open(p, encoding="utf-8").read())
+    except Exception:                                                   # noqa: BLE001
+        return False
+    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn for n in tree.body)
+
+
+def asserted_evidence_gaps(cls: dict | None = None, evidence: dict | None = None, root: str = HERE) -> list:
+    """Every claimed-ASSERTED rule outside the grandfathered set needs a verified evidence chain."""
+    cls = cls if cls is not None else classification()
+    evidence = ASSERTED_EVIDENCE if evidence is None else evidence
+    gaps = []
+    for rid in cls["ASSERTED"]:
+        if rid in GRANDFATHERED_ASSERTED:
+            continue
+        ev = evidence.get(rid)
+        if not ev:
+            gaps.append("§17: %s is claimed ASSERTED after 04-Oct-2026 with NO evidence entry (check, consumer, gate, "
+                        "negative fixture) - a JUDGEMENT rule wearing an ASSERTED label" % rid)
+            continue
+        for k in ("check", "consumed_by", "gate", "negative_fixture", "fixture_in"):
+            if not ev.get(k):
+                gaps.append("§17: %s evidence lacks `%s`" % (rid, k))
+        if any(not ev.get(k) for k in ("check", "consumed_by", "gate", "negative_fixture", "fixture_in")):
+            continue
+        if not _defined(ev["check"], root):
+            gaps.append("§17: %s check %s is not defined on disk" % (rid, ev["check"]))
+        if ev["gate"] not in GATE_ENTRY_POINTS:
+            gaps.append("§17: %s gate %s is not a real gate entry point %s" % (rid, ev["gate"], GATE_ENTRY_POINTS))
+        cm, _, cf = ev["consumed_by"].partition(".")
+        if ev["check"].split(".", 1)[1] not in _fn_calls(os.path.join(root, cm + ".py"), cf):
+            gaps.append("§17: %s consumer %s never calls the check %s (AST) - a check nobody consumes cannot refuse"
+                        % (rid, ev["consumed_by"], ev["check"]))
+        if ev["consumed_by"] != ev["gate"]:
+            gm, _, gf = ev["gate"].partition(".")
+            if cf not in _fn_calls(os.path.join(root, gm + ".py"), gf):
+                gaps.append("§17: %s gate %s never calls %s (AST)" % (rid, ev["gate"], ev["consumed_by"]))
+        fx = os.path.join(root, ev["fixture_in"])
+        txt = open(fx, encoding="utf-8").read() if os.path.exists(fx) else ""
+        if ev["negative_fixture"] not in txt:
+            gaps.append("§17: %s negative fixture %r is absent from %s - no case proves the check can FAIL"
+                        % (rid, ev["negative_fixture"][:60], ev["fixture_in"]))
+    return gaps
+
+
 def traceability(cls: dict | None = None, corpus: dict | None = None) -> dict:
     """For every rule claimed ASSERTED, which check surfaces ENFORCE it (and, separately,
     which merely mention it). Returns {rid: {"enforced_in": [...], "mentioned_in": [...]}}."""
@@ -421,6 +551,7 @@ def audit(standard_text: str | None = None, corpus: dict | None = None) -> dict:
                                if cls["ASSERTED"] else None),
             "pct_of_all_rules": (round(100.0 * len(strict) / total, 1) if total else None),
             "asserted_untraceable": untraceable,
+            "asserted_without_evidence": asserted_evidence_gaps(cls),
             "enforced_by": {r: trace[r]["fails_on_break_in"] for r in cls["ASSERTED"]},
             "mentioned_only": prose_only,
             # ⚑ BOTH MEASUREMENTS ARE PUBLISHED, NEVER BLENDED (R6.2). The delta is the finding.
@@ -453,6 +584,8 @@ def audit(standard_text: str | None = None, corpus: dict | None = None) -> dict:
                ("" if not prose_only else
                 " %d of them are MENTIONED in prose without being enforced (%s)."
                 % (len(prose_only), ", ".join(sorted(prose_only)))))),
+           ((" ⚑ %d newly claimed ASSERTED rule(s) lack the check/consumer/gate/negative-fixture evidence (ISA-0826)."
+             % len(doc["traceable"]["asserted_without_evidence"])) if doc["traceable"]["asserted_without_evidence"] else "") +
            ("§17 classifies every rule the body defines."
             if not unclass else
             "⚑ §17 does NOT classify %d rule(s) the body defines: %s. R15.4 item 3 says that "
@@ -653,6 +786,22 @@ def _selftest() -> int:
        all(set(v) == {"fails_on_break_in", "enforced_in", "mentioned_in"}
            for v in _both.values()))
 
+    # ── ISA-0826: a newly claimed ASSERTED rule needs check + consumer + gate + negative fixture ─────
+    _c = {"ASSERTED": ["R4.1", "R99.1"], "PARTIAL": [], "JUDGEMENT": []}
+    _g = asserted_evidence_gaps(_c, {})
+    ok("ISA-0826 MUST-FIRE (handoff case 19): a rule claimed ASSERTED with NO evidence entry is caught",
+       any("R99.1" in x and "NO evidence entry" in x for x in _g) and not any("R4.1" in x for x in _g), _g)
+    _g = asserted_evidence_gaps(_c, {"R99.1": {"check": "release_gate.verify_live", "consumed_by": "rule_audit.audit",
+                                               "gate": "release_gate.certify", "negative_fixture": "zz-not-anywhere-zz",
+                                               "fixture_in": "release_gate.py"}})
+    ok("ISA-0826 MUST-FIRE: a consumer that never calls the check, and an absent negative fixture, are both caught",
+       any("never calls the check" in x for x in _g) and any("negative fixture" in x for x in _g), _g)
+    _g = asserted_evidence_gaps(_c, {"R99.1": {"check": "release_gate.gate_failure_scope", "consumed_by": "release_gate.certify",
+                                               "gate": "release_gate.certify", "negative_fixture": "def certify(",
+                                               "fixture_in": "release_gate.py"}})
+    ok("ISA-0826 NEGATIVE CONTROL: a complete, AST-verified evidence chain passes", _g == [], _g)
+    ok("ISA-0826: the real §17 has no newly claimed ASSERTED rule without evidence",
+       asserted_evidence_gaps() == [], asserted_evidence_gaps())
     print("\nrule_audit._selftest: %d assertion(s) failed" % len(fails))
     return len(fails)
 

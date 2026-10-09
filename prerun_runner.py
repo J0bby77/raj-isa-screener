@@ -285,6 +285,7 @@ def stage_commit(live_inv: str, occurrence: str, ws_base: Optional[str] = None, 
                             "errored pass (T74)" % (run or {}).get("status"))
     man = json.load(open(os.path.join(ws, "sync_manifest.json"), encoding="utf-8"))
     ws_isa, live_isa = man["ws_isa"], man["live_isa"]
+    _t0_commit = time.time()                                            # ISA-0830 R5.12: commit duration is runtime evidence
     changed = _changed_files(ws)
     _ledger(live_inv, {"occurrence": occurrence, "stage": "commit", "status": "STARTED", "n_changed": len(changed)})
     conflicts = []
@@ -301,6 +302,24 @@ def stage_commit(live_inv: str, occurrence: str, ws_base: Optional[str] = None, 
                            "failure_scope": "BLOCK_RUN", "conflicts": conflicts[:50]})
         raise RunnerRefused("COMMIT_CONFLICT: LIVE changed after the sync for %s - re-sync and re-run (T75)"
                             % conflicts[:5])
+    # ⚑ ISA-0830 (R4.17, 04-Oct-2026): the run may write only what the signed artefact contract lets the
+    #   monthly pre-run write. A write to SIGNED (immutable) state, or a change to the DECLARED projection of
+    #   target_state.json, REFUSES the commit before LIVE is touched (ISA-0775 class: one certified pass made
+    #   LIVE UNTRUSTED). An artefact no entry declares is a DEGRADE_ONLY warning here (recorded) and a
+    #   certification RED at the release gate. An unreadable contract refuses (R4.3 - fail-closed).
+    try:
+        import run_contracts as _rc830
+        aw = _rc830.classify_writes(changed, "monthly_prerun", root=live_inv, before_dir=live_isa, after_dir=ws_isa)
+        blocking = _rc830.blocking_write_violations(aw)
+    except Exception as exc:                                            # noqa: BLE001
+        aw = {"state": "UNKNOWN", "violations": [{"kind": "CONTRACT_UNREADABLE", "why": "%s: %s" % (type(exc).__name__, exc)}],
+              "undeclared": []}
+        blocking = aw["violations"]
+    if blocking:
+        _ledger(live_inv, {"occurrence": occurrence, "stage": "commit", "status": "REFUSED_ARTEFACT_CONTRACT",
+                           "failure_scope": "BLOCK_RUN", "violations": blocking[:20]})
+        raise RunnerRefused("ARTEFACT_CONTRACT: the run wrote signed/immutable state %s - nothing committed (R4.17)"
+                            % [v.get("path") for v in blocking][:5])
     bdir = os.path.join(live_inv, "_bak_prerun_commit", occurrence + "_" + datetime.datetime.utcnow().strftime("%H%M%S"))
     done = []
     try:
@@ -336,7 +355,10 @@ def stage_commit(live_inv: str, occurrence: str, ws_base: Optional[str] = None, 
                            "failure_scope": "BLOCK_RUN", "why": str(exc)[:800], "n_reverted": len(done)})
         raise
     row = {"occurrence": occurrence, "stage": "commit", "status": "COMPLETE", "n_committed": len(done),
-           "backup_dir": bdir, "verification": ver}
+           "secs": round(time.time() - _t0_commit, 1),
+           "backup_dir": bdir, "verification": ver,
+           "artefact_contract": {"state": aw.get("state"), "undeclared": (aw.get("undeclared") or [])[:30],
+                                 "failure_scope": "DEGRADE_ONLY" if aw.get("undeclared") else None}}
     _ledger(live_inv, row)
     release_lock(live_inv, occurrence)
     return row
@@ -382,6 +404,11 @@ def _selftest() -> int:
     os.makedirs(os.path.join(live_inv, "Dashboard", "state"))
     open(os.path.join(live_inv, "a.json"), "w").write('{"x": 1}')
     open(os.path.join(live_inv, "keep.json"), "w").write('{"k": 1}')
+    open(os.path.join(live_inv, "signed_cfg.json"), "w").write('{"s": 1}')
+    json.dump({"artefacts": [{"path": "Investment Analysis/a.json", "class": "MUTABLE_RUNTIME_STATE", "writers": ["monthly_prerun"]},
+                             {"path": "Investment Analysis/new_out.json", "class": "RUN_OUTPUT", "writers": ["monthly_prerun"]},
+                             {"path": "Investment Analysis/signed_cfg.json", "class": "SIGNED_IMMUTABLE_CONFIG", "writers": ["release_promotion"]}]},
+              open(os.path.join(live_inv, "Dashboard", "state", "artefact_contracts.json"), "w"))
     fake = os.path.join(base, "fake_prerun.py")
     open(fake, "w").write(
         "import sys,os,json\nws=os.getcwd()\n"
@@ -431,7 +458,23 @@ def _selftest() -> int:
         ok("MUST-FIRE: failed post-commit verification ROLLS BACK every committed file",
            open(os.path.join(live_inv, "a.json")).read() == '{"x": 1}'
            and not os.path.exists(os.path.join(live_inv, "new_out.json")))
+    # ── ISA-0830 (R4.17): a run that writes SIGNED state cannot commit ─────────────────────────
+    _ws_inv = os.path.join(workspace_for(occ, wsb), "ISA", "Investment Analysis")
+    open(os.path.join(_ws_inv, "signed_cfg.json"), "w").write('{"s": 2}')
+    try:
+        stage_commit(live_inv, occ, wsb, verify=good)
+        ok("ISA-0830 MUST-FIRE: a run that rewrote SIGNED_IMMUTABLE_CONFIG is REFUSED and LIVE is untouched", False)
+    except RunnerRefused as e:
+        ok("ISA-0830 MUST-FIRE: a run that rewrote SIGNED_IMMUTABLE_CONFIG is REFUSED and LIVE is untouched",
+           "ARTEFACT_CONTRACT" in str(e) and open(os.path.join(live_inv, "signed_cfg.json")).read() == '{"s": 1}'
+           and open(os.path.join(live_inv, "a.json")).read() == '{"x": 1}', str(e))
+    open(os.path.join(_ws_inv, "signed_cfg.json"), "w").write('{"s": 1}')
+    os.utime(os.path.join(_ws_inv, "signed_cfg.json"), ns=(os.stat(os.path.join(live_inv, "signed_cfg.json")).st_mtime_ns,) * 2)
+    open(os.path.join(_ws_inv, "undeclared_store.json"), "w").write('{}')
     c = stage_commit(live_inv, occ, wsb, verify=good)
+    ok("ISA-0830 NEGATIVE CONTROL: an UNDECLARED artefact does not block the commit; it is recorded DEGRADE_ONLY",
+       c["status"] == "COMPLETE" and "Investment Analysis/undeclared_store.json" in c["artefact_contract"]["undeclared"]
+       and c["artefact_contract"]["failure_scope"] == "DEGRADE_ONLY", c.get("artefact_contract"))
     a = json.load(open(os.path.join(live_inv, "a.json")))
     ok("NEGATIVE CONTROL: a verified commit copies changed + new outputs and rewrites the workspace path",
        c["status"] == "COMPLETE" and a["v"] == 2 and a["path"] == live_inv

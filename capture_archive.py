@@ -42,7 +42,8 @@ from __future__ import annotations
 import argparse, hashlib, json, os, shutil, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ARCHIVE_DIR = os.path.join(HERE, "archive", "decision_capture")
+from month_artefacts import ARCHIVE_REL as _ARCHIVE_REL   # ISA-0832: one home
+ARCHIVE_DIR = os.path.join(HERE, _ARCHIVE_REL)
 
 # Files that ARE the decision record. Never deleted. {template: required?}
 # required=True  -> absence is an ERROR (the run should have produced it)
@@ -103,7 +104,7 @@ def _sha256(path):
 
 def _paths(month, here=None, archive_dir=None):
     here = here or HERE
-    archive_dir = archive_dir or os.path.join(here, "archive", "decision_capture")
+    archive_dir = archive_dir or os.path.join(here, _ARCHIVE_REL)
     return here, archive_dir
 
 

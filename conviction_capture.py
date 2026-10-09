@@ -472,13 +472,13 @@ def prefill(month_label, here=None, step9_pre=None, action_stack=None, regime=No
     """
     here = here or HERE
     if step9_pre is None:
-        p = os.path.join(here, f"step9_pre_{month_label}.json")
-        if not os.path.exists(p):
-            p = os.path.join(here, "archive", "decision_capture", f"step9_pre_{month_label}.json")
+        import month_artefacts as _MA                  # ISA-0832: the one home (was a local copy)
+        p = _MA.resolve(here, f"step9_pre_{month_label}.json")
         with open(p, encoding="utf-8") as f:
             step9_pre = json.load(f)
     if action_stack is None:
-        p = os.path.join(here, f"action_stack_{month_label}.json")
+        import month_artefacts as _MA                  # ISA-0832
+        p = _MA.resolve(here, f"action_stack_{month_label}.json")
         if os.path.exists(p):
             with open(p, encoding="utf-8") as f:
                 action_stack = json.load(f)
@@ -1159,7 +1159,8 @@ def _atomic_write_json(path, doc):
 def _scope_from_run_context(here, month):
     """The PRE-judgement scope, from the run context — its one source (ISA-0447). A judgement
     pass keeps the pre-judgement summary, so read that first."""
-    p = os.path.join(here, "run_context_%s.json" % month)
+    import month_artefacts as _MA                      # ISA-0832
+    p = _MA.resolve(here, "run_context_%s.json" % month)
     if not os.path.exists(p):
         return None
     try:

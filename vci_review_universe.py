@@ -76,7 +76,8 @@ def latest_portfolio(root: str = None):
     """(path, doc) of the newest portfolio_data_[mmm_yyyy].json by its month label, or (None, None)."""
     root = root or HERE
     best = None
-    for p in glob.glob(os.path.join(root, "portfolio_data_*_*.json")):
+    import month_artefacts as _MA                      # ISA-0832
+    for p in _MA.month_glob(root, "portfolio_data_*_*.json"):
         m = re.search(r"portfolio_data_([a-z]{3})_(\d{4})\.json$", os.path.basename(p))
         if m and m.group(1) in _MONTHS:
             k = (int(m.group(2)), _MONTHS[m.group(1)])

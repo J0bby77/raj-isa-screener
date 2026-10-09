@@ -678,6 +678,56 @@ def summarise(receipt: dict) -> str:
     return "\n".join(lines)
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0829 (R13.7, 04-Oct-2026) — ANALYSIS ACCEPTANCE: the contract, receipts and currency live in
+# analysis_acceptance.py (light, stdlib-only at import, because the register writer reads them). The
+# WRITER is here because acceptance needs the Trusted baseline (R12.5: no acceptance against an
+# unverified LIVE). CLI: python3 discussion_preflight.py --analysis <analysis.json> [--write]
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+def accept_analysis(doc: dict, root: str = HERE, write: bool = False) -> dict:
+    """R13.7 - validate a material analysis and emit its ANALYSIS_ACCEPTANCE receipt (ACCEPTED or REFUSED).
+    A REFUSED receipt is still written when asked: the refusal is evidence (R2.10)."""
+    from analysis_acceptance import (analysis_contract_gaps, analysis_fingerprint, _anchor_digests,
+                                     ANALYSIS_RECEIPT_REL, ANALYSIS_ACCEPTED, ANALYSIS_REFUSED, analysis_receipt_dir)
+    gaps = analysis_contract_gaps(doc)
+    fp = analysis_fingerprint(doc if isinstance(doc, dict) else {"_raw": str(doc)})
+    try:
+        import release_gate as rg
+        v = rg.verify_live(root)
+    except Exception as exc:                                            # noqa: BLE001
+        v = {"state": UNKNOWN, "why": str(exc)}
+    if v.get("state") != "TRUSTED":
+        gaps = gaps + ["R12.5: LIVE is %s - an analysis cannot be accepted against an unverified baseline" % v.get("state")]
+    rv = (doc or {}).get("revalidation") if isinstance(doc, dict) else None
+    intersects = (rv or {}).get("intersects") if isinstance(rv, dict) else None
+    state = ANALYSIS_ACCEPTED if not gaps else ANALYSIS_REFUSED
+    aid = str((doc or {}).get("analysis_id") or "UNNAMED") if isinstance(doc, dict) else "UNNAMED"
+    rec = {
+        "receipt_kind": "ANALYSIS_ACCEPTANCE",
+        "id": "AA-%s-%s-%s" % (_today(), re.sub(r"[^A-Za-z0-9_.-]", "_", aid)[:40], fp[:8]),
+        "analysis_id": aid, "version": (doc or {}).get("version") if isinstance(doc, dict) else None,
+        "fingerprint": fp, "state": state, "gaps": gaps,
+        "conclusion_state": ((doc or {}).get("conclusion") or {}).get("state") if isinstance(doc, dict) else None,
+        "decision_complete": state == ANALYSIS_ACCEPTED,
+        "accepted_against_build": v.get("build_id"), "trusted_state": v.get("state"),
+        "as_of": _today(), "revalidate_by": (rv or {}).get("revalidate_by") if isinstance(rv, dict) else None,
+        "intersects": intersects,
+        "anchor_digests": _anchor_digests(intersects or {}, root) if state == ANALYSIS_ACCEPTED else {},
+        "analysis": doc,
+        "basis": ("R13.7: a material analysis becomes decision-complete only through an ACCEPTED receipt; it "
+                  "goes STALE when revalidate_by passes or any anchored byte changes (R19.3 binds a BuildSpec "
+                  "to this id + fingerprint)."),
+    }
+    if write:
+        d = analysis_receipt_dir(root)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, rec["id"] + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, indent=1, sort_keys=True)
+        rec["written_to"] = os.path.join(ANALYSIS_RECEIPT_REL, rec["id"] + ".json")
+    return rec
+
+
 # ────────────────────────────────────────────────────────────────────────────────────────
 # selftest
 # ────────────────────────────────────────────────────────────────────────────────────────
@@ -841,6 +891,13 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--selftest" in argv:
         return _selftest()
+    if "--analysis" in argv:                                            # ISA-0829 (R13.7)
+        doc = json.load(open(argv[argv.index("--analysis") + 1], encoding="utf-8"))
+        rec = accept_analysis(doc, HERE, write="--write" in argv)
+        print(json.dumps({k: rec.get(k) for k in ("id", "state", "analysis_id", "fingerprint", "decision_complete",
+                                                  "accepted_against_build", "revalidate_by", "gaps", "written_to")},
+                         indent=1))
+        return 0 if rec["state"] == "ACCEPTED" else 3
     subject = "framework"
     scope_items, scope_authority = [], None
     for i, a in enumerate(argv):

@@ -752,7 +752,8 @@ def _portfolio_observations(folder=None):
     import glob as _glob
     folder = folder or HERE
     out = []
-    for fp in sorted(_glob.glob(os.path.join(folder, "portfolio_data_*.json"))):
+    import month_artefacts as _MA                      # ISA-0832: purged months stay in the history
+    for fp in _MA.month_glob(folder, "portfolio_data_*.json"):
         with open(fp, encoding="utf-8") as f:
             doc = json.load(f)
         meta, summ = doc.get("_meta") or {}, doc.get("summary") or {}

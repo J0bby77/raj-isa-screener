@@ -497,7 +497,8 @@ def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None,
     if auth is None or mx is None or weights is None:
         try:
             import sleeve_risk as _sr, stock_return_store as _srs, stock_price_fetch as _spf
-            cands = sorted(_glob.glob(os.path.join(root, "portfolio_data_*.json")), key=os.path.getmtime)
+            import month_artefacts as _MA              # ISA-0832
+            cands = sorted(_MA.month_glob(root, "portfolio_data_*.json"), key=os.path.getmtime)
             if not cands:
                 return errs + [warn("pair_risk_window_single_basis/ISA-0680: no portfolio_data file - "
                                     "nothing was checked, which is not agreement")]
@@ -622,7 +623,8 @@ def pair_checkpoint_d_population(root=None, checkpoint=None, run_ctx=None, step9
         checkpoint = json.load(open(_p, encoding="utf-8"))
     top = [str(t).upper() for t in (checkpoint.get("top5") or [])]
     if run_ctx is None:
-        _rp = os.path.join(root, "run_context_%s.json" % label)
+        import month_artefacts as _MA                  # ISA-0832
+        _rp = _MA.resolve(root, "run_context_%s.json" % label)
         run_ctx = json.load(open(_rp, encoding="utf-8")) if os.path.exists(_rp) else {}
     ops = ((((run_ctx or {}).get("summary") or {}).get("capital_destination") or {})
            .get("pipeline") or {}).get("opportunity_set")
@@ -673,7 +675,8 @@ def pair_one_risk_share_authority(root=None, ctx=None):
     doc = ctx
     if doc is None:
         import glob as _glob
-        paths = sorted(_glob.glob(os.path.join(root, "run_context_*.json")), reverse=True)
+        import month_artefacts as _MA                  # ISA-0832; basename order as before
+        paths = sorted(_MA.month_glob(root, "run_context_*.json"), key=os.path.basename, reverse=True)
         paths = [p for p in paths if "DRYRUN" not in os.path.basename(p)]
         if not paths:
             return [warn("pair_one_risk_share_authority/ISA-0708: no run_context_*.json on "
@@ -3118,6 +3121,62 @@ def pair_task_authority(ta=None, health_fn=None):
                          f"(installed text unverified until Raj installs the thin launcher): "
                          f"legacy={h.get('n_legacy')} probation={h.get('n_probation')}"
                          + (f"; unobserved/missed occurrences {missed}" if missed else "")))
+    return errs
+
+
+# ── ISA-0830 (04-Oct-2026) — THE RUN-TIME CONTRACTS HOLD BETWEEN CERTIFICATIONS ─────────────────────
+# The release gate refuses a build whose artefact contract, failure scopes or input identities are broken;
+# this pair keeps the battery (pre-run Step 9d, census) watching the same declarations between builds
+# (R14.1). Broken declarations are ERROR; an unmeasured runtime envelope and the last commit's undeclared
+# artefacts are WARN (visible, DEGRADE_ONLY - R4.18).
+def pair_month_artefacts_archive_aware(root=None, scan=None):
+    """ISA-0832 (04-Oct-2026), class kill. After the review, capture_archive MOVES each ARCHIVE_SET member into
+    archive/decision_capture/. A reader that globs beside the code for one of those families then silently
+    serves an older month (FC-A) or reports the current one missing (the measured verify_receipt STALE ->
+    execution_check REFUSED). Every such reader must go through month_artefacts.month_glob/resolve. ERROR
+    per raw glob found; an unreadable ARCHIVE_SET is itself an ERROR (nothing proven is not a pass, R2.10)."""
+    root = root or HERE
+    try:
+        if scan is None:
+            import month_artefacts as _MA
+            scan = _MA.raw_archive_globs
+        found = scan(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_month_artefacts_archive_aware/ISA-0832: scanner unavailable (%s) - R2.9" % exc]
+    return ["pair_month_artefacts_archive_aware/ISA-0832: %s:%s globs %r beside the code only - after the "
+            "post-review purge it serves a stale month; use month_artefacts.month_glob/resolve" % (b, ln, pat)
+            for (b, ln, pat) in found]
+
+
+def pair_run_contracts(rc=None, root=None):
+    try:
+        if rc is None:
+            import run_contracts as rc
+        root = root or HERE
+        errs = ["ISA-0830 " + e for e in (rc.contract_errors(root) + rc.failure_scope_gaps(root) + rc.input_identity_gaps(root))]
+    except Exception as e:                                             # noqa: BLE001
+        return [f"ISA-0830: run contracts could not be checked ({type(e).__name__}: {e}) - UNMEASURED, never clean (R4.9)"]
+    try:
+        tc = json.load(open(os.path.join(root, "Dashboard", "state", "task_contracts.json"), encoding="utf-8"))
+        for k, t in sorted((tc.get("tasks") or {}).items()):
+            if not t.get("capital_relevant"):
+                continue
+            env = rc.runtime_envelope(k, root)
+            if env.get("state") not in ("WITHIN",):
+                errs.append(warn("ISA-0830 R5.12: capital task %s runtime envelope %s - %s" % (k, env.get("state"), env.get("why"))))
+    except Exception as e:                                             # noqa: BLE001
+        errs.append(warn(f"ISA-0830 R5.12: runtime envelopes unreadable ({type(e).__name__}: {e})"))
+    try:
+        rows = [json.loads(l) for l in open(os.path.join(root, "Dashboard", "state", "prerun_stage_ledger.jsonl"), encoding="utf-8") if l.strip()]
+        last = [r for r in rows if r.get("stage") == "commit" and r.get("status") == "COMPLETE"]
+        und = ((last[-1].get("artefact_contract") or {}).get("undeclared") if last else None) or []
+        if und:
+            errs.append(warn("ISA-0830 R4.17: the last pre-run commit (%s) wrote %d UNDECLARED artefact(s) %s - declare them "
+                             "(release gate RED until then)" % (last[-1].get("occurrence"), len(und), und[:5])))
+    except FileNotFoundError:
+        pass
+    except Exception as e:                                             # noqa: BLE001
+        errs.append(warn(f"ISA-0830 R4.17: prerun stage ledger unreadable ({type(e).__name__}: {e})"))
     return errs
 
 
@@ -6695,11 +6754,12 @@ def _latest_month_pair(root=None):
     hours apart in the same run and must be compared as a PAIR, never cross-month)."""
     import glob as _glob
     root = root or HERE
-    cands = sorted(_glob.glob(os.path.join(root, "email_data_*.json")),
+    import month_artefacts as _MA                      # ISA-0832: the pair may be archived together
+    cands = sorted(_MA.month_glob(root, "email_data_*.json"),
                    key=os.path.getmtime, reverse=True)
     for p in cands:
         label = os.path.basename(p)[len("email_data_"):-len(".json")]
-        rc_path = os.path.join(root, f"run_context_{label}.json")
+        rc_path = _MA.resolve(root, f"run_context_{label}.json")
         if os.path.exists(rc_path):
             return p, rc_path, label
     return None, None, None
@@ -6727,7 +6787,8 @@ def _latest_run_context(root=None):
     """The newest run_context_[mmm_yyyy].json on disk (DRYRUN/scenario variants excluded)."""
     import glob as _glob
     root = root or HERE
-    cands = [p for p in _glob.glob(os.path.join(root, "run_context_*.json"))
+    import month_artefacts as _MA                      # ISA-0832
+    cands = [p for p in _MA.month_glob(root, "run_context_*.json")
              if re.fullmatch(r"run_context_[a-z]{3}_\d{4}\.json", os.path.basename(p))]
     cands.sort(key=os.path.getmtime, reverse=True)
     return cands[0] if cands else None
@@ -6928,6 +6989,8 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_return_basis_declared", pair_return_basis_declared())                  # ISA-0402 / ISA-0401 (20-Aug-2026)
     errs += _tally("pair_occurrence_guard_coverage", pair_occurrence_guard_coverage())              # ISA-0479/0480/0481/0482 (27-Aug-2026)
     errs += _tally("pair_task_authority", pair_task_authority())                              # ISA-0537 (27-Sep-2026)
+    errs += _tally("pair_month_artefacts_archive_aware", pair_month_artefacts_archive_aware())   # ISA-0832 (04-Oct-2026)
+    errs += _tally("pair_run_contracts", pair_run_contracts())                                # ISA-0830 (04-Oct-2026)
     errs += _tally("pair_vci_fv_inputs_single_writer", pair_vci_fv_inputs_single_writer())    # ISA-0771 (27-Sep-2026)
     # ── ISA-0623 / ISA-0467 ENFORCEMENT (09-Sep-2026) ───────────────────────────────────
     # ⚑⚑ THESE ARE THE CALL SITES. Every control below already existed; ISA-0467's finding was
@@ -8393,6 +8456,27 @@ def _suite_census_controls():
         ("ISA-0713 NEGATIVE CONTROL: with no broker book the population is UNKNOWN and that "
          "blocks - an unestablished denominator must not read as full coverage (R4.3)")
 
+    # ── ISA-0830 pair_run_contracts: must-fire + positive control ─────────────────────────
+    class _RC:
+        def __init__(self, ce):
+            self._ce = ce
+        def contract_errors(self, root): return list(self._ce)
+        def failure_scope_gaps(self, root): return []
+        def input_identity_gaps(self, root): return []
+        def runtime_envelope(self, k, root): return {"state": "WITHIN"}
+    _o830 = pair_run_contracts(rc=_RC(["R4.17: x is SIGNED_IMMUTABLE_CONFIG but declares runtime writer(s)"]))
+    assert _o830 and _norm(_o830[0])["severity"] == ERROR, \
+        "ISA-0830 MUST-FIRE: a broken artefact contract is an ERROR in the battery"
+    assert not [x for x in pair_run_contracts(rc=_RC([])) if _norm(x)["severity"] == ERROR], \
+        "ISA-0830 POSITIVE CONTROL: a consistent contract raises no ERROR"
+    # ── ISA-0832 pair_month_artefacts_archive_aware: must-fire + positive control ────────
+    _o832 = pair_month_artefacts_archive_aware(scan=lambda r: [("x.py", 7, "portfolio_data_*.json")])
+    assert _o832 and _norm(_o832[0])["severity"] == ERROR and "x.py:7" in _o832[0], \
+        "ISA-0832 MUST-FIRE: a raw glob over an archived family is an ERROR"
+    assert pair_month_artefacts_archive_aware(scan=lambda r: []) == [], \
+        "ISA-0832 POSITIVE CONTROL: no raw glob, no finding"
+    assert pair_month_artefacts_archive_aware(scan=lambda r: 1 / 0), \
+        "ISA-0832 MUST-FIRE: a broken scanner is a finding, never a silent pass"
     # ── ISA-0537 pair_task_authority: must-fire + positive control ─────────────────────────
     class _TA:
         def __init__(self, f): self._f = f

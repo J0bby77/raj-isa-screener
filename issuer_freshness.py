@@ -965,7 +965,8 @@ def month_label(d=None) -> str:
 
 
 def portfolio_path(month, here=None) -> str:
-    return os.path.join(here or HERE, "portfolio_data_%s.json" % month)
+    import month_artefacts as _MA                      # ISA-0832: a read path - archived months resolve
+    return _MA.resolve(here or HERE, "portfolio_data_%s.json" % month)
 
 
 def report(month=None, here=None) -> dict:

@@ -174,7 +174,8 @@ def _run_context_for(run_ml=None) -> dict:
 
 def _latest_run_context_path():
     import glob as _g
-    fs = sorted(_g.glob(os.path.join(SCRIPT_DIR, "run_context_*.json")), key=os.path.getmtime)
+    import month_artefacts as _MA                      # ISA-0832
+    fs = sorted(_MA.month_glob(SCRIPT_DIR, "run_context_*.json"), key=os.path.getmtime)
     return fs[-1] if fs else None
 
 
@@ -2216,6 +2217,9 @@ SUMMARY_ESCALATED = {
     # ISA-0779 — account identity ESCALATES only when UNVERIFIED (MISMATCH is a Step 1 error that stops
     #   the data steps); MATCH has nothing to tell the reader.
     "account_identity": "ACCOUNT IDENTITY",
+    # ISA-0830 (R6.6): X-Ray account/period identity - a MISMATCH is an ERROR (blocks the review); UNVERIFIED
+    # reaches the warning list with this prefix.
+    "xray_identity": "XRAY IDENTITY UNVERIFIED",
     # ISA-0701 — activation outcomes ESCALATE: an activated/fulfilled first claim, or an execution
     #   that could NOT create one (deviation, blocked VCI, non-contemporaneous plan), is an exception.
     "obligation_activation": "Step 1.5 (ISA-0701)",

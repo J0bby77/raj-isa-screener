@@ -571,6 +571,25 @@ def _data_errors(errors: list) -> list:
     return [e for e in (errors or []) if not str(e).startswith(CAPITAL_AUTHORITY_ERROR_PREFIX)]
 
 
+# ⚑ ISA-0830 (R4.18, 04-Oct-2026): ONE failure no longer skips UNRELATED stages. Each structured failure
+#   carries a DECLARED scope (artefact_contracts.json failure_scope_rules) and each gated stage declares the
+#   components it needs (stage_needs); a stage is skipped only by a failure whose scope blocks one of them.
+#   MEASURED 04-Oct-2026 (production-equivalent SHADOW of TB-2026-10-03-04): a 'SHADOW LEDGER IMMUTABILITY'
+#   refusal - a learning-ledger fact - skipped Step 9 email_prefill, and the manifest then ERRORed on
+#   'email_data not written; zero rows out': the ISA-0778 cascade in a second place. An undeclared failure is
+#   treated as BLOCK_RUN (fail-closed); an unreadable declaration falls back to `_data_errors` and says so.
+def _stage_blockers(errors: list, stage: str) -> list:
+    try:
+        import run_contracts as _rc830
+        _doc830 = _rc830.load_contract(SCRIPT_DIR)
+    except Exception:                                                   # noqa: BLE001
+        return _data_errors(errors)
+    _needs = ((_doc830.get("stage_needs") or {}).get("monthly_isa_prerun") or {}).get(stage)
+    if _needs is None:
+        return _data_errors(errors)
+    return _rc830.blocking_failures("monthly_isa_prerun", errors, _needs, _doc830)
+
+
 def _action_stack_coverage(dpr: list):
     """ISA-0782: source_score coverage over the forward-ELIGIBLE ranking population. A row that is
     forward-ineligible WITH a typed reason carries no source_score by design (CAP-4); one that is
@@ -1136,7 +1155,8 @@ def main():
             if not mm:
                 return (0, 0)
             return (int(mm.group(2)), _MON.get(mm.group(1).lower(), 0))
-        candidates = _glob.glob(os.path.join(SCRIPT_DIR, "portfolio_data_*.json"))
+        import month_artefacts as _MA                  # ISA-0832: last month is archived by the time this runs
+        candidates = _MA.month_glob(SCRIPT_DIR, "portfolio_data_*.json")
         # Exclude current month
         candidates = [c for c in candidates if month_label not in c]
         candidates = sorted(candidates, key=_mkey)
@@ -1412,7 +1432,7 @@ def main():
     # The system never assumes a prior recommendation was executed; it confirms from THIS month's
     # actual holdings (broker file). Additive — no-op until a decision ledger exists.
     # ---------------------------------------------------------------------------
-    if not _data_errors(errors) and os.path.exists(portfolio_path):
+    if not _stage_blockers(errors, "1.5") and os.path.exists(portfolio_path):
         ledger_path = os.path.join(SCRIPT_DIR, "decision_ledger.json")
         if os.path.exists(ledger_path):
             print("\n[1.5] Reconciling prior decision-ledger recommendations vs broker holdings...")
@@ -1680,7 +1700,28 @@ def main():
             print(f"  Validation WARNING: {vmsg}")
         else:
             print(f"  Validation: {vmsg}")
-            if not _data_errors(errors):  # only if portfolio step succeeded (ISA-0778)
+            # ⚑ ISA-0830 (R6.6): the X-Ray must be the SAME account and period as the portfolio export.
+            try:
+                import extract_xray as _ex830
+                with open(xray_path, encoding="utf-8") as _fx830:
+                    _xm830 = json.load(_fx830).get("_meta") or {}
+                with open(portfolio_path, encoding="utf-8") as _fp830:
+                    _pm830 = json.load(_fp830).get("_meta") or {}
+                _xv830 = _ex830.xray_identity_verdict(_xm830, _pm830)
+                summary["xray_identity"] = _xv830
+                if _xv830["account"] == "MISMATCH":
+                    errors.append("Step 2 XRAY ACCOUNT IDENTITY (ISA-0830): " + _xv830["why"] +
+                                  " - replace the X-Ray with the ISA account's X-Ray before any review.")
+                    print("  XRAY ACCOUNT IDENTITY MISMATCH: " + _xv830["why"])
+                elif _xv830["period"] == "MISMATCH":
+                    errors.append("Step 2 XRAY PERIOD IDENTITY (ISA-0830): " + _xv830["why"])
+                    print("  XRAY PERIOD IDENTITY MISMATCH: " + _xv830["why"])
+                elif _xv830["state"] == "UNVERIFIED":
+                    warnings.append("XRAY IDENTITY UNVERIFIED (ISA-0830): " + _xv830["why"])
+            except Exception as _e830:                                  # noqa: BLE001
+                warnings.append("XRAY IDENTITY UNVERIFIED (ISA-0830): check raised %s: %s"
+                                % (type(_e830).__name__, _e830))
+            if not _stage_blockers(errors, "2"):  # only if the portfolio step succeeded (ISA-0778/0830)
                 with open(xray_path, encoding="utf-8") as f:
                     xray_data = json.load(f)
                 tr = xray_data.get("trailing_returns", {})
@@ -1695,9 +1736,10 @@ def main():
     _mf_probe_json(xray_path, "country_exposure", "equity_pct", "X-Ray country rows")
     print(f"\n[3/9] Running portfolio analytics...")
     _mf_begin("3", "portfolio_analytics")
-    if _data_errors(errors):
-        print("  SKIPPED -- portfolio extraction failed (required input).")
-        warnings.append("Step 3 (analytics) skipped -- portfolio extraction failed.")
+    if _stage_blockers(errors, "3"):
+        print("  SKIPPED -- a required input failed: %s" % _stage_blockers(errors, "3")[:2])
+        warnings.append("Step 3 (analytics) skipped -- required input failed (ISA-0830 scope: %s)."
+                        % "; ".join(str(e)[:80] for e in _stage_blockers(errors, "3")[:2]))
     else:
         analytics_args = [
             "--portfolio", portfolio_path,
@@ -1759,9 +1801,10 @@ def main():
     _mf_probe_json(analytics_path, "fund_drift_table.rows", "ticker", "drift rows")
     print(f"\n[4/9] Updating watchlist via update_watchlist.py...")
     _mf_begin("4", "update_watchlist")
-    if _data_errors(errors):
+    if _stage_blockers(errors, "4"):
         print("  SKIPPED -- prior step(s) failed.")
-        warnings.append("Step 4 (update_watchlist) skipped -- prior step failures.")
+        warnings.append("Step 4 (update_watchlist) skipped -- prior step failures (ISA-0830 scope: %s)."
+                        % "; ".join(str(e)[:80] for e in _stage_blockers(errors, "4")[:2]))
     elif not os.path.exists(watchlist_config_path):
         warnings.append("Step 4 (update_watchlist): watchlist_tickers.json not found -- skipping.")
         print("  WARNING: watchlist_tickers.json not found -- skipped.")
@@ -2110,9 +2153,10 @@ def main():
         with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
             json.dump({"_meta": {"month_label": month_label}, "tickers": {},
                        "_warning": "watchlist_tickers.json missing -- metrics not pulled"}, f)
-    elif _data_errors(errors):
+    elif _stage_blockers(errors, "6"):
         print("  SKIPPED -- prior step(s) failed.")
-        warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures.")
+        warnings.append("Step 6 (fetch_watchlist) skipped -- prior step failures (ISA-0830 scope: %s)."
+                        % "; ".join(str(e)[:80] for e in _stage_blockers(errors, "6")[:2]))
         with open(watchlist_metrics_path, "w", encoding="utf-8") as f:
             json.dump({"_meta": {"month_label": month_label}, "tickers": {}}, f)
     elif _skip_fetch_reason(args, watchlist_metrics_path, watchlist_config_path):
@@ -4218,9 +4262,10 @@ def main():
 
     print(f"\n[9/9] Pre-populating email JSON...")
     _mf_begin("9", "email_prefill")
-    if _data_errors(errors):
+    if _stage_blockers(errors, "9"):
         print("  SKIPPED -- prior step(s) failed.")
-        warnings.append("Step 9 (email_prefill) skipped -- prior step failures.")
+        warnings.append("Step 9 (email_prefill) skipped -- prior step failures (ISA-0830 scope: %s)."
+                        % "; ".join(str(e)[:80] for e in _stage_blockers(errors, "9")[:2]))
     else:
         # ⚑ ISA-0798: THIS run's summary as a month-stamped snapshot - run_context_<month>.json is
         #   not written until 9c, so without it the email had no same-run source for §2/§7.
@@ -4486,7 +4531,8 @@ def main():
         _macro_prev = None
         try:                                    # last month's Step 4 call, for continuity only
             import glob as _g2
-            _prevs = sorted(_g2.glob(os.path.join(SCRIPT_DIR, "run_context_*.json")))
+            import month_artefacts as _MA              # ISA-0832; basename order as before
+            _prevs = _MA.month_glob(SCRIPT_DIR, "run_context_*.json")
             for _pf in reversed(_prevs):
                 if month_label in _pf:
                     continue
@@ -5489,6 +5535,19 @@ def _selftest(verbose: bool = True) -> int:
        "still skips the data steps",
        _data_errors(errs + ["Step 1 sanity: Portfolio value suspiciously low"])
        == ["Step 1 sanity: Portfolio value suspiciously low"])
+    # ── ISA-0830 (R4.18): declared failure scope - no cascade into unrelated stages ─────────────────
+    _sl830 = "SHADOW LEDGER IMMUTABILITY: shadow_ledger: oct_2026 is already frozen"
+    ok("ISA-0830 MUST-FIRE (measured 04-Oct cascade): a frozen shadow-ledger refusal does NOT skip Step 9 "
+       "email_prefill", _stage_blockers([_sl830], "9") == [])
+    ok("ISA-0830 NEGATIVE CONTROL: a portfolio extraction failure still skips Steps 3/4/6/9",
+       all(_stage_blockers(["Step 1 (extract_portfolio): boom"], st) for st in ("3", "4", "6", "9")))
+    ok("ISA-0830 MUST-FIRE: a failure with NO declared scope is treated as BLOCK_RUN (fail-closed)",
+       _stage_blockers(["Some brand-new failure"], "9") == ["Some brand-new failure"])
+    ok("ISA-0830 = ISA-0778 preserved: a refused capital authority alone blocks no data stage",
+       all(_stage_blockers([CAPITAL_AUTHORITY_ERROR_PREFIX + "REFUSED"], st) == [] for st in ("1.5", "2", "3", "4", "6", "9")))
+    ok("ISA-0830: a wrong-account X-Ray blocks fund analytics (Step 3) but not ledger reconciliation (1.5)",
+       _stage_blockers(["Step 2 XRAY ACCOUNT IDENTITY (ISA-0830): x"], "3")
+       and not _stage_blockers(["Step 2 XRAY ACCOUNT IDENTITY (ISA-0830): x"], "1.5"))
     _rows782 = ([{"source_score": 70.0}] * 32
                 + [{"source_score": None, "forward_eligible": False,
                     "forward_ineligible_reason": "forward gate: revision_stage='Maturing'"}] * 27)

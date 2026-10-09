@@ -1007,6 +1007,17 @@ def parse_xray(pdf_path: str) -> dict:
         text, (result["holdings_statistics"] or {}).get("by_index"))
     result["_meta"]["parse_warnings"] = list(PARSE_WARNINGS)   # Fix Pack A10
 
+    # ⚑ ISA-0830 (R6.6, 04-Oct-2026): the X-Ray header names the account ("AJ Bell ISA (ACB8G2I)").
+    #   It was parsed for nothing - a SIPP X-Ray beside an ISA portfolio export would have fed the fund
+    #   analytics. The ids are recorded here; xray_identity_verdict() is the one comparison.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import extract_portfolio as _ep830
+        result["_meta"]["account_ids"] = sorted(_ep830.account_ids_in(text))
+    except Exception as _e830:                                          # noqa: BLE001
+        result["_meta"]["account_ids"] = None
+        result["_meta"]["account_ids_error"] = "%s: %s" % (type(_e830).__name__, _e830)
+
     # Validation
     warnings = []
     if not result["sector_weights"]:
@@ -1023,6 +1034,75 @@ def parse_xray(pdf_path: str) -> dict:
         result["_warnings"] = warnings
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# ISA-0830 (R6.6) — external input identity: is this X-Ray the SAME account and period as the
+# portfolio export it is analysed beside? ONE home for the verdict; monthly_isa_prerun consumes it.
+# ---------------------------------------------------------------------------
+XRAY_MAX_LAG_DAYS = 7   # DECLARED (ISA-0830): AJ Bell produces both on request on the same day; a week covers a
+                        # weekend/holiday re-download. A larger gap means the X-Ray describes a different book.
+
+_DATE_FORMATS = ("%d %b %Y", "%d-%b-%Y", "%d %B %Y", "%B %d %Y", "%d-%b-%y", "%Y-%m-%d")
+
+
+def _parse_any_date(s):
+    s = re.sub(r"\s+", " ", str(s or "").strip())
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def xray_identity_verdict(xray_meta: dict, portfolio_meta: dict, max_lag_days: int = XRAY_MAX_LAG_DAYS) -> dict:
+    """-> {"account": MATCH|MISMATCH|UNVERIFIED, "period": MATCH|MISMATCH|UNVERIFIED, "state", "why"}.
+    state = MISMATCH if either key mismatches (refuse), UNVERIFIED if either cannot be established (warn,
+    never MATCH), else MATCH. Account ids come from the X-Ray header and the portfolio sheet title."""
+    xm, pm = xray_meta or {}, portfolio_meta or {}
+    xa, pa = set(xm.get("account_ids") or []), set(pm.get("account_ids") or [])
+    if not xa or not pa:
+        acct, awhy = "UNVERIFIED", "an account id is absent on the %s - identity not provable, not assumed" % (
+            "X-Ray header" if not xa else "portfolio export")
+    elif xa & pa and xa <= pa:
+        acct, awhy = "MATCH", "same account %s" % sorted(xa)
+    else:
+        acct, awhy = "MISMATCH", "X-Ray account %s is not the portfolio account %s" % (sorted(xa), sorted(pa))
+    xd, pd = _parse_any_date(xm.get("report_date")), _parse_any_date(pm.get("data_date") or pm.get("file_date"))
+    if xd is None or pd is None:
+        per, pwhy = "UNVERIFIED", "date unreadable (X-Ray %r, portfolio %r)" % (xm.get("report_date"), pm.get("data_date"))
+    elif abs((xd - pd).days) <= max_lag_days:
+        per, pwhy = "MATCH", "X-Ray %s vs portfolio %s (%+d d)" % (xd, pd, (xd - pd).days)
+    else:
+        per, pwhy = "MISMATCH", "X-Ray dated %s, portfolio %s: %d days apart > %d" % (xd, pd, abs((xd - pd).days), max_lag_days)
+    state = "MISMATCH" if "MISMATCH" in (acct, per) else ("UNVERIFIED" if "UNVERIFIED" in (acct, per) else "MATCH")
+    return {"state": state, "account": acct, "period": per, "why": "account: %s; period: %s" % (awhy, pwhy),
+            "basis": "ISA-0830 R6.6 external input identity"}
+
+
+def _selftest() -> int:
+    fails = []
+
+    def ok(name, cond):
+        print(("PASS " if cond else "FAIL ") + name)
+        if not cond:
+            fails.append(name)
+    pm = {"account_ids": ["ACB8G2I"], "data_date": "02-Oct-2026"}
+    ok("ISA-0830 MUST-FIRE: X-Ray of another account (SIPP ACB8G2S beside the ISA export) is MISMATCH",
+       xray_identity_verdict({"account_ids": ["ACB8G2S"], "report_date": "2 Oct 2026"}, pm)["account"] == "MISMATCH")
+    ok("ISA-0830 MUST-FIRE: X-Ray dated outside the portfolio window (31-Aug vs 02-Oct) is MISMATCH",
+       xray_identity_verdict({"account_ids": ["ACB8G2I"], "report_date": "31 Aug 2026"}, pm)["state"] == "MISMATCH")
+    ok("ISA-0830 NEGATIVE CONTROL: the 02-Oct ISA X-Ray beside the 02-Oct ISA export is MATCH",
+       xray_identity_verdict({"account_ids": ["ACB8G2I"], "report_date": "2 Oct 2026"}, pm)["state"] == "MATCH")
+    ok("ISA-0830 FAIL-CLOSED: an X-Ray with no readable account id is UNVERIFIED, never MATCH",
+       xray_identity_verdict({"account_ids": [], "report_date": "2 Oct 2026"}, pm)["state"] == "UNVERIFIED")
+    ok("ISA-0830 FAIL-CLOSED: an unreadable date is UNVERIFIED, never MATCH",
+       xray_identity_verdict({"account_ids": ["ACB8G2I"], "report_date": "unknown"}, pm)["period"] == "UNVERIFIED")
+    ok("ISA-0830: header date formats parse ('2 Oct 2026', '02-Oct-2026', 'October 2 2026')",
+       _parse_any_date("2 Oct 2026") == _parse_any_date("02-Oct-2026") == _parse_any_date("October 2 2026") is not None)
+    print("extract_xray selftest: %d FAIL(s)" % len(fails))
+    return len(fails)
 
 
 # ---------------------------------------------------------------------------
@@ -1090,4 +1170,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(1 if _selftest() else 0)
     main()

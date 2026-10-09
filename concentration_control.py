@@ -472,7 +472,8 @@ def real_shadow_evidence(here: str = HERE) -> dict:
     """A REAL pre-run SHADOW record (never DRYRUN/scenario/fixture): run_context_<mmm>_<yyyy>.json whose
     summary.capital_destination.concentration carries mode SHADOW and an available impact."""
     found = []
-    for f in sorted(glob.glob(os.path.join(here, "run_context_*_*.json"))):
+    import month_artefacts as _MA                      # ISA-0832
+    for f in _MA.month_glob(here, "run_context_*_*.json"):
         b = os.path.basename(f)
         if not re.match(r"^run_context_[a-z]{3}_\d{4}\.json$", b):
             continue
@@ -521,7 +522,8 @@ def live_readiness(here: str = HERE, *, review: Optional[dict] = None,
 def _cli_population(here: str = HERE):
     """(held {ticker: GBP}, capital_relevant [tickers], sources) from the newest real artefacts."""
     held, cap, src = {}, [], {}
-    pf = sorted(glob.glob(os.path.join(here, "portfolio_data_*_*.json")), key=os.path.getmtime)
+    import month_artefacts as _MA                      # ISA-0832
+    pf = sorted(_MA.month_glob(here, "portfolio_data_*_*.json"), key=os.path.getmtime)
     if pf:
         d = json.load(open(pf[-1], encoding="utf-8"))
         for h in d.get("stocks") or []:

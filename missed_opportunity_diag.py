@@ -235,13 +235,20 @@ def rule_frictions(gate_csv, px, min_hits=2):
     return out, {}
 
 
+def _month_inputs(month_label, here):
+    """ISA-0832: MOA is retrospective by construction, so its month has usually been archived by the
+    post-review purge. Resolve through the one home; an absent month stays {} (and is reported)."""
+    import month_artefacts as _MA
+    return (_load(_MA.resolve(here, "step9_pre_%s.json" % month_label), {}) or {},
+            _load(_MA.resolve(here, "entry_level_audit_%s.json" % month_label), {}) or {})
+
+
 # ── build ────────────────────────────────────────────────────────────────────────────────
 def build(month_label, here=None, fetch=True, top_n=DEFAULT_TOP_N, asof=None):
     here = here or HERE
     asof = asof or date.today()
     start = _month_start(month_label)
-    step9 = _load(os.path.join(here, f"step9_pre_{month_label}.json"), {}) or {}
-    audit = _load(os.path.join(here, f"entry_level_audit_{month_label}.json"), {}) or {}
+    step9, audit = _month_inputs(month_label, here)
     ledger = _load(os.path.join(here, "decision_ledger.json"), {}) or {}
     judge = _load(JUDGEMENTS, {}) or {}
 
@@ -354,6 +361,20 @@ def _selftest():
                                                  "decision": "TRIM"}]}, {}, px_fall)
     ok("a fall after a TRIM is a GOOD outcome (the fall was avoided)",
        sell2[0]["outcome_axis"] == "good")
+
+    # ISA-0832: the retrospective month is read from the archive after the post-review purge
+    import tempfile as _tf, shutil as _sh, month_artefacts as _MA
+    _d = _tf.mkdtemp(prefix="moa_0832_")
+    try:
+        os.makedirs(_MA.archive_dir(_d))
+        json.dump({"m": "archived"}, open(os.path.join(_MA.archive_dir(_d), "step9_pre_zzz_2099.json"), "w"))
+        json.dump({"m": "audit"}, open(os.path.join(_MA.archive_dir(_d), "entry_level_audit_zzz_2099.json"), "w"))
+        s9, au = _month_inputs("zzz_2099", _d)
+        ok("ISA-0832 MUST-FIRE: a purged (archived) month's step9_pre and audit are still read", s9 == {"m": "archived"} and au == {"m": "audit"})
+        ok("ISA-0832 NEGATIVE CONTROL: a month in neither place reads as {} - absence is never invented",
+           _month_inputs("yyy_2098", _d) == ({}, {}))
+    finally:
+        _sh.rmtree(_d, ignore_errors=True)
 
     print("\n" + ("MOA SELFTEST PASS" if not fails else f"MOA SELFTEST FAIL {fails}"))
     return 1 if fails else 0

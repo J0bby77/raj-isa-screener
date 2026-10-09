@@ -398,6 +398,8 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
      "ISA-0769: the canonical VCI review population (held + watchlist + QMS + overrides, conserved)"),
     ("vci_acs_scorer", "balance_sheet_basis", "live_run",
      "ISA-0770: listing-aware balance-sheet admissibility for VCI Part A (A8 runway)"),
+    ("release_gate", "capital_run_authority", "live_run",
+     "ISA-0826 CAP-release_control: R18.5 capital authority (TRUSTED + census) read at pre-run Step 0a, the VCI run and the intramonth review"),
     ("task_authority", "launch", "live_run",
      "ISA-0537: invocation authority - which canonical workflow a scheduled capital task executes"),
     # --- measurement ---------------------------------------------------------------------
@@ -2154,7 +2156,8 @@ def probe_ratchet_cannot_fire(root: str = HERE) -> dict:
     """Falsifier for 'the step-down ratchet cannot fire' (P0.4): reads the latest run_context's
     summary.v21.ratchet. HOLDS only while the rule's own inputs make firing impossible."""
     import glob as _g
-    cands = [p for p in _g.glob(os.path.join(root, "run_context_*_*.json"))
+    import month_artefacts as _MA                      # ISA-0832
+    cands = [p for p in _MA.month_glob(root, "run_context_*_*.json")
              if re.fullmatch(r"run_context_[a-z]{3}_\d{4}\.json", os.path.basename(p))]
     if not cands:
         return {"ran": False, "verdict": "UNTESTABLE", "detail": "no run_context on disk"}

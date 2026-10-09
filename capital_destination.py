@@ -677,7 +677,8 @@ def _load_portfolio(path=None, _return_path=False, root=None) -> dict:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
         return (Path(path), doc) if _return_path else doc
     cands, unreadable = [], []
-    for p in sorted((Path(root) if root else HERE).glob("portfolio_data_*.json")):
+    import month_artefacts as _MA                      # ISA-0832: LIVE copy, else the archived copy
+    for p in [Path(x) for x in _MA.month_glob(str(Path(root) if root else HERE), "portfolio_data_*.json")]:
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
             ds = ((d.get("_meta") or {}).get("data_date") or "").strip()
@@ -2454,7 +2455,8 @@ def _latest_step9_pre() -> tuple:
     ⚑ Same rule as `_load_portfolio`, for the same reason: the month label is the RUN month and
     'aug' sorts before 'jul'. A file whose stamp cannot be read is COUNTED and named (R4.9)."""
     cands, unreadable = [], []
-    for p in sorted(HERE.glob("step9_pre_*.json")):
+    import month_artefacts as _MA                      # ISA-0832
+    for p in [Path(x) for x in _MA.month_glob(str(HERE), "step9_pre_*.json")]:
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
             meta = d.get("_meta") or {}

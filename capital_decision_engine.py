@@ -172,13 +172,29 @@ FRESH_INPUTS = ("step9_pre", "horizon_value")
 DECISION_LEDGER = "capital_decision_ledger.jsonl"
 
 
+from month_artefacts import ARCHIVE_REL      # ISA-0832: one home for the archive location
+
+
+def input_path(month: str, key: str, root: str = HERE) -> str:
+    """ISA-0832 (04-Oct-2026) - ONE home for where a month's input lives. After the monthly review,
+    capture_archive --purge MOVES the month's inputs (e.g. portfolio_data_<month>.json) into
+    archive/decision_capture/ after verifying them byte-for-byte. Every post-review consumer of the frozen
+    month - the receipt verifier, the execution check before any order, the selftest, the campaign - reads
+    the archived copy, which IS the input the receipt was formed on (the hash check proves it). The LIVE
+    copy always wins when present (a re-run month is never silently served from the archive)."""
+    import month_artefacts as _MA                      # the single home (delegated, 04-Oct-2026)
+    return _MA.resolve(root, INPUT_FILES[key].format(m=month))
+
+
 def load_inputs(month: str, root: str = HERE) -> dict:
     """Read every input once; hash each file (s10 input hashes). A missing REQUIRED input
     refuses (R4.3) rather than producing a partial decision."""
     _fi_mark("capital_decision_engine", "load_inputs")
     out, hashes, missing = {"month": month, "root": root}, {}, []
+    sources = {}
     for key, pat in INPUT_FILES.items():
-        p = os.path.join(root, pat.format(m=month))
+        p = input_path(month, key, root)
+        sources[key] = "ARCHIVE" if os.path.dirname(p).endswith(ARCHIVE_REL) else "LIVE"
         hashes[key] = _file_sha(p)
         if hashes[key] is None:
             missing.append(pat.format(m=month))
@@ -196,6 +212,7 @@ def load_inputs(month: str, root: str = HERE) -> dict:
             with open(p, encoding="utf-8") as fh:
                 out[key] = json.load(fh)
     out["input_hashes"] = hashes
+    out["input_sources"] = sources
     out["missing_inputs"] = missing
     required = ("step9_pre", "horizon_value", "portfolio", "target_weights", "transaction_ledger")
     miss_req = [k for k in required if hashes.get(k) is None]
@@ -1892,7 +1909,7 @@ def verify_receipt(month: str, root: str = HERE, receipt: Optional[dict] = None)
     for k, h in (receipt.get("input_hashes") or {}).items():
         if k not in INPUT_FILES:
             continue
-        now = _file_sha(os.path.join(root, INPUT_FILES[k].format(m=month)))
+        now = _file_sha(input_path(month, k, root))              # ISA-0832: the archived copy after the purge
         if now != h:
             drift[k] = {"receipt": (h or "")[:12], "now": (now or "")[:12]}
     if drift:
@@ -1966,6 +1983,11 @@ def _row(bundle, wealth: dict, vol=1000.0, cost=0.0):
     return {"bundle": tuple(bundle), "tickers": [t for t, _ in bundle], "wealth": dict(wealth),
             "gbp_vol": vol, "feasible": True, "entry_costs_gbp": cost,
             "stock_gbp": round(sum(a for _, a in bundle), 2), "residual_gbp": 0.0}
+
+
+def real_inputs_missing(month: str, root: str) -> list:
+    """ISA-0832: the INPUT_FILES members absent for `month` under `root` ([] = the full real set is present)."""
+    return [k for k in INPUT_FILES if not os.path.exists(input_path(month, k, root))]
 
 
 def _selftest(verbose: bool = True) -> int:
@@ -2188,11 +2210,41 @@ def _selftest(verbose: bool = True) -> int:
         ok("T28 Source Score is read by NONE of the search/comparator/scenario functions (AST)", not bad_fns, bad_fns)
     except Exception as exc:                                        # noqa: BLE001
         ok("T28 AST check ran", False, str(exc))
+    # ── ISA-0832: one definition of "real inputs present" ───────────────────────────────
+    import tempfile as _tf832
+    import shutil as _sh832
+    _t832 = _tf832.mkdtemp(prefix="cde832_")
+    try:
+        for _k, _pat in INPUT_FILES.items():
+            if _k != "portfolio":
+                open(os.path.join(_t832, _pat.format(m="zzz_2099")), "w").write("{}")
+        ok("ISA-0832 MUST-FIRE: a month whose portfolio input is neither LIVE nor archived is NOT a real-input month",
+           real_inputs_missing("zzz_2099", _t832) == ["portfolio"])
+        os.makedirs(os.path.join(_t832, ARCHIVE_REL))
+        open(os.path.join(_t832, ARCHIVE_REL, INPUT_FILES["portfolio"].format(m="zzz_2099")), "w").write("{}")
+        ok("ISA-0832 MUST-FIRE: after the review purge the archived (byte-verified) copy is the month's input",
+           real_inputs_missing("zzz_2099", _t832) == [] and input_path("zzz_2099", "portfolio", _t832).endswith(
+               os.path.join(ARCHIVE_REL, INPUT_FILES["portfolio"].format(m="zzz_2099"))))
+        open(os.path.join(_t832, INPUT_FILES["portfolio"].format(m="zzz_2099")), "w").write("{}")
+        ok("ISA-0832 NEGATIVE CONTROL: a LIVE copy always wins over the archive (a re-run month is never served from it)",
+           input_path("zzz_2099", "portfolio", _t832) == os.path.join(_t832, INPUT_FILES["portfolio"].format(m="zzz_2099")))
+    finally:
+        _sh832.rmtree(_t832, ignore_errors=True)
     # ── real October inputs, when present (census sandbox carries them) ───────────────────
     month = None
     for cand in ("oct_2026",):
         if os.path.exists(os.path.join(HERE, "horizon_value_%s.json" % cand)):
             month = cand
+    # ⚑ ISA-0832 (04-Oct-2026): ONE definition of "the month's inputs are present" - every INPUT_FILES
+    #   member, not horizon_value alone. After the monthly review, capture_archive --purge archives
+    #   portfolio_data_<month>.json and keeps horizon_value, and the REAL rows then FAILED on an absent
+    #   input: the next census went FRESH_RED with no code change. A half-archived month is SKIPPED by name.
+    if month:
+        _missing832 = real_inputs_missing(month, HERE)
+        if _missing832:
+            print("SKIP REAL rows (ISA-0832): %s inputs incomplete - missing %s (archived after the review?); "
+                  "synthetic rows above still ran" % (month, _missing832))
+            month = None
     if month:
         try:
             r1 = build(month, root=HERE, write=False)
@@ -2221,7 +2273,7 @@ def _selftest(verbose: bool = True) -> int:
             tmp = tempfile.mkdtemp(prefix="cde_st_")
             try:
                 for k_, pat_ in INPUT_FILES.items():
-                    src_ = os.path.join(HERE, pat_.format(m=month))
+                    src_ = input_path(month, k_, HERE)          # ISA-0832: LIVE copy, else the archived one
                     if os.path.exists(src_):
                         shutil.copy2(src_, os.path.join(tmp, pat_.format(m=month)))
                 t_old = _time.time() - 86400 * 2

@@ -98,7 +98,8 @@ def classify(current_price, entry_level, realised_vol=None):
 
 
 def run(month, here=HERE, write=True):
-    path = os.path.join(here, f"entry_level_audit_{month}.json")
+    import month_artefacts as _MA                      # ISA-0832
+    path = _MA.resolve(here, f"entry_level_audit_{month}.json")
     with open(path) as f:
         doc = json.load(f)
     entries = doc.get("entries", doc)
@@ -144,6 +145,22 @@ def _selftest():
     assert c["reachability"] == "stretch" and "DISAGREE" in c["basis"], c
     c = classify(100, 120, 0.3)                       # entry ABOVE price — already in range
     assert c["reachability"] == "reachable" and c["required_move_pct"] == 20.0, c
+    # ISA-0832: the month's audit is read from the archive after the post-review purge
+    import tempfile as _tf, shutil as _sh, month_artefacts as _MA
+    _d = _tf.mkdtemp(prefix="er_0832_")
+    try:
+        os.makedirs(_MA.archive_dir(_d))
+        json.dump({"entries": [{"ticker": "X", "current_price": 100, "entry_level": 120, "realised_vol": 0.3}]},
+                  open(os.path.join(_MA.archive_dir(_d), "entry_level_audit_zzz_2099.json"), "w"))
+        r = run("zzz_2099", here=_d, write=False)
+        assert r["counts"]["reachable"] == 1, "ISA-0832 MUST-FIRE: an archived month's audit must be read"
+        try:
+            run("yyy_2098", here=_d, write=False)
+            raise AssertionError("ISA-0832 NEGATIVE CONTROL: a month in neither place must not read as empty")
+        except FileNotFoundError:
+            pass                                          # negative control: absence stays absence
+    finally:
+        _sh.rmtree(_d, ignore_errors=True)
     print("SELFTEST PASS — 8 assertions (reachable, stretch, TER/MSM unreachable, vol-missing "
           "fallback, unknown never defaults to reachable, disagreement flagged, entry-above-price)")
     return True

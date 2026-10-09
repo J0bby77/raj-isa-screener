@@ -487,10 +487,107 @@ def interim_policies(today=None, root=None) -> list:
             if not interim_owner_problem(decl.get(l.split(":")[0]) or {})]
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0829 (R12.3 amended, 04-Oct-2026) — PARAMETER FORM. Provenance answers "who chose this number and
+# why"; it never asked the PRIOR question: should this quantity be a number at all? Every capital-gating
+# parameter now records its CURRENT implemented form (a fact about the code) and a FORM DISPOSITION:
+#   ANALYSED        - the form question was answered by an ACCEPTED, CURRENT analysis (R13.7) and the
+#                     form contract is COMPLETE (drivers, evaluation, bounds, fallback, monitoring, rollback);
+#   REVIEW_PENDING  - not yet analysed: owned by a LIVE register item with a due date on the existing
+#                     revalidation clock (one clock, not two); an overdue review fails the battery exactly
+#                     as an expired revalidate_by does, and an ISA-0777 owned interim covers both.
+# A NEW or CHANGED capital-gating parameter cannot be certified on REVIEW_PENDING: release_gate's
+# parameter_contract gate demands ANALYSED (R12.3/R13.7). Dynamic or learned does NOT mean autonomous:
+# R8.7/§18 still govern every change of value or rule.
+# ════════════════════════════════════════════════════════════════════════════════════════
+PARAMETER_FORMS = ("DIRECT_MEASURE", "STATIC", "PERIODIC_RECALIBRATION", "REGIME_CONDITIONAL", "ADAPTIVE_LEARNED")
+FORM_COMMON_FIELDS = ("owning_decision", "candidate_forms_considered", "evidence_and_calibration",
+                      "missing_data_fallback", "drift_monitor", "rollback", "falsifier", "future_data_capture")
+FORM_CONTRACT_FIELDS = {
+    "DIRECT_MEASURE": ("measurement_source",),
+    "STATIC": ("bounds",),
+    "PERIODIC_RECALIBRATION": ("drivers", "update_cadence", "minimum_n", "evaluation_method", "bounds",
+                               "max_change_rate"),
+    "REGIME_CONDITIONAL": ("regime_driver", "per_regime_values", "evaluation_method", "bounds", "hysteresis"),
+    "ADAPTIVE_LEARNED": ("method", "drivers", "evaluation_method", "minimum_n", "bounds", "max_change_rate",
+                         "shadow_before_authority"),
+}
+FORM_DISPOSITIONS = ("ANALYSED", "REVIEW_PENDING")
+_FORM_NA_MIN = 20
+
+
+def form_contract_errors(name: str, spec) -> list:
+    """Applicable omissions in one parameter's form contract. N/A must be {"na": reason>=20 chars}."""
+    if not isinstance(spec, dict):
+        return ["R12.3: %s has no form contract (direct-measure vs static vs periodic vs regime vs adaptive)" % name]
+    form = spec.get("form")
+    if form not in PARAMETER_FORMS:
+        return ["R12.3: %s form %r is not one of %s" % (name, form, PARAMETER_FORMS)]
+    errs = []
+    for f in FORM_COMMON_FIELDS + FORM_CONTRACT_FIELDS[form]:
+        v = spec.get(f)
+        if isinstance(v, dict) and set(v) == {"na"}:
+            if not (isinstance(v["na"], str) and len(v["na"].strip()) >= _FORM_NA_MIN):
+                errs.append("R12.3: %s %s form field `%s` is N/A without a reason" % (name, form, f))
+            continue
+        if v is None or v == "" or v == [] or v == {} or (isinstance(v, str) and v.strip().upper().startswith("UNKNOWN")):
+            errs.append("R12.3: %s %s form contract is missing `%s`" % (name, form, f))
+    return errs
+
+
+def form_errors(today=None, root=None, read_item=None, analysis_currency=None) -> list:
+    """The battery reading of R12.3's form clause over every declared capital-gating constant."""
+    from datetime import date as _d
+    today = today or _d.fromisoformat(R._today())
+    decl = _declarations(root)
+    errs = []
+    for name in sorted(CAPITAL_GATING):
+        d = decl.get(name) or {}
+        form = d.get("parameter_form")
+        if form not in PARAMETER_FORMS:
+            errs.append("R12.3: %s declares no parameter_form (its CURRENT implemented form) - got %r" % (name, form))
+            continue
+        disp = d.get("form_disposition") or {}
+        st = disp.get("state")
+        if st == "ANALYSED":
+            errs += form_contract_errors(name, dict(d.get("form_contract") or {}, form=form))
+            if analysis_currency is None:
+                try:
+                    import analysis_acceptance as _aa
+                    analysis_currency = _aa.analysis_currency
+                except Exception as exc:                                # noqa: BLE001
+                    errs.append("R12.3: %s ANALYSED but analysis currency unreadable (%s)" % (name, exc))
+                    continue
+            cur = analysis_currency(disp.get("analysis_id"), disp.get("fingerprint"))
+            if cur.get("state") != "CURRENT":
+                errs.append("R12.3: %s form is ANALYSED on %s, which is %s - %s"
+                            % (name, disp.get("analysis_id"), cur.get("state"), cur.get("why")))
+        elif st == "REVIEW_PENDING":
+            own, due = disp.get("owner"), str(disp.get("due") or "")
+            if not re.match(r"^ISA-\d{4}$", str(own or "")):
+                errs.append("R12.3: %s form review is pending with no owner item" % name)
+                continue
+            try:
+                it = (read_item or R.get)(own)
+            except Exception:                                           # noqa: BLE001
+                it = None
+            if not it or it.get("state") in _TERMINAL:
+                errs.append("R12.3: %s form review owner %s is absent or terminal - the pending review is unowned" % (name, own))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due):
+                errs.append("R12.3: %s form review due %r is not an ISO date" % (name, due))
+            elif _d.fromisoformat(due) < today and interim_owner_problem(d, read_item=read_item):
+                errs.append("R12.3: %s form review was due %s and is not analysed (no valid ISA-0777 interim)" % (name, due))
+        else:
+            errs.append("R12.3: %s has no form_disposition (ANALYSED with a current analysis, or REVIEW_PENDING "
+                        "with an owner and a due date)" % name)
+    return errs
+
+
 def verify(today=None, root=None) -> list:
     """Everything the routine battery asserts about the ledger, in one call. An expired declaration
     fails it unless carried under a valid, OWNED interim policy (ISA-0777)."""
-    return declaration_errors(root) + coverage() + gaps() + unowned_stale_revalidations(today, root)
+    return (declaration_errors(root) + coverage() + gaps() + unowned_stale_revalidations(today, root)
+            + form_errors(today, root))
 
 
 def gaps() -> list:
@@ -613,6 +710,42 @@ def selftest(verbose=True) -> int:
        "ISA-0777 NEGATIVE CONTROL: an interim that claims to be a revalidation is refused")
     ok(interim_owner_problem({}, read_item=lambda i: {"state": "OPEN"}) is not None,
        "ISA-0777 NEGATIVE CONTROL: no interim_policy -> the expiry stays a failure")
+    # ── ISA-0829 (R12.3 form clause) ─────────────────────────────────────────────────────────
+    _full = {"form": "PERIODIC_RECALIBRATION", "owning_decision": "x", "candidate_forms_considered": ["STATIC"],
+             "evidence_and_calibration": "x", "missing_data_fallback": "x", "drift_monitor": "x", "rollback": "x",
+             "falsifier": "x", "future_data_capture": ["x"], "drivers": ["anchor"], "update_cadence": "semiannual",
+             "minimum_n": 12, "evaluation_method": "walk-forward", "bounds": [0, 1], "max_change_rate": "0.5pp"}
+    ok(form_contract_errors("P", _full) == [], "ISA-0829 NEGATIVE CONTROL: a complete periodic contract passes")
+    _part = dict(_full); _part.pop("drivers"); _part["bounds"] = "UNKNOWN"
+    ok(len(form_contract_errors("P", _part)) == 2,
+       "ISA-0829 MUST-FIRE: a periodic contract missing drivers and with UNKNOWN bounds is refused on both")
+    ok(form_contract_errors("P", None) and form_contract_errors("P", {"form": "MAGIC"}),
+       "ISA-0829 MUST-FIRE: no contract / an undeclared form is refused")
+    _na = dict(_full, form="STATIC", drift_monitor={"na": "no"})
+    ok(any("without a reason" in e for e in form_contract_errors("P", _na)),
+       "ISA-0829 MUST-FIRE: an N/A form field without a reason is refused")
+    # ── ISA-0829/R5.14: the REVIEW_PENDING due date at T-1 / T / T+1, a repeat, and the next occurrence ──
+    from datetime import date as _dd
+    _g = sorted(CAPITAL_GATING)[0]
+    _fx = {_g: {"parameter_form": "STATIC",
+                "form_disposition": {"state": "REVIEW_PENDING", "owner": "ISA-0831", "due": "2026-12-31"}}}
+    _orig_decl = globals()["_declarations"]
+    globals()["_declarations"] = lambda root=None: _fx
+    try:
+        _ri = lambda i: {"id": i, "state": "OPEN"}                      # noqa: E731
+        _due = lambda t: [e for e in form_errors(_dd.fromisoformat(t), None, read_item=_ri, analysis_currency=lambda *a: {"state": "CURRENT"})
+                          if e.startswith("R12.3: %s form review was due" % _g)]                                      # noqa: E731
+        ok(_due("2026-12-30") == [] and _due("2026-12-31") == [],
+           "R5.14 T-1/T: a REVIEW_PENDING form is not overdue the day before or on its due date")
+        ok(len(_due("2027-01-01")) == 1,
+           "R5.14 T+1 MUST-FIRE: the day after the due date an unanalysed form with no interim is a finding")
+        ok(_due("2027-01-01") == _due("2027-01-01"),
+           "R5.14 repeat_same_occurrence: re-reading the same day gives the same verdict (no hidden state)")
+        _fx[_g]["form_disposition"]["due"] = "2027-06-30"
+        ok(_due("2027-01-01") == [],
+           "R5.14 next_occurrence: a re-scheduled review (new due date) clears the finding at the next reading")
+    finally:
+        globals()["_declarations"] = _orig_decl
     if verbose:
         print(f"isa_rationale_ledger selftest: {n} assertions, 0 failed")
     return n

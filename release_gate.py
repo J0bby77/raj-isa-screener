@@ -50,6 +50,7 @@ import hashlib
 import json
 import re
 import os
+import shutil
 import sys
 from typing import Dict, List, Optional
 
@@ -220,7 +221,11 @@ CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "targ
                 os.path.join("Dashboard", "state", "task_contracts.json"),
                 # ISA-0537: the occurrence rules task_authority.launch REFUSES on (ENFORCED tasks) are
                 # read from this document's tables - an unsigned edit could move a task's window.
-                "SCHEDULED_TASKS_SETUP.md")
+                "SCHEDULED_TASKS_SETUP.md",
+                # ISA-0830 (04-Oct-2026, R4.17/R4.18/R6.6): which artefacts each workflow may write, the
+                # identity keys of every external input and the declared failure scopes - an unsigned edit
+                # could let a workflow write signed state or let a failure cascade.
+                os.path.join("Dashboard", "state", "artefact_contracts.json"))
 
 
 # ⚑ ISA-0775 (30-Sep-2026) — A SIGNED FILE THAT THE CERTIFIED CODE REWRITES EVERY RUN.
@@ -489,6 +494,22 @@ def item_currency(root: str = HERE, build_id: Optional[str] = None,
               "title": (i.get("title") or "")[:110]}
              for i in actionable
              if i.get("validated_against_build_id") != build_id]
+    # ⚑ ISA-0829 (R7.8 amended): build-current is not enough when the design rests on an analysis that
+    #   has gone STALE (expired, or an anchored input changed) - REVALIDATION_REQUIRED all the same.
+    _seen = {r["id"] for r in stale}
+    for i in actionable:
+        if i["id"] in _seen or i.get("analysis_dependency") != "REQUIRED":
+            continue
+        try:
+            import analysis_acceptance as _aa829
+            _ref = i.get("analysis_acceptance_ref") or {}
+            _cur = _aa829.analysis_currency(_ref.get("analysis_id"), _ref.get("fingerprint"), root)
+        except Exception as exc:                                        # noqa: BLE001
+            _cur = {"state": UNKNOWN, "why": str(exc)}
+        if _cur.get("state") != "CURRENT":
+            stale.append({"id": i["id"], "criticality": i.get("criticality"),
+                          "validated_against_build_id": i.get("validated_against_build_id"),
+                          "analysis_state": _cur.get("state"), "title": (i.get("title") or "")[:110]})
     stale.sort(key=lambda r: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
                .get(r["criticality"], 4))
     return {"state": GREEN if not stale else RED,
@@ -525,10 +546,21 @@ def invalidate_touched(items: list, footprint: dict) -> List[str]:
 # R4.15 — run-surface impact
 # ────────────────────────────────────────────────────────────────────────────────────────
 
-def run_surface_dispositions(declared: dict) -> dict:
+EXECUTED_SURFACES = ("executed_skill", "scheduled_task_instructions")
+
+
+def run_surface_dispositions(declared: dict, bases: Optional[dict] = None) -> dict:
     """KR14 / R4.15 / R14.5. Every affected surface is UPDATE_REQUIRED or VERIFIED_NO_CHANGE
-    WITH EVIDENCE. An unlisted surface cannot be inferred to need no change."""
+    WITH EVIDENCE. An unlisted surface cannot be inferred to need no change.
+
+    ⚑ ISA-0830 (R4.15 ENFORCED, 04-Oct-2026): "the executed surface is authoritative; a mirror can never
+    prove the live contract is current" was prose - a VERIFIED_NO_CHANGE on the executed SKILL / task
+    instructions read from the MIRROR passed. When `bases` (run_surface_fingerprint basis per label) is
+    supplied, such a verdict must name its `tasks` and each must have been read from the executed contract
+    (or proven loaded by the thin launcher); otherwise each label is an UNKNOWN finding ES-<label> that only
+    an owning item (ISA-0537) may waive."""
     missing, unevidenced = [], []
+    unknown_exec, findings = [], []
     for s in RUN_SURFACES:
         d = declared.get(s)
         if d in (None, "", {}):
@@ -540,6 +572,26 @@ def run_surface_dispositions(declared: dict) -> dict:
         elif verdict in ("VERIFIED_NO_CHANGE", "NOT_APPLICABLE") and not (
                 isinstance(d, dict) and d.get("evidence")):
             unevidenced.append(s)
+    if bases is not None:
+        try:
+            import run_contracts as _rc
+            for sname in EXECUTED_SURFACES:
+                d = declared.get(sname)
+                if isinstance(d, dict) and d.get("verdict") == "VERIFIED_NO_CHANGE":
+                    ei = _rc.executed_identity(d, bases)
+                    if ei["state"] != GREEN:
+                        for lab in (ei.get("unknown") or ["<no task named>"]):
+                            unknown_exec.append("%s:%s" % (sname, lab))
+                            findings.append({"id": "ES-%s-%s" % (sname, lab),
+                                             "text": "R4.15: %s VERIFIED_NO_CHANGE for %s rests on the MIRROR - the "
+                                                     "installed surface is UNKNOWN" % (sname, lab)})
+        except Exception as exc:                                        # noqa: BLE001
+            unknown_exec.append("run_contracts unavailable: %s" % exc)
+    if unknown_exec:
+        return {"state": UNKNOWN, "undispositioned": missing, "unevidenced": unevidenced,
+                "executed_identity_unknown": unknown_exec, "findings": findings,
+                "why": ("R4.15: VERIFIED_NO_CHANGE on %d executed surface label(s) rests on the mirror: %s. "
+                        "UNKNOWN blocks unless an owning item waives the named finding(s)." % (len(unknown_exec), unknown_exec[:6]))}
     return {"state": GREEN if not missing and not unevidenced else RED,
             "undispositioned": missing, "unevidenced": unevidenced,
             "why": ("every run surface carries a disposition with evidence"
@@ -676,6 +728,11 @@ def capital_run_authority(surface: str, root: str = HERE) -> dict:
     recorded against this exact source and config). A TRUSTED tree whose census is stale, red,
     incomplete or other-identity is REFUSED (NOT_ENFORCED under the census rollback), never AUTHORISED."""
     import datetime as _dt
+    try:                                                                # ISA-0826: CAP-release_control producer (R4.14)
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark("release_gate", "capital_run_authority")
+    except Exception:                                                   # noqa: BLE001
+        pass
     try:
         v = verify_live(root)
     except Exception as exc:                                            # noqa: BLE001
@@ -807,11 +864,305 @@ def waiver_check(gate: dict, waiver: dict, read_item=None) -> dict:
             "owned": {f: listed[f] for f in current if f in listed}}
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0826/0828/0829/0830 (04-Oct-2026) — CERTIFICATION CONTRACT GATES. Each is a pure function of the
+# Candidate tree + the change contract, so a test can drive it and certify() consumes the same function
+# (R4.4). The declarations live in run_contracts / discussion_preflight / isa_rationale_ledger /
+# system_acceptance; this module only refuses.
+#   analysis_binding    R19.3 / R13.7  - the BuildSpec binds the exact ACCEPTED, CURRENT analysis
+#   parameter_contract  R12.3          - a new/changed capital-gating parameter has an ANALYSED form contract
+#   artefact_state      R4.17          - the declaration is consistent; a SHADOW of the affected path wrote
+#                                        only declared artefacts and no signed state
+#   failure_scope       R4.18          - every failure an enrolled orchestrator emits has a declared scope
+#   input_identity      R6.6           - every external input key has a must-fire boundary check
+#   runtime_envelope    R5.12          - every affected scheduled task fits its declared envelope
+#   temporal_matrix     R5.14          - every changed clock-reading module carries T-1/T/T+1/repeat/next
+#   path_acceptance     R18.6          - reports which declared paths the build intersects (renewal owed)
+# ROLLBACK (R4.13): isa_policy.V2_FLAGS['run_contract_gates'] = False -> every gate NOT_ENFORCED (blocks:
+# NOT_ENFORCED is not GREEN, so a rollback must be waived explicitly - never silently passed).
+# ════════════════════════════════════════════════════════════════════════════════════════
+CERTIFICATION_EVIDENCE_KEYS = ("analysis_authority", "parameters_changed", "shadow_evidence",
+                               "affected_tasks", "temporal")
+
+
+def _contract_gates_on() -> bool:
+    try:
+        import isa_policy as _p
+        if "run_contract_gates" in _p.V2_FLAGS:
+            return bool(_p.V2_FLAGS["run_contract_gates"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    return True
+
+
+def _absent(spec, key) -> bool:
+    return not isinstance(spec, dict) or key not in spec or spec.get(key) is None
+
+
+def gate_analysis_binding(spec: Optional[dict], root: str = HERE, today: Optional[str] = None) -> dict:
+    """R19.3: a BuildSpec binds {analysis_id, fingerprint} of an ACCEPTED, CURRENT analysis, or declares
+    {"not_required": reason}. Stale / mismatched / refused -> REVALIDATION_REQUIRED (RED)."""
+    if _absent(spec, "analysis_authority"):
+        return _gate("analysis_binding", RED, "R19.3: the change contract declares no `analysis_authority` "
+                                              "({analysis_id, fingerprint} or {not_required: reason}) - silence is not N/A")
+    a = spec["analysis_authority"]
+    if isinstance(a, dict) and "not_required" in a:
+        if len(str(a.get("not_required") or "").strip()) < 30:
+            return _gate("analysis_binding", RED, "R19.3: analysis not_required needs a reason (>= 30 chars)")
+        return _gate("analysis_binding", GREEN, "declared analysis-independent: %s" % a["not_required"][:200])
+    if not isinstance(a, dict) or not a.get("analysis_id") or not a.get("fingerprint"):
+        return _gate("analysis_binding", RED, "R19.3: analysis_authority must be {analysis_id, fingerprint}")
+    try:
+        import analysis_acceptance as _aa
+        cur = _aa.analysis_currency(a["analysis_id"], a["fingerprint"], root, today)
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("analysis_binding", ENV_UNKNOWN, "analysis currency unreadable (%s)" % exc)
+    if cur.get("state") != "CURRENT":
+        return _gate("analysis_binding", RED,
+                     "R19.3: REVALIDATION_REQUIRED - the bound analysis %s is %s: %s"
+                     % (a["analysis_id"], cur.get("state"), cur.get("why")), analysis=cur,
+                     findings=[{"id": "AB-%s" % a["analysis_id"], "text": "analysis %s %s" % (a["analysis_id"], cur.get("state"))}])
+    return _gate("analysis_binding", GREEN, "bound to %s (%s): %s" % (a["analysis_id"], cur.get("receipt"), cur.get("why")),
+                 analysis=cur)
+
+
+def _capital_gating_names(root: str) -> set:
+    import ast as _ast
+    p = os.path.join(root, "isa_rationale_ledger.py")
+    try:
+        tree = _ast.parse(open(p, encoding="utf-8").read())
+    except Exception:                                                   # noqa: BLE001
+        return set()
+    for n in tree.body:
+        if isinstance(n, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == "CAPITAL_GATING" for t in n.targets) \
+                and isinstance(n.value, _ast.Dict):
+            return {k.value for k in n.value.keys if isinstance(k, _ast.Constant)}
+    return set()
+
+
+def _gating_values(root: str) -> Dict[str, Optional[str]]:
+    """{constant: source repr of its module-level assignment in its declared home} - AST, never import."""
+    import ast as _ast
+    try:
+        import isa_rationale_ledger as _irl
+        homes = {k: v[0] for k, v in _irl.CAPITAL_GATING.items()}
+    except Exception:                                                   # noqa: BLE001
+        homes = {}
+    out = {}
+    cache = {}
+    for name in _capital_gating_names(root):
+        home = homes.get(name)
+        if not home:
+            out[name] = None
+            continue
+        if home not in cache:
+            try:
+                cache[home] = _ast.parse(open(os.path.join(root, home), encoding="utf-8").read())
+            except Exception:                                           # noqa: BLE001
+                cache[home] = None
+        val = None
+        if cache[home] is not None:
+            for n in cache[home].body:
+                if isinstance(n, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == name for t in n.targets):
+                    val = _ast.unparse(n.value)
+        out[name] = val
+    return out
+
+
+def gate_parameter_contract(spec: Optional[dict], root: str = HERE, baseline_root: Optional[str] = None) -> dict:
+    """R12.3 (form clause): every capital-gating parameter this build CHANGES or ADDS - declared in
+    `parameters_changed` AND mechanically diffed against the baseline tree - carries an ANALYSED form
+    contract bound to a CURRENT analysis. An undeclared change is RED (silence)."""
+    if _absent(spec, "parameters_changed") or not isinstance(spec.get("parameters_changed"), list):
+        return _gate("parameter_contract", RED, "R12.3: the change contract declares no `parameters_changed` list ([] is an answer)")
+    declared = set(spec["parameters_changed"])
+    undeclared = []
+    if baseline_root:
+        a, b = _gating_values(root), _gating_values(baseline_root)
+        changed = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+        undeclared = sorted(changed - declared)
+    else:
+        changed = set()
+    errs = []
+    if undeclared:
+        errs.append("R12.3: capital-gating parameter(s) changed/added vs the baseline and NOT declared in parameters_changed: %s" % undeclared)
+    try:
+        sys.path.insert(0, root)
+        import isa_rationale_ledger as _irl
+        decl = _irl._declarations(root)
+        for name in sorted(declared | changed):
+            d = decl.get(name) or {}
+            disp = (d.get("form_disposition") or {})
+            if disp.get("state") != "ANALYSED":
+                errs.append("R12.3: %s changes in this build but its form is %s - a new/changed capital-gating parameter "
+                            "needs an ANALYSED form contract (direct-measure vs static vs periodic vs regime vs adaptive)"
+                            % (name, disp.get("state") or "UNDECLARED"))
+                continue
+            errs += _irl.form_contract_errors(name, dict(d.get("form_contract") or {}, form=d.get("parameter_form")))
+            import analysis_acceptance as _aa
+            cur = _aa.analysis_currency(disp.get("analysis_id"), disp.get("fingerprint"), root)
+            if cur.get("state") != "CURRENT":
+                errs.append("R12.3: %s form analysis %s is %s" % (name, disp.get("analysis_id"), cur.get("state")))
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("parameter_contract", ENV_UNKNOWN, "rationale ledger unreadable (%s)" % exc)
+    return _gate("parameter_contract", GREEN if not errs else RED,
+                 "%d parameter(s) changed (%s declared, baseline diff %s): %s"
+                 % (len(declared | changed), sorted(declared), "ON" if baseline_root else "OFF (no baseline_root)",
+                    "every one carries an ANALYSED form contract" if not errs else "; ".join(errs)[:600]),
+                 errors=errs[:20], findings=[{"id": text_finding_id("PC", e), "text": e[:300]} for e in errs])
+
+
+def _path_intersections(root: str, changed_modules: List[str]) -> Dict[str, list]:
+    """Which declared paths (capability_registry `paths`) this build's changed modules intersect."""
+    out = {}
+    try:
+        import system_acceptance as _sa
+        reg = json.load(open(os.path.join(root, "Dashboard", "state", "capability_registry.json"), encoding="utf-8"))
+        for pid, decl in (reg.get("paths") or {}).items():
+            clo = set(_sa.import_closure(root, decl.get("entry_modules") or []))
+            hit = sorted({m.replace(".py", "") for m in changed_modules} & clo)
+            if hit:
+                out[pid] = hit
+    except Exception as exc:                                            # noqa: BLE001
+        out["UNKNOWN"] = [str(exc)]
+    return out
+
+
+def gate_artefact_state(spec: Optional[dict], root: str = HERE, changed_modules: Optional[List[str]] = None) -> dict:
+    """R4.17: (1) the signed declaration is internally consistent with CONFIG_FILES/CONFIG_RUNTIME_KEYS;
+    (2) when the build intersects the monthly capital path, a production-equivalent SHADOW of the
+    pre-run on THIS candidate's code wrote only declared artefacts, by a declared writer, and no signed state."""
+    try:
+        import run_contracts as _rc
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("artefact_state", ENV_UNKNOWN, "run_contracts unavailable (%s)" % exc)
+    errs = list(_rc.contract_errors(root))
+    inter = _path_intersections(root, changed_modules or [])
+    shadow = None
+    if "monthly_capital" in inter or "UNKNOWN" in inter:
+        se = (spec or {}).get("shadow_evidence") if isinstance(spec, dict) else None
+        ws = (se or {}).get("prerun_workspace") if isinstance(se, dict) else None
+        if not ws or not os.path.isfile(os.path.join(ws, "sync_manifest.json")):
+            errs.append("R4.17: the build intersects monthly_capital (%s) but no SHADOW pre-run workspace is cited "
+                        "(shadow_evidence.prerun_workspace) - the write set of the changed path is UNKNOWN"
+                        % inter.get("monthly_capital", inter.get("UNKNOWN"))[:6])
+        else:
+            import prerun_runner as _prr
+            man = json.load(open(os.path.join(ws, "sync_manifest.json"), encoding="utf-8"))
+            ws_inv = os.path.join(man["ws_isa"], os.path.basename(os.path.abspath(root)))
+            stale = [m for m in sorted(set(x if x.endswith(".py") else x + ".py" for x in (changed_modules or [])))
+                     if os.path.exists(os.path.join(root, m)) and
+                     _sha(open(os.path.join(root, m), "rb").read()) != (
+                         _sha(open(os.path.join(ws_inv, m), "rb").read()) if os.path.exists(os.path.join(ws_inv, m)) else None)]
+            if stale:
+                errs.append("R4.17/R5.12: the SHADOW workspace ran DIFFERENT code from this candidate for %s - re-run it" % stale[:6])
+            changed = _prr._changed_files(ws)
+            shadow = _rc.classify_writes(changed, "monthly_prerun", root=root, before_dir=man["live_isa"], after_dir=man["ws_isa"])
+            for v in shadow["violations"]:
+                errs.append(v["why"])
+    return _gate("artefact_state", GREEN if not errs else RED,
+                 ("artefact contract consistent; %s" % ("SHADOW write set %d file(s) all declared" % shadow["n_changed"]
+                                                       if shadow else "no declared path intersected - no SHADOW write audit owed"))
+                 if not errs else "R4.17: %d finding(s): %s" % (len(errs), "; ".join(errs)[:600]),
+                 path_intersections=inter, shadow_write_set=(shadow or {}).get("classified"),
+                 findings=[{"id": text_finding_id("AS", e), "text": e[:300]} for e in errs])
+
+
+def gate_failure_scope(root: str = HERE) -> dict:
+    try:
+        import run_contracts as _rc
+        g = _rc.failure_scope_gaps(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("failure_scope", ENV_UNKNOWN, "run_contracts unavailable (%s)" % exc)
+    return _gate("failure_scope", GREEN if not g else RED,
+                 "every failure an enrolled orchestrator emits carries a declared scope" if not g else
+                 "R4.18: %d failure(s) with no declared scope: %s" % (len(g), "; ".join(g)[:500]),
+                 findings=[{"id": text_finding_id("FS", e), "text": e[:300]} for e in g])
+
+
+def gate_input_identity(root: str = HERE) -> dict:
+    try:
+        import run_contracts as _rc
+        g = [e for e in _rc.contract_errors(root) if e.startswith("R6.6")] + _rc.input_identity_gaps(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("input_identity", ENV_UNKNOWN, "run_contracts unavailable (%s)" % exc)
+    return _gate("input_identity", GREEN if not g else RED,
+                 "every external input key carries a must-fire boundary check or an owned NOT_PROVABLE" if not g else
+                 "R6.6: %d identity gap(s): %s" % (len(g), "; ".join(g)[:500]),
+                 findings=[{"id": text_finding_id("II", e), "text": e[:300]} for e in g])
+
+
+def gate_runtime_envelope(spec: Optional[dict], root: str = HERE) -> dict:
+    if _absent(spec, "affected_tasks") or not isinstance(spec.get("affected_tasks"), list):
+        return _gate("runtime_envelope", RED, "R5.12: the change contract declares no `affected_tasks` list ([] is an answer)")
+    try:
+        import run_contracts as _rc
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("runtime_envelope", ENV_UNKNOWN, "run_contracts unavailable (%s)" % exc)
+    rows = [_rc.runtime_envelope(t, root) for t in spec["affected_tasks"]]
+    bad = [r for r in rows if r.get("state") != "WITHIN"]
+    return _gate("runtime_envelope", GREEN if not bad else RED,
+                 ("%d affected task(s) fit their declared envelope" % len(rows)) if not bad else
+                 "R5.12: %s" % "; ".join("%s %s: %s" % (r.get("task"), r.get("state"), r.get("why")) for r in bad)[:600],
+                 rows=rows, findings=[{"id": "RE-%s" % (r.get("task") or "?"), "text": str(r.get("why"))[:300]} for r in bad])
+
+
+def gate_temporal_matrix(spec: Optional[dict], root: str = HERE, changed_modules: Optional[List[str]] = None) -> dict:
+    if _absent(spec, "temporal") or not isinstance(spec.get("temporal"), dict):
+        return _gate("temporal_matrix", RED, "R5.14: the change contract declares no `temporal` map ({} is an answer only when no changed module reads the clock)")
+    try:
+        import run_contracts as _rc
+        g = _rc.temporal_gaps(spec["temporal"], changed_modules or [], root)
+    except Exception as exc:                                            # noqa: BLE001
+        return _gate("temporal_matrix", ENV_UNKNOWN, "run_contracts unavailable (%s)" % exc)
+    return _gate("temporal_matrix", GREEN if not g else RED,
+                 "every changed clock-reading module carries its T-1/T/T+1/repeat/next matrix or a reasoned N/A" if not g else
+                 "R5.14: %d gap(s): %s" % (len(g), "; ".join(g)[:600]),
+                 findings=[{"id": text_finding_id("TM", e), "text": e[:300]} for e in g])
+
+
+def gate_path_acceptance(root: str = HERE, changed_modules: Optional[List[str]] = None) -> dict:
+    """R18.6 - informational: which accepted paths this build intersects. GREEN by construction (the
+    REFUSAL lives at the decision boundary: new_capital_control reads system_acceptance currency), but the
+    receipt records the renewal it owes so post-promotion cannot forget it."""
+    inter = _path_intersections(root, changed_modules or [])
+    return _gate("path_acceptance", GREEN if "UNKNOWN" not in inter else ENV_UNKNOWN,
+                 ("intersects %s - SYSTEM_ACCEPTANCE must be renewed on the delivered build before the next "
+                  "decision-effective occurrence (R18.6)" % sorted(inter)) if inter else
+                 "intersects no declared path - existing acceptances remain CURRENT (R18.6)",
+                 requires_renewal=sorted(k for k in inter if k != "UNKNOWN"), intersections=inter)
+
+
+def check_capital_authority_states(root: Optional[str] = None) -> bool:
+    """CAP-release_control typed check (consumption + decision-effective, via capital_run_authority):
+    an unsigned tree is REFUSED, and the recorded rollback reads NOT_ENFORCED - never AUTHORISED."""
+    import tempfile
+    t = tempfile.mkdtemp(prefix="rg_capchk_")
+    try:
+        os.makedirs(os.path.join(t, STATE_REL))
+        a = capital_run_authority("capability_check", t)
+        ok1 = a["authority"] == "REFUSED"
+        import isa_policy as _p
+        had, old = "refuse_untrusted_capital_run" in _p.V2_FLAGS, _p.V2_FLAGS.get("refuse_untrusted_capital_run")
+        _p.V2_FLAGS["refuse_untrusted_capital_run"] = False
+        try:
+            ok2 = capital_run_authority("capability_check", t)["authority"] == "NOT_ENFORCED"
+        finally:
+            if had:
+                _p.V2_FLAGS["refuse_untrusted_capital_run"] = old
+            else:
+                _p.V2_FLAGS.pop("refuse_untrusted_capital_run", None)
+        return bool(ok1 and ok2)
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def certify(root: str = HERE, *, build_id: str, items: List[str],
             changed_modules: List[str], spec: Optional[dict] = None,
             run_surfaces: Optional[dict] = None,
             waivers: Optional[List[dict]] = None,
-            orientation_receipts: Optional[List[dict]] = None) -> dict:
+            orientation_receipts: Optional[List[dict]] = None,
+            baseline_root: Optional[str] = None) -> dict:
     """R18.3 — the only supported route to LIVE. Returns a receipt-shaped certification.
 
     Every gate is GREEN / RED / ENVIRONMENT_UNKNOWN / UNKNOWN. **Only GREEN counts**, and a
@@ -845,10 +1196,16 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                            % (len(unclass), (": " + ", ".join(unclass)) if unclass else ""),
                            unclassified=unclass))
         unt = doc["traceable"]["asserted_untraceable"]
-        gates.append(_gate("no_false_asserted", GREEN if not unt else RED,
-                           "§17: %d rule(s) claimed ASSERTED with no check that FAILS%s"
-                           % (len(unt), (": " + ", ".join(unt)) if unt else ""),
-                           asserted_untraceable=unt,
+        # ISA-0826: a newly claimed ASSERTED rule must also prove check + consumer + gate + negative fixture.
+        _noev = doc["traceable"].get("asserted_without_evidence")
+        if _noev is None:
+            _noev = ["§17: rule_audit published no asserted_without_evidence field - evidence UNKNOWN (R4.3)"]
+        gates.append(_gate("no_false_asserted", GREEN if not unt and not _noev else RED,
+                           "§17: %d rule(s) claimed ASSERTED with no check that FAILS%s; %d without the "
+                           "check/consumer/gate/negative-fixture evidence%s"
+                           % (len(unt), (": " + ", ".join(unt)) if unt else "", len(_noev),
+                              (": " + "; ".join(_noev)[:400]) if _noev else ""),
+                           asserted_untraceable=unt, asserted_without_evidence=_noev,
                            traceable=doc["traceable"]["n_traceable"],
                            claimed=doc["traceable"]["n_claimed_asserted"]))
     except Exception as exc:                                            # noqa: BLE001
@@ -942,10 +1299,12 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                            "R4.15: no run-surface dispositions were supplied. Omission is not "
                            "a verdict (R14.5, KR14)"))
     else:
-        rsd = run_surface_dispositions(run_surfaces)
+        rsd = run_surface_dispositions(run_surfaces, bases=(live_fingerprints(root).get("run_surfaces") or {}).get("basis"))
         gates.append(_gate("run_surface_dispositions", rsd["state"], rsd["why"],
                            undispositioned=rsd["undispositioned"],
-                           unevidenced=rsd["unevidenced"]))
+                           unevidenced=rsd["unevidenced"],
+                           executed_identity_unknown=rsd.get("executed_identity_unknown"),
+                           **({"findings": rsd["findings"]} if rsd.get("findings") else {})))
 
     # 9 — R7.8: the items this build claims are validated against the CURRENT Trusted Build.
     prev = load_receipt(root)
@@ -1024,6 +1383,22 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
                        "every certifiable surface fingerprinted from this host",
                        unknowns=envs))
 
+    # 13-20 — ISA-0826 certification contract gates (R19.3, R12.3, R4.17, R4.18, R6.6, R5.12, R5.14, R18.6).
+    if _contract_gates_on():
+        gates.append(gate_analysis_binding(spec, root))
+        gates.append(gate_parameter_contract(spec, root, baseline_root))
+        gates.append(gate_artefact_state(spec, root, changed_modules))
+        gates.append(gate_failure_scope(root))
+        gates.append(gate_input_identity(root))
+        gates.append(gate_runtime_envelope(spec, root))
+        gates.append(gate_temporal_matrix(spec, root, changed_modules))
+        gates.append(gate_path_acceptance(root, changed_modules))
+    else:
+        for _n in ("analysis_binding", "parameter_contract", "artefact_state", "failure_scope",
+                   "input_identity", "runtime_envelope", "temporal_matrix", "path_acceptance"):
+            gates.append(_gate(_n, "NOT_ENFORCED", "isa_policy.V2_FLAGS['run_contract_gates'] is False (R4.13 "
+                                                   "rollback) - recorded, never GREEN"))
+
     for g in gates:
         if g["state"] != GREEN and not g.get("findings"):
             g["findings"] = [{"id": "G-%s" % g["gate"], "text": str(g.get("why"))[:300]}]
@@ -1046,6 +1421,8 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
         "items": items,
         "changed_modules": sorted(set(changed_modules)),
         "previous_build_id": (prev or {}).get("build_id"),
+        "requires_system_acceptance_renewal": next((g.get("requires_renewal") for g in gates
+                                                    if g["gate"] == "path_acceptance"), None),
         "fingerprints": fps,
         "basis": ("R18.3 — one canonical release gate is the only supported route to LIVE. Only "
                   "GREEN counts; ENVIRONMENT_UNKNOWN blocks rather than passes (R4.3, R5.12); a "
@@ -1726,6 +2103,71 @@ def _selftest(verbose: bool = True) -> int:
        "under _candidate_evidence is not source)", _got == ["keep.py", "pkg/k2.py"], _got)
     import shutil as _sh710
     _sh710.rmtree(_t710, ignore_errors=True)
+
+    # ── ISA-0826/0828/0829/0830 · certification contract gates (each a pure function certify() consumes) ──
+    ok("ISA-0830: the artefact contract is a SIGNED config file",
+       os.path.join("Dashboard", "state", "artefact_contracts.json") in CONFIG_FILES)
+    ok("ISA-0829 MUST-FIRE (R19.3): a change contract with no analysis_authority is RED",
+       gate_analysis_binding({}, HERE)["state"] == RED)
+    ok("ISA-0829 MUST-FIRE: analysis not_required without a reason is RED; with one it is GREEN",
+       gate_analysis_binding({"analysis_authority": {"not_required": "x"}}, HERE)["state"] == RED and
+       gate_analysis_binding({"analysis_authority": {"not_required": "a mechanical XS repair with no empirical question"}},
+                             HERE)["state"] == GREEN)
+    import analysis_acceptance as _dp_t
+    _ac = _dp_t.analysis_currency
+    try:
+        _dp_t.analysis_currency = lambda aid, fp=None, root=None, today=None: {"state": "STALE", "why": "fixture: anchored input changed"}
+        _g = gate_analysis_binding({"analysis_authority": {"analysis_id": "A", "fingerprint": "f"}}, HERE)
+        ok("ISA-0829 MUST-FIRE (handoff case 7): a BuildSpec bound to a STALE analysis is RED REVALIDATION_REQUIRED",
+           _g["state"] == RED and "REVALIDATION_REQUIRED" in _g["why"], _g)
+        _dp_t.analysis_currency = lambda aid, fp=None, root=None, today=None: {"state": "HASH_MISMATCH", "why": "fixture"}
+        ok("ISA-0829 MUST-FIRE: a BuildSpec bound to a DIFFERENT analysis hash is RED",
+           gate_analysis_binding({"analysis_authority": {"analysis_id": "A", "fingerprint": "f2"}}, HERE)["state"] == RED)
+        _dp_t.analysis_currency = lambda aid, fp=None, root=None, today=None: {"state": "CURRENT", "why": "fixture", "receipt": "AA-x"}
+        ok("ISA-0829 NEGATIVE CONTROL: bound to a CURRENT accepted analysis is GREEN",
+           gate_analysis_binding({"analysis_authority": {"analysis_id": "A", "fingerprint": "f"}}, HERE)["state"] == GREEN)
+    finally:
+        _dp_t.analysis_currency = _ac
+    ok("ISA-0829 MUST-FIRE (R12.3): a change contract with no parameters_changed list is RED",
+       gate_parameter_contract({}, HERE)["state"] == RED)
+    _pa, _pb = tempfile.mkdtemp(), tempfile.mkdtemp()
+    for _r, _v in ((_pa, "66.0"), (_pb, "65.0")):
+        with open(os.path.join(_r, "isa_rationale_ledger.py"), "w") as fh:
+            fh.write("CAPITAL_GATING = {'APS_FRESH_CAPITAL_BAR': ('scoring_config.py', 'x')}\n")
+        with open(os.path.join(_r, "scoring_config.py"), "w") as fh:
+            fh.write("APS_FRESH_CAPITAL_BAR = %s\n" % _v)
+    _g = gate_parameter_contract({"parameters_changed": []}, _pa, baseline_root=_pb)
+    ok("ISA-0829 MUST-FIRE (handoff case 4): an UNDECLARED capital-gating value change vs the baseline is RED",
+       _g["state"] == RED and any("NOT declared" in e for e in _g.get("errors") or []), _g)
+    _g = gate_parameter_contract({"parameters_changed": ["APS_FRESH_CAPITAL_BAR"]}, _pa, baseline_root=_pb)
+    ok("ISA-0829 MUST-FIRE: a DECLARED change whose form is still REVIEW_PENDING (not ANALYSED) is RED",
+       _g["state"] == RED and any("ANALYSED form contract" in e for e in _g.get("errors") or []), _g)
+    ok("ISA-0829 NEGATIVE CONTROL: no capital-gating change vs the baseline is GREEN",
+       gate_parameter_contract({"parameters_changed": []}, _pb, baseline_root=_pb)["state"] == GREEN)
+    ok("ISA-0830 MUST-FIRE (R5.12): no affected_tasks list is RED; an undeclared envelope is RED",
+       gate_runtime_envelope({}, HERE)["state"] == RED and
+       gate_runtime_envelope({"affected_tasks": ["no-such-task"]}, HERE)["state"] == RED)
+    ok("ISA-0830 MUST-FIRE (R5.14): no temporal map is RED",
+       gate_temporal_matrix({}, HERE, ["release_gate"])["state"] == RED)
+    _rsd = {s_: {"verdict": "VERIFIED_NO_CHANGE", "evidence": "x", "tasks": ["isa-monthly-prerun"]} for s_ in RUN_SURFACES}
+    _r1 = run_surface_dispositions(_rsd, bases={"isa-monthly-prerun": "mirror"})
+    ok("ISA-0830 MUST-FIRE (handoff case 15, R4.15 ENFORCED): VERIFIED_NO_CHANGE on a MIRROR-only executed surface "
+       "is UNKNOWN with an owned-waivable finding", _r1["state"] == UNKNOWN and
+       any(f["id"].startswith("ES-executed_skill-isa-monthly-prerun") for f in _r1.get("findings") or []), _r1)
+    ok("ISA-0830 NEGATIVE CONTROL: the same verdict on a canonical_loaded surface is GREEN",
+       run_surface_dispositions(_rsd, bases={"isa-monthly-prerun": "canonical_loaded"})["state"] == GREEN)
+    ok("ISA-0830 back-compat: without bases the R4.15 presence check is unchanged",
+       run_surface_dispositions(_rsd)["state"] == GREEN)
+    ok("ISA-0826 CAP-release_control typed check: unsigned -> REFUSED, rollback -> NOT_ENFORCED",
+       check_capital_authority_states())
+    ok("ISA-0830: the real tree's failure scopes and input identities are fully declared",
+       gate_failure_scope(HERE)["state"] == GREEN and gate_input_identity(HERE)["state"] == GREEN,
+       (gate_failure_scope(HERE)["why"], gate_input_identity(HERE)["why"]))
+    _pi = gate_path_acceptance(HERE, ["vci_" + "screener" + ".py"])
+    ok("ISA-0828 (handoff case 17): a VCI-screener-only change intersects no monthly path and owes no renewal",
+       _pi["state"] == GREEN and _pi["requires_renewal"] == [], _pi)
+    ok("ISA-0828 (handoff case 16): a capital_destination change owes a monthly_capital acceptance renewal",
+       gate_path_acceptance(HERE, ["capital_destination.py"])["requires_renewal"] == ["monthly_capital"])
 
     if verbose:
         print("\nrelease_gate selftest: %d assertion(s), %d FAIL(s)%s"

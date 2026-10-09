@@ -730,6 +730,9 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
         raise ValueError("register contract breach:\n  - " + "\n  - ".join(errs))
 
     existing = {i["id"]: i for i in _read_all()}
+    _agate = analysis_gate_errors(item, existing.get(item["id"]))
+    if _agate:
+        raise ValueError("register contract breach (ISA-0829, R7.8/R13.7):\n  - " + "\n  - ".join(_agate))
     if item["id"] in existing and not allow_update:
         raise ValueError(f"{item['id']} already exists; pass allow_update=True to supersede (R7.6)")
     if item["id"] in existing:
@@ -746,6 +749,53 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
             fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
     _commit_highwater(item["id"])          # ISA-0661: the mark follows the row, not the name
     return item
+
+
+# ⚑ ISA-0829 (R7.8 amended / R13.7, 04-Oct-2026) — BUILD_READY ON ANALYSIS THAT IS NOT CURRENT IS REFUSED.
+#   ISA-0333 stood BUILD_READY on a 16-Aug corrective action for five weeks after the 28-Sep adjudication
+#   replaced its target state; ISA-0740 stood BUILD_READY on a SHADOW ceiling the LIVE engine had overtaken.
+#   Nothing could refuse it because no item said WHICH analysis its design rested on. The gate binds on the
+#   TRANSITION (to BUILD_READY, or a change of the bound analysis) - history is not re-litigated (R7.5); the
+#   standing population is reported by build_authority() as ANALYSIS_STALE / UNDECLARED.
+_LIVE_FOR_GATE = ("OPEN", "IN_PROGRESS", "BLOCKED_ON_RAJ", "DEFERRED")
+MIN_ANALYSIS_REASON = 30
+
+
+def _analysis_currency(ref: dict) -> dict:
+    try:
+        import analysis_acceptance as _aa
+        return _aa.analysis_currency(ref.get("analysis_id"), ref.get("fingerprint"))
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "UNKNOWN", "why": "analysis currency unreadable (%s: %s)" % (type(exc).__name__, exc)}
+
+
+def analysis_gate_errors(item: dict, prev: dict = None, currency=None) -> list:
+    """[] unless `item` is BECOMING build-ready (or re-binding its analysis) without the authority to."""
+    if item.get("build_readiness") != "BUILD_READY" or item.get("state") not in _LIVE_FOR_GATE:
+        return []
+    prev = prev or {}
+    if prev.get("build_readiness") == "BUILD_READY" and \
+            prev.get("analysis_acceptance_ref") == item.get("analysis_acceptance_ref") and \
+            prev.get("analysis_dependency") == item.get("analysis_dependency"):
+        return []                                                       # not a transition (R7.5: no re-litigation)
+    dep = item.get("analysis_dependency")
+    if dep not in ("REQUIRED", "NOT_REQUIRED"):
+        return ["%s: becoming BUILD_READY requires analysis_dependency REQUIRED|NOT_REQUIRED - silence is not N/A (R7.8, R13.7)"
+                % item.get("id")]
+    if dep == "NOT_REQUIRED":
+        if len(str(item.get("analysis_dependency_reason") or "").strip()) < MIN_ANALYSIS_REASON:
+            return ["%s: analysis_dependency NOT_REQUIRED needs analysis_dependency_reason (>= %d chars)"
+                    % (item.get("id"), MIN_ANALYSIS_REASON)]
+        return []
+    ref = item.get("analysis_acceptance_ref")
+    if not isinstance(ref, dict) or not ref.get("analysis_id") or not ref.get("fingerprint"):
+        return ["%s: analysis_dependency REQUIRED but no analysis_acceptance_ref {analysis_id, fingerprint} (R13.7)"
+                % item.get("id")]
+    cur = (currency or _analysis_currency)(ref)
+    if cur.get("state") != "CURRENT":
+        return ["%s: the bound analysis %s is %s - %s. REVALIDATION_REQUIRED, not BUILD_READY (R7.8)"
+                % (item.get("id"), ref.get("analysis_id"), cur.get("state"), cur.get("why"))]
+    return []
 
 
 def get(item_id: str) -> dict:
@@ -974,6 +1024,13 @@ def build_authority(item: dict, current_build_id) -> dict:
                 "why": ("R7.8: validated against %s; the current Trusted Build is %s. The "
                         "defect, its systemic cause and its corrective action must be proven "
                         "still to fit before work starts (KR13)." % (against, current_build_id))}
+    if item.get("analysis_dependency") == "REQUIRED":
+        cur = _analysis_currency(item.get("analysis_acceptance_ref") or {})
+        if cur.get("state") != "CURRENT":
+            return {"authority": "ANALYSIS_STALE", "current": False,
+                    "validated_against_build_id": against, "analysis": cur,
+                    "why": ("ISA-0829/R7.8: build-current, but the analysis its design rests on is %s - %s"
+                            % (cur.get("state"), cur.get("why")))}
     return {"authority": "BUILD_READY", "current": True,
             "validated_against_build_id": against,
             "why": "validated against the current Trusted Build"}
@@ -1624,6 +1681,27 @@ def selftest(verbose: bool = True) -> int:
     ok(any(d["doc"] == "ISA_BuildSpec_Fixture_Study_25Sep2026.md" for d in (_w.get("studies") or [])),
        "ISA-0733: write() attaches the study the item names (reported on_disk=false, never dropped)")
 
+    # ── ISA-0829 (R7.8/R13.7): BUILD_READY on analysis that is not CURRENT is refused ─────────────
+    _cur = lambda ref: {"state": "CURRENT"} if ref.get("fingerprint") == "fp-ok" else {"state": "STALE", "why": "fixture"}   # noqa: E731
+    _base = {"id": "ISA-9990", "state": "OPEN", "build_readiness": "BUILD_READY"}
+    ok(analysis_gate_errors(dict(_base), {"build_readiness": "ANALYSIS_FIRST"}, _cur) != [],
+       "ISA-0829 MUST-FIRE: ANALYSIS_FIRST -> BUILD_READY with no analysis_dependency is refused (silence is not N/A)")
+    ok(analysis_gate_errors(dict(_base, analysis_dependency="REQUIRED",
+                                 analysis_acceptance_ref={"analysis_id": "A", "fingerprint": "fp-old"}),
+                            {"build_readiness": "ANALYSIS_FIRST"}, _cur) != [],
+       "ISA-0829 MUST-FIRE (handoff case 7 analogue): BUILD_READY bound to a STALE analysis is refused")
+    ok(analysis_gate_errors(dict(_base, analysis_dependency="REQUIRED",
+                                 analysis_acceptance_ref={"analysis_id": "A", "fingerprint": "fp-ok"}),
+                            {"build_readiness": "ANALYSIS_FIRST"}, _cur) == [],
+       "ISA-0829 NEGATIVE CONTROL: BUILD_READY bound to a CURRENT accepted analysis is admitted")
+    ok(analysis_gate_errors(dict(_base, analysis_dependency="NOT_REQUIRED", analysis_dependency_reason="short"),
+                            None, _cur) != [] and
+       analysis_gate_errors(dict(_base, analysis_dependency="NOT_REQUIRED",
+                                 analysis_dependency_reason="a measured defect whose fix is mechanical; no empirical question"),
+                            None, _cur) == [],
+       "ISA-0829: NOT_REQUIRED needs a real reason; with one it is admitted")
+    ok(analysis_gate_errors(dict(_base), dict(_base), _cur) == [],
+       "ISA-0829 R7.5: an item ALREADY BUILD_READY with nothing re-bound is not re-litigated by an unrelated update")
     shutil.rmtree(tmp, ignore_errors=True)
     os.environ.pop("ISA_REGISTER_STORE", None)
     _schema_cache.clear()

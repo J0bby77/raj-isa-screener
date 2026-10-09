@@ -492,7 +492,8 @@ def _held_tickers():
     try:
         import glob as _g, json as _j, os as _o
         _d = _o.path.dirname(_o.path.abspath(__file__))
-        _files = sorted(_g.glob(_o.path.join(_d, "portfolio_data_*.json")),
+        import month_artefacts as _MA                      # ISA-0832: archive-aware
+        _files = sorted(_MA.month_glob(_d, "portfolio_data_*.json"),
                         key=_o.path.getmtime, reverse=True)
         if _files:
             _pd = _j.load(open(_files[0]))

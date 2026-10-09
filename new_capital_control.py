@@ -251,6 +251,24 @@ def status(root: str = HERE, policy: Optional[dict] = None) -> dict:
                        "; ".join((pol.get("conflicts") or []) + (pol.get("unknowns") or []) +
                                  ([pol.get("why")] if pol.get("why") else []))[:300]))
     blocks = (st != OPEN) or (pol.get("state") != POLICY_RESOLVED)
+    # ⚑ ISA-0828 (R18.6, 04-Oct-2026): an OPEN control is only as good as the acceptance it cites. Before
+    #   this, status() reported OPEN from the last record and never asked whether its SYSTEM_ACCEPTANCE was
+    #   still CURRENT, so an intersecting promotion left new stock capital OPEN on a stale acceptance.
+    #   The cited acceptance must be CURRENT for the monthly capital path (or a governed ROLLBACK reference);
+    #   anything else - STALE, unreadable - BLOCKS (R4.3). A fixture book with no Trusted receipt is
+    #   UNGOVERNED_ROOT (capital_run_authority REFUSES such a tree upstream: NO_RECEIPT).
+    acceptance = None
+    if st == OPEN:
+        try:
+            import system_acceptance as _sa828
+            acceptance = _sa828.acceptance_currency((last or {}).get("acceptance_ref"), root)
+        except Exception as exc:                                        # noqa: BLE001
+            acceptance = {"state": "UNKNOWN", "why": "acceptance currency unreadable (%s: %s)" % (type(exc).__name__, exc)}
+        if acceptance.get("state") not in ("CURRENT", "ROLLBACK", "UNGOVERNED_ROOT"):
+            blocks = True
+            reasons.insert(0, "ACCEPTANCE_NOT_CURRENT (ISA-0828, R18.6): the OPEN record cites %s, which is %s - %s. "
+                              "Renew system acceptance on the delivered build and re-open citing it."
+                           % ((last or {}).get("acceptance_ref"), acceptance.get("state"), str(acceptance.get("why"))[:300]))
     if st == BLOCK and last:
         reasons.insert(0, "BLOCK_NEW_STOCK_CAPITAL recorded %s by %s: %s"
                        % (last.get("recorded_at"), last.get("recorded_by"), last.get("reason")))
@@ -266,6 +284,7 @@ def status(root: str = HERE, policy: Optional[dict] = None) -> dict:
         "occurrence": (last or {}).get("occurrence"),
         "record_id": (last or {}).get("record_id"),
         "acceptance_ref": (last or {}).get("acceptance_ref") if st == OPEN else None,
+        "acceptance": acceptance,
         "reasons": reasons,
         "policy_state": pol.get("state"),
         "policy_hard_max": (pol.get("hard_max") or {}).get("state"),
@@ -405,6 +424,25 @@ def _selftest(verbose: bool = True) -> int:
            s2["blocks_new_stock_capital"] is False and s2["acceptance_ref"] == "SA-TEST-1", s2)
         ok("NEGATIVE CONTROL: OPEN record + POLICY_AUTHORITY_CONFLICT still blocks",
            status(base, policy=stock_sleeve_policy(bad))["blocks_new_stock_capital"] is True)
+        # ── ISA-0828 (R18.6): OPEN is only as good as the acceptance it cites ───────────────────────
+        import system_acceptance as _sa_t
+        _orig_ac = _sa_t.acceptance_currency
+        try:
+            _sa_t.acceptance_currency = lambda ref, root=None, path_id=None: {"state": "STALE", "why": "fixture: intersecting change"}
+            _s = status(base)
+            ok("ISA-0828 MUST-FIRE (handoff case 16): an OPEN record citing a STALE acceptance BLOCKS new stock capital",
+               _s["blocks_new_stock_capital"] is True and _s["reasons"][0].startswith("ACCEPTANCE_NOT_CURRENT"), _s)
+            _sa_t.acceptance_currency = lambda ref, root=None, path_id=None: {"state": "CURRENT", "why": "fixture"}
+            ok("ISA-0828 NEGATIVE CONTROL: the same OPEN record citing a CURRENT acceptance does not block",
+               status(base)["blocks_new_stock_capital"] is False)
+
+            def _boom(ref, root=None, path_id=None):
+                raise RuntimeError("store unreadable")
+            _sa_t.acceptance_currency = _boom
+            ok("ISA-0828 FAIL-CLOSED: an unreadable acceptance BLOCKS (R4.3)",
+               status(base)["blocks_new_stock_capital"] is True)
+        finally:
+            _sa_t.acceptance_currency = _orig_ac
         # tamper: edit history -> chain breaks -> UNKNOWN -> blocks
         sp = store_path(base)
         with open(sp, encoding="utf-8") as fh:
