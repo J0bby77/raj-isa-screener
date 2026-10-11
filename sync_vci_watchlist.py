@@ -4,8 +4,10 @@ sync_vci_watchlist.py  --  VCI Watchlist Sync + Part A Refresh
 Version: 1.1  |  2026-06-10 (ACS8 sourced from scorer; A10/A11 + bottleneck-FV passed through and persisted; reliability guard never degrades a score on a missing/inconsistent breakdown)
 
 Purpose:
-    Reads project_isa_vci_watchlist.md (the authoritative VCI memory file,
-    updated by update_vci_watchlist.py after each VCI run), refreshes VCI
+    Reads the newest dated VCI watchlist markdown the pre-run selects (ISA-0792/ISA-0796): the GENERATED
+    VIEW project_isa_vci_watchlist.md of the canonical store Dashboard/state/vci_watchlist.json (written by
+    update_vci_watchlist.py after each VCI run - no longer a memory file) or the VCI run's
+    project_vci_output_<mmm>_<yyyy>.md, refreshes VCI
     Part A scores by calling vci_acs_scorer.py, recomputes ACS using fresh
     Part A and stored Part B dimension scores, and writes the updated VCI
     candidate data back into watchlist_tickers.json's vci_watchlist section.

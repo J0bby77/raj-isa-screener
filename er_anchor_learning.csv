@@ -5829,3 +5829,139 @@ run_date,group,ticker,sector,er_multiple_field,er_multiple_value,er_anchor_xs,er
 20261009,NASDAQ,ZG,Communication Services,fwd_pe,10.096644,11.8659,,11.8659,,False,cross_sectional,8.4,30.8,0.0,39.2,0.9,False,False,cross_sectional_primary
 20261009,NASDAQ,ZM,Technology,fwd_pe,14.927562,20.7114,33.2,20.7114,-37.6,True,cross_sectional,10.0,3.3,0.0,13.3,0.9,False,True,cross_sectional_primary
 20261009,NASDAQ,ZS,Technology,fwd_pe,38.702248,20.7114,,20.7114,,False,cross_sectional,-2.5,14.6,0.0,12.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,ROR.L,Industrials,ev_ebitda,19.791,10.44,,10.44,,False,cross_sectional,-2.5,6.5,0.0,4.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,ENT.L,Consumer Cyclical,fwd_pe,6.759988,11.0429,,11.0429,,False,cross_sectional,10.0,15.3,0.0,25.3,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,CWK.L,Consumer Defensive,fwd_pe,14.722734,11.5421,20.1,11.5421,-42.6,True,cross_sectional,-2.5,6.9,0.0,4.4,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,BME.L,Consumer Defensive,fwd_pe,11.21234,11.5421,10.0,11.5421,15.4,False,cross_sectional,0.0,8.4,0.0,8.4,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,HBR.L,Energy,ev_ebitda,1.779,10.9835,,10.9835,,False,cross_sectional,10.0,-4.9,0.0,5.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,MTO.L,Industrials,ev_ebitda,11.043,10.44,,10.44,,False,cross_sectional,0.0,15.0,0.0,15.0,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SRP.L,Industrials,ev_ebitda,12.07,10.44,,10.44,,False,cross_sectional,-1.7,8.7,0.0,7.0,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,TCAP.L,Financial Services,fwd_pe,8.765705,14.2784,12.7,14.2784,12.4,False,cross_sectional,10.0,7.4,0.0,17.4,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,HILS.L,Industrials,ev_ebitda,11.311,10.44,,10.44,,False,cross_sectional,0.0,10.3,0.0,10.3,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,HIK.L,Healthcare,fwd_pe,8.552601,20.8282,15.9,20.8282,31.0,True,cross_sectional,10.0,8.6,0.0,18.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,GRG.L,Consumer Cyclical,fwd_pe,15.983743,11.0429,18.7,11.0429,-40.9,True,cross_sectional,-2.5,2.6,0.0,0.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,KLR.L,Industrials,ev_ebitda,7.677,10.44,,10.44,,False,cross_sectional,10.0,7.9,0.0,17.9,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,HTWS.L,Communication Services,fwd_pe,18.835985,16.1836,40.2,16.1836,-59.7,True,cross_sectional,-1.8,37.5,0.0,35.7,0.9,True,False,cross_sectional_primary
+20261010,F250-SPI,TATE.L,Consumer Defensive,fwd_pe,13.039421,11.5421,14.0,11.5421,-17.6,False,cross_sectional,-1.5,15.7,0.0,14.2,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,INCH.L,Consumer Cyclical,fwd_pe,6.911863,11.0429,10.7,11.0429,3.2,False,cross_sectional,10.0,12.9,0.0,22.9,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,MGNS.L,Industrials,ev_ebitda,6.056,10.44,,10.44,,False,cross_sectional,10.0,-5.3,0.0,4.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,PNN.L,Utilities,ev_ebitda,12.387,10.9835,,10.9835,,False,cross_sectional,-1.5,7.8,0.0,6.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,GFTU.L,Industrials,ev_ebitda,10.44,10.44,,10.44,,False,cross_sectional,0.0,9.9,0.0,9.9,0.7,False,False,cross_sectional_primary
+20261010,F250-SPI,WOSG.L,Consumer Cyclical,fwd_pe,11.717744,11.0429,20.5,11.0429,-46.1,True,cross_sectional,0.0,10.8,0.0,10.8,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,GNC.L,Consumer Defensive,fwd_pe,10.845471,11.5421,16.4,11.5421,-29.6,True,cross_sectional,0.0,20.7,0.0,20.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,CKN.L,Industrials,ev_ebitda,12.717,10.44,,10.44,,False,cross_sectional,-2.3,-3.6,0.0,-5.9,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SSPG.L,Consumer Cyclical,fwd_pe,11.387609,11.0429,140.9,11.0429,-92.2,True,cross_sectional,0.0,19.1,0.0,19.1,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,CURY.L,Consumer Cyclical,fwd_pe,9.643537,11.0429,9.5,11.0429,16.2,False,cross_sectional,7.0,10.2,0.0,17.2,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,PFD.L,Consumer Defensive,fwd_pe,11.542123,11.5421,13.0,11.5421,-11.2,False,cross_sectional,0.0,5.8,0.0,5.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,FOUR.L,Communication Services,fwd_pe,16.200874,16.1836,11.8,16.1836,37.1,True,cross_sectional,0.0,4.7,0.0,4.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,ENOG.L,Energy,ev_ebitda,4.341,10.9835,,10.9835,,False,cross_sectional,10.0,40.0,0.0,50.0,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,KNOS.L,Technology,fwd_pe,21.17643,18.3252,33.1,18.3252,-44.6,True,cross_sectional,-1.7,11.3,0.0,9.6,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,FGP.L,Industrials,ev_ebitda,6.37,10.44,,10.44,,False,cross_sectional,10.0,-3.6,0.0,6.4,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,DNLM.L,Consumer Cyclical,fwd_pe,9.941309,11.0429,14.6,11.0429,-24.4,False,cross_sectional,5.4,4.7,0.0,10.1,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,ZIG.L,Industrials,ev_ebitda,4.448,10.44,,10.44,,False,cross_sectional,10.0,7.1,0.0,17.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,GAMA.L,Communication Services,fwd_pe,10.903582,16.1836,20.6,16.1836,-21.4,False,cross_sectional,10.0,8.0,0.0,18.0,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,BYIT.L,Technology,fwd_pe,18.32518,18.3252,22.4,18.3252,-18.2,False,cross_sectional,0.0,9.5,0.0,9.5,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,PETS.L,Consumer Cyclical,fwd_pe,11.621265,11.0429,12.5,11.0429,-11.7,False,cross_sectional,0.0,11.8,0.0,11.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,VLX.L,Industrials,ev_ebitda,10.12,10.44,,10.44,,False,cross_sectional,0.0,11.5,0.0,11.5,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,WIZZ.L,Industrials,ev_ebitda,28.656,10.44,,10.44,,False,cross_sectional,-2.5,42.1,0.0,39.6,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,MONY.L,Communication Services,fwd_pe,9.306167,16.1836,14.1,16.1836,14.8,False,cross_sectional,10.0,7.1,0.0,17.1,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,DOM.L,Consumer Cyclical,fwd_pe,12.207385,11.0429,13.6,11.0429,-18.8,False,cross_sectional,0.0,4.8,0.0,4.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,BREE.L,Basic Materials,ev_ebitda,6.692,19.1425,,19.1425,,False,cross_sectional,10.0,11.7,0.0,21.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,MOON.L,Consumer Cyclical,fwd_pe,12.836364,11.0429,20.9,11.0429,-47.2,True,cross_sectional,-1.8,15.0,0.0,13.2,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,TRST.L,Technology,fwd_pe,31.153233,18.3252,91.3,18.3252,-79.9,True,cross_sectional,-2.5,34.8,0.0,32.3,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,CVSG.L,Healthcare,fwd_pe,11.371128,20.8282,54.2,20.8282,-61.6,True,cross_sectional,10.0,8.9,0.0,18.9,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,MAB.L,Consumer Cyclical,fwd_pe,8.590756,11.0429,9.9,11.0429,11.5,False,cross_sectional,10.0,7.0,0.0,17.0,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,TRN.L,Consumer Cyclical,fwd_pe,7.5364404,11.0429,60.9,11.0429,-81.9,True,cross_sectional,10.0,11.7,0.0,21.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,VTY.L,Consumer Cyclical,fwd_pe,5.422015,11.0429,14.8,11.0429,-25.4,True,cross_sectional,10.0,39.5,0.0,49.5,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,AVON.L,Industrials,ev_ebitda,20.278,10.44,,10.44,,False,cross_sectional,-2.5,11.5,0.0,9.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SPI.L,Healthcare,fwd_pe,14.384718,20.8282,39.1,20.8282,-46.7,True,cross_sectional,10.0,43.7,0.0,53.7,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,GFRD.L,Industrials,ev_ebitda,9.12,10.44,,10.44,,False,cross_sectional,7.0,8.2,0.0,15.2,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,XPS.L,Consumer Cyclical,fwd_pe,12.278118,11.0429,28.3,11.0429,-61.0,True,cross_sectional,-1.3,8.1,0.0,6.8,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,HFD.L,Consumer Cyclical,fwd_pe,12.619816,11.0429,15.2,11.0429,-27.3,True,cross_sectional,-1.6,1.9,0.0,0.3,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,HFG.L,Consumer Defensive,fwd_pe,12.636147,11.5421,20.1,11.5421,-42.6,True,cross_sectional,0.0,8.2,0.0,8.2,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SMWH.L,Consumer Cyclical,fwd_pe,10.115154,11.0429,23.3,11.0429,-52.6,True,cross_sectional,0.0,-4.4,0.0,-4.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,CMCX.L,Financial Services,fwd_pe,10.314924,14.2784,11.3,14.2784,26.4,True,cross_sectional,10.0,10.2,0.0,20.2,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,BAG.L,Consumer Defensive,fwd_pe,10.7701,11.5421,17.7,11.5421,-34.8,True,cross_sectional,0.0,8.2,0.0,8.2,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,BMY.L,Communication Services,fwd_pe,16.166227,16.1836,17.2,16.1836,-5.9,False,cross_sectional,0.0,-10.4,0.0,-10.4,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,RPI.L,Technology,fwd_pe,44.76735,18.3252,35.5,18.3252,-48.4,True,cross_sectional,-2.5,-5.1,0.0,-7.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,HTG.L,Energy,ev_ebitda,6.847,10.9835,,10.9835,,False,cross_sectional,10.0,26.2,0.0,36.2,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,WIX.L,Consumer Cyclical,fwd_pe,9.597479,11.0429,13.3,11.0429,-17.0,False,cross_sectional,7.3,17.5,0.0,24.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,BOWL.L,Consumer Cyclical,fwd_pe,10.299779,11.0429,14.4,11.0429,-23.3,False,cross_sectional,0.0,8.7,0.0,8.7,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,ATG.L,Communication Services,fwd_pe,13.292583,16.1836,25.4,16.1836,-36.3,True,cross_sectional,10.0,18.1,0.0,28.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,APN.L,Consumer Defensive,fwd_pe,19.72593,11.5421,28.0,11.5421,-58.8,True,cross_sectional,-2.5,11.4,0.0,8.9,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,AEP.L,Consumer Defensive,fwd_pe,9.920194,11.5421,4.4,11.5421,162.3,True,cross_sectional,7.9,-11.3,0.0,-3.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,PINE.L,Technology,fwd_pe,28.603315,18.3252,6.1,18.3252,200.4,True,cross_sectional,-2.5,43.5,0.0,41.0,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,AO.L,Consumer Cyclical,fwd_pe,11.518987,11.0429,44.6,11.0429,-75.2,True,cross_sectional,0.0,13.7,0.0,13.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,PPH.L,Consumer Cyclical,fwd_pe,11.201249,11.0429,35.9,11.0429,-69.2,True,cross_sectional,0.0,10.7,0.0,10.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,MEGP.L,Industrials,ev_ebitda,3.716,10.44,,10.44,,False,cross_sectional,10.0,13.2,0.0,23.2,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,YNGA.L,Consumer Cyclical,fwd_pe,12.677723,11.0429,45.8,11.0429,-75.9,True,cross_sectional,-1.7,7.6,0.0,5.9,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,ALFA.L,Technology,fwd_pe,15.63746,18.3252,21.2,18.3252,-13.6,False,cross_sectional,8.3,9.6,0.0,17.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,RNK.L,Consumer Cyclical,fwd_pe,6.288587,11.0429,22.0,11.0429,-49.8,True,cross_sectional,10.0,25.0,0.0,35.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,DATA.L,Industrials,ev_ebitda,6.299,10.44,,10.44,,False,cross_sectional,10.0,7.6,0.0,17.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,PRN.L,Consumer Defensive,fwd_pe,9.37261,11.5421,151.1,11.5421,-92.4,True,cross_sectional,10.0,16.5,0.0,26.5,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,NOVN.SW,Healthcare,fwd_pe,14.530841,20.8282,14.5,20.8282,43.6,True,cross_sectional,10.0,11.1,0.0,21.1,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,ABBN.SW,Industrials,ev_ebitda,20.54,10.44,,10.44,,False,cross_sectional,-2.5,12.2,0.0,9.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,CFR.SW,Consumer Cyclical,fwd_pe,21.360691,11.0429,33.8,11.0429,-67.3,True,cross_sectional,-2.5,14.9,0.0,12.4,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,LONN.SW,Healthcare,fwd_pe,25.942703,20.8282,38.5,20.8282,-45.9,True,cross_sectional,-2.5,19.0,0.0,16.5,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,GALD.SW,Healthcare,fwd_pe,29.64218,20.8282,,20.8282,,False,cross_sectional,-2.5,33.5,0.0,31.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SDZ.SW,Healthcare,fwd_pe,18.43581,20.8282,27.0,20.8282,-22.9,False,cross_sectional,6.3,12.0,0.0,18.3,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,SIKA.SW,Basic Materials,ev_ebitda,16.95,19.1425,,19.1425,,False,cross_sectional,6.3,11.7,0.0,17.9,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,ALC.SW,Healthcare,fwd_pe,14.599837,20.8282,34.7,20.8282,-40.0,True,cross_sectional,10.0,24.5,0.0,34.5,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,GIVN.SW,Basic Materials,ev_ebitda,22.818,19.1425,,19.1425,,False,cross_sectional,-2.1,10.9,0.0,8.8,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,DSFIR.SW,Basic Materials,ev_ebitda,21.335,19.1425,,19.1425,,False,cross_sectional,-1.3,18.8,0.0,17.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SCMN.SW,Communication Services,fwd_pe,20.11855,16.1836,14.9,16.1836,8.6,False,cross_sectional,-2.5,11.1,0.0,8.6,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,SGSN.SW,Industrials,ev_ebitda,17.72,10.44,,10.44,,False,cross_sectional,-2.5,9.1,0.0,6.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,AMRZ.SW,Basic Materials,ev_ebitda,7.911,19.1425,,19.1425,,False,cross_sectional,10.0,15.2,0.0,25.2,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,LOGN.SW,Technology,fwd_pe,16.4314,18.3252,18.9,18.3252,-3.0,False,cross_sectional,5.6,7.8,0.0,13.4,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,STMN.SW,Healthcare,fwd_pe,23.326218,20.8282,43.7,20.8282,-52.3,True,cross_sectional,-1.4,16.8,0.0,15.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,LISN.SW,Consumer Defensive,fwd_pe,24.242786,11.5421,35.9,11.5421,-67.8,True,cross_sectional,-2.5,6.2,0.0,3.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,LISP.SW,Consumer Defensive,fwd_pe,23.543386,11.5421,34.8,11.5421,-66.8,True,cross_sectional,-2.5,5.4,0.0,2.9,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,BEAN.SW,Industrials,ev_ebitda,33.314,10.44,,10.44,,False,cross_sectional,-2.5,19.9,0.0,17.4,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,ACLN.SW,Industrials,ev_ebitda,17.313,10.44,,10.44,,False,cross_sectional,-2.5,11.2,0.0,8.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,GALE.SW,Healthcare,fwd_pe,20.05933,20.8282,19.9,20.8282,4.7,False,cross_sectional,0.0,10.4,0.0,10.4,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,AVOL.SW,Consumer Cyclical,fwd_pe,10.296163,11.0429,49.2,11.0429,-77.6,True,cross_sectional,0.0,15.7,0.0,15.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,FHZN.SW,Industrials,ev_ebitda,9.343,10.44,,10.44,,False,cross_sectional,5.7,-9.8,0.0,-4.1,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,TEMN.SW,Technology,fwd_pe,16.177437,18.3252,28.2,18.3252,-35.0,True,cross_sectional,6.4,10.4,0.0,16.8,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,IFCN.SW,Technology,fwd_pe,33.520027,18.3252,23.8,18.3252,-23.0,False,cross_sectional,-2.5,31.3,0.0,28.8,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,SIGN.SW,Consumer Cyclical,fwd_pe,17.79352,11.0429,34.4,11.0429,-67.9,True,cross_sectional,-2.5,7.8,0.0,5.3,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SFZN.SW,Healthcare,fwd_pe,14.270703,20.8282,23.0,20.8282,-9.4,False,cross_sectional,10.0,14.0,0.0,24.0,1.0,False,True,cross_sectional_primary
+20261010,F250-SPI,SUN.SW,Industrials,ev_ebitda,10.948,10.44,,10.44,,False,cross_sectional,0.0,8.3,0.0,8.3,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SFSN.SW,Industrials,ev_ebitda,11.486,10.44,,10.44,,False,cross_sectional,0.0,4.9,0.0,4.9,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,BANB.SW,Healthcare,fwd_pe,25.991695,20.8282,37.9,20.8282,-45.0,True,cross_sectional,-2.5,26.5,0.0,24.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,EMMN.SW,Consumer Defensive,fwd_pe,17.729172,11.5421,19.5,11.5421,-40.8,True,cross_sectional,-2.5,10.1,0.0,7.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SWON.SW,Technology,fwd_pe,10.73793,18.3252,,18.3252,,False,cross_sectional,10.0,22.8,0.0,32.8,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,BCHN.SW,Industrials,ev_ebitda,8.92,10.44,,10.44,,False,cross_sectional,8.2,8.5,0.0,16.7,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,KARN.SW,Industrials,ev_ebitda,13.681,10.44,,10.44,,False,cross_sectional,-2.5,33.3,0.0,30.8,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,YPSN.SW,Healthcare,fwd_pe,24.717813,20.8282,57.9,20.8282,-64.0,True,cross_sectional,-2.1,11.7,0.0,9.6,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,ALSN.SW,Technology,fwd_pe,16.447838,18.3252,23.0,18.3252,-20.3,False,cross_sectional,5.6,9.3,0.0,14.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,JFN.SW,Industrials,ev_ebitda,10.199,10.44,,10.44,,False,cross_sectional,0.0,8.9,0.0,8.9,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,BRKN.SW,Industrials,ev_ebitda,16.315,10.44,,10.44,,False,cross_sectional,-2.5,6.8,0.0,4.3,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,ARYN.SW,Consumer Defensive,fwd_pe,7.9639807,11.5421,19.6,11.5421,-41.1,True,cross_sectional,10.0,9.8,0.0,19.8,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SENS.SW,Technology,fwd_pe,34.978718,18.3252,36.4,18.3252,-49.7,True,cross_sectional,-2.5,13.0,0.0,10.5,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,SKAN.SW,Healthcare,fwd_pe,38.39303,20.8282,69.7,20.8282,-70.1,True,cross_sectional,-2.5,29.2,0.0,26.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,DESN.SW,Basic Materials,ev_ebitda,23.331,19.1425,,19.1425,,False,cross_sectional,-2.4,19.5,0.0,17.2,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,BSLN.SW,Healthcare,fwd_pe,14.286119,20.8282,40.3,20.8282,-48.3,True,cross_sectional,10.0,6.3,0.0,16.4,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,CFT.SW,Financial Services,fwd_pe,12.778905,14.2784,9.5,14.2784,50.3,True,cross_sectional,5.7,12.9,0.0,18.6,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,MOVE.SW,Healthcare,fwd_pe,21.597132,20.8282,47.7,20.8282,-56.3,True,cross_sectional,0.0,19.1,0.0,19.1,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,SMG.SW,Communication Services,fwd_pe,16.128464,16.1836,69.9,16.1836,-76.8,True,cross_sectional,0.0,19.6,0.0,19.6,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,PPGN.SW,Healthcare,fwd_pe,31.073738,20.8282,,20.8282,,False,cross_sectional,-2.5,43.6,0.0,41.1,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,RSGN.SW,Industrials,ev_ebitda,9.698,10.44,,10.44,,False,cross_sectional,0.0,14.6,0.0,14.6,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,MED.SW,Healthcare,fwd_pe,38.549347,20.8282,206.1,20.8282,-89.9,True,cross_sectional,-2.5,37.3,0.0,34.8,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,CMHC.SW,Healthcare,fwd_pe,15.394997,20.8282,45.1,20.8282,-53.8,True,cross_sectional,10.0,49.9,0.0,59.9,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,REHN.SW,Utilities,ev_ebitda,9.085,10.9835,,10.9835,,False,cross_sectional,10.0,25.5,0.0,35.4,0.9,False,False,cross_sectional_primary
+20261010,F250-SPI,BELL.SW,Consumer Defensive,fwd_pe,10.745071,11.5421,12.1,11.5421,-4.6,False,cross_sectional,0.0,1.6,0.0,1.6,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,CICN.SW,Technology,fwd_pe,13.718942,18.3252,26.3,18.3252,-30.3,True,cross_sectional,10.0,29.7,0.0,39.7,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,AEVS.SW,Healthcare,fwd_pe,57.276993,20.8282,,20.8282,,False,cross_sectional,-2.5,49.5,0.0,47.0,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,AUTN.SW,Consumer Cyclical,fwd_pe,10.884463,11.0429,13.2,11.0429,-16.3,False,cross_sectional,0.0,6.8,0.0,6.8,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,APGN.SW,Communication Services,fwd_pe,17.95799,16.1836,17.4,16.1836,-7.0,False,cross_sectional,-1.3,3.2,0.0,1.9,1.0,False,False,cross_sectional_primary
+20261010,F250-SPI,ARBN.SW,Industrials,ev_ebitda,,10.44,,10.44,,False,UNMEASURED,,48.1,0.0,48.1,0.7,True,False,cross_sectional_primary
+20261010,F250-SPI,BVZN.SW,Industrials,ev_ebitda,8.204,10.44,,10.44,,False,cross_sectional,10.0,,0.0,,0.4,False,True,cross_sectional_primary
+20261010,F250-SPI,TIBN.SW,Consumer Cyclical,fwd_pe,15.9517,11.0429,12.7,11.0429,-13.0,False,cross_sectional,-2.5,38.1,0.0,35.6,1.0,True,True,cross_sectional_primary
+20261010,F250-SPI,CNTL.SW,Industrials,ev_ebitda,38.718,10.44,,10.44,,False,cross_sectional,-2.5,40.6,0.0,38.1,0.9,True,True,cross_sectional_primary
+20261010,F250-SPI,MIKN.SW,Industrials,ev_ebitda,3.797,10.44,,10.44,,False,cross_sectional,10.0,1.0,0.0,11.0,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,OFN.SW,Industrials,ev_ebitda,6.229,10.44,,10.44,,False,cross_sectional,10.0,13.6,0.0,23.6,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,STGN.SW,Industrials,ev_ebitda,7.291,10.44,,10.44,,False,cross_sectional,10.0,29.3,0.0,39.3,0.9,False,True,cross_sectional_primary
+20261010,F250-SPI,VBSN.SW,Healthcare,price_fcf,17.095387713076306,13.7746,,13.7746,,False,cross_sectional,-2.5,,0.0,,0.4,False,True,cross_sectional_primary
+20261010,F250-SPI,GMI.SW,Consumer Defensive,fwd_pe,,11.5421,13.2,11.5421,-12.6,False,UNMEASURED,,,0.0,,0.2,False,False,cross_sectional_primary
+20261010,F250-SPI,LMN.SW,Consumer Cyclical,fwd_pe,4.4507704,11.0429,11.6,11.0429,-4.8,False,cross_sectional,10.0,44.9,0.0,54.9,1.0,True,True,cross_sectional_primary
+20261010,F250-SPI,MCHN.SW,Communication Services,fwd_pe,24.642857,16.1836,23.0,16.1836,-29.6,True,cross_sectional,-2.5,,0.0,,0.4,False,True,cross_sectional_primary

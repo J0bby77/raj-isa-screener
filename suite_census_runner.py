@@ -171,9 +171,61 @@ def ensure_runtime_packages(target: str = None, runner=None) -> dict:
     return {"state": "UNAVAILABLE", "missing": missing, "target": target,
             "why": "install failed - suites needing %s will read ENVIRONMENT_UNKNOWN (typed, R2.9): %s"
                    % (missing, "; ".join(why))}
-IGNORE_PREFIXES = ("archive", "_bak", "_to_delete", "__pycache__", "_baseline", "register_archive",
+IGNORE_PREFIXES = ("_bak", "_to_delete", "__pycache__", "_baseline", "register_archive",
                    "_dryrun_outputs", "_candidate_evidence", ".git")
+# ⚑ ISA-0837 (10-Oct-2026) — THE CENSUS COPY IS A DATA WORLD, NOT A SOURCE LIST.
+#   `archive` used to sit in IGNORE_PREFIXES because the census borrowed the SOURCE exclusion set
+#   (isa_tree_scope: "same exclusions as a Candidate"). But since ISA-0832 (04-Oct) archive/decision_capture
+#   is a RUNTIME READ-HOME: after the review's capture_archive --purge, month_artefacts.resolve() serves
+#   portfolio_data_<month>.json from there and nowhere else (calibration readers also read archive/<yyyy-mm>).
+#   The sandbox dropped it, so from 06-Oct EVERY census ran the capital-engine campaign without October's
+#   portfolio (RAISED -> FRESH_RED x10 -> the 11-Oct VCI run REFUSED) and the engine selftest silently skipped
+#   its REAL rows (GREEN on synthetic rows only - ISA-0838). A directory that is not source but IS read by a
+#   tested path is DATA the copy must carry. DATA_READ_HOMES is that declaration; prepare() copies each one
+#   and PROVES byte parity with LIVE (read_home_parity), REFUSING - never publishing - on any divergence.
+#   The source/config/census rolls are unaffected: isa_tree_scope still excludes `archive` from every
+#   fingerprint and every source enumeration.
+DATA_READ_HOMES = ("archive",)
 PREPARE_MAX_AGE_H = 24
+
+
+def _home_manifest(root: str, home: str) -> dict:
+    """{relpath: sha256} of every file under root/home ({} when the home is absent)."""
+    import hashlib
+    out = {}
+    base = os.path.join(root, home)
+    for dp, dn, fn in os.walk(base):
+        dn.sort()
+        for f in sorted(fn):
+            p = os.path.join(dp, f)
+            try:
+                with open(p, "rb") as fh:
+                    out[os.path.relpath(p, root).replace(os.sep, "/")] = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                out[os.path.relpath(p, root).replace(os.sep, "/")] = None
+    return out
+
+
+def read_home_digest(root: str) -> str:
+    """One sha over every DATA_READ_HOMES manifest - changes when the post-review purge adds a file."""
+    import hashlib
+    m = {h: _home_manifest(root, h) for h in DATA_READ_HOMES}
+    return hashlib.sha256(json.dumps(m, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def read_home_parity(live: str, tree: str) -> dict:
+    """ISA-0837 (R5.12): every LIVE file under each DATA_READ_HOME is present in the copy with an identical
+    sha. -> {"state": "PARITY"|"DIVERGED", "missing": [...], "differs": [...], "extra": [...], "n_files": n}."""
+    missing, differs, extra, n = [], [], [], 0
+    for h in DATA_READ_HOMES:
+        lm, tm = _home_manifest(live, h), _home_manifest(tree, h)
+        n += len(lm)
+        missing += sorted(k for k in lm if k not in tm)
+        differs += sorted(k for k in lm if k in tm and (lm[k] is None or lm[k] != tm[k]))
+        extra += sorted(k for k in tm if k not in lm)
+    bad = missing or differs or extra
+    return {"state": "DIVERGED" if bad else "PARITY", "missing": missing, "differs": differs,
+            "extra": extra, "n_files": n, "homes": list(DATA_READ_HOMES)}
 
 
 def _now():
@@ -244,12 +296,22 @@ def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
     for stale in (STATUS_REL, HISTORY_REL):
         if os.path.exists(os.path.join(tree, stale)):
             os.remove(os.path.join(tree, stale))
+    # ISA-0837: the runtime read-homes are proven byte-identical to LIVE, or the census does not run.
+    _par = read_home_parity(live, tree)
+    if _par["state"] != "PARITY":
+        return {"state": "REFUSED", "parity": _par,
+                "why": ("ISA-0837 (R5.12): the sandbox's data read-homes %s are not LIVE's - missing %s, differs %s, "
+                        "extra %s. A tested path that reads them (month_artefacts.resolve after the post-review purge) "
+                        "would see a different world; REFUSED rather than publish a census about it."
+                        % (list(DATA_READ_HOMES), _par["missing"][:5], _par["differs"][:5], _par["extra"][:5]))}
     lr, sr = _rolls(live), _rolls(tree)
     if lr != sr or None in lr.values():
         return {"state": "REFUSED", "why": "sandbox rolls %s differ from LIVE %s - the copy is not the Trusted "
                                            "tree" % (sr, lr)}
     meta = {"prepared_at": _now().isoformat(timespec="seconds"), "live_root": os.path.realpath(live),
-            "build_id": v.get("build_id"), "parent_inputs_copied": _n_parent, **lr}
+            "build_id": v.get("build_id"), "parent_inputs_copied": _n_parent,
+            "read_homes": {"homes": list(DATA_READ_HOMES), "n_files": _par["n_files"],
+                           "digest": read_home_digest(live)}, **lr}
     _write_atomic(os.path.join(sandbox, META), meta)
     _write_atomic(os.path.join(sandbox, "live_snapshot_before.json"), wg.snapshot(live))
     return dict(meta, state="PREPARED")
@@ -262,6 +324,9 @@ def _needs_prepare(live: str, sandbox: str) -> bool:
     if meta.get("live_root") != os.path.realpath(live) or _rolls(live) != {
             "source_roll": meta.get("source_roll"), "config_roll": meta.get("config_roll"),
             "census_roll": meta.get("census_roll")}:
+        return True
+    # ISA-0837 (R5.14 next occurrence): a purge between prepare and step changes LIVE's read-homes.
+    if (meta.get("read_homes") or {}).get("digest") != read_home_digest(live):
         return True
     try:
         age_h = (_now() - datetime.datetime.fromisoformat(meta["prepared_at"])).total_seconds() / 3600
@@ -511,6 +576,13 @@ def _selftest(verbose: bool = True) -> int:
             fh.write("def _selftest():\n    return 0\n")
         with open(os.path.join(live, "data.json"), "w") as fh:
             fh.write("{}")
+        # ISA-0837: a post-review purge state - the month input exists ONLY in the archive read-home
+        import month_artefacts as _ma837
+        _arch837 = os.path.join(live, _ma837.ARCHIVE_REL)
+        os.makedirs(_arch837)
+        _pf837 = "portfolio_data_zzz_2099.json"
+        with open(os.path.join(_arch837, _pf837), "w") as fh:
+            fh.write('{"frozen": "zzz_2099"}')
         for cf in rg.CONFIG_FILES:                       # placeholders: config is fingerprinted, not interpreted
             os.makedirs(os.path.dirname(os.path.join(live, cf)) or live, exist_ok=True)
             with open(os.path.join(live, cf), "w") as fh:
@@ -549,6 +621,45 @@ def _selftest(verbose: bool = True) -> int:
            touched <= {STATUS_REL, HISTORY_REL}, d)
         ok("A2 ensure(): a FRESH_GREEN census is a no-op (state FRESH, nothing re-run)",
            ensure(live, sandbox, budget_s=30)["state"] == "FRESH")
+        # ── ISA-0837: the census copy carries the runtime read-homes, byte-identical ──────────────
+        _tree837 = _tree(sandbox)
+        _rp837 = _ma837.resolve(_tree837, _pf837)
+        ok("ISA-0837 MUST-FIRE: a month input that exists ONLY in LIVE's archive read-home resolves IN THE SANDBOX "
+           "to the archived copy with LIVE's bytes (the 06..10-Oct campaign failure cannot recur)",
+           _ma837.is_archived(_rp837) and os.path.exists(_rp837)
+           and open(_rp837).read() == open(os.path.join(_arch837, _pf837)).read(), _rp837)
+        ok("ISA-0837 WIRING: month_artefacts' archive home lies inside a declared DATA_READ_HOME (derived, so "
+           "moving the resolver's archive without moving the census copy fails here)",
+           any(_ma837.ARCHIVE_REL.replace(os.sep, "/") == h or _ma837.ARCHIVE_REL.replace(os.sep, "/").startswith(h + "/")
+               for h in DATA_READ_HOMES), (_ma837.ARCHIVE_REL, DATA_READ_HOMES))
+        ok("ISA-0837 WIRING: no DATA_READ_HOME is re-excluded by IGNORE_PREFIXES",
+           not any(h == x or h.startswith(x) for h in DATA_READ_HOMES for x in IGNORE_PREFIXES))
+        ok("ISA-0837: read_home_parity(LIVE, sandbox) is PARITY on the prepared copy",
+           read_home_parity(live, _tree837)["state"] == "PARITY", read_home_parity(live, _tree837))
+        _gone837 = os.path.join(_tree837, _ma837.ARCHIVE_REL, _pf837)
+        _keep837 = open(_gone837).read()
+        os.remove(_gone837)
+        _dv837 = read_home_parity(live, _tree837)
+        ok("ISA-0837 NEGATIVE CONTROL: a copy missing the archived input is DIVERGED and names the file",
+           _dv837["state"] == "DIVERGED" and any(_pf837 in x for x in _dv837["missing"]), _dv837)
+        with open(_gone837, "w") as fh:
+            fh.write(_keep837)
+        _saved_ig = globals()["IGNORE_PREFIXES"]
+        try:
+            globals()["IGNORE_PREFIXES"] = _saved_ig + ("archive",)      # the pre-10-Oct copy rule
+            _pr837 = prepare(live, sandbox + "_old_rule")
+            ok("ISA-0837 NEGATIVE CONTROL (replay of the 06..10-Oct copy rule): a sandbox built WITHOUT the archive "
+               "read-home is REFUSED by prepare() - never stepped, never published",
+               _pr837.get("state") == "REFUSED" and "ISA-0837" in str(_pr837.get("why")), _pr837)
+        finally:
+            globals()["IGNORE_PREFIXES"] = _saved_ig
+            shutil.rmtree(sandbox + "_old_rule", ignore_errors=True)
+        ok("ISA-0837 (R5.14 T): an unchanged LIVE read-home needs no re-prepare", not _needs_prepare(live, sandbox))
+        with open(os.path.join(_arch837, "portfolio_data_zzz_2100.json"), "w") as fh:
+            fh.write("{}")                                            # the next review's purge
+        ok("ISA-0837 MUST-FIRE (R5.14 next occurrence): a purge into LIVE's archive after prepare forces a fresh "
+           "copy before the next step", _needs_prepare(live, sandbox))
+        os.remove(os.path.join(_arch837, "portfolio_data_zzz_2100.json"))
         # a data-dependent RED suite -> FRESH_RED -> REFUSED
         with open(os.path.join(live, "s_red.py"), "w") as fh:
             fh.write("import json\ndef _selftest():\n    d = json.load(open('data.json'))\n"

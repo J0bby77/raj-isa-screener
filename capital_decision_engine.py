@@ -1990,6 +1990,24 @@ def real_inputs_missing(month: str, root: str) -> list:
     return [k for k in INPUT_FILES if not os.path.exists(input_path(month, k, root))]
 
 
+MONTH_KEYED_INPUTS = tuple(k for k, p in INPUT_FILES.items() if "{m}" in p)
+
+
+def real_month_state(month: str, root: str) -> dict:
+    """ISA-0838 (10-Oct-2026) - ONE predicate for "may the REAL rows run on this month here?".
+      ABSENT   no month-keyed input resolves (LIVE or archived): this tree simply has no such month - a
+               legitimate, printed skip.
+      COMPLETE every INPUT_FILES member resolves - the real rows run.
+      PARTIAL  some resolve, some do not. Since ISA-0832 the archive-aware resolver makes this impossible on
+               an intact LIVE, so PARTIAL means an environment that hides inputs (the 06..10-Oct census copy
+               without archive/) or real data loss - both must be LOUD (R2.10), never a green skip."""
+    missing = real_inputs_missing(month, root)
+    present_keyed = [k for k in MONTH_KEYED_INPUTS if k not in missing]
+    if not present_keyed:
+        return {"state": "ABSENT", "month": month, "missing": missing}
+    return {"state": "COMPLETE" if not missing else "PARTIAL", "month": month, "missing": missing}
+
+
 def _selftest(verbose: bool = True) -> int:
     """BuildSpec s16 T-suite (engine-level rows). Every MUST-FIRE has a NEGATIVE CONTROL; oracles are
     independent of the production helper they check (s16: tests may not share the same incorrect
@@ -2228,23 +2246,33 @@ def _selftest(verbose: bool = True) -> int:
         open(os.path.join(_t832, INPUT_FILES["portfolio"].format(m="zzz_2099")), "w").write("{}")
         ok("ISA-0832 NEGATIVE CONTROL: a LIVE copy always wins over the archive (a re-run month is never served from it)",
            input_path("zzz_2099", "portfolio", _t832) == os.path.join(_t832, INPUT_FILES["portfolio"].format(m="zzz_2099")))
+        # ISA-0838: the one REAL-rows predicate
+        ok("ISA-0838 NEGATIVE CONTROL: a month with no input at all is ABSENT (a legitimate skip)",
+           real_month_state("yyy_2098", _t832)["state"] == "ABSENT")
+        ok("ISA-0838: the full set (portfolio archived) is COMPLETE",
+           real_month_state("zzz_2099", _t832)["state"] == "COMPLETE")
+        os.remove(os.path.join(_t832, INPUT_FILES["portfolio"].format(m="zzz_2099")))
+        os.remove(os.path.join(_t832, ARCHIVE_REL, INPUT_FILES["portfolio"].format(m="zzz_2099")))
+        _st838 = real_month_state("zzz_2099", _t832)
+        ok("ISA-0838 MUST-FIRE: horizon_value present but portfolio unseen is PARTIAL naming the gap - the state the "
+           "archive-less census copy produced, which the selftest used to SKIP as green",
+           _st838["state"] == "PARTIAL" and _st838["missing"] == ["portfolio"], _st838)
     finally:
         _sh832.rmtree(_t832, ignore_errors=True)
     # ── real October inputs, when present (census sandbox carries them) ───────────────────
     month = None
+    # ⚑ ISA-0838 (10-Oct-2026): ONE predicate (real_month_state). ABSENT -> printed skip; COMPLETE -> the REAL
+    #   rows run; PARTIAL -> FAIL. The ISA-0832 version SKIPPED a half-present month, and from 06-Oct the census
+    #   copy (no archive/ - ISA-0837) produced exactly that state: five days of GREEN with zero REAL rows run.
     for cand in ("oct_2026",):
-        if os.path.exists(os.path.join(HERE, "horizon_value_%s.json" % cand)):
+        _rms = real_month_state(cand, HERE)
+        if _rms["state"] == "ABSENT":
+            print("SKIP REAL rows: no %s input in this tree (ABSENT - nothing to run on)" % cand)
+        elif _rms["state"] == "PARTIAL":
+            ok("ISA-0838 REAL %s inputs are COMPLETE or ABSENT - PARTIAL (missing %s) is an environment that hides "
+               "inputs or real data loss, never a skip (R2.10)" % (cand, _rms["missing"]), False, _rms)
+        else:
             month = cand
-    # ⚑ ISA-0832 (04-Oct-2026): ONE definition of "the month's inputs are present" - every INPUT_FILES
-    #   member, not horizon_value alone. After the monthly review, capture_archive --purge archives
-    #   portfolio_data_<month>.json and keeps horizon_value, and the REAL rows then FAILED on an absent
-    #   input: the next census went FRESH_RED with no code change. A half-archived month is SKIPPED by name.
-    if month:
-        _missing832 = real_inputs_missing(month, HERE)
-        if _missing832:
-            print("SKIP REAL rows (ISA-0832): %s inputs incomplete - missing %s (archived after the review?); "
-                  "synthetic rows above still ran" % (month, _missing832))
-            month = None
     if month:
         try:
             r1 = build(month, root=HERE, write=False)

@@ -165,9 +165,19 @@ def current_held_vci(root: str = None, *, portfolio_doc=None, ledger=None, decis
             "why": "broker snapshot %s rolled forward by %d ledger trade(s) through %s" % (snap, len(rolled), ledger_through)}
 
 
+WATCHLIST_SOURCE = "vci_watchlist_store (Dashboard/state/vci_watchlist.json)"
+
+
 def active_watchlist(root: str = None) -> list:
-    wt = _read(os.path.join(root or HERE, "watchlist_tickers.json"), {}) or {}
-    return [r.get("ticker") for r in (wt.get("vci_watchlist") or []) if r.get("ticker")]
+    """ISA-0796 (10-Oct-2026): ACTIVE_VCI_WATCHLIST is read from the CANONICAL store the VCI run writes
+    (vci_watchlist_store), not from watchlist_tickers.json - a copy the monthly pre-run derives a month later.
+    RAISES ReviewUniverseError when the store cannot be read: an unreadable watchlist is UNKNOWN, never an
+    empty review population (the held-authority rule, R4.3)."""
+    import vci_watchlist_store as _vws
+    try:
+        return _vws.members(root or HERE)
+    except _vws.StoreError as exc:
+        raise ReviewUniverseError("ISA-0796: active VCI watchlist UNKNOWN - %s" % exc)
 
 
 def build(qms_rows, n, *, held=None, watchlist=None, overrides=None, root: str = None,
@@ -186,7 +196,7 @@ def build(qms_rows, n, *, held=None, watchlist=None, overrides=None, root: str =
         inputs.append((h["key"], h["ticker"], ROLE_HELD, {"holding_state": h["holding_state"],
                                                           "vci_provenance": h["vci_provenance"]}))
     for t in watchlist:
-        inputs.append((key(t), t, ROLE_WATCH, {"source": "watchlist_tickers.json vci_watchlist"}))
+        inputs.append((key(t), t, ROLE_WATCH, {"source": WATCHLIST_SOURCE}))
     for i, r in enumerate(rows[:n] if n else [], 1):
         inputs.append((key(r.get("ticker")), r.get("ticker"), ROLE_QMS, {"qms_rank": i, "qms": r.get("qms")}))
     for r in rows:
@@ -326,6 +336,28 @@ def _selftest(verbose: bool = True) -> int:
         ok(False, "U8 must raise")
     except ReviewUniverseError:
         ok(True, "U8 an override with no reason is refused")
+    # ISA-0796: ACTIVE_VCI_WATCHLIST is the canonical store the VCI run writes
+    import tempfile as _tf796
+    import shutil as _sh796
+    import vci_watchlist_store as _vws
+    _r796 = _tf796.mkdtemp(prefix="vru796_")
+    try:
+        try:
+            active_watchlist(_r796)
+            ok(False, "W1 must raise")
+        except ReviewUniverseError:
+            ok(True, "W1 MUST-FIRE (ISA-0796): no store -> the watchlist is UNKNOWN (raises), never an empty population")
+        _d796 = _vws.parse_legacy_markdown(_vws._LEGACY_FIXTURE)
+        _d796["revision"] = 1
+        _vws.write(_r796, _d796, writer="selftest")
+        ok(active_watchlist(_r796) == ["INFQ", "IONQ"],
+           "W2 NEGATIVE CONTROL: with the store, ACTIVE_VCI_WATCHLIST = its members in rank order")
+        _u796 = build([], 0, held={"state": "OK", "members": [], "authority": {}, "why": "selftest"},
+                      watchlist=None, root=_r796)
+        ok([m["key"] for m in _u796["members"]] == ["INFQ", "IONQ"] and WATCHLIST_SOURCE in json.dumps(_u796),
+           "W3 build() with no injected watchlist reads the store and records it as the source (the VCI-run call shape)")
+    finally:
+        _sh796.rmtree(_r796, ignore_errors=True)
     # stage conservation
     c = conservation(u, {"scored": [m["ticker"] for m in u["members"]]})
     ok(c["state"] == "PASS" and c["counts"]["unexplained"] == 0, "C1 all scored -> PASS")

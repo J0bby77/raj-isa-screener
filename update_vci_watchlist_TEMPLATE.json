@@ -1,5 +1,5 @@
 {
-  "_instructions": "Copy to update_vci_watchlist_[mmm_yyyy].json. Fill watchlist entries and change_log_entry. Run: python update_vci_watchlist.py --watchlist <PATH_TO_MEMORY_FILE>/project_isa_vci_watchlist.md --update update_vci_watchlist_jun2026.json",
+  "_instructions": "ISA-0796: copy to update_vci_watchlist_[mmm_yyyy].json. Fill watchlist entries (acs null when not measured - never 0) and change_log_entry; include rescore_calendar/excluded/amba_monitor/nvidia_class_note/narrative_sections only when changed (omitted = kept). Run: python update_vci_watchlist.py --update update_vci_watchlist_[mmm_yyyy].json --run-date YYYY-MM-DD (writes Dashboard/state/vci_watchlist.json + the generated view project_isa_vci_watchlist.md). --watchlist is retired.",
 
   "run_month": "June 2026",
   "run_note": "v2.0 scorecard",

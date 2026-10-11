@@ -95,44 +95,11 @@ SCRIPTS = {
     "calibration_report":     os.path.join(SCRIPT_DIR, "calibration_report.py"),   # Jul-26 Part 9c
 }
 
-# Memory files (read for the VCI watchlist; purchase dates come from transaction_ledger.json)
-# These paths use the Windows path as passed through the bash mount.
-def _resolve_memory_base() -> str:
-    """Locate the Cowork memory dir. The previous relative ".." climb from
-    SCRIPT_DIR landed in the OneDrive tree, so memory files were never found and
-    Step 5 was skipped. Anchor at the USER HOME and fall back to a glob on the
-    stable memory-space id so session/project id drift does not break discovery."""
-    import glob as _g
-    home  = os.path.expanduser("~")
-    SPACE = "aa27f2f8-c3d3-4862-ba9a-a67b7f6d74b9"
-    base  = os.path.join(home, "AppData", "Roaming", "Claude", "local-agent-mode-sessions")
-    candidates = []
-    # 01-Aug-26 ROOT-CAUSE FIX: the pre-run executes in the LINUX sandbox, where HOME is
-    # /sessions/<session> and the Windows AppData tree below does NOT exist -- so every
-    # candidate failed and MEMORY_BASE pointed at nothing. The memory dir IS mounted, at
-    # /sessions/<session>/mnt/.auto-memory. The earlier "fix" (dropping the '..' climb out
-    # of the OneDrive tree) corrected the wrong environment and never took effect. The
-    # consequence was NOT limited to the visible Step 5 skip: find_memory_file
-    # ("project_isa_trades_log.md") also returned None SILENTLY, so analytics ran with no
-    # purchase dates. Sandbox-native locations are probed FIRST; the Windows paths remain
-    # for a native/desktop invocation.
-    if os.environ.get("ISA_MEMORY_DIR"):
-        candidates.append(os.environ["ISA_MEMORY_DIR"])
-    candidates += sorted(_g.glob("/sessions/*/mnt/.auto-memory"))
-    # SCRIPT_DIR is <mnt>/ISA/Investment Analysis -> ../../.auto-memory
-    candidates.append(os.path.normpath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", ".auto-memory")))
-    candidates.append(os.path.join(base, "5240c546-04fc-4dfa-9e3c-ac4943abb0ca",
-                                   "f7637f5f-1fa6-4075-a7d9-50bc4a878712",
-                                   "spaces", SPACE, "memory"))
-    candidates += _g.glob(os.path.join(base, "*", "*", "spaces", SPACE, "memory"))
-    for c in candidates:
-        if os.path.isdir(c):
-            return c
-    return candidates[0]
-
-
-MEMORY_BASE = _resolve_memory_base()
+# ⚑ ISA-0796 (10-Oct-2026): the assistant-memory probe (_resolve_memory_base / MEMORY_BASE /
+#   find_memory_file) is RETIRED. Its last framework consumer - Step 5's VCI watchlist - now reads the
+#   canonical store's view (vci_watchlist_store); the trades log was retired by ISA-0759. The memory folder
+#   is not on disk in current sessions (MEASURED 10-Oct), so the probe could only ever read nothing and warn
+#   "MEMORY BASE ABSENT" on every run about an input no stage consumes. Framework inputs live in the tree.
 
 
 def _previous_month_label(month_label: str) -> str:
@@ -147,11 +114,6 @@ def _previous_month_label(month_label: str) -> str:
     return f"{_m[i - 1]}_{int(yr) - 1}" if i == 0 else f"{_m[i - 1]}_{yr}"
 
 
-def find_memory_file(pattern: str) -> str | None:
-    """Find latest memory file matching a glob-style prefix."""
-    import glob as _glob
-    candidates = _glob.glob(os.path.join(MEMORY_BASE, pattern))
-    return max(candidates, default=None, key=os.path.getmtime) if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -624,20 +586,24 @@ def _step8_measure(dpr: list) -> dict:
 VCI_SOURCE_FRESH_DAYS = 45   # ISA-0792: one monthly VCI cycle + slack; older = STALE, never current
 
 
-def _vci_watchlist_source(isa_folder: str, memory_md=None):
-    """ISA-0792: the VCI watchlist source with the NEWEST declared run date among the memory file
-    (only if present) and the VCI run's own output files in the ISA folder. -> (run_date, path) or
-    (None, None). The memory directory is environment-dependent; the VCI output is the artefact
-    the VCI task writes to disk, so it is the source that survives the environment."""
+def _vci_watchlist_source(isa_folder: str, store_view=None):
+    """ISA-0792 / ISA-0796: the VCI watchlist source with the NEWEST declared run date among the canonical
+    store's generated view (vci_watchlist_store.view_path - only if present) and the VCI run's own output
+    files in the ISA folder. -> (run_date, path) or (None, None). On an equal run date the CANONICAL STORE
+    wins (one home); the VCI output stays the fallback that survives a run which wrote no store update.
+    (ISA-0796: the retired assistant-memory probe is gone - that folder no longer exists on disk.)"""
     import glob as _g792
     if SCRIPT_DIR not in sys.path:
         sys.path.insert(0, SCRIPT_DIR)
     import sync_vci_watchlist as _svw
-    cands = ([memory_md] if memory_md and os.path.exists(memory_md) else []) + sorted(
-        _g792.glob(os.path.join(isa_folder or "", "project_vci_output_*.md")))
-    dated = [(_svw.source_run_date(p), p) for p in cands]
+    cands = ([(1, store_view)] if store_view and os.path.exists(store_view) else []) + [
+        (0, p) for p in sorted(_g792.glob(os.path.join(isa_folder or "", "project_vci_output_*.md")))]
+    dated = [(_svw.source_run_date(p), pri, p) for pri, p in cands]
     dated = [d for d in dated if d[0]]
-    return max(dated) if dated else (None, None)
+    if not dated:
+        return (None, None)
+    best = max(dated)
+    return (best[0], best[2])
 
 
 def _step5_measure(rows: list, run_date_iso: str, src_date=None) -> dict:
@@ -969,7 +935,6 @@ def _dry_run_in_sandbox(args) -> int:
     if args.isa_folder and args.isa_folder in argv:
         argv.remove(args.isa_folder)
     env = dict(os.environ, ISA_DRYRUN_SANDBOX=sb,
-               ISA_MEMORY_DIR=os.environ.get("ISA_MEMORY_DIR") or MEMORY_BASE,   # same inputs as the real run
                ISA_DRYRUN_PROTECTED=os.pathsep.join([os.path.realpath(live_ia), os.path.realpath(isa_folder)]))
     print(f"[ISA-0704] --dry-run: rehearsing in sandbox copy {sb} (live folder is read-only for this run)")
     rc = subprocess.run([sys.executable, os.path.join(sb, os.path.basename(__file__)), *argv,
@@ -1117,22 +1082,7 @@ def main():
     watchlist_config_path   = os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
 
     # Find memory files (optional -- best effort)
-    # ⚑ AN ABSENT MEMORY DIR IS NAMED, NOT DISCOVERED LATER (ISA-0572, 02-Sep-2026).
-    # `_resolve_memory_base()` returns candidates[0] when NOTHING on its list exists, so
-    # MEMORY_BASE can point at a directory that is not there and every `find_memory_file` then
-    # returns None — silently. That is the exact shape of the defect ISA already fixed once
-    # (project_isa_memory_base_fix: "a Windows path in a Linux sandbox read as 'no memory',
-    # silently"), and it is environment-dependent rather than code-dependent: `.auto-memory`
-    # was NOT mounted in the 02-Sep Cowork session, so the same tree degrades or does not
-    # depending on which session runs it. Step 5 loses the VCI watchlist and analytics loses
-    # every purchase date, and both look like ordinary empty results.
-    if not os.path.isdir(MEMORY_BASE):
-        warnings.append(
-            "MEMORY BASE ABSENT: %r does not exist, so every memory read returns None — the "
-            "VCI watchlist (Step 5) is UNAVAILABLE, not empty. Set ISA_MEMORY_DIR to the memory directory and re-run, or "
-            "treat this run's memory-derived fields as UNMEASURED." % MEMORY_BASE)
-        print("  ⚑ MEMORY BASE ABSENT: %s — memory-derived inputs are UNAVAILABLE, not empty"
-              % MEMORY_BASE)
+    # (ISA-0572's MEMORY BASE ABSENT guard retired with the memory probe itself - ISA-0796, 10-Oct-2026.)
     # ⚑ ISA-0124 / ISA-0759 (26-Sep-2026): purchase dates come from the TRANSACTION LEDGER
     #   (ISA-0645 authority; appended by Step 1b before Step 3 reads it). The former
     #   `project_isa_trades_log.md` lookup is RETIRED: that file never existed, so every run
@@ -1916,12 +1866,14 @@ def main():
     _mf_probe_json(watchlist_config_path, "watchlist", "ticker", "watchlist entries")
     print(f"\n[5/9] Syncing VCI watchlist from project_isa_vci_watchlist.md...")
     _mf_begin("5", "sync_vci_watchlist")
-    # ISA-0792: newest dated source - the VCI run's own output file unless a NEWER memory file exists
-    _vci_mem = find_memory_file("project_isa_vci_watchlist.md")
-    _vci_src_date, vci_md_path = _vci_watchlist_source(isa_folder, _vci_mem)
+    # ISA-0792/ISA-0796: newest dated source - the canonical store's view, else the VCI run's own output file
+    import vci_watchlist_store as _vws796
+    _vci_view = _vws796.view_path(SCRIPT_DIR)
+    _vci_view = _vci_view if os.path.exists(_vci_view) else None
+    _vci_src_date, vci_md_path = _vci_watchlist_source(isa_folder, _vci_view)
     summary["vci_watchlist_source"] = {"path": os.path.basename(vci_md_path) if vci_md_path else None,
                                        "run_date": _vci_src_date,
-                                       "memory_file_present": bool(_vci_mem)}
+                                       "store_view_present": bool(_vci_view)}
     if vci_md_path:
         print(f"  VCI watchlist source: {os.path.basename(vci_md_path)} (run date {_vci_src_date})")
     _vci_existing = 0
@@ -1938,9 +1890,9 @@ def main():
             degraded = True
     elif not vci_md_path:
         warnings.append("Step 5 (sync_vci_watchlist): NO dated VCI watchlist source - neither a VCI run output "
-                        "(ISA folder project_vci_output_[mmm]_[yyyy].md) nor the memory file - VCI watchlist "
+                        "(ISA folder project_vci_output_[mmm]_[yyyy].md) nor the store view (ISA-0796) - VCI watchlist "
                         "NOT synced; its ACS values are UNMEASURED, not current (ISA-0792).")
-        print(f"  WARNING: no VCI watchlist source -- skipped. MEMORY_BASE={MEMORY_BASE}")
+        print(f"  WARNING: no VCI watchlist source -- skipped (no store view, no VCI output file).")
         degraded = True
     elif not os.path.exists(watchlist_config_path):
         warnings.append("Step 5 (sync_vci_watchlist): watchlist_tickers.json not found -- skipped.")
@@ -5582,6 +5534,34 @@ def _selftest(verbose: bool = True) -> int:
        _step8_measure([{"source_score": None, "forward_eligible": True}])["coverage"] == 0.0)
     ok("ISA-0790: one home - the Step 8 coverage IS the action-stack coverage",
        _step8_measure(_rows782)["coverage"] == _action_stack_coverage(_rows782))
+    # ISA-0796: no assistant-memory reader may come back into the pre-run (AST: names, not prose)
+    import ast as _ast796
+    _names796 = {n.id for n in _ast796.walk(_ast796.parse(open(__file__, encoding="utf-8").read()))
+                 if isinstance(n, _ast796.Name)} | {n.name for n in _ast796.walk(_ast796.parse(
+                     open(__file__, encoding="utf-8").read())) if isinstance(n, _ast796.FunctionDef)}
+    ok("ISA-0796 WIRING (AST): the pre-run defines/uses no MEMORY_BASE / find_memory_file / _resolve_memory_base "
+       "- framework inputs live in the tree", not ({"MEMORY_BASE", "find_memory_file", "_resolve_memory_base"} & _names796))
+    # ISA-0796: the Step-5 source - canonical store view vs the VCI output files
+    _t796 = tempfile.mkdtemp(prefix="pr796_")
+    try:
+        _isa796 = os.path.join(_t796, "ISA")
+        os.makedirs(_isa796)
+        with open(os.path.join(_isa796, "project_vci_output_sep_2026.md"), "w") as _fh:
+            _fh.write("# VCI\nRun date: 13 September 2026\n")
+        _view796 = os.path.join(_t796, "project_isa_vci_watchlist.md")
+        with open(_view796, "w") as _fh:
+            _fh.write("---\nlastUpdated: 2026-09-13\n---\n")
+        ok("ISA-0796 MUST-FIRE: on an equal run date the canonical store view wins over the VCI output (one home)",
+           _vci_watchlist_source(_isa796, _view796) == ("2026-09-13", _view796))
+        with open(os.path.join(_isa796, "project_vci_output_oct_2026.md"), "w") as _fh:
+            _fh.write("# VCI\nRun date: 11 October 2026\n")
+        ok("ISA-0796 NEGATIVE CONTROL: a NEWER VCI output (a run that wrote no store update) is still read",
+           _vci_watchlist_source(_isa796, _view796)[0] == "2026-10-11")
+        ok("ISA-0796: no store view -> the VCI output alone (the ISA-0792 path is unchanged)",
+           _vci_watchlist_source(_isa796, None)[0] == "2026-10-11")
+    finally:
+        import shutil as _sh796
+        _sh796.rmtree(_t796, ignore_errors=True)
     # ISA-0792: Step 5 / Step 7 measures
     _vr = [{"ticker": "INFQ", "acs_score": 0, "vci_run_date": "2026-07-12"},
            {"ticker": "IONQ", "acs_score": None, "vci_run_date": ""}]

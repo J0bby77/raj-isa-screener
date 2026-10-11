@@ -132,6 +132,13 @@
     "schema_version": "1.0",
     "stamped_at": "2026-10-09"
   },
+  "2026-10-10|F250-SPI": {
+    "fingerprint": "7e6fc8157576",
+    "group": "F250-SPI",
+    "run_date": "2026-10-10",
+    "schema_version": "1.0",
+    "stamped_at": "2026-10-10"
+  },
   "_pool_exclusions": {
     "2026-08-07|SP500": {
       "approved_by": "raj",
