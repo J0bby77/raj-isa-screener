@@ -29,8 +29,9 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import openpyxl
 
@@ -128,23 +129,12 @@ def _standing_order_adjustment(file_dt: datetime | None) -> tuple[float, bool, i
         the 1st, the S/O has not cleared → add STANDING_ORDER_MONTHLY.
       - Otherwise the S/O is already reflected in the stated cash → add 0.
     """
-    # ⚑ 12-Aug-2026 (register ISA-0011). The standing order is PAUSED. There is no
-    # unprocessed payment to credit, so the adjustment is 0 in every branch - including the
-    # unknown-date branch below, whose "fail-safe: never under-count cash" is only fail-safe
-    # while a payment is actually coming. With the S/O paused, adding it OVER-counts
-    # deployable cash by £1,250, and it did so on any file dated within SO_CLEAR_WORKING_DAYS
-    # of the 1st - which is precisely when the monthly review runs.
-    if not STANDING_ORDER_ACTIVE:
-        return 0.0, False, (None if file_dt is None else _working_days_after_1st(file_dt))
-
-    if file_dt is None:
-        return STANDING_ORDER_MONTHLY, True, None
-
-    elapsed = _working_days_after_1st(file_dt)
-    if elapsed < SO_CLEAR_WORKING_DAYS:
-        return STANDING_ORDER_MONTHLY, True, elapsed
-    else:
-        return 0.0, False, elapsed
+    # ⚑⚑ ISA-0851 (11-Oct-2026, B01-R01/R02): THE INFERRED CREDIT IS RETIRED. A scheduled payment and its
+    #   date are an EXPECTATION; whether the money arrived is observed only in the cash statement (the
+    #   golden source). Adding GBP 1,250 because a file is dated near the 1st created deployable cash that
+    #   nobody had observed - and would have restarted on its own at the 6-Apr-2027 schedule restart. The
+    #   adjustment is 0 in every branch; the working-day count is still reported for the record.
+    return 0.0, False, (None if file_dt is None else _working_days_after_1st(file_dt))
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +202,31 @@ def account_identity_verdict(portfolio_ids, reference_ids) -> dict:
             "why": "portfolio export account %s is not the cash-statement account %s" % (sorted(p), sorted(r))}
 
 
+def mmf_reconciliation_record(deployable_basis, mmf_value_gbp, trades_after_snapshot=None) -> dict:
+    """ISA-0865 (11-Oct-2026, B02-R03): the money-market holding is reconciled into deployable cash ONCE, and how
+    is typed. INCLUDED_ONCE - statement cash + the month-end MMF holding, no MMF trade after the snapshot;
+    UNAVAILABLE_TRADED_AFTER_SNAPSHOT - an MMF trade settled after the holding was valued, so the stale holding is
+    NOT added (never estimated) and the liquidity is unavailable up to a stated bound; IN_BROKER_CASH_LINE - the
+    month-end broker cash line already carries the MMF (B2), dated at the broker file; any other basis is UNKNOWN."""
+    v = round(float(mmf_value_gbp or 0.0), 2)
+    tr = list(trades_after_snapshot or [])
+    if deployable_basis == "cash_statement_closing_balance_plus_mmf":
+        return {"state": "INCLUDED_ONCE", "mmf_holding_gbp": v, "counted_in_deployable_gbp": v,
+                "unavailable_bound_gbp": 0.0, "trades_after_snapshot": [],
+                "basis": "statement cash + month-end MMF holding; no MMF trade after the snapshot"}
+    if deployable_basis == "cash_statement_closing_balance_mmf_excluded":
+        return {"state": "UNAVAILABLE_TRADED_AFTER_SNAPSHOT", "mmf_holding_gbp": v, "counted_in_deployable_gbp": 0.0,
+                "unavailable_bound_gbp": v, "trades_after_snapshot": tr[:10],
+                "basis": ("an MMF trade settled after the holding was valued: the stale holding is excluded, deployable "
+                          "is understated by at most GBP %.2f; a verified current MMF position would restore it" % v)}
+    if deployable_basis == "month_end_broker_file":
+        return {"state": "IN_BROKER_CASH_LINE", "mmf_holding_gbp": v, "counted_in_deployable_gbp": v,
+                "unavailable_bound_gbp": 0.0, "trades_after_snapshot": [],
+                "basis": "the month-end broker cash line already carries the MMF (B2); dated at the broker file"}
+    return {"state": "UNKNOWN", "mmf_holding_gbp": v, "counted_in_deployable_gbp": None, "unavailable_bound_gbp": None,
+            "trades_after_snapshot": tr[:10], "basis": "deployable basis %r not recognised - UNKNOWN, never assumed" % (deployable_basis,)}
+
+
 def statement_is_stale(cs_last_iso, data_date_iso, closing_gbp, broker_cash_ex_mmf_gbp) -> bool:
     """ISA-0785: the cash statement is STALE only when its last activity row predates the broker file
     AND its closing balance does not reconcile (to 1p) with the broker's cash line excluding the MMF.
@@ -275,8 +290,13 @@ def classify_holding(investment_name: str, ticker) -> str:
         if any(str(d or "").strip().upper() in (investment_name or "").upper()
                for d in _declared if " " in str(d or "")):
             return "cash_equivalent"
-    except Exception:
-        pass
+    except Exception as _ceq_exc:                                      # noqa: BLE001
+        # ISA-0849 (11-Oct-2026): this used to `pass`, so an unreadable scoring_config filed the
+        # money-market ETF (GBP 11,290.50 on 02-Oct) as a STOCK without a word - measured while
+        # building this fix. A cash-equivalent declaration that cannot be read is a refusal.
+        raise ValueError("ISA-0849: scoring_config.CASH_EQUIVALENT_TICKERS unreadable (%s: %s) - cash "
+                         "equivalents cannot be classified, so the book cannot be parsed honestly"
+                         % (type(_ceq_exc).__name__, _ceq_exc))
     """
     Returns 'stock', 'fund', or 'cash'.
 
@@ -294,7 +314,10 @@ def classify_holding(investment_name: str, ticker) -> str:
         return "fund"
 
     # Extract exchange from parenthetical "(EXCHANGE:SYMBOL)"
-    m = re.search(r"\(([A-Z]+):([A-Z0-9]+)\)", investment_name or "")
+    # ISA-0849 (11-Oct-2026): the symbol may carry a share-class or listing separator
+    # (NYSE:BRK.B, NYSE:BF.B, LSE:BT.A, XTRA:RHM-X) - the old `[A-Z0-9]+` sent these to 'unknown',
+    # and an 'unknown' row then vanished from the book (EV-0097).
+    m = re.search(r"\(([A-Z]+):([A-Z0-9][A-Z0-9.\-/]*)\)", investment_name or "")
     if m:
         exchange = m.group(1).upper()
         symbol   = m.group(2).upper()
@@ -578,6 +601,11 @@ def parse_portfolio(xlsx_path: str) -> dict:
     cash_value = 0.0
     mmf_value = 0.0
     mmf_holdings = []
+    # ISA-0849 (11-Oct-2026): ROW CONSERVATION. Every holding row reaches exactly one disposition:
+    # cash | cash_equivalent | stock | fund | UNCLASSIFIED (kind could not be resolved - its VALUE STILL
+    # COUNTS in NAV) | UNVALUED (the value cell is unreadable - typed, never 0.0, never summed).
+    unresolved = []
+    n_holding_rows = 0
     data_date = None
 
     for row in rows[data_start:]:
@@ -616,7 +644,19 @@ def parse_portfolio(xlsx_path: str) -> dict:
             except (TypeError, ValueError):
                 return None
 
-        v = safe_float(value) or 0.0
+        n_holding_rows += 1
+        v_raw = safe_float(value)
+        if v_raw is not None and v_raw != v_raw:                       # NaN is unreadable, not a value
+            v_raw = None
+        if v_raw is None and kind not in ("cash",):
+            # ISA-0849 (EV-0098): an unreadable value is a VALUATION GAP, not a measured zero. The row is
+            # retained (named, typed) and NOT summed; book_coverage below goes INCOMPLETE.
+            unresolved.append({"name": investment, "ticker": _canonical_ticker(ticker), "kind": kind,
+                               "state": "UNVALUED", "value_gbp": None, "raw_value": None if value is None else str(value),
+                               "quantity": safe_float(qty), "price": safe_float(price),
+                               "why": "value cell unreadable (%r) - a valuation gap is never a 0" % (value,)})
+            continue
+        v = v_raw if v_raw is not None else 0.0
         c = safe_float(cost)  or v   # if cost missing, use value
         g = safe_float(change_gbp)
         gp = safe_float(change_pct)
@@ -634,7 +674,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
             continue
 
         # Extract clean name (remove exchange/ISIN suffix)
-        clean_name = re.sub(r"\s*\([A-Z]+:[A-Z0-9]+\)\s*$", "", investment).strip()
+        clean_name = re.sub(r"\s*\([A-Z]+:[A-Z0-9][A-Z0-9.\-/]*\)\s*$", "", investment).strip()   # ISA-0849
 
         record = {
             "name":         clean_name,
@@ -655,11 +695,34 @@ def parse_portfolio(xlsx_path: str) -> dict:
             stocks.append(record)
         elif kind == "fund":
             funds.append(record)
+        else:
+            # ISA-0849 (EV-0096): an unclassifiable holding keeps its VALUE in NAV and is NAMED; it was
+            # assembled and appended nowhere, so up to a third of the book could disappear unseen.
+            unresolved.append(dict(record, state="UNCLASSIFIED",
+                                   why="classify_holding returned %r - neither stock, fund nor cash" % kind))
 
     # Portfolio totals
     total_stock = round(sum(h["value_gbp"] for h in stocks), 2)
     total_funds = round(sum(h["value_gbp"] for h in funds), 2)
-    total_value = round(total_stock + total_funds + cash_value, 2)
+    unclassified_value = round(sum(float(u["value_gbp"]) for u in unresolved if u["state"] == "UNCLASSIFIED"), 2)
+    total_value = round(total_stock + total_funds + cash_value + unclassified_value, 2)
+    _n_unc = sum(1 for u in unresolved if u["state"] == "UNCLASSIFIED")
+    _n_unv = sum(1 for u in unresolved if u["state"] == "UNVALUED")
+    _n_cash_rows = n_holding_rows - len(stocks) - len(funds) - len(unresolved) - len(mmf_holdings)
+    book_coverage = {
+        "state": "COMPLETE" if not unresolved else "INCOMPLETE",
+        "n_rows": n_holding_rows, "n_stock": len(stocks), "n_fund": len(funds), "n_mmf": len(mmf_holdings),
+        "n_cash_rows": _n_cash_rows, "n_unclassified": _n_unc, "n_unvalued": _n_unv,
+        "unclassified_value_gbp": unclassified_value,
+        "unvalued_names": [u["name"] for u in unresolved if u["state"] == "UNVALUED"],
+        "why": (None if not unresolved else
+                "%d holding row(s) unresolved: %d UNCLASSIFIED (GBP %.2f, counted in NAV, in no sleeve) and %d "
+                "UNVALUED (value unknown - NAV understates by an UNKNOWN amount). Positive new risk needs a "
+                "complete book; held review and reductions are unaffected." % (len(unresolved), _n_unc, unclassified_value, _n_unv)),
+        "basis": "ISA-0849 row conservation: every holding row -> one disposition; an unknown is never a 0",
+    }
+    # the invariant: rows conserve exactly (a lost row is the defect this replaces, R5.2)
+    assert book_coverage["n_cash_rows"] >= 0, "ISA-0849: holding-row dispositions exceed the rows read"
 
     if total_value == 0:
         raise ValueError("Total portfolio value is zero — check xlsx format.")
@@ -722,6 +785,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
     class _MMFHandled(Exception):
         """Sentinel: the MMF branch already set the basis; skip the default assignment."""
     deployable_basis = "month_end_broker_file"
+    _mmf_trades_seen = []                                    # ISA-0865: carried to the typed MMF record
     deployable_as_of = str(data_date)
     deployable_note = ("cash statement not consulted")
     try:
@@ -773,6 +837,8 @@ def parse_portfolio(xlsx_path: str) -> dict:
                                    or "OVERNIGHT" in str(r.get("description") or "").upper()
                                    for n in _mmf_names)]
             if _mmf_trades:
+                _mmf_trades_seen = [{"date": str(r.get("date"))[:10], "description": str(r.get("description") or "")[:60],
+                                     "amount_gbp": r.get("amount_gbp")} for r in _mmf_trades]
                 deployable_cash = round(float(_close), 2)
                 deployable_basis = "cash_statement_closing_balance_mmf_excluded"
                 deployable_as_of = _cs_last
@@ -802,7 +868,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
                            % (type(_dep_e).__name__, _dep_e))
 
     # Weights
-    for h in stocks + funds:
+    for h in stocks + funds + [u for u in unresolved if u["state"] == "UNCLASSIFIED"]:
         h["weight_pct"] = round(h["value_gbp"] / total_value * 100, 2)
 
     cash_pct         = round(cash_value / total_value * 100, 2)
@@ -827,22 +893,72 @@ def parse_portfolio(xlsx_path: str) -> dict:
     month_label = data_dt.strftime("%b_%Y").lower() if data_dt else "unknown"
     run_month   = data_dt.strftime("%b %Y") if data_dt else "Unknown"
 
-    # Build standing order notes
-    if so_applied:
-        so_note = (
-            f"Standing order NOT YET cleared ({so_elapsed} working day(s) after 1st — "
-            f"threshold {SO_CLEAR_WORKING_DAYS}). "
-            f"£{so_adj:,.0f} added: £{cash_value:,.2f} → £{effective_cash:,.2f} effective."
-        ) if so_elapsed is not None else (
-            f"Standing order adjustment applied (file date unknown — conservative default). "
-            f"£{so_adj:,.0f} added: £{cash_value:,.2f} → £{effective_cash:,.2f} effective."
-        )
-    else:
-        so_note = (
-            f"Standing order ALREADY CLEARED ({so_elapsed} working day(s) after 1st — "
-            f"threshold {SO_CLEAR_WORKING_DAYS}). "
-            f"No adjustment: stated cash £{cash_value:,.2f} = effective cash."
-        )
+    # Standing-order note (ISA-0851): the schedule's state on the data date, and that it is not cash.
+    try:
+        import contribution_schedule as _cs851
+        _so_state = _cs851.state(data_dt.date() if data_dt else None)
+        _so_text = _cs851.describe(_so_state)
+    except Exception as _cs_e:                                          # noqa: BLE001
+        _so_state = {"state": "UNKNOWN", "why": "contribution_schedule unavailable (%s)" % _cs_e}
+        _so_text = "S/O state UNKNOWN - %s" % _so_state["why"]
+    so_note = ("No inferred credit (ISA-0851): effective cash = stated cash GBP %s. %s."
+               % (format(cash_value, ",.2f"), _so_text))
+    _contrib = _contributions_golden(os.path.dirname(os.path.abspath(xlsx_path)), data_dt)
+    _golden_cs = _contrib.get("golden_source") == "cash_statement"
+    _obs = _cs851.observed_credits(_contrib.get("contributions_detail")) if _golden_cs else None
+    _sub_used = _contrib.get("allowance_used_gbp")
+    funding = {
+        "basis": ("B01-R02: four distinct quantities - an EXPECTED contribution (schedule), OBSERVED external "
+                  "credits (cash statement, de-duplicated by flow identity), the ISA SUBSCRIPTION used this tax "
+                  "year, and DEPLOYABLE cash. None substitutes for another; missing evidence is UNKNOWN."),
+        "expected_contribution": {k: _so_state.get(k) for k in ("state", "monthly_gbp", "in_force_from", "paused_since",
+                                                                "next_change", "credit_evidence", "source", "as_of", "why")},
+        "expected_contribution_text": _so_text,
+        "observed_credits_tax_year": (dict(_obs, state="OBSERVED", golden_source="cash_statement") if _obs is not None else
+                                      {"state": "UNKNOWN", "golden_source": _contrib.get("golden_source"),
+                                       "why": ("the cash statement is absent or unreconciled; the dealing record cannot "
+                                               "contain cash deposits, so observed credits are UNKNOWN")}),
+        "isa_subscription": {"state": ("RECONCILED" if _contrib.get("allowance_reconciled") else "UNKNOWN"),
+                             "used_gbp": _sub_used, "remaining_gbp": _contrib.get("allowance_remaining_gbp"),
+                             "source": _contrib.get("golden_source")},
+        "deployable_cash": {"gbp": deployable_cash, "basis": deployable_basis, "as_of": deployable_as_of},
+    }
+    funding["invariants"] = {
+        "expected_is_not_cash": {"ok": round(effective_cash, 2) == round(cash_value, 2),
+                                 "note": "effective cash equals stated cash - no expected flow is added"},
+        "observed_credits_equal_subscription": (
+            {"ok": abs(float(_obs["total_gbp"]) - float(_sub_used)) <= 0.01, "observed_gbp": _obs["total_gbp"],
+             "subscription_gbp": _sub_used,
+             "note": "every external credit this tax year is a subscription; a gap means a credit was missed or double-counted"}
+            if (_obs is not None and _sub_used is not None) else {"ok": None, "state": "UNMEASURED"}),
+    }
+    # ISA-0853 (B01-R04): three NAV identities, each with its own basis and date - never interchangeable.
+    try:
+        import derive_required_return as _drr853
+        _vobs, _vmeta = _drr853.valuation_observations()
+    except Exception as _v_e:                                           # noqa: BLE001
+        _vobs, _vmeta = [], {"status": "UNREADABLE", "detail": str(_v_e)}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "target_state.json"), encoding="utf-8") as _tsf:
+            _vb = (json.load(_tsf).get("valuation_basis") or {})
+    except Exception:                                                   # noqa: BLE001
+        _vb = {}
+    _is_me = bool(data_dt) and (data_dt + timedelta(days=1)).month != data_dt.month
+    nav = {
+        "basis": "B01-R04: current NAV, month-end valuation and the dated smoothed planning NAV are distinct; a consumer "
+                 "pairs a value only with ITS OWN date",
+        "current_nav": {"value_gbp": total_value, "as_of": (data_dt.date().isoformat() if data_dt else None),
+                        "basis": "BROKER_FILE (AJ Bell portfolio export, %s)" % os.path.basename(xlsx_path)},
+        "month_end_valuation": ({"value_gbp": total_value, "month_end": data_dt.date().isoformat(),
+                                 "basis": "this broker file IS a month-end file"} if _is_me else
+                                ({"value_gbp": float(_vobs[0]["value_gbp"]), "month_end": str(_vobs[0]["month_end"])[:10],
+                                  "basis": "latest month-end observation in anchor_valuation_history.json (%s)" % _vobs[0].get("source")}
+                                 if _vobs else {"value_gbp": None, "state": "UNAVAILABLE", "why": _vmeta.get("detail")})),
+        "planning_nav": ({"value_gbp": _vb.get("value_gbp"), "value_date": _vb.get("value_date"), "basis": _vb.get("basis"),
+                          "source": "target_state.valuation_basis (derive_required_return D-3)"}
+                         if _vb.get("value_gbp") is not None else {"value_gbp": None, "state": "UNAVAILABLE",
+                                                                   "why": "target_state.valuation_basis absent"}),
+    }
 
     return {
         "_meta": {
@@ -869,8 +985,11 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "cash_deployable_gbp":    deployable_cash,
             "cash_deployable_basis":  deployable_basis,
             "cash_deployable_as_of":  deployable_as_of,
+            "mmf_reconciliation":     mmf_reconciliation_record(deployable_basis, mmf_value, _mmf_trades_seen),  # ISA-0865
             "standing_order_applied": so_applied,
             "standing_order_adj":     so_adj,
+            "funding":                funding,                 # ISA-0851 (B01-R02)
+            "nav":                    nav,                     # ISA-0853 (B01-R04)
             "cash_pct":               cash_pct,
             "stock_sleeve_value_gbp": total_stock,
             "stock_sleeve_pct":       stock_sleeve_pct,
@@ -878,7 +997,9 @@ def parse_portfolio(xlsx_path: str) -> dict:
             "fund_sleeve_pct":        fund_sleeve_pct,
             "num_stock_positions":    len(stocks),
             "num_fund_positions":     len(funds),
+            "book_coverage":          book_coverage,       # ISA-0849
         },
+        "unresolved_holdings": unresolved,                   # ISA-0849 - named, typed, never dropped
         "flags": {
             "concentration_over_12_5pct": concentration_flags,
             "vuag_plus_vanguard_us_combined_pct": vuag_combined_pct,
@@ -886,7 +1007,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
         },
         # Fix Pack A22: broker-reconciled allowance (S/O + lump sums) — feeds email §10 and
         # the A19 contribution-history cross-check; UNRECONCILED prints as such, never assumed.
-        "contributions": _contributions_golden(os.path.dirname(os.path.abspath(xlsx_path)), data_dt),
+        "contributions": _contrib,
         "stocks": sorted(stocks, key=lambda h: h["value_gbp"], reverse=True),
         "funds":  sorted(funds,  key=lambda h: h["value_gbp"], reverse=True),
         "cash": {
@@ -976,7 +1097,8 @@ def main():
         print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (+£{s['standing_order_adj']:,.0f} S/O not yet cleared — {days_str})")
     else:
         so_days = data["_meta"].get("standing_order_working_days")
-        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared — {so_days} working day(s) after 1st)")
+        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (= stated; no inferred credit, ISA-0851 — "
+              f"{((s.get('funding') or {}).get('expected_contribution_text') or 'S/O state in summary.funding').split(' (schedule')[0]})")
     print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
     print(f"\n  Stock positions:   {s['num_stock_positions']}")
     print(f"  Fund positions:    {s['num_fund_positions']}")
@@ -1059,7 +1181,8 @@ def main():
         print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (+£{s['standing_order_adj']:,.0f} S/O not yet cleared -- {days_str})")
     else:
         so_days = data["_meta"].get("standing_order_working_days")
-        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (S/O already cleared -- {so_days} working day(s) after 1st)")
+        print(f"  Cash (effective):  £{s['cash_effective_gbp']:>12,.2f}  (= stated; no inferred credit, ISA-0851 -- "
+              f"{((s.get('funding') or {}).get('expected_contribution_text') or 'S/O state in summary.funding').split(' (schedule')[0]})")
     print(f"  Deployable cash:   £{s['cash_deployable_gbp']:>12,.2f}")
     print(f"\n  Stock positions:   {s['num_stock_positions']}")
     print(f"  Fund positions:    {s['num_fund_positions']}")
@@ -1098,6 +1221,91 @@ def _selftest(verbose: bool = True) -> int:
        statement_is_stale("2026-09-30", "2026-09-30", 1.0, 2.0) is False)
     ok("ISA-0785 FAIL-CLOSED: an unreadable balance with an older last row is STALE",
        statement_is_stale("2026-09-18", "2026-09-30", None, 346.81) is True)
+    # ISA-0865 (B02-R03): the MMF is reconciled into deployable ONCE and the way it was is typed
+    _m1 = mmf_reconciliation_record("cash_statement_closing_balance_plus_mmf", 1000.0)
+    ok("ISA-0865: statement + MMF with no later MMF trade -> INCLUDED_ONCE, counted once",
+       _m1["state"] == "INCLUDED_ONCE" and _m1["counted_in_deployable_gbp"] == 1000.0 and _m1["unavailable_bound_gbp"] == 0.0)
+    _m2 = mmf_reconciliation_record("cash_statement_closing_balance_mmf_excluded", 1000.0, [{"date": "2026-10-05"}])
+    ok("ISA-0865 MUST-FIRE: an MMF trade after the snapshot -> UNAVAILABLE with the stated bound, nothing counted",
+       _m2["state"] == "UNAVAILABLE_TRADED_AFTER_SNAPSHOT" and _m2["counted_in_deployable_gbp"] == 0.0
+       and _m2["unavailable_bound_gbp"] == 1000.0 and _m2["trades_after_snapshot"])
+    _m3 = mmf_reconciliation_record("month_end_broker_file", 1000.0)
+    ok("ISA-0865: the broker-file fallback carries the MMF inside its cash line (counted once, not added again)",
+       _m3["state"] == "IN_BROKER_CASH_LINE" and _m3["counted_in_deployable_gbp"] == 1000.0)
+    ok("ISA-0865 FAIL-CLOSED: an unrecognised basis is UNKNOWN, never a number",
+       mmf_reconciliation_record("something_new", 1000.0)["counted_in_deployable_gbp"] is None)
+    # ── ISA-0849 (11-Oct-2026): ROW CONSERVATION on a synthetic AJ Bell export (no real workbook read) ──
+    import tempfile as _tf
+    _d = _tf.mkdtemp(prefix="ep849_")
+    try:
+        def _book(rows, name="AJ Bell ISA Portfolio 02-Oct-26.xlsx"):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "portfolio-ACB8G2I-ISA"
+            ws.append(["Investment", "Quantity", "Price", "Value (£)", "Cost (£)", "Ticker", "Date"])
+            for r in rows:
+                ws.append(list(r) + [datetime(2026, 10, 2)])
+            pth = os.path.join(_d, name)
+            wb.save(pth)
+            return pth
+        _rows = [("Cash GBP", None, None, 3000.0, 3000.0, None),
+                 ("Broadcom Inc (NASDAQ:AVGO)", 10, 700.0, 7000.0, 6000.0, "AVGO"),
+                 ("Berkshire Hathaway Inc (NYSE:BRK.B)", 10, 500.0, 5000.0, 4000.0, "BRK.B"),
+                 ("Mystery Holding Plc (OTC:QQQ9X)", 1, 5000.0, 5000.0, 5000.0, None),
+                 ("Broken Value Co (NASDAQ:BRKN)", 3, None, "n/a", 900.0, "BRKN")]
+        _pf = parse_portfolio(_book(_rows))
+        _bc = _pf["summary"]["book_coverage"]
+        ok("ISA-0849 MUST-FIRE (EV-0097): NYSE:BRK.B parses as a STOCK, not a vanished 'unknown'",
+           any(h["ticker"] == "BRK.B" for h in _pf["stocks"]))
+        ok("ISA-0849 MUST-FIRE (EV-0096): the unclassifiable row is RETAINED, named UNCLASSIFIED, and its GBP 5,000 "
+           "stays in NAV (3000 + 7000 + 5000 + 5000 = 20000)",
+           any(u["state"] == "UNCLASSIFIED" and u["value_gbp"] == 5000.0 for u in _pf["unresolved_holdings"])
+           and abs(_pf["summary"]["total_value_gbp"] - 20000.0) < 0.005)
+        ok("ISA-0849 MUST-FIRE (EV-0098): the unreadable value is UNVALUED (None), listed, never summed as 0",
+           any(u["state"] == "UNVALUED" and u["value_gbp"] is None and u["name"].startswith("Broken Value")
+               for u in _pf["unresolved_holdings"])
+           and not any(h["ticker"] == "BRKN" for h in _pf["stocks"]))
+        ok("ISA-0849 MUST-FIRE: book_coverage is INCOMPLETE with 1 unclassified (GBP 5000) and 1 unvalued, and says why",
+           _bc["state"] == "INCOMPLETE" and _bc["n_unclassified"] == 1 and _bc["n_unvalued"] == 1
+           and abs(_bc["unclassified_value_gbp"] - 5000.0) < 0.005 and bool(_bc["why"]))
+        ok("ISA-0849: rows conserve exactly - stock + fund + unresolved + mmf + cash rows = rows read",
+           _bc["n_stock"] + _bc["n_fund"] + _bc["n_unclassified"] + _bc["n_unvalued"] + _bc["n_mmf"] + _bc["n_cash_rows"] == _bc["n_rows"])
+        ok("ISA-0849: sleeve weights use the COMPLETE NAV (stock 12000/20000 = 60.0%, not 12000/15000)",
+           abs(_pf["summary"]["stock_sleeve_pct"] - 60.0) < 0.01)
+        _pf2 = parse_portfolio(_book(_rows[:3], name="AJ Bell ISA Portfolio 03-Oct-26.xlsx"))
+        ok("ISA-0849 NEGATIVE CONTROL: a fully resolvable book is COMPLETE with no unresolved rows",
+           _pf2["summary"]["book_coverage"]["state"] == "COMPLETE" and _pf2["unresolved_holdings"] == []
+           and abs(_pf2["summary"]["total_value_gbp"] - 15000.0) < 0.005)
+        # ── ISA-0851 (B01-R01/R02): no inferred credit; four funding quantities kept apart ──
+        global STANDING_ORDER_ACTIVE
+        _was = STANDING_ORDER_ACTIVE
+        try:
+            STANDING_ORDER_ACTIVE = True                    # even a running S/O never becomes cash by inference
+            _adj = _standing_order_adjustment(datetime(2027, 5, 4))
+        finally:
+            STANDING_ORDER_ACTIVE = _was
+        ok("ISA-0851 MUST-FIRE: a file dated 2 working days after the 1st with the S/O ACTIVE adds NO inferred credit",
+           _adj[0] == 0.0 and _adj[1] is False)
+        _fd = _pf2["summary"]["funding"]
+        ok("ISA-0851: effective cash = stated cash and the invariant says so",
+           _pf2["summary"]["cash_effective_gbp"] == _pf2["summary"]["cash_stated_gbp"]
+           and _fd["invariants"]["expected_is_not_cash"]["ok"] is True)
+        ok("ISA-0851 MUST-FIRE (B01-R02): no cash statement -> observed credits UNKNOWN (the dealing record cannot hold deposits)",
+           _fd["observed_credits_tax_year"]["state"] == "UNKNOWN"
+           and _fd["invariants"]["observed_credits_equal_subscription"]["ok"] is None)
+        ok("ISA-0851 NEGATIVE CONTROL: the expected contribution is read from the schedule and is never a credit",
+           _fd["expected_contribution"]["state"] in ("ACTIVE", "PAUSED", "UNKNOWN")
+           and str(_fd["expected_contribution"]["credit_evidence"]).startswith("NOT_PROVEN"))
+        # ── ISA-0853 (B01-R04): three NAV identities, each with its own date ──
+        _nv = _pf2["summary"]["nav"]
+        ok("ISA-0853: current NAV is the broker value at the data date; planning NAV keeps its own date and basis",
+           _nv["current_nav"]["value_gbp"] == _pf2["summary"]["total_value_gbp"] and _nv["current_nav"]["as_of"] == "2026-10-02"
+           and (_nv["planning_nav"].get("value_date") or _nv["planning_nav"].get("state") == "UNAVAILABLE")
+           and _nv["planning_nav"].get("value_date") != _nv["current_nav"]["as_of"])
+        ok("ISA-0853 NEGATIVE CONTROL: a non-month-end file does not pose as a month-end valuation",
+           _nv["month_end_valuation"].get("month_end") != "2026-10-02")
+    finally:
+        shutil.rmtree(_d, ignore_errors=True)
     if verbose:
         print("extract_portfolio selftest: %d failure(s)" % len(fails))
     return 1 if fails else 0

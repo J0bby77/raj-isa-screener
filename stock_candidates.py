@@ -310,7 +310,10 @@ def build(*, portfolio_data: Optional[dict] = None, step9_pre: Optional[dict] = 
                   "why": "verdict raised %s: %s - refused" % (type(_ve).__name__, _ve)}
         c["broker_dealability"] = {"state": _v.get("state"), "venue": _v.get("venue"),
                                    "admissible_for_new_capital": bool(_v.get("admissible_for_new_capital")),
-                                   "why": _v.get("why")}
+                                   "why": _v.get("why"),
+                                   # ISA-0860: fundable, confirm at dealing (never a refusal here)
+                                   "confirm_required": sorted({x.get("code") for x in (_v.get("confirm_required") or [])
+                                                               if isinstance(x, dict) and x.get("code")})}
         if c["qualifies"] and not _v.get("admissible_for_new_capital"):
             c["qualifies"] = False
             c["disqualified_reason"] = ("BROKER_NOT_DEALABLE_ONLINE (ISA-0607): %s - %s"

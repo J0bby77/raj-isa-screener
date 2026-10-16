@@ -65,16 +65,22 @@ CASH_BUFFER_MAX = 200.0
 # being implicit in three. It feeds contribution schedules, the required-return anchor and
 # allowance projection - so if the pause is real, the anchor is derived on a schedule that
 # is not happening.
-STANDING_ORDER = 1250.0
-# ⚑ CONFIRMED BY RAJ 12-Aug-2026: the standing order is PAUSED. Last payment June-2026.
-# Allowance used £8,750 = £5,000 initial + 3 x £1,250 (April, May, June). Nothing since.
-# target_state.json already models this correctly (contribution_schedule: 0/month from
-# 2026-07-01), so the REQUIRED-RETURN ANCHOR was never affected. What WAS affected is cash:
-# extract_portfolio.standing_order_adjustment() credited £1,250 of "unprocessed S/O" to
-# effective cash whenever the broker file was dated within SO_CLEAR_WORKING_DAYS of the 1st -
-# which is exactly when the monthly review runs. See register ISA-0011.
-STANDING_ORDER_ACTIVE = False
-STANDING_ORDER_PAUSED_FROM = "2026-07-01"   # Raj, job security
+# ⚑⚑ ISA-0851 (11-Oct-2026, B01-R01): these names are NO LONGER A SECOND HOME. They are DERIVED, at
+#   import, from the one schedule reader (contribution_schedule -> target_state.contribution_schedule), so
+#   the 6-Apr-2027 restart (or any schedule edit) reaches every consumer with no hand edit, and a missing
+#   schedule reads UNKNOWN -> not active (no assumed contribution). They are kept as names only for the
+#   existing importers (extract_portfolio, email_prefill, portfolio_analytics). An expected contribution
+#   is never cash: extract_portfolio no longer infers a credit from them (ISA-0851).
+try:
+    import contribution_schedule as _cs851
+    _SO_STATE = _cs851.state()
+except Exception as _cs_exc:                                             # noqa: BLE001
+    _SO_STATE = {"state": "UNKNOWN", "monthly_gbp": None, "paused_since": None, "restart_monthly_gbp": None,
+                 "why": "contribution_schedule unavailable (%s)" % _cs_exc}
+STANDING_ORDER_ACTIVE = _SO_STATE.get("state") == "ACTIVE"
+STANDING_ORDER = float((_SO_STATE.get("monthly_gbp") if STANDING_ORDER_ACTIVE else _SO_STATE.get("restart_monthly_gbp")) or 0.0)
+STANDING_ORDER_PAUSED_FROM = _SO_STATE.get("paused_since")      # None when active or UNKNOWN
+STANDING_ORDER_STATE = _SO_STATE.get("state")
 SO_CLEAR_WORKING_DAYS = 3             # clears within ~3 working days of the 1st
 
 # ⚑ SINGLE HOME for the AJ Bell FX charge. Evidenced by two `FX Charge (0.50%)` rows in the

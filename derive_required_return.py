@@ -560,7 +560,7 @@ def fv_at_rate(m: float, principal: float, start: date, end: date, schedule,
 
 
 def solve_required_annual_pct(target: float, principal: float, start: date, end: date,
-                              schedule, tol=1e-10, one_offs=None) -> float:
+                              schedule, tol=1e-10, one_offs=None, rounded: bool = True) -> float:
     """Bisect the monthly rate so FV == target; return effective annual % ((1+m)^12 - 1)."""
     lo, hi = -0.02, 0.08          # -21%..+152% annual — generous, monotone in m
     if fv_at_rate(hi, principal, start, end, schedule, one_offs) < target:
@@ -574,7 +574,65 @@ def solve_required_annual_pct(target: float, principal: float, start: date, end:
         if hi - lo < tol:
             break
     m = (lo + hi) / 2
-    return round(((1 + m) ** 12 - 1) * 100, 1)
+    return round(((1 + m) ** 12 - 1) * 100, 1) if rounded else ((1 + m) ** 12 - 1) * 100
+
+
+ROOT_CHECK_TOL_PP = 0.15   # ISA-0852: floor of the agreement band (month-count vs exact-day convention, measured
+ROOT_CHECK_TOL_REL = 0.01  #   <= 0.06pp at today's 13.7/18.4% roots, ~0.14pp at a 20% root) - the band is max(0.15pp, 1% of the rate)
+
+
+def independent_root_check(target: float, principal: float, start: date, end: date, schedule,
+                           solved_annual_pct: float, one_offs=None, tol_pp: float = ROOT_CHECK_TOL_PP) -> dict:
+    """ISA-0852 (B01-R03): a SECOND derivation of the same root, coded independently of fv_at_rate /
+    solve_required_annual_pct: every dated flow (principal at `start`, each scheduled contribution on the 1st of
+    each month after `start`, each forward one-off on its own date) compounds to `end` at an ANNUAL rate over
+    exact days (ACT/365.25), and the rate is found by regula falsi rather than bisection on a monthly rate.
+    Agreement within `tol_pp` is required (R5.2: two derivations, stated tolerance)."""
+    flows = [(start, float(principal))]
+    k = 1
+    while True:
+        y, m = divmod(start.year * 12 + start.month - 1 + k, 12)
+        d = date(y, m + 1, 1)
+        if d > end:
+            break
+        amt = 0.0
+        for seg in sorted(schedule, key=lambda x: str(x["from"])):
+            if date.fromisoformat(str(seg["from"])[:10]) <= d:
+                amt = float(seg["monthly_gbp"])
+        if amt:
+            flows.append((d, amt))
+        k += 1
+    for o in (one_offs or []):
+        od = date.fromisoformat(str(o["date"])[:10])
+        if start <= od <= end:
+            flows.append((od, float(o["amount_gbp"])))
+
+    def fv(r):
+        return sum(a * (1.0 + r) ** ((end - d).days / 365.25) for d, a in flows)
+
+    lo, hi = -0.5, 2.0
+    flo, fhi = fv(lo) - target, fv(hi) - target
+    if flo > 0 or fhi < 0:
+        return {"state": "ROOT_CHECK_FAILED", "why": "independent bracket [-50%%, 200%%] does not contain the root",
+                "solved_pct": solved_annual_pct}
+    r = lo
+    for _ in range(500):
+        r = hi - fhi * (hi - lo) / (fhi - flo)
+        fr = fv(r) - target
+        if abs(fr) < 1e-6 * max(1.0, target):
+            break
+        if fr < 0:
+            lo, flo = r, fr
+            fhi *= 0.5                       # Illinois modification: keep regula falsi converging
+        else:
+            hi, fhi = r, fr
+            flo *= 0.5
+    ind = r * 100.0
+    diff = abs(ind - float(solved_annual_pct))
+    tol_pp = max(float(tol_pp), ROOT_CHECK_TOL_REL * abs(float(solved_annual_pct)))
+    return {"state": "OK" if diff <= tol_pp else "ROOT_CHECK_FAILED", "solved_pct": solved_annual_pct,
+            "independent_pct": round(ind, 4), "diff_pp": round(diff, 4), "tol_pp": tol_pp, "n_flows": len(flows),
+            "method": "exact-date ACT/365.25 annual compounding, Illinois regula falsi (independent of fv_at_rate)"}
 
 
 def apply_guardrails(derived_floor_pct: float):
@@ -627,6 +685,18 @@ def _reported_solve(state, pv, vd):
                                       one_offs=one_offs)
     stretch = solve_required_annual_pct(float(state["target_stretch_gbp"]), pv, vd, td, sched,
                                         one_offs=one_offs)
+    # ISA-0852 (B01-R03): the solved roots are independently re-derived before they may be used.
+    #   Compared on the UNROUNDED solver root, so display rounding is not mistaken for disagreement.
+    _rc = {}
+    for _k, _tgt in (("floor", float(state["target_floor_gbp"])), ("stretch", float(state["target_stretch_gbp"]))):
+        _raw = solve_required_annual_pct(_tgt, pv, vd, td, sched, one_offs=one_offs, rounded=False)
+        _rc[_k] = independent_root_check(_tgt, pv, vd, td, sched, _raw, one_offs=one_offs)
+    _bad = [k for k, v in _rc.items() if v.get("state") != "OK"]
+    if _bad:
+        raise AnchorCadenceError("ROOT_CHECK_FAILED (ISA-0852): the independent re-derivation of the %s root disagrees "
+                                 "with the solver beyond %.2fpp: %s - the anchor is NOT re-derived; the stored operative "
+                                 "anchor stands until the disagreement is resolved" % ("/".join(_bad), ROOT_CHECK_TOL_PP,
+                                                                                         {k: _rc[k] for k in _bad}))
     operative, gstate = apply_guardrails(floor)
     _gfired, _gnote = glidepath_check(pv)
     if _gfired:      # B6: age/value trigger overrides OK/attainability states for visibility
@@ -634,7 +704,7 @@ def _reported_solve(state, pv, vd):
     else:
         gnote = None
     return {"floor_pct": floor, "stretch_pct": stretch, "operative_pct": operative,
-            "guardrail_state": gstate, "glidepath_note": gnote,
+            "guardrail_state": gstate, "glidepath_note": gnote, "root_check": _rc,
             "one_off_contributions_applied": [
                 {"date": o["date"], "amount_gbp": float(o["amount_gbp"])} for o in one_offs],
             "one_off_contributions_in_value": [
@@ -725,6 +795,7 @@ def derive(state: dict, portfolio_value=None, value_date=None, as_of=None,
         "flow_trigger": trig,
         "one_off_contributions_applied": rep["one_off_contributions_applied"],
         "one_off_contributions_in_value": rep["one_off_contributions_in_value"],
+        "anchor_root_check": rep["root_check"],                         # ISA-0852 (B01-R03)
     }
     if rep.get("glidepath_note"):
         out["glidepath_note"] = rep["glidepath_note"]
@@ -1176,6 +1247,21 @@ def _selftest():
     ok(_r781["floor_pct"] == _r781b["floor_pct"],
        "ISA-0781: the past one-off changes nothing in the solve (it is already in the value)")
 
+    # ══ ISA-0852 (B01-R03): the solved root is independently re-derived ══
+    _s852 = [{"from": "2026-07-01", "monthly_gbp": 0}, {"from": "2027-04-06", "monthly_gbp": 1250}]
+    _o852 = [{"date": "2026-09-05", "amount_gbp": 11250}]
+    _raw852 = solve_required_annual_pct(1_000_000, 143_423.34, date(2026, 8, 31), date(2037, 12, 31), _s852,
+                                        one_offs=_o852, rounded=False)
+    _ok852 = independent_root_check(1_000_000, 143_423.34, date(2026, 8, 31), date(2037, 12, 31), _s852, _raw852, one_offs=_o852)
+    ok(_ok852["state"] == "OK" and _ok852["diff_pp"] <= ROOT_CHECK_TOL_PP,
+       "ISA-0852 NEGATIVE CONTROL: the independent exact-date derivation agrees with the solver within 0.15pp")
+    _bad852 = independent_root_check(1_000_000, 143_423.34, date(2026, 8, 31), date(2037, 12, 31), _s852, _raw852 + 1.0,
+                                     one_offs=_o852)
+    ok(_bad852["state"] == "ROOT_CHECK_FAILED",
+       "ISA-0852 MUST-FIRE: a root 1pp away from the independent derivation is ROOT_CHECK_FAILED")
+    _miss852 = independent_root_check(1_000_000, 143_423.34, date(2026, 8, 31), date(2037, 12, 31), _s852, _raw852)
+    ok(_miss852["state"] == "ROOT_CHECK_FAILED",
+       "ISA-0852 MUST-FIRE: dropping the GBP 11,250 one-off from ONE derivation is caught (the two must see the same flows)")
     # ══ ISA-0775: every key this module writes into target_state.json is declared RUNTIME in the
     #    signed-config projection (release_gate.CONFIG_RUNTIME_KEYS), so a pre-run cannot make LIVE
     #    UNTRUSTED by doing its job - and a NEW written key fails HERE before it can do so in LIVE.

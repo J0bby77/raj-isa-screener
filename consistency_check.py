@@ -1792,6 +1792,8 @@ PRERUN_REQUIRED_PRECEDENCE = (
     ("0a", "1", "R18.5 capital authority before any work"),
     ("1b", "3", "the transaction ledger is appended before analytics reads purchase dates (ISA-0124)"),
     ("5x", "5y", "symbol map refreshed before the price fetch resolves through it (ISA-0577/0725)"),
+    ("5x", "5x-ie", "instrument eligibility types every VERIFIED symbol, including names the map just admitted (ISA-0860)"),
+    ("5x-ie", "8", "the eligibility cache is current before step9_pre stamps the broker verdict (ISA-0860)"),
     ("5y", "6.12", "weekly return store refreshed before the V2.1 risk stack (ISA-0708)"),
     ("5y", "6.10", "weekly return store refreshed before the router sizes capital (ISA-0754)"),
     ("8", "6.10", "step9_pre (current_admissibility) produced before the router consumes it (ISA-0616)"),
@@ -3089,6 +3091,342 @@ def pair_occurrence_guard_coverage(setup_text=None, mirrors=None, exists=os.path
     return errs
 
 
+
+# ── ISA-0843 (11-Oct-2026) — EVERY INTENDED OCCURRENCE IS A CRON FIRING DAY, UNDER EITHER SEMANTICS ──────
+# The occurrence guards (Step 0A / task_authority.occurrence) can only SUPPRESS a wrong firing; they cannot
+# create a missing one. Whether a restricted day-of-month AND a restricted day-of-week combine as AND or OR is
+# a property of the HOST scheduler, measured twice with opposite answers: AND on the Cowork desktop scheduler
+# (ISA-0479, Jun-Aug 2026) and OR on the account-level scheduled tasks re-created 02-07 Oct 2026
+# (ISA/_october_build_11oct2026/evidence/installed_scheduled_tasks_11oct2026.json). A declared cron is therefore
+# required to reach every intended occurrence under BOTH, so a scheduler change cannot silently drop a run.
+# The case that motivated it: `30 9 1-7 * 6` for 'Saturday before the 1st Sunday' never fires on Sat
+# 31-Oct-2026 under AND (1-Nov-2026 is a Sunday); `30 9 * * 6` fires under both.
+CRON_SEMANTICS = ("AND", "OR")
+# NB: a distinct name - `_CRON_LITERAL_RE` already belongs to pair_prose_quantity_values (ISA-0461).
+_ROW_CRON_RE = re.compile(r"`(\S+\s+\S+\s+\S+\s+\S+\s+\S+)`")
+
+
+def _cron_field(spec, lo, hi):
+    """Set of ints a cron field admits, or None for an unrestricted '*'. Raises ValueError on junk."""
+    if spec == "*":
+        return None
+    out = set()
+    for part in spec.split(","):
+        step = 1
+        if "/" in part:
+            part, st = part.split("/", 1)
+            step = int(st)
+        if part == "*":
+            a, b = lo, hi
+        elif "-" in part:
+            a, b = (int(x) for x in part.split("-", 1))
+        else:
+            a = b = int(part)
+        if a < lo or b > hi or a > b or step < 1:
+            raise ValueError("cron field %r outside %d-%d" % (spec, lo, hi))
+        out.update(range(a, b + 1, step))
+    return out
+
+
+def cron_fires_on(cron, day, semantics):
+    """Does the 5-field `cron` fire on calendar date `day` under 'AND' or 'OR' day-field semantics?"""
+    f = cron.split()
+    if len(f) != 5:
+        raise ValueError("not a 5-field cron: %r" % cron)
+    dom, mon, dow = _cron_field(f[2], 1, 31), _cron_field(f[3], 1, 12), _cron_field(f[4], 0, 7)
+    if mon is not None and day.month not in mon:
+        return False
+    if dow is not None:
+        dow = {0 if x == 7 else x for x in dow}
+    cdow = (day.weekday() + 1) % 7                       # python Mon=0 -> cron Sun=0, Mon=1
+    dom_ok = dom is None or day.day in dom
+    dow_ok = dow is None or cdow in dow
+    if dom is not None and dow is not None and semantics == "OR":
+        return dom_ok or dow_ok
+    return dom_ok and dow_ok
+
+
+def _intended_on(spec, day):
+    """Is `day` an intended occurrence for a declared_tasks() row? None when the row states no parseable rule."""
+    wd = _WEEKDAYS[day.weekday()]
+    if spec.get("relative"):
+        nxt = day + __import__("datetime").timedelta(days=1)
+        return wd == "Saturday" and 1 <= nxt.day <= 7
+    if spec.get("ordinal") and spec.get("weekday"):
+        lo, hi = spec["ordinal"]
+        return lo <= day.day <= hi and wd == spec["weekday"]
+    m = re.search(r"\b(" + "|".join(_WEEKDAYS) + r")s\b", spec.get("row") or "")
+    if m:
+        return wd == m.group(1)
+    return None
+
+
+def pair_cron_reaches_occurrences(setup_text=None, today=None, horizon_days=731):
+    """ISA-0843. For every task row in SCHEDULED_TASKS_SETUP.md with a cron literal, every intended occurrence in
+    the next `horizon_days` must be a firing day of that cron under BOTH AND and OR semantics. A row with no
+    cron literal (UNVERIFIED) or no parseable rule is a WARN - unmeasured, never clean (R2.10)."""
+    import datetime as _dt
+    text = setup_text if setup_text is not None else _read("SCHEDULED_TASKS_SETUP.md")
+    tasks = declared_tasks(text)
+    if not tasks:
+        return ["ISA-0843: SCHEDULED_TASKS_SETUP.md yielded no task rows - cron reachability UNMEASURED (R2.10)"]
+    start = today or _dt.date.today()
+    errs = []
+    for task, spec in sorted(tasks.items()):
+        m = _ROW_CRON_RE.search(spec.get("row") or "")
+        if not m:
+            errs.append(warn(f"ISA-0843: `{task}` declares no cron literal - its reachability is UNMEASURED"))
+            continue
+        cron = m.group(1)
+        try:
+            cron_fires_on(cron, start, "AND")
+        except ValueError as exc:
+            errs.append(f"ISA-0843: `{task}` cron {cron!r} is not parseable ({exc})")
+            continue
+        unknown, missed = False, {s: [] for s in CRON_SEMANTICS}
+        for i in range(horizon_days):
+            d = start + _dt.timedelta(days=i)
+            want = _intended_on(spec, d)
+            if want is None:
+                unknown = True
+                break
+            if want:
+                for sem in CRON_SEMANTICS:
+                    if not cron_fires_on(cron, d, sem):
+                        missed[sem].append(d.isoformat())
+        if unknown:
+            errs.append(warn(f"ISA-0843: `{task}` schedule {spec.get('row')!r} states no parseable occurrence rule - "
+                             f"reachability UNMEASURED"))
+            continue
+        for sem in CRON_SEMANTICS:
+            if missed[sem]:
+                errs.append(f"ISA-0843: `{task}` cron `{cron}` cannot fire on intended occurrence(s) "
+                            f"{missed[sem][:3]}{' ...' if len(missed[sem]) > 3 else ''} under {sem} day-field semantics "
+                            f"- a scheduler with those semantics would silently drop the run (the guard cannot add it)")
+    return errs
+
+# ── ISA-0808 (11-Oct-2026) — THE AUTOMATIC PHASE SWITCH STAYS RETIRED ─────────────────────
+# Raj 10-Oct-2026: no automatic Phase-1 -> Phase-2 fund re-target at two months >= 15%. One home:
+# target_weights.thresholds carries only the retirement record; no module reads the old key or emits
+# the old states/lever; Run_Context carries no executable transition instruction.
+PHASE_SWITCH_RETIRED_KEY = "phase_transition_pct"
+PHASE_SWITCH_RETIRED_TOKENS = ("TRANSITION_CONFIRMED", "ABOVE_TRIGGER_FIRST_MONTH",
+                               "ABOVE_TRIGGER_PRIOR_UNKNOWN", "grow_stock_sleeve_to_phase2")
+PHASE_SWITCH_RC_FORBIDDEN = ("PHASE TRANSITION CONFIRMED", "Shifting to Phase 2 target weights",
+                             "phase transition sub-step", "On confirmed transition")
+# A module may name the key only to DETECT its re-appearance (reported, never acted on).
+PHASE_SWITCH_DETECTORS = {"new_capital_control.py": "reports a re-appeared key as a policy conflict",
+                          "consistency_check.py": "this pair"}
+
+
+def _phase_switch_readers(src):
+    """AST: subscripts/.get() of the retired key, and string constants equal to a retired state/lever."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return ["unparseable"]
+    hits = []
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Subscript):
+            k = n.slice
+            if isinstance(k, _ast.Constant) and k.value == PHASE_SWITCH_RETIRED_KEY:
+                hits.append("reads [%r] at line %d" % (k.value, n.lineno))
+        elif isinstance(n, _ast.Call) and getattr(n.func, "attr", None) == "get" and n.args \
+                and isinstance(n.args[0], _ast.Constant) and n.args[0].value == PHASE_SWITCH_RETIRED_KEY:
+            hits.append("reads .get(%r) at line %d" % (PHASE_SWITCH_RETIRED_KEY, n.lineno))
+        elif isinstance(n, _ast.Constant) and isinstance(n.value, str) and n.value in PHASE_SWITCH_RETIRED_TOKENS:
+            hits.append("emits %r at line %d" % (n.value, n.lineno))
+    return hits
+
+
+def pair_phase_switch_retired(tw=None, sources=None, run_context=None):
+    """ISA-0808. ERROR when the retired automatic phase switch re-appears in config, code or instructions."""
+    errs = []
+    if tw is None:
+        try:
+            tw = json.loads(_read("target_weights.json"))
+        except Exception as exc:
+            return ["ISA-0808: target_weights.json unreadable (%s) - phase-switch retirement UNMEASURED" % exc]
+    th = (tw or {}).get("thresholds") or {}
+    if PHASE_SWITCH_RETIRED_KEY in th:
+        errs.append("ISA-0808: target_weights.thresholds.%s = %r is LIVE again - the automatic Phase-2 switch "
+                    "was retired by Raj (10-Oct-2026); keep only _retired_phase_transition_11oct2026"
+                    % (PHASE_SWITCH_RETIRED_KEY, th[PHASE_SWITCH_RETIRED_KEY]))
+    if not isinstance(th.get("_retired_phase_transition_11oct2026"), dict):
+        errs.append(warn("ISA-0808: target_weights.thresholds has no _retired_phase_transition_11oct2026 record - "
+                         "the retirement's history is not discoverable (R6.4)"))
+    if sources is None:
+        sources = {}
+        for fn in sorted(os.listdir(HERE)):
+            if fn.endswith(".py") and fn not in PHASE_SWITCH_DETECTORS:
+                txt = _read(fn)
+                if PHASE_SWITCH_RETIRED_KEY in txt or any(t in txt for t in PHASE_SWITCH_RETIRED_TOKENS):
+                    sources[fn] = txt
+        if not any(fn.endswith(".py") for fn in os.listdir(HERE)):
+            errs.append("ISA-0808: no modules found - code scan UNMEASURED")
+    for fn, txt in sorted(sources.items()):
+        if fn in PHASE_SWITCH_DETECTORS:
+            continue
+        for h in _phase_switch_readers(txt):
+            errs.append("ISA-0808: %s %s - the retired automatic phase switch has a live reader/emitter" % (fn, h))
+    rc = run_context if run_context is not None else _read("Run_Context_Monthly_ISA_Review.md")
+    if not rc:
+        errs.append("ISA-0808: Run_Context unreadable - instruction scan UNMEASURED")
+    for phrase in PHASE_SWITCH_RC_FORBIDDEN:
+        if phrase in (rc or ""):
+            errs.append("ISA-0808: Run_Context still instructs the retired phase switch (%r)" % phrase)
+    return errs
+
+# ── ISA-0858 (12-Oct-2026) — ONE DEPLOYABLE-CASH ROUTING RULE (Raj D1/D3/D4/D5/D8) ─────────────────
+CAPITAL_ROUTING_RC_FORBIDDEN = (
+    "If no stock action is taken this month, it adds to the cash buffer",
+    "is reserved for stock sleeve accumulation",
+    "is reserved exclusively for stock sleeve accumulation",
+    "stays BARRED until 2026-11-01",
+)
+
+
+def pair_capital_routing_one_rule(tw=None, run_context=None, engine_src=None):
+    """ISA-0858. ERROR when (a) the D1 bands are not declared as numbers with priority <= hard; (b) the retired
+    scaling freeze is active again or its record is missing (R6.4); (c) the executed Run_Context still states a
+    superseded per-source/per-phase routing rule; (d) the capital decision engine does not take its capital from
+    the one funding waterfall."""
+    errs = []
+    if tw is None:
+        try:
+            tw = json.loads(_read("target_weights.json"))
+        except Exception as exc:
+            return ["ISA-0858: target_weights.json unreadable (%s) - routing rule UNMEASURED" % exc]
+    ss = (tw or {}).get("stock_sleeve") or {}
+    try:
+        h, p = float(ss.get("sleeve_ceiling")), float(ss.get("sleeve_priority_ceiling"))
+        if not (0 < p <= h <= 1):
+            errs.append("ISA-0858: sleeve bands inconsistent (priority %s, hard %s)" % (p, h))
+    except (TypeError, ValueError):
+        errs.append("ISA-0858: stock_sleeve.sleeve_ceiling / sleeve_priority_ceiling are not declared numbers (Raj D1)")
+    fz = (tw or {}).get("scaling_freeze") or {}
+    if fz.get("active"):
+        errs.append("ISA-0858: scaling_freeze is ACTIVE again - Raj retired it (D5, 11-Oct-2026); the brake on fund-funded "
+                    "stock capital is the retention ratchet")
+    if not isinstance(fz.get("retired"), dict):
+        errs.append(warn("ISA-0858: scaling_freeze carries no `retired` record - the retirement's history is not "
+                         "discoverable (R6.4)"))
+    rc = run_context if run_context is not None else _read("Run_Context_Monthly_ISA_Review.md")
+    if not rc:
+        errs.append("ISA-0858: Run_Context unreadable - instruction scan UNMEASURED")
+    for phrase in CAPITAL_ROUTING_RC_FORBIDDEN:
+        if phrase in (rc or ""):
+            errs.append("ISA-0858: Run_Context still states a superseded routing rule (%r)" % phrase)
+    src = engine_src if engine_src is not None else _read("capital_decision_engine.py")
+    if "_fw.build(" not in (src or ""):
+        errs.append("ISA-0858: capital_decision_engine.build does not take its capital from funding_waterfall")
+    return errs
+
+
+# ── ISA-0851 (11-Oct-2026) — ONE CONTRIBUTION SCHEDULE, AND AN EXPECTATION IS NEVER CASH ────────
+# target_state.contribution_schedule is read only through contribution_schedule.py. The cash-side names
+# (extract_cash_statement.STANDING_ORDER*) are DERIVED from it, extract_portfolio never infers a credit,
+# the email prices nothing from a literal, and Run_Context instructs no adjustment.
+CONTRIB_RC_FORBIDDEN = ("add £1,250 to stated cash", "Adjusted for unprocessed standing order",
+                        "is applied conditionally by `extract_portfolio.py`")
+
+
+def pair_contribution_single_home(sources=None, run_context=None, live_state=None, constants=None):
+    """ISA-0851 / B01-R01/R02/R05. ERROR when a second home or an inferred credit re-appears."""
+    import ast as _ast
+    errs = []
+    if sources is None:
+        sources = {f: _read(f) for f in ("extract_cash_statement.py", "extract_portfolio.py", "email_prefill.py")}
+    for fn, txt in sorted(sources.items()):
+        if not txt:
+            errs.append("ISA-0851: %s unreadable - contribution single-home UNMEASURED" % fn)
+            continue
+        try:
+            tree = _ast.parse(txt)
+        except SyntaxError:
+            errs.append("ISA-0851: %s does not parse" % fn)
+            continue
+        _skip = set()
+        for _f in _ast.walk(tree):                     # a selftest may patch a name to prove a control; it is not a home
+            if isinstance(_f, _ast.FunctionDef) and _f.name in ("_selftest", "selftest"):
+                _skip |= {id(x) for x in _ast.walk(_f)}
+        for n in _ast.walk(tree):
+            if id(n) in _skip:
+                continue
+            if isinstance(n, _ast.Assign) and isinstance(n.value, _ast.Constant) and not isinstance(n.value.value, str):
+                for t in n.targets:
+                    if isinstance(t, _ast.Name) and t.id in ("STANDING_ORDER", "STANDING_ORDER_ACTIVE", "STANDING_ORDER_MONTHLY", "so"):
+                        errs.append("ISA-0851: %s line %d assigns a literal %r to %s - a second home for the contribution "
+                                    "schedule (read contribution_schedule)" % (fn, n.lineno, n.value.value, t.id))
+            if (fn == "extract_portfolio.py" and isinstance(n, _ast.FunctionDef) and n.name == "_standing_order_adjustment"):
+                for r in _ast.walk(n):
+                    if isinstance(r, _ast.Return) and isinstance(r.value, _ast.Tuple) and r.value.elts:
+                        e0 = r.value.elts[0]
+                        if not (isinstance(e0, _ast.Constant) and e0.value in (0, 0.0)):
+                            errs.append("ISA-0851: extract_portfolio._standing_order_adjustment line %d can return a non-zero "
+                                        "credit - an expected contribution would become cash" % r.lineno)
+    rc = run_context if run_context is not None else _read("Run_Context_Monthly_ISA_Review.md")
+    if not rc:
+        errs.append("ISA-0851: Run_Context unreadable - instruction scan UNMEASURED")
+    for ph in CONTRIB_RC_FORBIDDEN:
+        if ph in (rc or ""):
+            errs.append("ISA-0851: Run_Context still instructs an inferred standing-order credit (%r)" % ph)
+    try:
+        if live_state is None:
+            import contribution_schedule as _cs851
+            live_state = _cs851.state()
+        if constants is None:
+            import extract_cash_statement as _ecs851
+            constants = {"STANDING_ORDER_ACTIVE": _ecs851.STANDING_ORDER_ACTIVE}
+        if live_state.get("state") == "UNKNOWN":
+            errs.append(warn("ISA-0851: the contribution schedule reads UNKNOWN (%s) - no contribution is assumed"
+                             % live_state.get("why")))
+        if bool(constants.get("STANDING_ORDER_ACTIVE")) != (live_state.get("state") == "ACTIVE"):
+            errs.append("ISA-0851: extract_cash_statement.STANDING_ORDER_ACTIVE=%r disagrees with the schedule state %s"
+                        % (constants.get("STANDING_ORDER_ACTIVE"), live_state.get("state")))
+    except Exception as exc:                                            # noqa: BLE001
+        errs.append("ISA-0851: contribution_schedule unreadable (%s: %s) - UNMEASURED" % (type(exc).__name__, exc))
+    return errs
+
+# ── ISA-0857 (11-Oct-2026) — ONE CURRENT FUNDING FIGURE FOR SPENDING CAPACITY ───────────────────
+# summary.cash_deployable_gbp is the current funding figure (cash-statement closing + MMF when newer); the
+# broker-file cash_effective_gbp is a labelled diagnostic. No capital consumer may size or reserve on it.
+FUNDING_CAPITAL_MODULES = ("capital_decision_engine.py", "capital_destination.py", "position_sizing.py",
+                           "drawdown_monitor.py", "deployment_sequencer.py", "waiting_room.py", "checkpoint_d.py",
+                           "capital_authorisation.py")
+
+
+def pair_one_funding_figure(sources=None, prerun_src=None):
+    """ISA-0857 / B02-R01. ERROR when a capital consumer reads the diagnostic broker-file cash."""
+    import ast as _ast
+    errs = []
+    if sources is None:
+        sources = {f: _read(f) for f in FUNDING_CAPITAL_MODULES}
+    for fn, txt in sorted(sources.items()):
+        if not txt:
+            errs.append(warn("ISA-0857: %s unreadable - funding-figure scan UNMEASURED for it" % fn))
+            continue
+        try:
+            tree = _ast.parse(txt)
+        except SyntaxError:
+            errs.append("ISA-0857: %s does not parse" % fn)
+            continue
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Constant) and n.value == "cash_effective_gbp":
+                errs.append("ISA-0857: capital consumer %s reads cash_effective_gbp at line %d - spending capacity must come "
+                            "from summary.cash_deployable_gbp (the one current funding figure)" % (fn, n.lineno))
+    pr = prerun_src if prerun_src is not None else _read("monthly_isa_prerun.py")
+    try:
+        for n in _ast.walk(_ast.parse(pr or "")):
+            if (isinstance(n, _ast.Call) and getattr(n.func, "attr", None) == "get" and n.args
+                    and isinstance(n.args[0], _ast.Constant) and n.args[0].value == "cash_effective_gbp"):
+                errs.append("ISA-0857: monthly_isa_prerun reads summary.get('cash_effective_gbp') at line %d for a "
+                            "capital quantity - use cash_deployable_gbp" % n.lineno)
+    except SyntaxError:
+        errs.append("ISA-0857: monthly_isa_prerun does not parse")
+    return errs
+
 # ── ISA-0537 (27-Sep-2026) — SCHEDULED-TASK RUN-SURFACE AUTHORITY ──────────────────────────
 # The installed Cowork task text is unreadable from every session, so the framework cannot diff it.
 # The fix makes it a stable THIN LAUNCHER and moves the proof to the invocation: task_authority.launch
@@ -3113,12 +3451,18 @@ def pair_task_authority(ta=None, health_fn=None):
         if v.get("effective_state") == "ENFORCED" and v.get("missed"):
             errs.append(f"ISA-0537: ENFORCED task {k} MISSED expected occurrence(s) {v['missed']} - a task "
                         f"that never fired cannot report itself")
+    for k, v in sorted((h.get("tasks") or {}).items()):
+        if v.get("state") == "FIRING_OFF_SCHEDULE":                    # ISA-0844 (11-Oct-2026)
+            msg = (f"ISA-0844: scheduled task {k} FIRES but every firing is outside its declared occurrence "
+                   f"({v.get('off_schedule_fires')}) while declared occurrence(s) {v.get('missed')} were missed - "
+                   f"the INSTALLED schedule disagrees with SCHEDULED_TASKS_SETUP.md, so the task silently never runs")
+            errs.append(msg if v.get("capital_relevant") else warn(msg))
     soft = sorted(k for k, v in (h.get("tasks") or {}).items()
                   if v.get("effective_state") != "ENFORCED" and v.get("capital_relevant"))
     if soft:
         missed = sorted(o for k in soft for o in (h["tasks"][k].get("missed") or []))
         errs.append(warn(f"ISA-0537: {len(soft)} capital-relevant scheduled task(s) not yet ENFORCED "
-                         f"(installed text unverified until Raj installs the thin launcher): "
+                         f"(all are installed as ISA-TL-1 thin launchers since 11-Oct-2026; ENFORCED still needs retained receipt evidence - ISA-0537): "
                          f"legacy={h.get('n_legacy')} probation={h.get('n_probation')}"
                          + (f"; unobserved/missed occurrences {missed}" if missed else "")))
     return errs
@@ -5096,7 +5440,7 @@ def _summary_decls(prefill_text):
     return found, None
 
 
-def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None):
+def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None, renderer_text=None):
     """ISA-0447 — EVERY top-level `summary[...]` key the pre-run writes must have a DECLARED
     disposition: rendered in the email, escalated through the pre-run warning list, declared out
     of scope with a reason, or unadjudicated under a LIVE register item.
@@ -5192,6 +5536,19 @@ def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None
             errs.append("ISA-0447: `summary[%r]` is declared RENDERED by `%s`, and email_prefill "
                         "defines no such function. A renderer named but absent is worse than one "
                         "missing, because the declaration reads as evidence." % (k, fn))
+
+    # 4b. ISA-0860 (12-Oct-2026): a RENDERED key's builder must be CALLED somewhere on the email path. Found:
+    #     build_integrity_block was the declared renderer of six keys (coverage, symbol map, integrity queue)
+    #     and had ZERO call sites - defined, declared, and reaching no email. Declared + defined is not consumed.
+    if renderer_text is None:
+        renderer_text = _read("build_monthly_isa_email.py") or ""
+    _both = prefill_text + "\n" + renderer_text
+    for fn in sorted({str(v) for v in rendered.values()}):
+        _n = len(re.findall(r'(?<![\w])%s\s*\(' % re.escape(fn), _both)) - len(re.findall(r'\bdef\s+%s\s*\(' % re.escape(fn), _both))
+        if _n <= 0:
+            errs.append("ISA-0860: `%s` is the declared RENDERER of %s and NOTHING calls it - the keys reach no "
+                        "email. A renderer defined and declared but never invoked is the ISA-0439 defect one level "
+                        "down (a present computation reporting to nobody)." % (fn, sorted(k for k, v in rendered.items() if str(v) == fn)))
 
     # 5. an ESCALATED key must name a prefix the pre-run's warning list actually emits.
     #    ⚑ Read the STRING LITERALS passed to warnings.append, not the file text: a check that
@@ -6981,6 +7338,10 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_no_informational_in_register", pair_no_informational_in_register())  # ISA-0336 (13-Aug-2026)
     errs += _tally("pair_register_fourc_complete", pair_register_fourc_complete())       # ISA-0337 (13-Aug-2026)
     errs += _tally("pair_target_weights_bucket_reconciliation", pair_target_weights_bucket_reconciliation())   # ISA-0394 root (20-Aug-2026)
+    errs += _tally("pair_phase_switch_retired", pair_phase_switch_retired())              # ISA-0808 (11-Oct-2026)
+    errs += _tally("pair_capital_routing_one_rule", pair_capital_routing_one_rule())      # ISA-0858 (12-Oct-2026)
+    errs += _tally("pair_contribution_single_home", pair_contribution_single_home())      # ISA-0851 (11-Oct-2026)
+    errs += _tally("pair_one_funding_figure", pair_one_funding_figure())                  # ISA-0857 (11-Oct-2026)
     errs += _tally("pair_build_readiness_declared", pair_build_readiness_declared())      # ISA-0399 (20-Aug-2026)
     errs += _tally("pair_lookthrough_xray_reconciliation", pair_lookthrough_xray_reconciliation())        # XR1 — ISA-0407 (20-Aug-2026)
     errs += _tally("pair_regional_m_contracts", pair_regional_m_contracts())                   # RM1-RM4 — ISA-0160 (20-Aug-2026)
@@ -6988,6 +7349,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_adoption_gate_refuses", pair_adoption_gate_refuses())                  # ISA-0409 (20-Aug-2026)
     errs += _tally("pair_return_basis_declared", pair_return_basis_declared())                  # ISA-0402 / ISA-0401 (20-Aug-2026)
     errs += _tally("pair_occurrence_guard_coverage", pair_occurrence_guard_coverage())              # ISA-0479/0480/0481/0482 (27-Aug-2026)
+    errs += _tally("pair_cron_reaches_occurrences", pair_cron_reaches_occurrences())      # ISA-0843 (11-Oct-2026)
     errs += _tally("pair_task_authority", pair_task_authority())                              # ISA-0537 (27-Sep-2026)
     errs += _tally("pair_month_artefacts_archive_aware", pair_month_artefacts_archive_aware())   # ISA-0832 (04-Oct-2026)
     errs += _tally("pair_run_contracts", pair_run_contracts())                                # ISA-0830 (04-Oct-2026)
@@ -7204,6 +7566,114 @@ def _selftest():
         _setup_rel, {"isa-monthly-prerun": "## STEP 0A — OCCURRENCE GUARD\nis tomorrow the first Sunday"})
     # an empty setup surface is UNMEASURED, never clean (R2.10)
     assert pair_occurrence_guard_coverage("", {})
+    # ISA-0843 (11-Oct-2026) cron reachability under BOTH day-field semantics.
+    import datetime as _dt843
+    _rel_old = "| isa-monthly-prerun | pre-run | `30 9 1-7 * 6` | Saturday before the 1st Sunday, 09:30 | yes |\n"
+    _rel_new = "| isa-monthly-prerun | pre-run | `30 9 * * 6` | Saturday before the 1st Sunday, 09:30 | yes |\n"
+    _nth = "| isa-nasdaq-fri2 | NASDAQ | x | `0 9 8-14 * 5` | 2nd Friday |\n"
+    _wk = "| isa-weekly-eps-snapshot | y | `30 14 * * 5` | Fridays 14:30 | yes |\n"
+    _bad_wk = "| isa-weekly-eps-snapshot | y | `0 8 * * 1` | Fridays 14:30 | yes |\n"
+    _T = _dt843.date(2026, 10, 31)
+    def _e843(txt, d):
+        return [x for x in pair_cron_reaches_occurrences(txt, today=d) if _norm(x)["severity"] == ERROR]
+    _m = _e843(_rel_old, _dt843.date(2026, 10, 30))
+    assert _m and any("2026-10-31" in x and "under AND" in x for x in _m), \
+        "ISA-0843 MUST-FIRE R5.14 T-1: on 30-Oct the old pre-run cron cannot reach Sat 31-Oct under AND"
+    assert not any("under OR" in x for x in _m), "ISA-0843: under OR the old cron DOES reach 31-Oct"
+    assert any("2026-10-31" in x for x in _e843(_rel_old, _T)), \
+        "ISA-0843 R5.14 T: on 31-Oct itself the miss is still reported"
+    assert any("2027-08-01" not in x and "2027-07-31" in x for x in _e843(_rel_old, _T + _dt843.timedelta(days=1))), \
+        "ISA-0843 R5.14 T+1: after 31-Oct the next month-wrap miss (Sat 31-Jul-2027) is reported"
+    assert _e843(_rel_old, _T) == _e843(_rel_old, _T), "ISA-0843 R5.14 repeat_same_occurrence: idempotent"
+    assert not _e843(_rel_new, _dt843.date(2026, 11, 7)), \
+        "ISA-0843 R5.14 next_occurrence: the every-Saturday cron is clean at the next occurrence"
+    for _d in (_dt843.date(2026, 10, 24), _dt843.date(2026, 10, 25), _dt843.date(2026, 10, 26), _T):
+        assert not _e843(_rel_new, _d), "ISA-0843 NEGATIVE CONTROL: `30 9 * * 6` reaches every occurrence (incl. the 25-Oct DST weekend)"
+        assert not _e843(_nth, _d), "ISA-0843 NEGATIVE CONTROL: an Nth-weekday cron reaches its ordinal under both semantics"
+        assert not _e843(_wk, _d), "ISA-0843 NEGATIVE CONTROL: weekly Friday cron matches 'Fridays'"
+    assert _e843(_bad_wk, _T), "ISA-0843 MUST-FIRE: a Monday cron cannot serve a 'Fridays' declaration (the ISA-0844 shape)"
+    assert any(_norm(x)["severity"] == WARN for x in pair_cron_reaches_occurrences(
+        "| isa-mid-month-intelligence-brief | b | UNVERIFIED | 3rd Sunday | **NO — deletion is permanent** |\n", today=_T)), \
+        "ISA-0843: a row with no cron literal is WARN-unmeasured, never clean"
+    assert pair_cron_reaches_occurrences("", today=_T), "ISA-0843: no rows -> UNMEASURED, never clean"
+    for _bad in ("30 9 1-32 * 6", "x y z", "30 9 * * 8"):
+        try:
+            cron_fires_on(_bad, _T, "AND"); raise AssertionError("ISA-0843: junk cron %r accepted" % _bad)
+        except ValueError:
+            pass
+
+    # ISA-0808 (11-Oct-2026) the automatic phase switch stays retired.
+    _tw_ok = {"thresholds": {"_retired_phase_transition_11oct2026": {"was_pct": 0.15}}}
+    _rc_ok = "### 6.7 - Phase Status Statement. No automatic phase switch (ISA-0808)."
+    _src_ok = {"portfolio_analytics.py": "PHASE_STATUS_RETIRED = 'AUTHORISED_TARGETS_FIXED'\n# phase_transition_pct retired\n"}
+    _tw858 = {"stock_sleeve": {"sleeve_ceiling": 0.30, "sleeve_priority_ceiling": 0.25},
+              "scaling_freeze": {"active": False, "retired": {"on": "2026-10-11"}}}
+    assert pair_capital_routing_one_rule(tw=_tw858, run_context="one rule", engine_src="_fw.build(") == [], \
+        "ISA-0858 control: a declared one-rule config passes"
+    assert pair_capital_routing_one_rule(tw=dict(_tw858, scaling_freeze={"active": True, "retired": {}}),
+                                         run_context="x", engine_src="_fw.build("), \
+        "ISA-0858 MUST-FIRE: a re-activated scaling freeze is an ERROR"
+    assert pair_capital_routing_one_rule(tw=_tw858, run_context="If no stock action is taken this month, it adds to the cash buffer",
+                                         engine_src="_fw.build("), \
+        "ISA-0858 MUST-FIRE: the superseded 'adds to the cash buffer' rule in Run_Context is an ERROR"
+    assert pair_capital_routing_one_rule(tw={"stock_sleeve": {"sleeve_ceiling": None}, "scaling_freeze": {"retired": {}}},
+                                         run_context="x", engine_src="_fw.build("), \
+        "ISA-0858 MUST-FIRE: undeclared bands are an ERROR"
+    assert pair_capital_routing_one_rule(tw=_tw858, run_context="x", engine_src="capital = deployable - reserve"), \
+        "ISA-0858 MUST-FIRE: an engine that does not read the waterfall is an ERROR"
+    _e808 = lambda **kw: [x for x in pair_phase_switch_retired(**{**dict(tw=_tw_ok, sources=_src_ok, run_context=_rc_ok), **kw})
+                          if _norm(x)["severity"] == ERROR]
+    assert not _e808(), "ISA-0808 NEGATIVE CONTROL: retired config + non-reading code + status-only Run_Context is clean"
+    assert _e808(tw={"thresholds": {"phase_transition_pct": 0.15, "_retired_phase_transition_11oct2026": {}}}), \
+        "ISA-0808 MUST-FIRE: the live key re-appearing in target_weights is an ERROR"
+    assert _e808(sources={"portfolio_analytics.py": "x = tw['thresholds']['phase_transition_pct']\n"}), \
+        "ISA-0808 MUST-FIRE: a subscript reader of the retired key is an ERROR"
+    assert _e808(sources={"return_architecture.py": "t = th.get('phase_transition_pct')\n"}), \
+        "ISA-0808 MUST-FIRE: a .get() reader of the retired key is an ERROR"
+    assert _e808(sources={"return_architecture.py": "out.append({'lever': 'grow_stock_sleeve_to_phase2'})\n"}), \
+        "ISA-0808 MUST-FIRE: emitting the retired lever is an ERROR"
+    assert _e808(sources={"portfolio_analytics.py": "phase_status = 'TRANSITION_CONFIRMED'\n"}), \
+        "ISA-0808 MUST-FIRE: emitting the retired transition state is an ERROR"
+    assert _e808(run_context="1. State: \"PHASE TRANSITION CONFIRMED - shifting\""), \
+        "ISA-0808 MUST-FIRE: a Run_Context transition instruction is an ERROR"
+    assert not _e808(sources={"new_capital_control.py": "trig = th.get('phase_transition_pct')\n"}), \
+        "ISA-0808 NEGATIVE CONTROL: the declared detector may read the key to report it"
+    assert any(_norm(x)["severity"] == WARN for x in pair_phase_switch_retired(tw={"thresholds": {}}, sources=_src_ok,
+                                                                               run_context=_rc_ok)), \
+        "ISA-0808: a missing retirement record is WARN (history), not silence"
+
+    # ISA-0851 (11-Oct-2026) one contribution schedule; an expectation is never cash.
+    _src851 = {"extract_cash_statement.py": "STANDING_ORDER_ACTIVE = _SO_STATE.get('state') == 'ACTIVE'\n",
+               "extract_portfolio.py": "def _standing_order_adjustment(d):\n    return 0.0, False, None\n",
+               "email_prefill.py": "so = _so.get('restart_monthly_gbp')\n"}
+    _ls851 = {"state": "PAUSED"}
+    _e851 = lambda **kw: [x for x in pair_contribution_single_home(**{**dict(sources=_src851, run_context="no adjustment is made",
+                                                                            live_state=_ls851, constants={"STANDING_ORDER_ACTIVE": False}), **kw})
+                          if _norm(x)["severity"] == ERROR]
+    assert not _e851(), "ISA-0851 NEGATIVE CONTROL: derived constants, a zero adjustment and a schedule-read email are clean"
+    assert _e851(sources=dict(_src851, **{"extract_cash_statement.py": "STANDING_ORDER_ACTIVE = True\n"})), \
+        "ISA-0851 MUST-FIRE: a literal STANDING_ORDER_ACTIVE is a second home"
+    assert _e851(sources=dict(_src851, **{"email_prefill.py": "so = 1250.0\n"})), \
+        "ISA-0851 MUST-FIRE: a literal pause-cost amount is a second home"
+    assert _e851(sources=dict(_src851, **{"extract_portfolio.py":
+                                          "def _standing_order_adjustment(d):\n    return STANDING_ORDER_MONTHLY, True, 1\n"})), \
+        "ISA-0851 MUST-FIRE: an adjustment that can return a credit is an inferred credit"
+    assert _e851(run_context="if within 3 working days add £1,250 to stated cash"), \
+        "ISA-0851 MUST-FIRE: a Run_Context instruction to add an expected payment is an ERROR"
+    assert _e851(constants={"STANDING_ORDER_ACTIVE": True}), \
+        "ISA-0851 MUST-FIRE: a cash-side ACTIVE flag that disagrees with the schedule is an ERROR"
+    assert any(_norm(x)["severity"] == WARN for x in pair_contribution_single_home(
+        sources=_src851, run_context="x", live_state={"state": "UNKNOWN", "why": "fixture"}, constants={"STANDING_ORDER_ACTIVE": False})), \
+        "ISA-0851: an UNKNOWN schedule is a WARN, never silence"
+
+    # ISA-0857 (11-Oct-2026) one current funding figure for spending capacity.
+    assert not [x for x in pair_one_funding_figure(sources={"capital_destination.py": "x = s['cash_deployable_gbp']\n"},
+                                                    prerun_src="_cash = summary.get('cash_deployable_gbp')\n")
+                if _norm(x)["severity"] == ERROR], "ISA-0857 NEGATIVE CONTROL: deployable-only consumers are clean"
+    assert pair_one_funding_figure(sources={"drawdown_monitor.py": "c = s['cash_effective_gbp']\n"}, prerun_src=""), \
+        "ISA-0857 MUST-FIRE: a capital consumer reading cash_effective_gbp is an ERROR"
+    assert pair_one_funding_figure(sources={}, prerun_src="_cash = (summary.get('cash_effective_gbp') or 0.0)\n"), \
+        "ISA-0857 MUST-FIRE: the pre-run drawdown reserve on the broker-file cash is an ERROR (the EV-0091 shape)"
 
     # seeded-good fixtures pass
     good_ctx = ("references SUMMARY_PART_B_FLOOR and SUMMARY_SOURCE_FLOOR and SUMMARY_MAX_COUNT. "

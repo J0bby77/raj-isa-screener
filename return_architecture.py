@@ -799,31 +799,10 @@ def levers(inputs, basis, thr, anchor_pct, sect, tw, frs_rows, portfolio):
                     "assumptions": ["policy-sanctioned by construction — these ARE the declared "
                                     "target weights; dealing costs and min-hold are not priced"]})
 
-    # ── 3. Grow the stock sleeve to the Phase-2 trigger ───────────────────────────────
-    stocks = [i for i in inputs if i["kind"] == "stock"]
-    s_w = sum(i["weight"] or 0.0 for i in stocks)
-    trig = ((tw or {}).get("thresholds") or {}).get("phase_transition_pct")
-    fund_er = sect["section_a"].get("value_pct")
-    stock_er = sect["section_b"].get("value_pct")
-    mech3 = ("(phase-2 stock-sleeve trigger - actual stock weight) x (stock sleeve E[r] - fund "
-             "sleeve E[r]); funded from the fund sleeve pro rata")
-    if trig is None or fund_er is None or stock_er is None:
-        out.append(_blocked("grow_stock_sleeve_to_phase2", "sleeve E[r] or the phase trigger is "
-                                                           "unmeasured", mech3))
-    else:
-        dw = max(0.0, float(trig) - s_w)
-        out.append({"lever": "grow_stock_sleeve_to_phase2",
-                    "delta_pp": _round(dw * (stock_er - fund_er), 4), "feasible": True,
-                    "blocked_reason": None, "mechanism": mech3,
-                    "detail": {"stock_weight_now_pct": _round(100 * s_w, 2),
-                               "phase2_trigger_pct": _round(100 * float(trig), 2),
-                               "stock_sleeve_er_pct": stock_er, "fund_sleeve_er_pct": fund_er},
-                    "assumptions": [
-                        "⚑ NOT currently sanctioned at this size. The sleeve-confidence "
-                        "roadmap sets Stage 1 at ONE position of 0.75%, so this prices the "
-                        "STRUCTURAL value of the shift, not an action available this month",
-                        "assumes new stock capital earns the declared sleeve premium, which is "
-                        "an assumption about the sleeve and not a forecast for any name"]})
+    # ── 3. RETIRED 11-Oct-2026 (ISA-0808, Raj 10-Oct-2026) ───────────────────────────
+    # `grow_stock_sleeve_to_phase2` priced the move to thresholds.phase_transition_pct. The
+    # automatic phase switch and that key are retired; a lever anchored on a retired policy
+    # number would price a target nobody authorised, so it is no longer emitted.
 
     # ── 4. Resume the paused standing order ──────────────────────────────────────────
     # ⚑ This one moves the BAR, not the ball. It lowers the required return; it does not raise
@@ -834,22 +813,30 @@ def levers(inputs, basis, thr, anchor_pct, sect, tw, frs_rows, portfolio):
     try:
         import derive_required_return as drr
         st = json.load(open(os.path.join(HERE, "target_state.json"), encoding="utf-8"))
-        pv = float(((portfolio or {}).get("summary") or {}).get("total_value_gbp")
-                   or st["portfolio_value_gbp"])
-        vd = dt.date.fromisoformat(st["portfolio_value_date"])
+        # ⚑ ISA-0853 (B01-R04): the principal and its date are ONE identity - the dated planning NAV
+        #   (target_state.valuation_basis, D-3) at ITS date, with the forward one-offs, exactly as the anchor
+        #   solve uses them. Before 11-Oct this paired the CURRENT broker NAV (e.g. GBP 160,391 at 02-Oct)
+        #   with the PLANNING date (31-Aug) and dropped the declared one-offs.
+        _vb = st.get("valuation_basis") or {}
+        pv = float(_vb.get("value_gbp") if _vb.get("value_gbp") is not None else st["portfolio_value_gbp"])
+        vd = dt.date.fromisoformat(str(_vb.get("value_date") or st["portfolio_value_date"])[:10])
         td = dt.date.fromisoformat(st["target_date"])
         sched = st["contribution_schedule"]
+        _oo = [o for o in (st.get("one_off_contributions") or []) if dt.date.fromisoformat(str(o["date"])[:10]) >= vd]
         resumed = [dict(s) for s in sched]
         live = max((float(s["monthly_gbp"]) for s in sched), default=0.0)
         if live > 0:
             resumed = [{"from": vd.isoformat(), "monthly_gbp": live}]
-        now_pct = drr.solve_required_annual_pct(float(st["target_floor_gbp"]), pv, vd, td, sched)
-        res_pct = drr.solve_required_annual_pct(float(st["target_floor_gbp"]), pv, vd, td, resumed)
+        now_pct = drr.solve_required_annual_pct(float(st["target_floor_gbp"]), pv, vd, td, sched, one_offs=_oo)
+        res_pct = drr.solve_required_annual_pct(float(st["target_floor_gbp"]), pv, vd, td, resumed, one_offs=_oo)
         out.append({"lever": "resume_standing_order", "delta_pp": _round(now_pct - res_pct, 4),
                     "feasible": True, "blocked_reason": None, "mechanism": mech4,
                     "moves": "the required return DOWN — not the expected return up",
                     "detail": {"required_now_pct": now_pct, "required_if_resumed_pct": res_pct,
                                "monthly_gbp": live,
+                               "principal": {"value_gbp": round(pv, 2), "value_date": vd.isoformat(),
+                                             "basis": (_vb.get("basis") or "target_state.portfolio_value_gbp"),
+                                             "one_offs_forward": [{"date": o["date"], "amount_gbp": float(o["amount_gbp"])} for o in _oo]},
                                "schedule_now": [f"{s['monthly_gbp']}/mo from {s['from']}"
                                                 for s in sched]},
                     "assumptions": ["S/O paused since Jul-26 on job security — a personal "
@@ -2260,6 +2247,18 @@ def _selftest():
        "ISA-0409 CONTROL: an invariant with NO declared scope BLOCKS — a new invariant nobody "
        "classified must not silently inherit 'does not matter' (R4.7)")
 
+    # ── ISA-0853 (B01-R04): the resume-S/O lever solves on the dated PLANNING NAV, never the broker spot ──
+    _st853 = json.load(open(os.path.join(HERE, "target_state.json"), encoding="utf-8"))
+    _lv = levers([], "declared_prior", {}, a, {"section_c": {"covered_weight": 0}, "section_a": {}, "section_b": {}},
+                 tw, [], {"summary": {"total_value_gbp": 999999.0}})
+    _r853 = next(x for x in _lv["levers"] if x["lever"] == "resume_standing_order")
+    _vb853 = _st853.get("valuation_basis") or {}
+    ok(_r853["feasible"] and _r853["detail"]["principal"]["value_gbp"] == round(float(_vb853.get("value_gbp")), 2)
+       and _r853["detail"]["principal"]["value_date"] == str(_vb853.get("value_date"))[:10],
+       "ISA-0853 MUST-FIRE: an absurd broker spot (999,999) must not become the solve principal - the planning NAV at its own date is")
+    ok(abs(float(_r853["detail"]["required_now_pct"]) - float(_st853.get("required_return_reported_floor_pct")
+                                                           or _st853.get("required_return_floor_pct"))) <= 0.1,
+       "ISA-0853 NEGATIVE CONTROL: on the planning NAV with forward one-offs the lever's 'required now' reproduces the anchor solve")
     print(f"return_architecture SELF-TEST OK — {n} assertions")
     return n
 

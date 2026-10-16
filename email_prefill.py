@@ -75,8 +75,8 @@ def _entry_display(entry_level, reach):
 # Constants
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-from extract_cash_statement import (  # ONE HOME (R4.4)  # noqa: E402
-    STANDING_ORDER, STANDING_ORDER_ACTIVE, STANDING_ORDER_PAUSED_FROM)
+# ISA-0851 (11-Oct-2026): the S/O constants are no longer read here - every contribution figure comes
+# from contribution_schedule (target_state.contribution_schedule), the one reader.
 
 # Tax year 26/27 start
 TAX_YEAR_START = date(2026, 4, 6)
@@ -187,43 +187,62 @@ def load_json_optional(path):
         return {}
 
 
+def _so_kpi_text(portfolio) -> str:
+    """ISA-0851: the schedule sentence for a portfolio file produced before summary.funding existed."""
+    try:
+        import contribution_schedule as _cs851
+        _dd = str((portfolio.get("_meta") or {}).get("data_date") or "")
+        try:
+            _asof = datetime.strptime(_dd, "%d-%b-%Y").date()
+        except ValueError:
+            _asof = None
+        return _cs851.describe(_cs851.state(_asof))
+    except Exception as _e:                                             # noqa: BLE001
+        return "S/O state UNKNOWN (%s)" % _e
+
+
 def build_b5_trajectory(target_state: dict, run_date: date) -> str:
     """B5 — standing §2 line, pure function of target_state.json (A19).
     'S/O: PAUSED month N | pause cost to date: £X terminal (@required-return) |
      required return now: Y% floor / Z% stretch | drift since derivation: +W pp'"""
     if not target_state:
         return "Trajectory: target_state.json unavailable — anchor line PENDING (A19)"
-    sched = target_state.get("contribution_schedule") or []
-    # pick the entry EFFECTIVE at run_date (from <= today), not a future assumed-resume row
-    cur = {}
-    _today_s = run_date.isoformat()
-    for _e in sorted(sched, key=lambda e: str(e.get("from") or "")):
-        if str(_e.get("from") or "9999")[:10] <= _today_s:
-            cur = _e
-    monthly = float(cur.get("monthly_gbp") or 0)
+    # ISA-0851 (B01-R01/R05): the ONE schedule reader - same state, dates and amounts as portfolio_data.funding.
+    import contribution_schedule as _cs851
+    _so = _cs851.state(run_date, target_state=target_state)
     floor = float(target_state.get("required_return_floor_pct") or 0)
     stretch = float(target_state.get("required_return_stretch_pct") or 0)
-    if monthly > 0:
-        so_part = f"S/O: ACTIVE £{monthly:,.0f}/mo"
+    _nc = _so.get("next_change") or {}
+    _next = (f"; restart {_nc['from']} £{float(_nc['monthly_gbp']):,.0f}/mo (scheduled, not a credit)" if _nc else "")
+    if _so["state"] == _cs851.ACTIVE:
+        so_part = f"S/O: ACTIVE £{_so['monthly_gbp']:,.0f}/mo since {_so['in_force_from']}"
         cost_part = "pause cost: n/a"
-    else:
-        frm = str(cur.get("from") or "")[:10]
+    elif _so["state"] == _cs851.PAUSED:
+        frm = str(_so.get("paused_since") or "")[:10]
         try:
             y, m = int(frm[:4]), int(frm[5:7])
             months_paused = max(0, (run_date.year - y) * 12 + (run_date.month - m) + 1)
         except Exception:
             months_paused = 0
-        # terminal cost = FV difference of the missed contributions at required_return_floor
-        so = 1250.0
+        # terminal cost = FV of the contributions the pause has skipped, valued at the amount the SCHEDULE
+        # restarts at (target_state, ISA-0851 - never a literal), compounded at the required-return floor
+        so = _so.get("restart_monthly_gbp")
         r_m = (1 + floor / 100.0) ** (1 / 12.0) - 1 if floor else 0.0
         try:
             td = str(target_state.get("target_date") or "2037-12-31")[:10]
             months_left = max(0, (int(td[:4]) - run_date.year) * 12 + (int(td[5:7]) - run_date.month))
         except Exception:
             months_left = 0
-        cost = sum(so * ((1 + r_m) ** (months_left + i)) for i in range(months_paused))
-        so_part = f"S/O: PAUSED month {months_paused}"
-        cost_part = f"pause cost to date: £{cost:,.0f} terminal (@{floor:.1f}%)"
+        so_part = f"S/O: PAUSED month {months_paused}{_next}"
+        if so:
+            cost = sum(so * ((1 + r_m) ** (months_left + i)) for i in range(months_paused))
+            cost_part = (f"pause cost to date: £{cost:,.0f} terminal (@{floor:.1f}%, valued at the scheduled "
+                         f"restart amount £{so:,.0f}/mo)")
+        else:
+            cost_part = "pause cost: UNAVAILABLE (the schedule declares no restart amount)"
+    else:
+        so_part = f"S/O: UNKNOWN ({_so.get('why')})"
+        cost_part = "pause cost: UNAVAILABLE"
     derived_at = str(target_state.get("derived_at") or "?")
     return (f"{so_part} | {cost_part} | required return now: {floor:.1f}% floor / "
             f"{stretch:.1f}% stretch | derived {derived_at} "
@@ -280,7 +299,7 @@ def compute_vuag_counterfactual(trades: list, vuag_price_now: float,
 
 
 def compute_challenger_counterfactuals(trades, vuag_price_now, iwmo_price_now,
-                                       sleeve_value_now, mu_value_now=None):
+                                       sleeve_value_now, mu_value_now=None, exclude_ticker="MU"):
     """WP-1 (audit #1, 26-Jul-26) - dual-challenger cash-flow-matched counterfactual
     (VUAG.L + IWMO.L, all-trades + ex-MU). Missing iwmo_price on any trade -> IWMO legs
     INCOMPLETE(n), line degrades to VUAG-only; never raises. Ticker from the backfilled
@@ -295,7 +314,7 @@ def compute_challenger_counterfactuals(trades, vuag_price_now, iwmo_price_now,
     def _leg(pk, pnow, exmu):
         units = invested = 0.0
         for t in trades:
-            if exmu and _tk(t) == "MU":
+            if exmu and _tk(t).split(".")[0] == str(exclude_ticker or "MU").upper().split(".")[0]:
                 continue
             px, amt = t.get(pk), t.get("amount_gbp")
             if not px or amt is None:
@@ -384,18 +403,34 @@ def compute_freeze_status(freeze_history):
             "note": note}
 
 
-def append_freeze_history_entry(store, month_str, challenger_out):
-    """WP-4 - idempotent monthly append to sleeve_counterfactual.json['freeze_history']."""
+def append_freeze_history_entry(store, month_str, challenger_out, exlargest_out=None,
+                                largest_ticker=None, largest_weight_pct=None):
+    """WP-4 - idempotent monthly append to sleeve_counterfactual.json['freeze_history'] - THE ONE APPENDER.
+
+    ⚑ ISA-0858 (12-Oct-2026): the retention step-down ratchet (Raj D5: the brake on fund-funded stock capital) reads
+    the P5.4 fields (retention.FREEZE_MONTH_FIELDS) from this history. They were declared on 29-Aug and never written,
+    and the pre-run carried its own inline appender that wrote not even `measured` - so the brake could never
+    measure. `exlargest_out` is the same counterfactual with the LARGEST CURRENT position excluded."""
     hist = store.setdefault("freeze_history", [])
     if any(h.get("month") == month_str for h in hist):
         return hist
     v, i = challenger_out.get("vs_vuag_exmu_pp"), challenger_out.get("vs_iwmo_exmu_pp")
     entry = {"month": month_str, "beats_vuag_exmu": (v is not None and v > 0),
              "beats_iwmo_exmu": (i is not None and i > 0)}
+    xl = exlargest_out or {}
+    _all, _xl = challenger_out.get("vs_vuag_pp"), xl.get("vs_vuag_exmu_pp")
+    entry.update({"vs_vuag_pp": _all, "vs_iwmo_pp": challenger_out.get("vs_iwmo_pp"),
+                  "vs_vuag_exlargest_pp": _xl, "vs_iwmo_exlargest_pp": xl.get("vs_iwmo_exmu_pp"),
+                  "largest_position_ticker": largest_ticker, "largest_position_weight_pct": largest_weight_pct,
+                  "sign_all_in": (None if _all is None else ("+" if _all > 0 else "-")),
+                  "sign_exlargest": (None if _xl is None else ("+" if _xl > 0 else "-")),
+                  "basis": ("A14 cash-flow-matched counterfactual vs VUAG.L/IWMO.L; ex-largest = largest CURRENT "
+                            "direct-stock position (ISA-0858 / P5.4)")})
     # ISA-0429: an UNMEASURABLE month is not a FAILED month and must not look like one.
     # The freeze clock counts consecutive passes; a refusal has to be visible in the log
     # or a data fault becomes indistinguishable from underperformance.
-    if challenger_out.get("status") == "REFUSED_IMPLAUSIBLE" or v is None or i is None:
+    if (challenger_out.get("status") == "REFUSED_IMPLAUSIBLE" or v is None or i is None
+            or _all is None or (exlargest_out is not None and xl.get("status") == "REFUSED_IMPLAUSIBLE")):
         entry["measured"] = False
         entry["reason"] = challenger_out.get("note") or "challenger leg unavailable"
     else:
@@ -488,9 +523,8 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         {
             "label": "Cash (Effective)",
             "value": f"£{cash_eff:,.2f}",
-            "sub":   ((f"+£{STANDING_ORDER:,.0f} unprocessed S/O | " if STANDING_ORDER_ACTIVE
-                       else f"S/O PAUSED since {STANDING_ORDER_PAUSED_FROM} | ")
-                      + f"Deployable: £{s['cash_deployable_gbp']:,.2f}"),
+            "sub":   (((s.get("funding") or {}).get("expected_contribution_text") or _so_kpi_text(portfolio))
+                      .split(" (schedule")[0] + f" | Deployable: £{s['cash_deployable_gbp']:,.2f}"),
             "style": "info",
         },
         {
@@ -586,11 +620,10 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
 
     notes = (
         f"Cash per AJ Bell file: £{s['cash_stated_gbp']:,.2f}. "
-        + (f"Adjusted for unprocessed standing order: +£{STANDING_ORDER:,.0f} = "
-           f"£{s['cash_effective_gbp']:,.2f} effective. " if STANDING_ORDER_ACTIVE else
-           f"Standing order PAUSED since {STANDING_ORDER_PAUSED_FROM}: no adjustment, "
-           f"effective = stated £{s['cash_effective_gbp']:,.2f}. ")
-        + f"Deployable after £{150:.0f} buffer: £{s['cash_deployable_gbp']:,.2f}. "
+        + (f"No inferred credit (ISA-0851): effective = stated £{s['cash_effective_gbp']:,.2f}. "
+           + (((s.get("funding") or {}).get("expected_contribution_text") or _so_kpi_text(portfolio)) + ". "))
+        + f"Deployable: £{s['cash_deployable_gbp']:,.2f} ({s.get('cash_deployable_basis') or 'basis unstated'}; "
+          f"the D23 reserve is applied by the router, not here). "
         + f"[Claude to fill: MoM change vs prior month, benchmark comparison for portfolio performance.]"
     )
 
@@ -1735,6 +1768,25 @@ def new_capital_control_line(ncc, held_gbp=None):
                ncc.get("policy_state"), ncc.get("policy_hard_max")))
 
 
+def fund_leg_line(fund_leg, ncc=None):
+    """ISA-0833: one sentence when the fund leg's acceptance verdict refuses new fund capital, None when
+    OPEN. A reading with no fund verdict renders as refused (R4.3), never as silence."""
+    fl = fund_leg if isinstance(fund_leg, dict) else {}
+    if not fl and isinstance(ncc, dict) and ncc:
+        if ncc.get("blocks_new_fund_capital") is False:
+            return None
+        fl = {"verdict": "BLOCKED", "reasons": (ncc.get("fund_leg") or {}).get("reasons")
+              or ["fund verdict absent from the control reading"], "held_as_cash_gbp": None}
+    if not fl or fl.get("verdict") == "OPEN":
+        return None
+    return ("NEW FUND CAPITAL BLOCKED (ISA-0833, path %s, acceptance %s): %s held as cash, not routed to "
+            "funds, until system acceptance is CURRENT. Fund-internal rebalances, reductions and sells are "
+            "unaffected. Why: %s"
+            % (fl.get("path_id") or "monthly_capital", fl.get("acceptance_state") or "-",
+               _gbp(fl.get("held_as_cash_gbp")) if fl.get("held_as_cash_gbp") is not None else "New fund capital",
+               "; ".join(fl.get("reasons") or [])[:240] or "-"))
+
+
 def decision_engine_line(cde, verification=None):
     """ISA-0804: one sentence rendering the ONE Capital Decision Receipt (the email never recomputes
     selection, size or permission - R20.2). Absent/failed/stale receipts render as such, never as
@@ -1757,6 +1809,26 @@ def decision_engine_line(cde, verification=None):
                 "the governed plan." if auth != "LIVE" else
                 ("capital authorised by the receipt." if cde.get("capital_authorised") else
                  "capital NOT authorised by the receipt."))))
+
+
+def dealability_confirmation_line(cde):
+    """ISA-0860 - the receipt's confirm-at-dealing list and its PRE-AUTHORISED fallbacks, rendered from the ONE
+    receipt summary (never recomputed, R20.2). '' when no selected name needs a confirmation."""
+    dc = (cde or {}).get("dealability_confirmation") or {}
+    req = dc.get("required") or []
+    if not req:
+        return ""
+    fbs = dc.get("fallbacks") or []
+    return ("CONFIRM AT DEALING (ISA-0860): %s. Check %s at AJ Bell (ISA wrapper) BEFORE placing any other order. If refused: "
+            "%s. Record every outcome (--record-dealability ... --outcome REFUSED|DEALT) so the flag is asked once."
+            % ("; ".join("%s [%s]" % (x.get("ticker"), ", ".join(x.get("flags") or [])) for x in req),
+               "it" if len(req) == 1 else "them",
+               " | ".join("if %s refused -> %s (%s)" % ("+".join(f.get("if_refused") or []),
+                                                         ", ".join("%s %s" % (a.get("ticker"), _gbp(a.get("gbp")))
+                                                                   for a in f.get("actions") or []) or "NO NEW STOCK (cash)",
+                                                         "pre-authorised" if f.get("authorised") else
+                                                         "NOT authorised - %s" % (f.get("authorised_basis") or "re-run"))
+                          for f in fbs) or "no fallback is pre-authorised - re-run the engine"))
 
 
 def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
@@ -1793,12 +1865,31 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
                ", ".join("%s %s" % (x.get("ticker"), _gbp(x.get("gbp"))) for x in (_lg.get("rows") or [])) or "none"))
     if cd.get("split_reason"):
         out["split_reason_line"] = cd["split_reason"]
+    # ISA-0858 (D3/D4/B1.6b) - how the stock decision is funded and where any unspent stock-intended pound waits
+    _pk = cd.get("park") or {}
+    if _pk.get("park_reason"):
+        _ff = float(cd.get("engine_allocated_fund_funded_gbp") or 0.0)
+        _dd = float(cd.get("drawdown_reserved_gbp") or 0.0)
+        out["funding_park_line"] = (
+            "Funding (ISA-0858): %s waits as %s -> %s%s%s%s."
+            % (_gbp(_pk.get("gbp") or 0.0), _pk["park_reason"], _pk.get("destination"),
+               ("; GBP %s of the stock decision is FUND-FUNDED - sell the donors first, buy after settlement" % ("{:,.2f}".format(_ff)))
+               if _ff > 0 else "",
+               ("; GBP %s reserved for fired drawdown tranches" % ("{:,.2f}".format(_dd))) if _dd > 0 else "",
+               ("; decided stock spend %s waits in the MMF until executed"
+                % _gbp((_pk.get("decided_trade_pending_execution") or {}).get("gbp") or 0.0))
+               if _pk.get("decided_trade_pending_execution") else ""))
     # ISA-0807 — the canonical new-stock-capital control, rendered FIRST and as a refusal (R2.10).
     _ncc_line = new_capital_control_line(cd.get("new_capital_control"),
                                          cd.get("held_pending_stock_decision_gbp"))
     if _ncc_line:
         out["new_capital_control_line"] = _ncc_line
         warns.append(_ncc_line)
+    # ISA-0833 — the fund leg's acceptance verdict, rendered as a refusal when it refuses.
+    _fl_line = fund_leg_line(cd.get("fund_leg"), cd.get("new_capital_control"))
+    if _fl_line:
+        out["fund_leg_line"] = _fl_line
+        warns.append(_fl_line)
 
     # ── 2. executability — a cap that cannot open a position is GBP 0 of executable capital ──
     ex = cd.get("executability") or {}
@@ -1916,7 +2007,12 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
             warns.append(out["post_deployment_warning"])
 
     # ── 3. the freeze, and WHOSE decision its basis is ──────────────────────────────────────
-    if cd.get("freeze_basis"):
+    if cd.get("freeze_basis") and not cd.get("freeze_active"):
+        # ISA-0858 (Raj D5): retired - say so, never "inactive on basis reallocation_only" as if it could bind
+        out["freeze_line"] = ("Scaling freeze RETIRED 11-Oct-2026 (ISA-0858 D5): fund-funded stock capital is braked by "
+                              "the retention step-down ratchet and bounded by the 25%% priority band; cash-funded stock "
+                              "capital is bounded by the 30%% hard ceiling.")
+    elif cd.get("freeze_basis"):
         out["freeze_line"] = (
             "Scaling freeze %s on basis `%s` (%s). The freeze binds only capital whose SOURCE is "
             "a disposal from the fund sleeve, so a subscription is not frozen by it; earliest "
@@ -2145,6 +2241,7 @@ SUMMARY_RENDERED = {
     # they exist to make visible produced NO output at all for 119 names: 66.9% of the
     # universe unfetched behind a coverage line reading 59 of 59 measured.
     "symbol_map_refresh":         "build_integrity_block",        # s7 — measurement/coverage
+    "instrument_eligibility":     "build_integrity_block",        # s7 — ISA-0860 instrument type / ISA eligibility
     "fetch_universe":             "build_integrity_block",        # s7 — measurement/coverage
     "execution_ledger":           "build_integrity_block",        # s11 — framework health
     "integrity_report":           "build_integrity_block",        # s11 — framework health
@@ -2240,6 +2337,9 @@ SUMMARY_ESCALATED = {
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here
 # without one is a key nobody decided about wearing the costume of a decision.
 SUMMARY_OUT_OF_SCOPE = {
+    "cash_equivalent_movements": "ISA-0858: MMF buys/sells are CASH moves that fund or park a decision (Raj D3/D4) - "
+                               "kept for audit beside the reconciliation, not a decision figure; an UNDECIDED stock or "
+                               "fund trade still escalates as OFF_FRAMEWORK_TRADE",
     "pit_capture":             "ISA-0722 capture-only observability: the point-in-time evidence "
                                "vintage's coverage for future SHADOW research - not a decision "
                                "figure; its failure is escalated as an ISA-0722 PIT CAPTURE warning",
@@ -2294,7 +2394,8 @@ SUMMARY_UNADJUDICATED = (
 
 def build_integrity_block(fetch_report=None, correlation_coverage=None,
                           integrity_report=None, execution_ledger=None,
-                          symbol_map_refresh=None, fetch_universe=None) -> dict:
+                          symbol_map_refresh=None, fetch_universe=None,
+                          instrument_eligibility=None) -> dict:
     """P0/P1 -> the §7 (measurement) and §11 (framework health) sub-blocks.
 
     ⚑ WHY THESE FOUR KEYS ARE RENDERED AND NOT ESCALATED. `SUMMARY_ESCALATED` is admissible
@@ -2350,6 +2451,26 @@ def build_integrity_block(fetch_report=None, correlation_coverage=None,
                          smr.get("n_universe"), len(ref),
                          (" (" + ", ".join(str(r.get("ticker")) for r in ref) + ")")
                          if ref else ""))
+    ie = instrument_eligibility or {}
+    if ie:
+        # ISA-0860: the instrument type / ISA-eligibility stage (OpenFIGI + HMRC table), stated with its basis
+        if ie.get("state") in ("UNAVAILABLE", "DISABLED"):
+            s7.append("Instrument eligibility (Step 5x, ISA-0860): %s - %s. Every name without a cached record reads "
+                      "ELIGIBILITY_UNVERIFIED: fundable, confirm at dealing (never a refusal on missing data)."
+                      % (ie.get("state"), ie.get("reason") or ie.get("why") or "rollback flag"))
+        else:
+            _cnt = ie.get("counts") or {}
+            _rc = ie.get("reason_counts") or {}
+            s7.append("Instrument eligibility (Step 5x, ISA-0860): %s symbols - %s ELIGIBLE, %s CONFIRM_REQUIRED%s, "
+                      "%s NOT ISA-QUALIFYING%s; %s fetched from OpenFIGI this run%s. \u2691 Refused only where "
+                      "ESTABLISHED (a DR whose underlying has no recognised listing); every uncertain name stays "
+                      "fundable and is confirmed at dealing with a pre-authorised fallback (Raj 12-Oct-2026)."
+                      % (ie.get("n_symbols"), _cnt.get("ELIGIBLE", 0), _cnt.get("CONFIRM_REQUIRED", 0),
+                         (" (" + ", ".join("%s %d" % (k, v) for k, v in sorted(_rc.items())) + ")") if _rc else "",
+                         _cnt.get("NOT_ISA_QUALIFYING_DR", 0),
+                         (" (" + ", ".join(ie.get("not_isa_qualifying") or []) + ")") if ie.get("not_isa_qualifying") else "",
+                         ie.get("fetched", 0),
+                         ("; NOT COMPLETE: " + "; ".join(ie.get("errors") or [])) if ie.get("errors") else ""))
     if fr:
         st = fr.get("state")
         if st in ("FETCH_UNAVAILABLE", "UNAVAILABLE"):
@@ -2788,7 +2909,18 @@ def build_prefilled_email(
             _cf_src["trades"], _cf_src.get("vuag_price_now"),
             _cf_src.get("iwmo_price_now"), _sleeve_now, _mu_now)
         _frz = compute_freeze_status(_cf_src.get("freeze_history"))
-        _ch["line"] += " - scaling freeze: %s (WP-4)" % _frz["status"]
+        try:
+            _fz_rec = (json.load(open(os.path.join(SCRIPT_DIR, "target_weights.json"), encoding="utf-8"))
+                       .get("scaling_freeze") or {})
+        except Exception:                                               # noqa: BLE001
+            _fz_rec = {}
+        if _fz_rec.get("retired"):
+            # ISA-0858 (Raj D5): the freeze is RETIRED; the streak is still reported for the record
+            _frz = dict(_frz, status="RETIRED", streak_status=_frz["status"])
+            _ch["line"] += (" - scaling freeze: RETIRED 11-Oct-2026 (ISA-0858 D5); fund-funded stock capital is "
+                            "braked by the step-down ratchet")
+        else:
+            _ch["line"] += " - scaling freeze: %s (WP-4)" % _frz["status"]
         _cf = {"status": "OK", "sleeve_vs_vuag_pp": _ch.get("vs_vuag_pp"),
                "line": _ch["line"], "challengers": _ch, "freeze": _frz}
     else:
@@ -2831,9 +2963,11 @@ def build_prefilled_email(
             "do not read capital_destination_*.json in their place - that glob also matches the "
             "September scenario file, which is not this run.")}
 
-    _s7_out["probation_rule"] = ("D6: if the sleeve trails the VUAG counterfactual by >5pp "
-                                 "cumulative after 12mo with >=3 positions, Phase-1 target "
-                                 "reverts to the 10% floor and increments route to VUAG (A14)")
+    _s7_out["probation_rule"] = ("D6 successor (retention s3 step-down ratchet, D18/D19; ISA-0858 D5): when all three "
+                                 "legs fire (trails VUAG by >=5pp, in >=9 of 12 measured months, and ex-largest), "
+                                 "FUND-FUNDED stock capital stops; cash-funded buys continue up to the 30% hard "
+                                 "ceiling and the step-down ceiling is reported, not enforced. While unmeasured, "
+                                 "fund-funded buys are allowed and labelled 'brake UNMEASURED'.")
 
     return {
         "_instructions": (
@@ -3019,6 +3153,17 @@ def _selftest():
     _ob = build_capital_router_block(dict(_blk_cd, new_capital_control={"state": "OPEN", "blocks_new_stock_capital": False}))
     assert not _ob.get("new_capital_control_line"), \
         "NEGATIVE CONTROL ISA-0807: an OPEN control must not render a refusal"
+    # ISA-0833: the fund leg's refusal renders; an OPEN verdict is silent; a missing verdict refuses.
+    _fb = build_capital_router_block(dict(_blk_cd, fund_leg={"verdict": "BLOCKED", "acceptance_state": "STALE",
+                                                             "held_as_cash_gbp": 5000.0, "path_id": "monthly_capital",
+                                                             "reasons": ["ACCEPTANCE_NOT_CURRENT (fixture)"]}))
+    assert "NEW FUND CAPITAL BLOCKED" in (_fb.get("fund_leg_line") or "") and "GBP 5,000.00" in _fb["fund_leg_line"], \
+        "ISA-0833 MUST-FIRE: a refused fund leg renders with the held amount"
+    assert fund_leg_line({"verdict": "OPEN"}) is None, "ISA-0833 NEGATIVE CONTROL: an OPEN fund leg is silent"
+    assert fund_leg_line(None, {"state": "OPEN", "blocks_new_stock_capital": False}) is not None, \
+        "ISA-0833 FAIL-CLOSED: a control reading with no fund verdict renders as refused"
+    assert fund_leg_line(None, {"blocks_new_fund_capital": False}) is None, \
+        "ISA-0833 NEGATIVE CONTROL: an explicit open fund verdict is silent"
     assert new_capital_control_line({"state": "UNKNOWN"}) is not None, \
         "MUST-FIRE ISA-0807: an UNKNOWN control (no explicit False) renders as blocking, never silence"
     # ISA-0804 - the engine receipt line: SHADOW says it moves no capital; absence is stated
@@ -3114,6 +3259,17 @@ def _selftest():
         "a feasible name with no Step-7 skeleton must be a named placeholder, not absent"
     assert [c["ticker"] for c in build_s3_from_scored(sc)] == ["ZAB.WA", "HALO"], \
         "NEGATIVE CONTROL ISA-0608: a pre-control step9_pre keeps the previous behaviour unchanged"
+    # ISA-0851 (B01-R01/R05): the anchor line reads the ONE schedule; no literal amount, UNKNOWN stays UNKNOWN.
+    # the anchor values come from the delivered target_state (never a literal - ISA-0432 Form 3); only the schedule is a fixture
+    _ts851 = dict(load_json_optional(os.path.join(SCRIPT_DIR, "target_state.json")),
+                  contribution_schedule=[{"from": "2026-07-01", "monthly_gbp": 0}, {"from": "2027-04-06", "monthly_gbp": 900}])
+    _b5 = build_b5_trajectory(_ts851, date(2026, 11, 1))
+    assert "PAUSED month 5" in _b5 and "£900/mo" in _b5 and "2027-04-06" in _b5, \
+        "ISA-0851 MUST-FIRE: the pause cost is valued at the SCHEDULE's restart amount (900 here), never a literal 1250"
+    assert "UNKNOWN" in build_b5_trajectory({"target_date": "2037-12-31"}, date(2026, 11, 1)), \
+        "ISA-0851 MUST-FIRE: an absent schedule renders UNKNOWN, never PAUSED"
+    assert "ACTIVE £900/mo" in build_b5_trajectory(_ts851, date(2027, 5, 1)), \
+        "ISA-0851 NEGATIVE CONTROL: after the scheduled restart the line reads ACTIVE at the scheduled amount"
     print("email_prefill selftest OK (ISA-0722 held-underwriting renderer + ISA-0608 s3 population)")
     return 0
 

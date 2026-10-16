@@ -42,6 +42,27 @@ RETIRED_FLAG_MSG = ("ISA-0796: --watchlist (the memory-file path) is RETIRED. Th
                     "The generated view is Investment Analysis/project_isa_vci_watchlist.md.")
 
 
+SYMBOL_MAP_REFRESHER = None   # test injection only; None -> stock_price_fetch.refresh_symbol_map
+
+
+def refresh_symbol_map_after_vci(root: str) -> dict:
+    """ISA-0848 (11-Oct-2026): the VCI run grows the fetch universe (watchlist, review universe, deploy names) but
+    only the monthly pre-run's Step 5x refreshed stock_symbol_map.json, so the names it added (AEVA, LAES, OUST on
+    11-Oct) sat in neither the map nor the declared refusals for ~3 weeks and consistency_check ISA-0577 was RED.
+    The VCI run's LAST step (this writer) now calls the SAME append-only producer (one producer, two call sites).
+    A failure never undoes the store write; it is printed and the ISA-0577 pair stays RED (visible, not silent)."""
+    try:
+        fn = SYMBOL_MAP_REFRESHER
+        if fn is None:
+            import stock_price_fetch as _spf
+            fn = lambda r: _spf.refresh_symbol_map(root=r)               # noqa: E731
+        res = fn(root) or {}
+        return {"state": res.get("state") or "UNKNOWN", "n_universe": res.get("n_universe"),
+                "admitted": res.get("admitted") or res.get("n_admitted"), "refused": res.get("refused") or res.get("n_refused")}
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "REFRESH_FAILED", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def run(argv=None, root: str = HERE) -> int:
     ap = argparse.ArgumentParser(description="Apply a VCI run's update to the canonical VCI watchlist store (ISA-0796).")
     ap.add_argument("--update", metavar="PATH")
@@ -110,6 +131,8 @@ def run(argv=None, root: str = HERE) -> int:
           % (line["revision"], doc["as_of"], line["members"], line["added"], line["removed"],
              (" MAX5_TRIMMED %s" % line["max5_dropped"]) if line.get("max5_dropped") else ""))
     print("VIEW %s" % S.view_path(rt))
+    _sm = refresh_symbol_map_after_vci(rt)
+    print("SYMBOL_MAP_%s %s" % (_sm["state"], json.dumps({k: v for k, v in _sm.items() if k != "state"}, default=str)))
     return 0
 
 
@@ -151,20 +174,42 @@ def _selftest(verbose: bool = True) -> int:
         with contextlib.redirect_stdout(io.StringIO()):
             rc2 = run(["--bootstrap-from", legacy], root=root)
         ok("NEGATIVE CONTROL: a second bootstrap over an existing store is REFUSED", rc2 == 2)
-        with contextlib.redirect_stdout(io.StringIO()):
+        global SYMBOL_MAP_REFRESHER
+        _calls = []
+        SYMBOL_MAP_REFRESHER = lambda r: (_calls.append(r) or {"state": "REFRESHED", "n_universe": 3})
+        _o = io.StringIO()
+        with contextlib.redirect_stdout(_o):
             rc = run(["--update", upd, "--run-date", "2026-10-11"], root=root)
+        ok("ISA-0848 MUST-FIRE: a VCI store update refreshes the symbol map in the same run (append-only producer)",
+           rc == 0 and _calls == [root] and "SYMBOL_MAP_REFRESHED" in _o.getvalue(), _o.getvalue())
         d = S.load(root)
         ok("MUST-FIRE (end to end): the VCI update lands in the store, the view and the history",
            rc == 0 and S.members(root) == ["INFQ"] and d["as_of"] == "2026-10-11" and d["excluded"]
            and "lastUpdated: 2026-10-11" in open(S.view_path(root), encoding="utf-8").read()
            and len(open(S.history_path(root)).readlines()) == 2, d.get("last_write"))
+        _calls.clear()
         with contextlib.redirect_stdout(io.StringIO()):
             rc = run(["--update", upd, "--run-date", "2026-10-11"], root=root)
+        ok("ISA-0848 NEGATIVE CONTROL: an unchanged (repeat) update does not call the refresher", _calls == [])
         ok("MUST-FIRE (R5.14 repeat): re-running the identical post-run update writes nothing (no 3rd history line)",
            rc == 0 and len(open(S.history_path(root)).readlines()) == 2 and S.load(root)["revision"] == 2)
         with contextlib.redirect_stdout(io.StringIO()):
             rc = run(["--update", upd, "--run-date", "2026-10-12", "--dry-run"], root=root)
         ok("NEGATIVE CONTROL: --dry-run writes nothing", rc == 0 and S.load(root)["as_of"] == "2026-10-11")
+
+        def _fail(r):
+            raise OSError("network down")
+        SYMBOL_MAP_REFRESHER = _fail
+        upd2 = os.path.join(root, "u2.json")
+        with open(upd2, "w") as fh:
+            json.dump({"run_month": "October 2026", "watchlist": [{"ticker": "INFQ", "acs": 71}],
+                       "change_log_entry": {"month": "Oct-26b"}}, fh)
+        _o2 = io.StringIO()
+        with contextlib.redirect_stdout(_o2):
+            rc = run(["--update", upd2, "--run-date", "2026-10-13"], root=root)
+        ok("ISA-0848 FAIL-VISIBLE: a refresh failure keeps the store write (exit 0) and prints SYMBOL_MAP_REFRESH_FAILED",
+           rc == 0 and "SYMBOL_MAP_REFRESH_FAILED" in _o2.getvalue() and S.load(root)["as_of"] == "2026-10-13", _o2.getvalue())
+        SYMBOL_MAP_REFRESHER = None
     finally:
         shutil.rmtree(root, ignore_errors=True)
     if verbose:

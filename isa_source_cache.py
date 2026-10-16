@@ -31,8 +31,10 @@ from typing import Dict, List, Optional, Tuple
 _TEXT: Dict[str, Optional[str]] = {}
 _TREE_BY_TEXT: Dict[str, ast.Module] = {}
 _WALK: Dict[int, Tuple[object, List[ast.AST]]] = {}
+_ORIGINAL_PARSE = ast.parse
+_PARSE_STATS = {"routed": False, "hits": 0, "misses": 0, "bypass": 0, "why_not": None}
 
-__all__ = ["read", "parse_text", "parse_path", "walk", "stats", "clear",
+__all__ = ["read", "parse_text", "parse_path", "walk", "stats", "clear", "route_ast_parse", "unroute_ast_parse",
            "enable_snapshot", "snapshot_enabled", "memo_listing", "file_sha", "fresh_snapshot"]
 
 # ── ISA-0801 (03-Oct-2026, BuildSpec P1 / s12.1): ONE PATH CENSUS + FINGERPRINT CONTEXT PER PROCESS ──
@@ -122,8 +124,46 @@ def parse_text(text: str, filename: str = "<unknown>") -> ast.Module:
     `filename` affects only the SyntaxError message, which is raised, not cached."""
     got = _TREE_BY_TEXT.get(text)
     if got is None:
-        got = _TREE_BY_TEXT[text] = ast.parse(text, filename=filename)
+        got = _TREE_BY_TEXT[text] = _ORIGINAL_PARSE(text, filename=filename)
     return got
+
+
+# ── ISA-0845 / B12-R04 (11-Oct-2026): ROUTE EVERY ast.parse IN THE PRE-RUN PROCESS THROUGH parse_text ──────
+# MEASURED 11-Oct-2026 (SHADOW shadow-cand-11oct): the monthly pre-run pass took 163.6-168.1 s against the
+# runner's 168-172 s timeout under the 180 s host ceiling - two of four passes CUT OFF. Step 9d (A18) = 51.5 s and
+# Step 0 (framework_integrity) = 23.7 s; cProfile of check_all: builtins.compile x2,418 = 20.8 s, because most
+# pairs still call `ast.parse` directly rather than parse_text (ISA-0594's one home existed; its callers did not
+# all use it). Routing ast.parse here: Step 0 + Step 9d 60.9 s -> 42.5 s with BYTE-IDENTICAL preflight and
+# check_all results (JSON equal, 23/23 findings). The module CONTRACT above (shared trees, never mutated) is the
+# same one parse_text has always carried; the key is the full SOURCE TEXT, so changed bytes are never served an
+# old tree. Only plain `exec` parses of text are routed; anything else falls through to the real parser.
+# ROLLBACK (R4.13): environment ISA_AST_CACHE=0 makes route_ast_parse() a recorded no-op.
+def _routed_parse(source, filename="<unknown>", mode="exec", *, type_comments=False, feature_version=None):
+    if isinstance(source, str) and mode == "exec" and not type_comments and feature_version is None:
+        got = _TREE_BY_TEXT.get(source)
+        if got is not None:
+            _PARSE_STATS["hits"] += 1
+            return got
+        _PARSE_STATS["misses"] += 1
+        got = _TREE_BY_TEXT[source] = _ORIGINAL_PARSE(source, filename=filename)
+        return got
+    _PARSE_STATS["bypass"] += 1
+    return _ORIGINAL_PARSE(source, filename, mode, type_comments=type_comments, feature_version=feature_version)
+
+
+def route_ast_parse() -> dict:
+    """Route `ast.parse` through the text memo for THIS process (idempotent). Returns the routing stats."""
+    if os.environ.get("ISA_AST_CACHE", "1").strip() == "0":
+        _PARSE_STATS.update(routed=False, why_not="ISA_AST_CACHE=0 (rollback)")
+        return dict(_PARSE_STATS)
+    ast.parse = _routed_parse
+    _PARSE_STATS.update(routed=True, why_not=None)
+    return dict(_PARSE_STATS)
+
+
+def unroute_ast_parse() -> None:
+    ast.parse = _ORIGINAL_PARSE
+    _PARSE_STATS.update(routed=False)
 
 
 def parse_path(path: str) -> ast.Module:
@@ -147,7 +187,7 @@ def walk(node: ast.AST) -> List[ast.AST]:
 
 
 def stats() -> dict:
-    return {"files": len(_TEXT), "trees": len(_TREE_BY_TEXT), "walks": len(_WALK)}
+    return {"files": len(_TEXT), "trees": len(_TREE_BY_TEXT), "walks": len(_WALK), "parse_routing": dict(_PARSE_STATS)}
 
 
 def clear() -> None:
@@ -190,6 +230,32 @@ def _selftest(verbose: bool = True) -> int:
     enable_snapshot(False)
     ok("NEGATIVE CONTROL: snapshot OFF (tests, certification) never memoises",
        memo_listing(("st", d), lister) == ["a.py", "b.py"] and file_sha(f) != h1)
+    # ISA-0845: process-wide ast.parse routing
+    _a, _b = "x = 1\ndef f():\n    return x\n", "x = 2\ndef f():\n    return x\n"
+    try:
+        os.environ.pop("ISA_AST_CACHE", None)
+        route_ast_parse()
+        t1, t2 = ast.parse(_a), ast.parse(_a)
+        ok("ISA-0845: routed ast.parse returns the SAME tree for the same text (one compile)", t1 is t2)
+        ok("ISA-0845 NEGATIVE CONTROL: changed text is never served the old tree",
+           ast.dump(ast.parse(_b)) != ast.dump(t1))
+        ok("ISA-0845: routed tree is structurally identical to an unrouted parse",
+           ast.dump(t1) == ast.dump(_ORIGINAL_PARSE(_a)))
+        ok("ISA-0845 NEGATIVE CONTROL: eval mode / type_comments bypass the memo",
+           ast.parse("1+1", mode="eval") is not t1 and ast.parse(_a, type_comments=True) is not t1)
+        try:
+            ast.parse("def (:\n")
+            ok("ISA-0845 NEGATIVE CONTROL: a syntax error still raises through the routing", False)
+        except SyntaxError:
+            ok("ISA-0845 NEGATIVE CONTROL: a syntax error still raises through the routing", True)
+        unroute_ast_parse()
+        ok("ISA-0845: unroute restores the real parser", ast.parse is _ORIGINAL_PARSE)
+        os.environ["ISA_AST_CACHE"] = "0"
+        ok("ISA-0845 NEGATIVE CONTROL (rollback): ISA_AST_CACHE=0 leaves ast.parse untouched",
+           route_ast_parse()["routed"] is False and ast.parse is _ORIGINAL_PARSE)
+    finally:
+        os.environ.pop("ISA_AST_CACHE", None)
+        unroute_ast_parse()
     if verbose:
         print("isa_source_cache selftest: %d FAIL(s)" % len(fails))
     return len(fails)

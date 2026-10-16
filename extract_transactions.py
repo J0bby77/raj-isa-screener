@@ -236,8 +236,45 @@ def build_ticker_map(isa_folder):
     return mapping
 
 
-def resolve_ticker(description, mapping):
-    """Exact normalised match, then a conservative containment match."""
+# ISA-0866 (11-Oct-2026, B02-R09): a closed or newly-bought stock is in NO saved portfolio file (NetApp, sold
+#   02-Oct; Matador, bought 05-Oct after the 02-Oct file), so the hand-kept STATIC_TICKER_OVERRIDES was the only
+#   other source and both rows imported with ticker None - the October MTDR purchase could not confirm its decision.
+#   Third tier: the VERIFIED company names in stock_symbol_map.json, matched on the legal-form-stripped core name
+#   and ONLY when exactly one verified listing matches (two share classes = ambiguous = unmapped, named).
+_LEGAL_SUFFIXES = {"inc", "incorporated", "co", "company", "corp", "corporation", "ltd", "limited", "plc", "sa",
+                   "nv", "ag", "se", "llc", "lp", "holdings", "hldg", "hldgs", "group", "the", "common", "stock",
+                   "ordinary", "shares", "share", "ads", "adr", "class", "a", "b", "com", "usd0.001", "usd0.01"}
+
+
+def _core_name(s) -> str:
+    t = re.sub(r"[^a-z0-9& ]+", " ", _norm(s))
+    toks = [x for x in t.split() if x]
+    while toks and toks[-1] in _LEGAL_SUFFIXES:
+        toks.pop()
+    while toks and toks[0] == "the":
+        toks.pop(0)
+    return " ".join(toks)
+
+
+def symbol_map_names(inv_dir=None) -> dict:
+    """core company name -> set(tickers) from stock_symbol_map.json `verified` rows (exchange-verified listings)."""
+    out = {}
+    pth = os.path.join(inv_dir or SCRIPT_DIR, "stock_symbol_map.json")
+    try:
+        with open(pth, encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception:
+        return out
+    for r in doc.get("verified") or []:
+        c = _core_name(r.get("company"))
+        if c and r.get("ticker"):
+            out.setdefault(c, set()).add(str(r["ticker"]).upper())
+    return out
+
+
+def resolve_ticker(description, mapping, names=None):
+    """Exact normalised match, then a conservative containment match, then (ISA-0866) a UNIQUE verified-company
+    core-name match. Ambiguity is returned as 'ambiguous:<tickers>', never a guess."""
     key = _norm(description)
     if not key:
         return None, "unmapped"
@@ -248,6 +285,12 @@ def resolve_ticker(description, mapping):
             continue
         if key.startswith(known) or known.startswith(key):
             return ticker, "prefix"
+    if names:
+        cands = sorted(names.get(_core_name(description)) or [])
+        if len(cands) == 1:
+            return cands[0], "symbol_map_company"
+        if len(cands) > 1:
+            return None, "ambiguous:%s" % ",".join(cands)
     return None, "unmapped"
 
 
@@ -303,7 +346,7 @@ def export_evidence_window(xlsx_path, created=None):
             "basis": "ISA-0791: filename month %02d-%d x workbook creation stamp (export day excluded)" % (mm, yy)}
 
 
-def parse_xlsx(path, mapping):
+def parse_xlsx(path, mapping, names=None):
     """Return (rows, warnings). Never drops a row silently."""
     warnings = []
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -360,8 +403,12 @@ def parse_xlsx(path, mapping):
                     "recorded as unclassified, excluded from reconciliation"
                     % (i, date, description[:40], raw_type))
 
-        ticker, match = resolve_ticker(description, mapping)
-        if ticker is None:
+        ticker, match = resolve_ticker(description, mapping, names)
+        if ticker is None and str(match).startswith("ambiguous:"):
+            warnings.append(
+                "Row %d (%s, %s): description matches MORE THAN ONE verified listing (%s) -- not guessed; "
+                "add it to STATIC_TICKER_OVERRIDES" % (i, date, description[:50], match.split(":", 1)[1]))
+        elif ticker is None:
             warnings.append(
                 "Row %d (%s, %s): description not mapped to a ticker -- add it "
                 "to STATIC_TICKER_OVERRIDES, or save the portfolio xlsx that "
@@ -424,17 +471,50 @@ def save_ledger(led, path):
 
 def merge_rows(ledger, rows, stamp):
     """Append-and-dedupe on the composite uid. Idempotent by construction, so
-    re-importing an overlapping export (or the full-history seed) is safe."""
-    existing = set(e["uid"] for e in ledger["entries"])
-    added, dupes = 0, 0
+    re-importing an overlapping export (or the full-history seed) is safe.
+
+    ISA-0866 (11-Oct-2026, B02-R09) - TYPED IMPORTER TRANSITIONS, appended to ledger["transitions"]:
+      TICKER_RESOLVED   a row already in the ledger with ticker None is seen again and now resolves (the
+                        resolver improved or the overrides grew): the ticker is filled in place - the broker
+                        facts (uid fields) are untouched.
+      BROKER_AMENDMENT  a TRADE row whose (reference, type) equals an active ledger trade from ANOTHER export,
+                        and this export does not also carry the old row: the broker has amended it. The old row
+                        moves to ledger["superseded"] (never deleted) so every consumer of `entries` counts the
+                        trade once; two rows sharing a reference INSIDE one export are two genuine rows.
+    Nothing is invented: no trade is created that the broker export does not contain."""
+    existing = {e["uid"]: e for e in ledger["entries"]}
+    ledger.setdefault("transitions", [])
+    ledger.setdefault("superseded", [])
+    batch_uids = {r["uid"] for r in rows}
+    added, dupes, resolved, amended = 0, 0, 0, 0
     for r in rows:
         if r["uid"] in existing:
             dupes += 1
+            old = existing[r["uid"]]
+            if not old.get("ticker") and r.get("ticker"):
+                old["ticker"], old["ticker_match"] = r["ticker"], r.get("ticker_match")
+                old["asset_class"] = r.get("asset_class")
+                ledger["transitions"].append({"kind": "TICKER_RESOLVED", "uid": r["uid"], "ticker": r["ticker"],
+                                              "match": r.get("ticker_match"), "at": stamp,
+                                              "source_file": r.get("source_file")})
+                resolved += 1
             continue
+        if r.get("type") in TRADE_TYPES and r.get("reference"):
+            prior = [e for e in ledger["entries"] if e.get("reference") == r["reference"] and e.get("type") == r["type"]
+                     and e["uid"] not in batch_uids and e.get("source_file") != r.get("source_file")]
+            for o in prior:
+                ledger["entries"].remove(o)
+                existing.pop(o["uid"], None)
+                ledger["superseded"].append(dict(o, superseded_by_uid=r["uid"], superseded_at=stamp))
+                ledger["transitions"].append({"kind": "BROKER_AMENDMENT", "old_uid": o["uid"], "new_uid": r["uid"],
+                                              "reference": r["reference"], "type": r["type"], "at": stamp,
+                                              "old": {k: o.get(k) for k in ("date", "description", "quantity", "price", "amount_gbp", "source_file")},
+                                              "new": {k: r.get(k) for k in ("date", "description", "quantity", "price", "amount_gbp", "source_file")}})
+                amended += 1
         r = dict(r)
         r["first_seen"] = stamp
         ledger["entries"].append(r)
-        existing.add(r["uid"])
+        existing[r["uid"]] = r
         added += 1
     ledger["entries"].sort(key=lambda e: (e["date"], e.get("reference") or ""))
     ledger["_meta"] = {
@@ -443,8 +523,26 @@ def merge_rows(ledger, rows, stamp):
         "earliest": ledger["entries"][0]["date"] if ledger["entries"] else None,
         "latest": ledger["entries"][-1]["date"] if ledger["entries"] else None,
     }
-    return {"added": added, "duplicates_skipped": dupes,
-            "total": len(ledger["entries"])}
+    return {"added": added, "duplicates_skipped": dupes, "ticker_resolved": resolved,
+            "broker_amendments": amended, "total": len(ledger["entries"])}
+
+
+def reresolve_unmapped(ledger, mapping, names, stamp):
+    """ISA-0866: every import re-tries the resolver on ledger rows still carrying ticker None (a row seen only in an
+    OLDER export - e.g. the 08-Sep NetApp purchase - is otherwise never re-read). Fills ticker in place with a typed
+    TICKER_RESOLVED transition; the broker facts are untouched; an ambiguous match stays unmapped."""
+    ledger.setdefault("transitions", [])
+    n = 0
+    for e in ledger["entries"]:
+        if e.get("ticker"):
+            continue
+        t, m = resolve_ticker(e.get("description"), mapping, names)
+        if t:
+            e["ticker"], e["ticker_match"], e["asset_class"] = t, m, asset_class_for(t)
+            ledger["transitions"].append({"kind": "TICKER_RESOLVED", "uid": e.get("uid"), "ticker": t, "match": m,
+                                          "at": stamp, "source_file": e.get("source_file"), "via": "ledger_reresolve"})
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -654,11 +752,15 @@ def reconcile_vs_broker(entries, portfolio_xlsx, tol_qty=0.01, tol_cost=1.00):
         cost_bad = (ac is not None and ic is not None
                     and abs(ac - ic) > tol_cost)
         if qty_bad or cost_bad:
+            # ISA-0866: a UNITS difference is a missing/extra trade; units reconciled with only book cost apart is
+            # an income/accumulation posting absent from the exports (the dealing record itself is complete).
             diffs.append({"ticker": ticker, "broker_quantity": aq,
                           "ledger_quantity": iq, "broker_cost_gbp": ac,
                           "ledger_cost_gbp": ic,
                           "quantity_mismatch": qty_bad,
-                          "cost_mismatch": cost_bad})
+                          "cost_mismatch": cost_bad,
+                          "kind": "QUANTITY" if qty_bad else "COST_ONLY",
+                          "cost_gap_gbp": (round(ac - ic, 2) if (ac is not None and ic is not None) else None)})
     # The check is only meaningful once the ledger spans the period in which
     # the open positions were acquired. On a fresh (unseeded) ledger almost
     # every position is legitimately absent -- report that as a window problem,
@@ -681,7 +783,9 @@ def reconcile_vs_broker(entries, portfolio_xlsx, tol_qty=0.01, tol_cost=1.00):
                          "completeness check"),
                 "differences": diffs}
 
-    return {"status": "MISMATCH" if diffs else "OK",
+    _st = ("MISMATCH" if any(d["kind"] == "QUANTITY" for d in diffs) else
+           "COST_BASIS_DRIFT" if diffs else "OK")
+    return {"status": _st,
             "as_at": as_at,
             "ledger_earliest": earliest,
             "n_compared": n_total,
@@ -732,11 +836,20 @@ def run(xlsx_path, isa_folder, ledger_path, out_path, stamp=None, quiet=False,
         portfolio_xlsx=None):
     stamp = stamp or datetime.now().date().isoformat()
     mapping = build_ticker_map(isa_folder)
-    rows, warnings = parse_xlsx(xlsx_path, mapping)
+    rows, warnings = parse_xlsx(xlsx_path, mapping, symbol_map_names())
 
     ledger = load_ledger(ledger_path)
     merge_stats = merge_rows(ledger, rows, stamp)
+    merge_stats["ticker_resolved"] = merge_stats.get("ticker_resolved", 0) + reresolve_unmapped(
+        ledger, mapping, symbol_map_names(), stamp)
     save_ledger(ledger, ledger_path)
+    # ISA-0866 (B02-R09): unmatched broker facts are EXPOSED, ledger-wide, every import (not only this month's rows)
+    _unmatched = [{"date": e.get("date"), "type": e.get("type"), "description": e.get("description"),
+                   "amount_gbp": e.get("amount_gbp"), "reference": e.get("reference"),
+                   "why": ("unmapped_ticker" if not e.get("ticker") else "unclassified_type")}
+                  for e in ledger["entries"]
+                  if (e.get("type") in TRADE_TYPES and not e.get("ticker")) or e.get("type") == "unclassified"]
+    _this_transitions = [t for t in ledger.get("transitions") or [] if t.get("at") == stamp]
 
     entries = ledger["entries"]
     month_trades = [r for r in rows if r["type"] in TRADE_TYPES]
@@ -753,6 +866,8 @@ def run(xlsx_path, isa_folder, ledger_path, out_path, stamp=None, quiet=False,
             "evidence_window": export_evidence_window(xlsx_path),
         },
         "import": merge_stats,
+        "unmatched_broker_facts": _unmatched,            # ISA-0866
+        "importer_transitions": _this_transitions,       # ISA-0866
         "warnings": warnings,
         "unmapped_descriptions": unmapped,
         "month_rows": rows,
@@ -784,9 +899,25 @@ def run(xlsx_path, isa_folder, ledger_path, out_path, stamp=None, quiet=False,
             entries, portfolio_xlsx or find_latest_portfolio(isa_folder)),
         "ledger_meta": ledger["_meta"],
     }
-    if data["broker_reconciliation"]["status"] == "MISMATCH":
+    for _u in _unmatched:
+        data["warnings"].append("UNMATCHED BROKER FACT (ISA-0866): %s %s %s GBP %s ref %s - %s"
+                                % (_u["date"], _u["type"], (_u["description"] or "")[:40], _u["amount_gbp"],
+                                   _u["reference"], _u["why"]))
+    for _t in _this_transitions:
+        if _t["kind"] == "BROKER_AMENDMENT":
+            data["warnings"].append("BROKER AMENDMENT (ISA-0866): ref %s %s superseded %s -> %s" % (
+                _t["reference"], _t["type"], _t["old"], _t["new"]))
+    if data["broker_reconciliation"]["status"] == "COST_BASIS_DRIFT":
         data["_meta"]["status"] = "WARN"
         for d in data["broker_reconciliation"]["differences"]:
+            data["warnings"].append(
+                "Book-cost drift on %s (ISA-0866): units reconcile (%s) but broker cost %s vs ledger cost %s "
+                "(gap GBP %s) -- an income/accumulation posting is absent from the exports; the dealing record "
+                "is complete" % (d["ticker"], d["broker_quantity"], d["broker_cost_gbp"], d["ledger_cost_gbp"],
+                                 d.get("cost_gap_gbp")))
+    if data["broker_reconciliation"]["status"] == "MISMATCH":
+        data["_meta"]["status"] = "WARN"
+        for d in [x for x in data["broker_reconciliation"]["differences"] if x.get("kind") == "QUANTITY"]:
             data["warnings"].append(
                 "Broker reconciliation mismatch on %s: broker qty %s / ledger "
                 "qty %s, broker cost %s / ledger cost %s -- a transaction "
@@ -886,6 +1017,39 @@ def _selftest() -> int:
         "NEGATIVE CONTROL: a file outside the naming contract declares NO window (never guessed)"; n += 1
     assert export_evidence_window("Transaction History 09-2026.xlsx", created=_dt(2026, 9, 1, 8, 0)) is None, \
         "NEGATIVE CONTROL: exported on the 1st -> no complete day in the month -> no window"; n += 1
+    # ── ISA-0866 (B02-R09): importer integrity ──
+    names = {"netapp": {"NTAP"}, "matador resources": {"MTDR"}, "alphabet": {"GOOG", "GOOGL"}}
+    assert resolve_ticker("NetApp Inc", {}, names) == ("NTAP", "symbol_map_company"), \
+        "ISA-0866: a closed stock in no portfolio file resolves from its verified company name"; n += 1
+    assert resolve_ticker("Matador Resources Co", {}, names)[0] == "MTDR", "ISA-0866: legal-form suffixes are stripped"; n += 1
+    t, m = resolve_ticker("Alphabet Inc", {}, names)
+    assert t is None and m == "ambiguous:GOOG,GOOGL", "MUST-FIRE ISA-0866: two verified listings -> ambiguous, never guessed"; n += 1
+    assert resolve_ticker("Unknown Widgets plc", {}, names) == (None, "unmapped"), "NEGATIVE CONTROL: no match stays unmapped"; n += 1
+    assert resolve_ticker("adobe inc", {"adobe inc": "ADBE"}, names) == ("ADBE", "exact"), "NEGATIVE CONTROL: the exact map still wins"; n += 1
+
+    def _row(uid, ref, typ="buy", tk=None, src="Transaction History 09-2026.xlsx", amt=100.0, d="2026-09-08"):
+        return {"uid": uid, "reference": ref, "type": typ, "ticker": tk, "ticker_match": "x" if tk else "unmapped",
+                "asset_class": "stock", "source_file": src, "amount_gbp": amt, "date": d, "description": "D", "quantity": 1.0, "price": amt}
+    led = {"entries": [], "_meta": {}}
+    merge_rows(led, [_row("u1", "R1"), _row("u2", "R2", "sell")], "2026-09-29")
+    st = merge_rows(led, [_row("u1", "R1", tk="NTAP")], "2026-10-11")
+    assert st["ticker_resolved"] == 1 and led["entries"][0]["ticker"] == "NTAP" and led["transitions"][0]["kind"] == "TICKER_RESOLVED", \
+        "ISA-0866: a re-seen unmapped row is resolved in place (typed TICKER_RESOLVED), broker facts untouched"; n += 1
+    st2 = merge_rows(led, [_row("u3", "R2", "sell", src="Transaction History 10-2026.xlsx", amt=101.5)], "2026-10-12")
+    assert st2["broker_amendments"] == 1 and len([e for e in led["entries"] if e.get("reference") == "R2"]) == 1 \
+        and led["superseded"][0]["uid"] == "u2" and led["superseded"][0]["superseded_by_uid"] == "u3", \
+        "MUST-FIRE ISA-0866: a cross-export amended trade supersedes the old row (counted once, history kept)"; n += 1
+    st3 = merge_rows(led, [_row("u3", "R2", "sell", src="Transaction History 10-2026.xlsx", amt=101.5)], "2026-10-13")
+    assert st3["added"] == 0 and st3["broker_amendments"] == 0, "ISA-0866: re-importing the amended export is idempotent"; n += 1
+    led2 = {"entries": [], "_meta": {}}
+    st4 = merge_rows(led2, [_row("p1", "R9", amt=40.0), _row("p2", "R9", amt=60.0)], "2026-10-11")
+    assert st4["added"] == 2 and st4["broker_amendments"] == 0, \
+        "NEGATIVE CONTROL ISA-0866: two rows sharing a reference INSIDE one export are two genuine rows"; n += 1
+    st5 = merge_rows(led2, [_row("p1", "R9", amt=40.0), _row("p2", "R9", amt=60.0)], "2026-10-12")
+    assert st5["broker_amendments"] == 0 and len(led2["entries"]) == 2, "NEGATIVE CONTROL: an overlapping re-export changes nothing"; n += 1
+    _l3 = {"entries": [dict(_row("z1", "R7", tk=None), description="NetApp Inc")], "_meta": {}}
+    assert reresolve_unmapped(_l3, {}, names, "2026-10-11") == 1 and _l3["entries"][0]["ticker"] == "NTAP" \
+        and _l3["transitions"][0]["via"] == "ledger_reresolve", "ISA-0866: an older-export unmapped row is re-resolved on import"; n += 1
     print("extract_transactions selftest: %d assertions, 0 failed" % n)
     return 0
 

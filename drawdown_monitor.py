@@ -100,6 +100,22 @@ def tranche_size(reserve_gbp, tranches_fired, just_fired):
     return round(max(0.0, float(reserve_gbp)) / remaining_before, 2)
 
 
+def record_tranches(state, fired, reserve_gbp, today=None):
+    """ISA-0858 B1.6b - log every newly fired tranche with its SIZE at fire time, keyed by (episode, threshold),
+    so funding_waterfall.drawdown_reservation reserves exactly those pounds BEFORE any stock deployment until the
+    VUAG purchase appears in the dealing record. Idempotent: a key already logged for the episode is not re-added."""
+    log = state.setdefault("tranche_log", [])
+    ep = state.get("episode_id")
+    have = {(r.get("episode_id"), r.get("key")) for r in log}
+    for k in fired or []:
+        if (ep, k) in have:
+            continue
+        log.append({"episode_id": ep, "key": k, "fired_on": (today or date.today()).isoformat(),
+                    "tranche_gbp": tranche_size(reserve_gbp, state.get("tranches_fired") or {}, fired),
+                    "reserve_gbp_at_fire": reserve_gbp})
+    return log
+
+
 def compute_reserve(cash_gbp, mmf_gbp=0.0, committed_gbp=0.0, buffer_gbp=500.0):
     """D11 (U-B1-2)."""
     return round(max(0.0, (cash_gbp or 0.0) + (mmf_gbp or 0.0)
@@ -182,6 +198,7 @@ def run(reserve_gbp=None, check_only=False, state_path=STATE_PATH):
     state["regime_basis"] = basis
     if reserve_gbp is not None:
         state["reserve_gbp"] = reserve_gbp
+    record_tranches(state, fired, reserve_gbp if reserve_gbp is not None else state.get("reserve_gbp"))
     if not check_only and _c("DRAWDOWN_PROTOCOL_ACTIVE", True):
         save_state(state, state_path)
     block = emit_block(state, fired, reserve_gbp if reserve_gbp is not None
@@ -191,6 +208,21 @@ def run(reserve_gbp=None, check_only=False, state_path=STATE_PATH):
 
 
 def _selftest():
+    # ISA-0858 B1.6b: a fired tranche is logged with its size once per (episode, threshold)
+    _s = {"episode_id": 3, "tranches_fired": {"t10": True, "t20": False, "t30": False}}
+    record_tranches(_s, ["t10"], 9000.0, today=date(2026, 10, 20))
+    record_tranches(_s, ["t10"], 9000.0, today=date(2026, 10, 21))
+    assert _s["tranche_log"] == [{"episode_id": 3, "key": "t10", "fired_on": "2026-10-20", "tranche_gbp": 3000.0,
+                                  "reserve_gbp_at_fire": 9000.0}], _s["tranche_log"]
+    _n = {"episode_id": 3, "tranches_fired": {"t10": False, "t20": False, "t30": False}}
+    record_tranches(_n, [], 9000.0, today=date(2026, 10, 20))
+    assert _n["tranche_log"] == [], ("ISA-0858 NEGATIVE CONTROL: no fired threshold -> no reservation is logged "
+                                     "(a quiet day must not claim cash)")
+    _e = {"episode_id": 4, "tranches_fired": {"t10": True, "t20": False, "t30": False},
+          "tranche_log": [{"episode_id": 3, "key": "t10", "fired_on": "2026-10-20", "tranche_gbp": 3000.0}]}
+    record_tranches(_e, ["t10"], 6000.0, today=date(2026, 11, 2))
+    assert [(r["episode_id"], r["tranche_gbp"]) for r in _e["tranche_log"]] == [(3, 3000.0), (4, 2000.0)], \
+        ("ISA-0858 NEGATIVE CONTROL: a NEW episode's t10 is a new reservation, not deduplicated against the old one")
     # U-B1-1: threshold/re-arm truth table (synthetic series)
     st = load_state("/nonexistent")
     base = [100.0] * 260

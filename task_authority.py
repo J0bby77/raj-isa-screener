@@ -87,6 +87,9 @@ REFUSED_UNTRUSTED_LIVE = "REFUSED_UNTRUSTED_LIVE"
 REFUSED_CANONICAL_SURFACE_MISMATCH = "REFUSED_CANONICAL_SURFACE_MISMATCH"
 REFUSED_OUTSIDE_OCCURRENCE = "REFUSED_OUTSIDE_OCCURRENCE"
 MISSED_EXPECTED_OCCURRENCE = "MISSED_EXPECTED_OCCURRENCE"
+# ISA-0844 (11-Oct-2026): the task FIRES (launcher receipts exist) but every firing is outside its declared
+# occurrence while a declared occurrence is missed - the installed schedule disagrees with the signed one.
+FIRING_OFF_SCHEDULE = "FIRING_OFF_SCHEDULE"
 CAPABILITY_STATES = (LEGACY_UNVERIFIED, PROBATION_MATCH, AUTHORITY_VERIFIED, REFUSED_LAUNCHER_IDENTITY,
                      REFUSED_UNTRUSTED_LIVE, REFUSED_CANONICAL_SURFACE_MISMATCH,
                      REFUSED_OUTSIDE_OCCURRENCE, MISSED_EXPECTED_OCCURRENCE)
@@ -563,7 +566,20 @@ def health(root: str = HERE, now=None, contracts: dict = None, ledger: list = No
             start = end + datetime.timedelta(days=1)
         exp = expected_occurrences(t, k, start, end, root, setup_text) if start <= end else []
         missed = [o for o in exp if o not in seen]
-        if eff == ENFORCED and missed:
+        # ISA-0844: off-schedule firings inside the observation window (real, non-dry-run launches that the
+        # occurrence rule turned away). With a missed occurrence this proves the INSTALLED schedule disagrees
+        # with the SIGNED declaration - not "idle", not "ran without the hook" (measured 11-Oct-2026: the EPS
+        # snapshot fired every Friday and no-op'd while its declared Mondays were missed).
+        off = sorted(r.get("invoked_at") for r in led
+                     if r.get("kind") == "LAUNCH" and r.get("task_key") == k and not r.get("dry_run")
+                     and r.get("verdict") == NO_OP_OUTSIDE and r.get("invoked_at")
+                     and start.isoformat() <= str(r.get("invoked_at"))[:10] <= end.isoformat()
+                     # a no-op ON a date the CURRENT declaration intends is a lost occurrence (declaration
+                     # corrected after the firing), not evidence that the installed schedule is still wrong
+                     and "%s@%s" % (k, str(r.get("invoked_at"))[:10]) not in exp)
+        if missed and off:
+            st = FIRING_OFF_SCHEDULE
+        elif eff == ENFORCED and missed:
             st = MISSED_EXPECTED_OCCURRENCE
         elif missed and eff == PROBATION:
             st = MISSED_EXPECTED_OCCURRENCE
@@ -572,7 +588,7 @@ def health(root: str = HERE, now=None, contracts: dict = None, ledger: list = No
         else:
             st = {ENFORCED: AUTHORITY_VERIFIED, PROBATION: PROBATION_MATCH}.get(eff, LEGACY_UNVERIFIED)
         out[k] = {"effective_state": eff, "capital_relevant": bool(t.get("capital_relevant")),
-                  "expected": exp, "missed": missed, "state": st}
+                  "expected": exp, "missed": missed, "state": st, "off_schedule_fires": off if missed else []}
     n_enf_missed = sum(1 for v in out.values() if v["effective_state"] == ENFORCED and v["missed"])
     return {"state": "RED" if n_enf_missed else "OK", "as_of": now.isoformat(timespec="seconds"),
             "tasks": out,
@@ -805,6 +821,30 @@ def _selftest(verbose: bool = True) -> int:
            "S5 Sat 31-Oct-2026 precedes Sun 01-Nov (month-crossing edge)")
         ok(not occurrence(doc["tasks"]["isa-monthly-prerun"], "isa-monthly-prerun", datetime.date(2026, 10, 10), tmp)["in_window"],
            "S6 Sat 10-Oct not an occurrence")
+        # ISA-0843 / B12-R03 (11-Oct-2026): the five-point R5.14 matrix for the month-wrap pre-run, in UK time,
+        # across the 25-Oct-2026 BST->GMT change (09:30 local both sides) - evaluated through the real launch path.
+        import run_contracts as _rc
+        _pt = doc["tasks"]["isa-monthly-prerun"]
+        _occ = lambda d: occurrence(_pt, "isa-monthly-prerun", d, tmp)["in_window"]
+        _m = _rc.temporal_matrix(_occ, datetime.date(2026, 10, 31), next_boundary=datetime.date(2026, 12, 5))
+        ok(_m["T-1"] is False, "ISA-0843 R5.14 T-1: Fri 30-Oct-2026 is not a pre-run occurrence")
+        ok(_m["T"] is True, "ISA-0843 R5.14 T: Sat 31-Oct-2026 IS the pre-run occurrence (1-Nov is the first Sunday)")
+        ok(_m["T+1"] is False, "ISA-0843 R5.14 T+1: Sun 1-Nov-2026 is not a pre-run occurrence")
+        ok(_m["next_occurrence"] is True and not _occ(datetime.date(2026, 11, 7)),
+           "ISA-0843 R5.14 next_occurrence: Sat 5-Dec-2026 is next; Sat 7-Nov (wrong-week Saturday) no-ops")
+        ok(all(not _occ(datetime.date(2026, 10, d)) for d in (24, 25, 26)),
+           "ISA-0843 DST: the 24/25/26-Oct BST->GMT weekend contains no pre-run occurrence")
+        _wrap = datetime.datetime(2026, 10, 31, 9, 30)
+        import shutil as _sh843
+        _t843 = tempfile.mkdtemp(prefix="ta843_")          # private ledger: later rows assert on tmp's ledger
+        _sh843.copytree(tmp, _t843, dirs_exist_ok=True)
+        _l1 = launch("isa-monthly-prerun", PROTOCOL, root=_t843, now=_wrap, trusted=TR, setup_text=setup, dry_run=False)
+        complete(_l1["receipt_id"], "COMPLETED", root=_t843, now=_wrap.replace(hour=10))
+        _l2 = launch("isa-monthly-prerun", PROTOCOL, root=_t843, now=_wrap.replace(hour=11), trusted=TR, setup_text=setup, dry_run=False)
+        _sh843.rmtree(_t843, ignore_errors=True)
+        ok(_l1["verdict"] == PROCEED and _l2["verdict"] == NO_OP_DUPLICATE,
+           "ISA-0843 R5.14 repeat_same_occurrence: a second 31-Oct firing is an idempotent duplicate no-op (%s/%s)"
+           % (_l1["verdict"], _l2["verdict"]))
 
         # T1 single-home lint + NEGATIVE CONTROLS
         for k in doc["tasks"]:
@@ -918,6 +958,26 @@ def _selftest(verbose: bool = True) -> int:
                         docE["tasks"]["isa-monthly-prerun"], enforcement_state=ENFORCED, enforced_on_evidence="x")})))
         ok(hE["state"] == "RED" and hE["tasks"]["isa-monthly-prerun"]["state"] == MISSED_EXPECTED_OCCURRENCE,
            "T8d an ENFORCED task that never fired is MISSED and RED")
+        # T8e ISA-0844 (11-Oct-2026): fires-but-never-proceeds is the installed/signed schedule mismatch
+        _led = list(read_ledger(tmp)) + [
+            {"kind": "LAUNCH", "task_key": "isa-weekly-eps-snapshot", "verdict": NO_OP_OUTSIDE,
+             "invoked_at": "2026-10-02T17:45:42+01:00"},
+            {"kind": "LAUNCH", "task_key": "isa-weekly-eps-snapshot", "verdict": NO_OP_OUTSIDE,
+             "invoked_at": "2026-10-09T14:35:30+01:00"}]
+        hX = health(tmp, now=datetime.datetime(2026, 10, 20, 12), setup_text=setup, ledger=_led)
+        ok(hX["tasks"]["isa-weekly-eps-snapshot"]["state"] == FIRING_OFF_SCHEDULE
+           and len(hX["tasks"]["isa-weekly-eps-snapshot"]["off_schedule_fires"]) == 2,
+           "T8e MUST-FIRE ISA-0844: Friday firings that no-op while declared Mondays are missed -> FIRING_OFF_SCHEDULE")
+        _dry = [dict(r, dry_run=True) if r.get("task_key") == "isa-weekly-eps-snapshot" else r for r in _led]
+        ok(health(tmp, now=datetime.datetime(2026, 10, 20, 12), setup_text=setup, ledger=_dry)
+           ["tasks"]["isa-weekly-eps-snapshot"]["state"] != FIRING_OFF_SCHEDULE,
+           "T8f NEGATIVE CONTROL: dry-run launches are not firings")
+        ok(hX["tasks"]["isa-nasdaq-fri2"]["state"] != FIRING_OFF_SCHEDULE,
+           "T8g NEGATIVE CONTROL: a task with no missed occurrence is never off-schedule")
+        _fri = setup.replace("`0 8 * * 1` | Mondays 08:00", "`30 14 * * 5` | Fridays 14:30")
+        ok(_fri != setup and health(tmp, now=datetime.datetime(2026, 10, 20, 12), setup_text=_fri, ledger=_led)
+           ["tasks"]["isa-weekly-eps-snapshot"]["state"] == "UNOBSERVED_OCCURRENCE",
+           "T8h NEGATIVE CONTROL: once the declaration matches the installed Fridays, the earlier no-ops are LOST occurrences (missed), not off-schedule")
         # integrity + generated launcher drift
         ok(any("no generated" in e for e in integrity_findings(tmp, setup)), "I1 missing LAUNCHER.md fires")
         write_launchers(tmp)

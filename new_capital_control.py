@@ -60,6 +60,17 @@ CASH_TREATMENT = ("HELD_AS_CASH_PENDING_STOCK_DECISION - blocked stock capital i
                   "an allocation decision the block exists to defer); the residual-routing / MMF rule "
                   "prices and places it as cash.")
 
+# ISA-0833 (POL-1, Raj 04-Oct-2026; October build S1a): the FUND leg of monthly capital has its own
+# named verdict, read from the SAME acceptance currency as the stock leg (system_acceptance, path
+# monthly_capital). It refuses NEW money routed to funds; it never blocks fund-internal rebalances,
+# reductions, sells or cash/MMF handling.
+FUND_SCOPE = "NEW_MONEY_ROUTED_TO_FUNDS"
+FUND_SCOPE_DETAIL = ("new capital offered to the fund sleeve by capital_destination.sleeve_split "
+                     "(fund_max_gbp). Fund-internal rebalances funded inside the fund sleeve, "
+                     "reductions, sells and cash/MMF handling are NOT blocked.")
+FUND_PATH_ID = "monthly_capital"
+ACCEPTANCE_OK = ("CURRENT", "ROLLBACK", "UNGOVERNED_ROOT")
+
 STATE_CONTRACT = {
     "path": STORE_REL.replace(os.sep, "/"),
     "class": "APPEND_ONLY_HISTORY",
@@ -155,20 +166,18 @@ def stock_sleeve_policy(tw: Optional[dict] = None, root: str = HERE) -> dict:
 
     removed = ss.get("_removed_caps_26aug2026") or {}
     trig_live = th.get("phase_transition_pct")
+    # ISA-0808 (Raj 10-Oct-2026): the automatic Phase-1 -> Phase-2 fund re-target is RETIRED and
+    # thresholds.phase_transition_pct removed. A re-appearance is a policy conflict reported here
+    # (and failed by consistency_check.pair_phase_switch_retired), never a stock gate.
     transition = {
         "value_pct": None if trig_live is None else round(float(trig_live) * 100, 4),
-        "live_consumers": ["portfolio_analytics phase_status (reporting)",
-                           "Run_Context Step 6.7 (fund-weight Phase-2 transition)"],
-        "role": "FUND_WEIGHT_TRANSITION_TRIGGER - not a cap on new stock capital",
-        "config_note": ("stock_sleeve._removed_caps_26aug2026 records the transition test as removed "
-                        "with the ceiling, while thresholds.phase_transition_pct is still read by "
-                        "portfolio_analytics and Run_Context 6.7" if removed and trig_live is not None
-                        else None),
+        "live_consumers": [],
+        "role": "RETIRED 11-Oct-2026 (ISA-0808) - no automatic phase switch; not a cap on new stock capital",
+        "config_note": ("thresholds.phase_transition_pct has re-appeared after its retirement (ISA-0808)"
+                        if trig_live is not None else None),
+        "retired_record": th.get("_retired_phase_transition_11oct2026") is not None,
         "admission_effect": "NONE",
     }
-    # ⚑ The transition question is a FUND-sleeve policy question (it re-targets fund weights after
-    #   two months >= trigger). It does not bear on whether a pound may enter the stock sleeve, so
-    #   its internal inconsistency is reported (and registered) without blocking stock admission.
     risk_limits = {"max_stock_position_pct": th.get("max_stock_position_pct"),
                    "sizing_ladder_pct": ss.get("sizing_ladder_pct"),
                    "cash_reserve_gbp": ss.get("cash_reserve_gbp"),
@@ -186,6 +195,12 @@ def stock_sleeve_policy(tw: Optional[dict] = None, root: str = HERE) -> dict:
         "target_range": target_range,
         "transition_trigger": transition,
         "risk_limits": risk_limits,
+        # ISA-0858 (Raj D1/D4): the priority band - below it stocks take first call and fund trims may fund stocks
+        "priority_band": {"value_pct": (None if ss.get("sleeve_priority_ceiling") is None
+                                        else round(float(ss["sleeve_priority_ceiling"]) * 100, 4)),
+                          "basis": str(ss.get("sleeve_priority_ceiling_basis") or "")[:300],
+                          "source": "target_weights.stock_sleeve.sleeve_priority_ceiling",
+                          "applied_by": "funding_waterfall"},
         "breach_route": ("NOT_APPLICABLE - there is no hard sleeve maximum; a weight above the "
                          "reporting band is published, not trimmed" if hard.get("state") == NOT_A_POLICY_LIMIT
                          else "REFUSE the addition that would cross hard_max" if hard.get("state") == "HARD_LIMIT"
@@ -269,6 +284,26 @@ def status(root: str = HERE, policy: Optional[dict] = None) -> dict:
             reasons.insert(0, "ACCEPTANCE_NOT_CURRENT (ISA-0828, R18.6): the OPEN record cites %s, which is %s - %s. "
                               "Renew system acceptance on the delivered build and re-open citing it."
                            % ((last or {}).get("acceptance_ref"), acceptance.get("state"), str(acceptance.get("why"))[:300]))
+    # ── ISA-0833: the fund-leg verdict - same acceptance currency, independent of the stock policy ──
+    fund_reasons, fund_acc = [], None
+    if rd["state_of_store"] != "OK":
+        fund_reasons.append("control store %s - the cited acceptance cannot be read (R4.3)" % rd["state_of_store"])
+    else:
+        _open = next((r for r in reversed(rd["records"]) if r.get("state") == OPEN), None)
+        _fref = (_open or {}).get("acceptance_ref")
+        if st == OPEN and acceptance is not None:
+            fund_acc = acceptance
+        else:
+            try:
+                import system_acceptance as _sa833
+                fund_acc = _sa833.acceptance_currency(_fref, root)
+            except Exception as exc:                                    # noqa: BLE001
+                fund_acc = {"state": "UNKNOWN", "why": "acceptance currency unreadable (%s: %s)" % (type(exc).__name__, exc)}
+        if fund_acc.get("state") not in ACCEPTANCE_OK:
+            fund_reasons.append("ACCEPTANCE_NOT_CURRENT (ISA-0833, R18.6): the fund leg's acceptance %s is %s - %s. "
+                                "Renew system acceptance on the delivered build and re-open citing it."
+                                % (_fref, fund_acc.get("state"), str(fund_acc.get("why"))[:300]))
+    fund_blocks = bool(fund_reasons)
     if st == BLOCK and last:
         reasons.insert(0, "BLOCK_NEW_STOCK_CAPITAL recorded %s by %s: %s"
                        % (last.get("recorded_at"), last.get("recorded_by"), last.get("reason")))
@@ -286,6 +321,13 @@ def status(root: str = HERE, policy: Optional[dict] = None) -> dict:
         "acceptance_ref": (last or {}).get("acceptance_ref") if st == OPEN else None,
         "acceptance": acceptance,
         "reasons": reasons,
+        "blocks_new_fund_capital": fund_blocks,
+        "fund_leg": {"path_id": FUND_PATH_ID,
+                     "acceptance_state": (fund_acc or {}).get("state") if fund_acc else "UNREADABLE",
+                     "scope": FUND_SCOPE if fund_blocks else None,
+                     "scope_detail": FUND_SCOPE_DETAIL,
+                     "reasons": fund_reasons,
+                     "consumer": "capital_destination.sleeve_split (fund_max_gbp - the one fund-routing point)"},
         "policy_state": pol.get("state"),
         "policy_hard_max": (pol.get("hard_max") or {}).get("state"),
         "store": STATE_CONTRACT["path"],
@@ -348,6 +390,11 @@ def append_record(root: str = HERE, *, state: str, occurrence: str, reason: str,
 
 def blocks_new_stock_capital(root: str = HERE) -> bool:
     return bool(status(root)["blocks_new_stock_capital"])
+
+
+def blocks_new_fund_capital(root: str = HERE) -> bool:
+    """ISA-0833: True unless the monthly_capital path acceptance the control cites is CURRENT."""
+    return bool(status(root)["blocks_new_fund_capital"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -432,15 +479,26 @@ def _selftest(verbose: bool = True) -> int:
             _s = status(base)
             ok("ISA-0828 MUST-FIRE (handoff case 16): an OPEN record citing a STALE acceptance BLOCKS new stock capital",
                _s["blocks_new_stock_capital"] is True and _s["reasons"][0].startswith("ACCEPTANCE_NOT_CURRENT"), _s)
+            ok("ISA-0833 MUST-FIRE: the same STALE acceptance BLOCKS new FUND capital (named verdict)",
+               _s["blocks_new_fund_capital"] is True and _s["fund_leg"]["scope"] == FUND_SCOPE
+               and _s["fund_leg"]["reasons"][0].startswith("ACCEPTANCE_NOT_CURRENT"), _s)
             _sa_t.acceptance_currency = lambda ref, root=None, path_id=None: {"state": "CURRENT", "why": "fixture"}
             ok("ISA-0828 NEGATIVE CONTROL: the same OPEN record citing a CURRENT acceptance does not block",
                status(base)["blocks_new_stock_capital"] is False)
+            _sc = status(base)
+            ok("ISA-0833 NEGATIVE CONTROL: a CURRENT acceptance leaves the fund leg open",
+               _sc["blocks_new_fund_capital"] is False and _sc["fund_leg"]["scope"] is None, _sc)
+            _sp = status(base, policy={"state": "POLICY_CONFLICT", "conflicts": ["fixture"]})
+            ok("ISA-0833 NEGATIVE CONTROL: a STOCK-sleeve policy conflict blocks stock, not the fund verdict",
+               _sp["blocks_new_stock_capital"] is True and _sp["blocks_new_fund_capital"] is False, _sp)
 
             def _boom(ref, root=None, path_id=None):
                 raise RuntimeError("store unreadable")
             _sa_t.acceptance_currency = _boom
             ok("ISA-0828 FAIL-CLOSED: an unreadable acceptance BLOCKS (R4.3)",
                status(base)["blocks_new_stock_capital"] is True)
+            ok("ISA-0833 FAIL-CLOSED: an unreadable acceptance BLOCKS the fund leg (R4.3)",
+               status(base)["blocks_new_fund_capital"] is True)
         finally:
             _sa_t.acceptance_currency = _orig_ac
         # tamper: edit history -> chain breaks -> UNKNOWN -> blocks
@@ -453,6 +511,8 @@ def _selftest(verbose: bool = True) -> int:
         s3 = status(base)
         ok("NEGATIVE CONTROL: an edited history breaks the hash chain, reads UNKNOWN and BLOCKS",
            s3["state"] == UNKNOWN and s3["blocks_new_stock_capital"], s3)
+        ok("ISA-0833 FAIL-CLOSED: a corrupt control store BLOCKS the fund leg",
+           s3["blocks_new_fund_capital"] is True, s3)
         try:
             append_record(base, state=OPEN, occurrence="x", reason="r", recorded_by="b", acceptance_ref="A")
             ok("NEGATIVE CONTROL: appending to a CORRUPT store must fail", False)

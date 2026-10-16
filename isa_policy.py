@@ -126,6 +126,7 @@ V2_FLAGS: Dict[str, bool] = {
     # 03-Sep-2026, 119 of 178 names (66.9%) were unmapped, unfetched, UNMEASURED, sized on
     # A2.3's adverse 0.70 and capped at STARTER. False reproduces 02-Sep-2026 behaviour exactly.
     "symbol_map_refresh":         True,   # P1.2c: Step 5x refreshes the ticker->Yahoo symbol map
+    "instrument_eligibility_refresh": True,   # ISA-0860 (12-Oct-2026): Step 5x-ie OpenFIGI fetch; False -> no fetch, the cache is re-evaluated offline
     "stock_return_fetch":         True,   # P1: populate the weekly GBP total-return store
     "stock_candidate_pipeline":   True,   # P3: a real candidate list reaches stock_max
     "deployment_sequencer":       True,   # P6: correlation orders the queue, never the score

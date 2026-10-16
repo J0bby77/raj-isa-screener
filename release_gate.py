@@ -213,6 +213,9 @@ CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "targ
                 # ISA-0607 (23-Sep-2026): Raj's broker venue declaration decides which venues may
                 # receive automated new capital - an unsigned edit to it would move capital.
                 "broker_venues.json",
+                # ISA-0860 (12-Oct-2026): the HMRC recognised-exchange table mapped to OpenFIGI codes decides which
+                # depositary receipts are REFUSED as not ISA-qualifying - an unsigned edit would move capital.
+                "recognised_exchanges.json",
                 # ISA-0729 (23-Sep-2026): the declared release denominator of the script battery - an
                 # unsigned edit could quietly move a failing release test out of the census.
                 "script_suite_census.json",
@@ -248,7 +251,8 @@ CONFIG_RUNTIME_KEYS = {
         "operative_portfolio_value_gbp", "operative_next_window", "anchor_cadence", "flow_trigger",
         "one_off_contributions_applied", "one_off_contributions_in_value", "glidepath_note",
         "derived_at", "derivation", "next_derivation_due", "next_operative_window",
-        "reported_derivation_cadence", "derivation_basis", "derivation_history"),
+        "reported_derivation_cadence", "derivation_basis", "derivation_history",
+        "anchor_root_check"),                                           # ISA-0852 (11-Oct-2026)
 }
 
 

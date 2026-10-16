@@ -537,6 +537,10 @@ def _selftest(verbose: bool = True) -> int:
             fails.append(name)
 
     # ── ISA-0786: sandbox placement and the typed disk refusal ─────────────────────────────────
+    # ⚑ ISA-0861 (11-Oct-2026): the placement rows test the CANDIDATE logic, so the operator override is
+    #   neutralised for them (a LIVE census run with ISA_CENSUS_SANDBOX set published a false FRESH_RED) and
+    #   restored after; the override itself is asserted separately below.
+    _env_sb = os.environ.pop("ISA_CENSUS_SANDBOX", None)
     _fake = {"/roomy/a": 5000.0, "/full/b": 20.0}
     ok("ISA-0786 MUST-FIRE: a full first candidate is skipped for a roomy one",
        default_sandbox(["/full/b", "/roomy/a"], free_fn=lambda p: _fake[p]) == "/roomy/a")
@@ -558,6 +562,16 @@ def _selftest(verbose: bool = True) -> int:
     _st = ensure_runtime_packages(target=tempfile.mkdtemp(prefix="isa0786p_"),
                                   runner=lambda a: _calls.append(a))
     import importlib.util as _iu786
+    if _env_sb is not None:
+        os.environ["ISA_CENSUS_SANDBOX"] = _env_sb
+    _prev = os.environ.get("ISA_CENSUS_SANDBOX")
+    os.environ["ISA_CENSUS_SANDBOX"] = "/explicit/override"
+    ok("ISA-0861: an explicit ISA_CENSUS_SANDBOX override wins over the candidates",
+       default_sandbox(["/full/b", "/roomy/a"], free_fn=lambda p: _fake[p]) == "/explicit/override")
+    if _prev is None:
+        os.environ.pop("ISA_CENSUS_SANDBOX", None)
+    else:
+        os.environ["ISA_CENSUS_SANDBOX"] = _prev
     ok("ISA-0786 dependency installer: a present package is PRESENT with no pip call; an absent one is "
        "attempted and, if still absent, typed UNAVAILABLE (never silently green)",
        (_st["state"] == "PRESENT" and not _calls) if _iu786.find_spec("yfinance") else

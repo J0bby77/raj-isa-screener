@@ -36,6 +36,42 @@ def _norm_decision(decision: str) -> str:
     return norm
 
 
+# ── ISA-0866 amendment (12-Oct-2026) - ONE canonical ORIGIN-route vocabulary ───────────────────────────
+# The ledger carries free-text routes ('growth', 'growth_stock', 'vci', 'held_sleeve', 'portfolio', 'fund', ...).
+# Only an ORIGINATING route says which path generated a position: FORWARD_LED (the forward-led / momentum growth
+# path - Path A) or VCI. 'held_sleeve' / 'portfolio' are review routes of a position already held, never origins.
+ROUTE_FORWARD_LED, ROUTE_VCI = "FORWARD_LED", "VCI"
+ROUTE_CANON = {"growth": ROUTE_FORWARD_LED, "growth_stock": ROUTE_FORWARD_LED, "main": ROUTE_FORWARD_LED,
+               "forward": ROUTE_FORWARD_LED, "forward_led": ROUTE_FORWARD_LED, "momentum": ROUTE_FORWARD_LED,
+               "vci": ROUTE_VCI}
+_ORIGIN_DECISIONS = ("buy", "start", "top_up", "add")
+
+
+def canonical_route(raw):
+    """-> FORWARD_LED | VCI | None (not an originating route). Never guessed from anything but the declared map."""
+    return ROUTE_CANON.get(str(raw or "").strip().lower())
+
+
+def origin_route(ticker, entries, on_or_before=None) -> dict:
+    """The route that GENERATED a holding, from the decision record only: the latest buy-type decision on an
+    originating route on or before `on_or_before`. Two different routes for the same name -> CONFLICT (never a
+    pick); no record -> NO_DECISION_RECORD (never inferred)."""
+    t = str(ticker or "").strip().upper()
+    rows = [e for e in (entries or []) if isinstance(e, dict) and str(e.get("ticker") or "").strip().upper() == t
+            and str(e.get("decision") or "").strip().lower() in _ORIGIN_DECISIONS and canonical_route(e.get("route"))
+            and (on_or_before is None or str(e.get("date") or "") <= str(on_or_before))]
+    if not rows:
+        return {"state": "NO_DECISION_RECORD", "route": None, "ticker": t}
+    routes = sorted({canonical_route(e.get("route")) for e in rows})
+    if len(routes) > 1:
+        return {"state": "CONFLICT", "route": None, "ticker": t, "routes": routes,
+                "decisions": [e.get("decision_id") or e.get("_id") for e in rows]}
+    e = max(rows, key=lambda x: str(x.get("date") or ""))
+    return {"state": "RECORDED", "route": routes[0], "ticker": t, "raw_route": e.get("route"),
+            "decision_id": e.get("decision_id") or e.get("_id"), "decision_date": e.get("date"),
+            "basis": "decision_ledger.json (the latest buy-type decision on an originating route)"}
+
+
 def load_ledger(path: str) -> dict:
     """Return the ledger dict {schema_version, entries:[...]} — tolerant of a missing or
     legacy (bare-list) file so a first run never crashes."""
@@ -355,7 +391,7 @@ def log_decision(path, ticker, route, decision, scores=None, gates=None, flags=N
                  dedupe=True, *, build_id=None, input_snapshot_id=None,
                  event_review_id=None, config_id=None, supersedes_decision_id=None,
                  size_pct=None, target_gbp=None, reasons=None, lifecycle=None,
-                 also_supersedes=None) -> dict:
+                 also_supersedes=None, receipt_binding=None) -> dict:
     """Append one decision entry and persist. Idempotent per (date, ticker, decision)
     when dedupe=True (re-running a review in the same month won't duplicate). Returns
     the entry dict (existing one if it was a dedupe hit)."""
@@ -385,6 +421,9 @@ def log_decision(path, ticker, route, decision, scores=None, gates=None, flags=N
         "config_id": config_id,
         "size_pct": size_pct,
         "target_gbp": target_gbp,
+        # ISA-0868 (11-Oct-2026, B10-R09/B11-R02): the join key to the authoritative Capital Decision Receipt
+        #   (receipt id, its ER12/method for this name, the build/path it was formed by) - or UNBOUND:<state>.
+        "receipt_binding": receipt_binding,
         "reasons": list(reasons or []),
         "date": date,
         "ticker": ticker,
@@ -693,7 +732,7 @@ def _stamp_execution(entry, txn):
 
 def reconcile_executions_from_transactions(path, transactions, current_holdings,
                                            prior_holdings=None, date=None, persist=True,
-                                           evidence=None):
+                                           evidence=None, ledger_trades=None):
     """Confirm recommendations against the ACTUAL dealing record (broker truth).
 
     `transactions`: list of dicts as produced by
@@ -711,6 +750,15 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     recommendation, i.e. action taken outside the framework. That is the input
     the A13 override log needs, and holdings-diffing cannot produce it reliably.
 
+    `ledger_trades` (ISA-0866 rev, 12-Oct-2026): every executed trade in the persistent dealing
+    record (`transaction_ledger.json`, via load_ledger_trades). A trade PROVES an execution whenever
+    it was dealt, so confirmation reads the whole record; only this month's export may prove an
+    ABSENCE (`not_executed` / `not_executed_to_date` keep the export's own window) and only this
+    month's trades are candidates for `off_framework` (old trades are not re-flagged every month).
+    Without it, a decision whose trade sat in an earlier export with an unresolved ticker (the
+    06-Sep NTAP BUY, filled 08-Sep, ticker None until ISA-0866) could never confirm once a newer
+    export replaced that month's file - it decayed to `execution_unconfirmed`.
+
     Returns {counts, confirmed, off_framework, fallback_used}."""
     date = date or _today()
     cur = _as_qty_map(current_holdings)
@@ -718,6 +766,16 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     ledger = load_ledger(path)
     txns = list(transactions or [])
     have_txns = bool(txns)
+    # ISA-0866 rev: confirmation evidence = this month's trades + the whole dealing record
+    # (deduplicated on date/ticker/type/reference; rows without a resolved ticker cannot match).
+    _conf = list(txns)
+    _seen_conf = {(x.get("date"), str(x.get("ticker") or "").upper(), x.get("type"), x.get("reference"))
+                  for x in txns}
+    for _x in (ledger_trades or []):
+        _k = (_x.get("date"), str(_x.get("ticker") or "").upper(), _x.get("type"), _x.get("reference"))
+        if _x.get("ticker") and _k not in _seen_conf:
+            _seen_conf.add(_k)
+            _conf.append(dict(_x, _evidence="transaction_ledger"))
     # ISA-0684 (R4.3/V-1, R2.10). `have_txns` says an export EXISTS; it does not
     # say the export COVERS the recommendation. The September NTAP buy was
     # labelled "declined" because the newest export ended in August -- absence of
@@ -777,6 +835,25 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
         #   trade inside its window on a later export must still confirm it.
         if e.get("execution_status") not in ("recommended", "execution_unconfirmed",
                                              "not_executed_to_date"):
+            # ISA-0866 rev b (12-Oct-2026): a confirmation already made BY THIS RUN DATE (an earlier,
+            # cut-off pass of the same occurrence - the documented re-run, ISA-0780/ISA-0845) is
+            # reported again, so a re-run reproduces the same counts and confirmed rows instead of
+            # reporting 0 and dropping the month's executions from the run_context summary.
+            if (e.get("execution_status") == "confirmed_executed"
+                    and str(e.get("executed_confirmed_date") or "") == str(date)):
+                counts["confirmed_executed"] += 1
+                confirmed.append({"ticker": str(e.get("ticker") or "").strip().upper(),
+                                  "decision": str(e.get("decision") or "").strip().lower(),
+                                  "decision_id": e.get("decision_id") or e.get("_id"),
+                                  "route": e.get("route"), "executed_date": e.get("executed_date"),
+                                  "price": e.get("executed_price"),
+                                  "amount_gbp": e.get("executed_amount_gbp"),
+                                  "evidence": e.get("execution_evidence") or "month_export",
+                                  "same_date_earlier_pass": True})
+                matched_uids.add((e.get("executed_date"), str(e.get("ticker") or "").strip().upper(),
+                                  "sell" if str(e.get("decision") or "").strip().lower()
+                                  in {x.lower() for x in SELL_LIKE} else "buy",
+                                  e.get("executed_reference")))
             continue
         # Historic entries were written with mixed casing ("BUY", "HOLD"), so
         # normalise before matching -- a case-sensitive compare would route a
@@ -801,13 +878,14 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
             continue
         _end = _window_end(_idx, e)
         e["validity_end"] = _end
-        cand = _txn_window(txns, t, rec_date, date) if (have_txns and want) else []
+        cand = _txn_window(_conf, t, rec_date, date) if (_conf and want) else []
         cand = [x for x in cand if x.get("type") == want
                 and (_end is None or str(x.get("date") or "") < _end)
                 and (x.get("date"), t, x.get("type"), x.get("reference")) not in matched_uids]
 
         if cand:
             _stamp_execution(e, cand[0])
+            e["execution_evidence"] = cand[0].get("_evidence") or "month_export"   # ISA-0866 rev
             e["execution_status"] = "confirmed_executed"
             e.pop("execution_unconfirmed_reason", None)                 # ISA-0787: evidence arrived
             e.pop("evidence_through", None)                             # ISA-0791
@@ -818,7 +896,9 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
                               "route": e.get("route"),
                               "executed_date": cand[0].get("date"),
                               "price": cand[0].get("price"),
-                              "amount_gbp": cand[0].get("amount_gbp")})
+                              "amount_gbp": cand[0].get("amount_gbp"),
+                              # ISA-0866 rev: which record proved it
+                              "evidence": cand[0].get("_evidence") or "month_export"})
             for x in cand[:1]:
                 matched_uids.add((x.get("date"), t, x.get("type"),
                                   x.get("reference")))
@@ -895,11 +975,24 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
         counts[status] = counts.get(status, 0) + 1
 
     # Trades the framework never recommended — action taken outside the process.
-    off_framework = []
+    # ⚑ ISA-0858 (12-Oct-2026): an MMF buy/sell is a CASH-EQUIVALENT movement (the D3 operational parking place and
+    #   the first funding source, Raj D4) - it funds or parks a decision, it is not an investment decision, so it is
+    #   reported under `cash_equivalent_movements`, never as an OFF_FRAMEWORK trade (the October CSH2 sell that
+    #   funded MTDR was flagged off-framework).
+    try:
+        import scoring_config as _sc_mmf
+        _mmf = {str(t).upper() for t in getattr(_sc_mmf, "MMF_TICKERS", ())}
+    except Exception:                                                   # noqa: BLE001
+        _mmf = {"CSH2", "CSH2.L"}
+    off_framework, cash_equiv = [], []
     for x in txns:
         key = (x.get("date"), str(x.get("ticker") or "").upper(),
                x.get("type"), x.get("reference"))
         if key in matched_uids:
+            continue
+        if str(x.get("ticker") or "").upper() in _mmf:
+            cash_equiv.append({"date": x.get("date"), "ticker": x.get("ticker"), "type": x.get("type"),
+                               "amount_gbp": x.get("amount_gbp")})
             continue
         off_framework.append({
             "date": x.get("date"), "ticker": x.get("ticker"),
@@ -914,7 +1007,7 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
     if persist:
         save_ledger(ledger, path)
     return {"counts": counts, "confirmed": confirmed, "persisted": bool(persist),
-            "off_framework": off_framework,
+            "off_framework": off_framework, "cash_equivalent_movements": cash_equiv,
             "fallback_used": sorted(set(fallback_used)),
             # ISA-0684: the coverage window travels with the verdict, so every
             # downstream reader can tell a refusal from a rejection (R2.10).
@@ -924,6 +1017,25 @@ def reconcile_executions_from_transactions(path, transactions, current_holdings,
                              "complete": bool(cov_to is not None
                                               and cov_to >= str(date))},
             "source": "transactions" if have_txns else "holdings_delta"}
+
+
+def load_ledger_trades(transaction_ledger_path):
+    """ISA-0866 rev (12-Oct-2026): every executed buy/sell in the persistent dealing record
+    (`transaction_ledger.json` -> entries; amended rows already moved to `superseded` by the
+    importer), in the executed_trades shape. Rows whose ticker is still unresolved are excluded -
+    they cannot be matched to a decision and remain visible in unmatched_broker_facts.
+    Returns [] when the file is absent or unreadable (degrades to month-only confirmation)."""
+    if not transaction_ledger_path or not os.path.exists(transaction_ledger_path):
+        return []
+    try:
+        with open(transaction_ledger_path, "r", encoding="utf-8") as fh:
+            ents = json.load(fh).get("entries") or []
+    except Exception:                                                   # noqa: BLE001
+        return []
+    keys = ("date", "ticker", "type", "quantity", "price", "amount_gbp", "cost_gbp",
+            "cost_pct", "description", "reference")
+    return [dict((k, e.get(k)) for k in keys) for e in ents
+            if e.get("type") in ("buy", "sell") and e.get("ticker")]
 
 
 def load_transactions(transactions_json_path):
@@ -938,6 +1050,25 @@ def load_transactions(transactions_json_path):
         return []
 
 
+def _selftest_routes():
+    E = [{"ticker": "MTDR", "route": "growth", "decision": "buy", "date": "2026-10-04", "decision_id": "DEC-M"},
+         {"ticker": "QBTS", "route": "vci", "decision": "buy", "date": "2026-08-09", "_id": "Q1"},
+         {"ticker": "QBTS", "route": "vci", "decision": "top_up", "date": "2026-09-13", "decision_id": "Q2"},
+         {"ticker": "MU", "route": "held_sleeve", "decision": "HOLD", "date": "2026-07-05"},
+         {"ticker": "XX", "route": "growth", "decision": "buy", "date": "2026-08-01"},
+         {"ticker": "XX", "route": "vci", "decision": "buy", "date": "2026-09-01"},
+         {"ticker": "NTAP", "route": "growth_stock", "decision": "PASS", "date": "2026-07-05"},
+         {"ticker": "NTAP", "route": "growth", "decision": "buy", "date": "2026-09-06"}]
+    assert origin_route("MTDR", E)["route"] == ROUTE_FORWARD_LED and origin_route("mtdr", E)["decision_id"] == "DEC-M"
+    assert origin_route("QBTS", E)["route"] == ROUTE_VCI and origin_route("QBTS", E)["decision_id"] == "Q2"
+    assert origin_route("MU", E)["state"] == "NO_DECISION_RECORD", "a HOLD on held_sleeve is not an origin"
+    assert origin_route("XX", E)["state"] == "CONFLICT", "two routes are a CONFLICT, never a pick"
+    assert origin_route("NTAP", E)["route"] == ROUTE_FORWARD_LED, "NTAP was forward-led (Raj 12-Oct-2026), not VCI"
+    assert origin_route("MTDR", E, on_or_before="2026-10-01")["state"] == "NO_DECISION_RECORD"
+    assert canonical_route("held_sleeve") is None and canonical_route("GROWTH_STOCK") == ROUTE_FORWARD_LED
+    return 8
+
+
 def _selftest():
     """ISA-0684 — the execution verdict is CONDITIONED on evidence, not merely produced.
 
@@ -947,6 +1078,7 @@ def _selftest():
     a blind spot. The negative control is what proves the verdict still fires when the
     export genuinely covers the window.
     """
+    _n_routes = _selftest_routes()        # ISA-0866 amendment: the canonical origin route
     import tempfile as _tf
     ok = [0]
 
@@ -1273,6 +1405,63 @@ def _selftest():
        _r9c["counts"]["confirmed_executed"] == 0
        and [e for e in load_ledger(_lp9)["entries"] if e["ticker"] == "NTAP"][0]["execution_status"]
        == "confirmed_executed")
+    # ── ISA-0866 rev — confirmation reads the WHOLE dealing record, absence only the export ──
+    _lpL = os.path.join(_tf.mkdtemp(), "lL.json")
+    log_decision(_lpL, "NTAP", "growth", "buy", date="2026-09-06")
+    log_decision(_lpL, "OLDX", "growth", "buy", date="2026-09-20")
+    _octx = [{"date": "2026-10-05", "ticker": "MTDR", "type": "buy", "quantity": 137, "price": 40.5,
+              "amount_gbp": 5597.38, "reference": "R-MTDR"}]
+    _ledL = [{"date": "2026-09-08", "ticker": "NTAP", "type": "buy", "quantity": 37, "price": 137.0,
+              "amount_gbp": 5112.19, "reference": "R-NTAP"},
+             {"date": "2026-08-01", "ticker": "OLDX", "type": "buy", "quantity": 1, "price": 1.0,
+              "amount_gbp": 1.0, "reference": "R-OLDX"},
+             {"date": "2026-09-25", "ticker": None, "type": "buy", "quantity": 9, "price": 1.0,
+              "amount_gbp": 9.0, "reference": "R-UNRES"}] + _octx
+    _rL0 = reconcile_executions_from_transactions(
+        _lpL, _octx, {"MTDR": 137}, date="2026-10-12", persist=False,
+        evidence={"from": "2026-10-01", "through": "2026-10-10"})
+    _eL0 = {e["ticker"]: e for e in load_ledger(_lpL)["entries"]}
+    ck("ISA-0866 rev precondition (the 12-Oct shadow defect): with the October export alone the 06-Sep "
+       "NTAP BUY filled 08-Sep is NOT confirmed",
+       _rL0["counts"]["confirmed_executed"] == 0)
+    _rL = reconcile_executions_from_transactions(
+        _lpL, _octx, {"MTDR": 137}, date="2026-10-12", persist=True,
+        evidence={"from": "2026-10-01", "through": "2026-10-10"}, ledger_trades=_ledL)
+    _eL = {e["ticker"]: e for e in load_ledger(_lpL)["entries"]}
+    ck("⚑ ISA-0866 rev MUST-FIRE: the dealing record's 08-Sep NTAP trade CONFIRMS the 06-Sep BUY and "
+       "the confirmed row names its evidence (transaction_ledger)",
+       _eL["NTAP"]["execution_status"] == "confirmed_executed"
+       and any(c["ticker"] == "NTAP" and c["evidence"] == "transaction_ledger" for c in _rL["confirmed"]))
+    ck("ISA-0866 rev NEGATIVE CONTROL: a ledger trade dated BEFORE the decision does not confirm it, and "
+       "a ledger row with no resolved ticker matches nothing",
+       _eL["OLDX"]["execution_status"] != "confirmed_executed")
+    ck("ISA-0866 rev NEGATIVE CONTROL: old ledger trades are never re-flagged off-framework (only this "
+       "month's export is), and the month-export confirmation path is unchanged",
+       not any(x["ticker"] in ("NTAP", "OLDX", None) for x in _rL["off_framework"])
+       and _rL0["off_framework"] and [x["ticker"] for x in _rL["off_framework"]] == ["MTDR"])
+    _rL2 = reconcile_executions_from_transactions(
+        _lpL, _octx, {"MTDR": 137}, date="2026-10-12", persist=True,
+        evidence={"from": "2026-10-01", "through": "2026-10-10"}, ledger_trades=_ledL)
+    ck("⚑ ISA-0866 rev b MUST-FIRE: a SAME-DATE re-run (the documented pre-run re-run) reproduces the "
+       "confirmation (count + row + evidence) instead of reporting 0",
+       _rL2["counts"]["confirmed_executed"] == _rL["counts"]["confirmed_executed"] == 1
+       and [(c["ticker"], c["evidence"]) for c in _rL2["confirmed"]] == [("NTAP", "transaction_ledger")]
+       and _rL2["confirmed"][0].get("same_date_earlier_pass") is True)
+    ck("ISA-0866 rev b NEGATIVE CONTROL: the re-run neither double-counts nor turns the confirmed trade "
+       "off-framework",
+       [x["ticker"] for x in _rL2["off_framework"]] == ["MTDR"])
+    _rL3 = reconcile_executions_from_transactions(
+        _lpL, _octx, {"MTDR": 137}, date="2026-10-13", persist=False,
+        evidence={"from": "2026-10-01", "through": "2026-10-10"}, ledger_trades=_ledL)
+    _rM = reconcile_executions_from_transactions(
+        _lpL, _octx + [{"date": "2026-10-05", "ticker": "CSH2", "type": "sell", "quantity": 4, "price": 1254.7,
+                        "amount_gbp": 5013.81, "reference": "R-MMF"}], {"MTDR": 137}, date="2026-10-12", persist=False,
+        evidence={"from": "2026-10-01", "through": "2026-10-10"}, ledger_trades=_ledL)
+    ck("ISA-0858 MUST-FIRE: an MMF sell is a cash-equivalent movement, never an OFF_FRAMEWORK trade",
+       [x["ticker"] for x in _rM["cash_equivalent_movements"]] == ["CSH2"]
+       and not any(x["ticker"] == "CSH2" for x in _rM["off_framework"]))
+    ck("ISA-0866 rev b NEGATIVE CONTROL: a LATER run date does not re-report an earlier confirmation",
+       _rL3["counts"]["confirmed_executed"] == 0 and _rL3["confirmed"] == [])
     _lp8 = os.path.join(_tf.mkdtemp(), "l8.json")
     log_decision(_lp8, "DUP", "growth", "buy", date="2026-09-01")
     log_decision(_lp8, "DUP", "vci", "buy", date="2026-09-02")
@@ -1323,5 +1512,5 @@ def _selftest():
            "thesis_contract_id" not in _e2)
     finally:
         _sh.rmtree(_td, ignore_errors=True)
-    print("decision_ledger._selftest: %d assertion(s) passed (ISA-0684 + ISA-0686 + ISA-0717)" % ok[0])
+    print("decision_ledger._selftest: %d assertion(s) passed (ISA-0684 + ISA-0686 + ISA-0717 + ISA-0866 rev)" % ok[0])
     return ok[0]

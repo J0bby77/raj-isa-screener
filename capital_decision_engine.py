@@ -739,6 +739,8 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
             rec["reasons"].append(_reason("population", "NOT_IN_DEPLOYMENT_RANK",
                                           source="step9_pre.deployment_priority_rank",
                                           note="scored but not progressed to the deployment population (tier/viability)"))
+        # ISA-0860: the pre-run's confirm-at-dealing flags (fundable; the receipt pre-authorises fallbacks)
+        rec["dealability_confirm"] = sorted(set((d or {}).get("broker_confirm_required") or []))
         if disp is None and d and d.get("broker_dealability") not in (None, "DEALABLE_ONLINE"):
             disp = "IDENTITY_REFUSED"
             rec["reasons"].append(_reason("identity", "NOT_DEALABLE_ONLINE", d.get("broker_dealability"),
@@ -1037,6 +1039,9 @@ def bruteforce_bundles(names: List[dict], capital: float, min_entry: float) -> s
                 b.append((t, c))
         res.add(tuple(b))
     return res
+
+
+_BUNDLE_RISK_MEMO: Dict[tuple, dict] = {}     # ISA-0858: pure-function memo, keyed on input FILE hashes
 
 
 def bundle_risk(store: dict, portfolio: dict, bundle: Tuple, nav_gbp: float) -> dict:
@@ -1427,11 +1432,26 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     if reserve is None:
         raise EngineRefused("target_weights.stock_sleeve.cash_reserve_gbp not declared (D23) - R4.1")
     reserve = float(reserve)
-    capital = round(deployable - reserve, 2)
+    # ⚑ ISA-0858 (12-Oct-2026, Raj D1/D3/D4/D5/D8 + B1.6b): the capital this decision may use comes from the ONE
+    #   funding waterfall - cash/MMF less the D23 reserve less FIRED drawdown tranches (claimed first), plus fund
+    #   trims only while the post-trade sleeve stays <= 25% and the retention brake has not FIRED, all bounded by
+    #   the 30% hard ceiling measured at decision time incl. pending fills. Never re-derived here (R4.4).
+    import funding_waterfall as _fw
+    try:
+        _wf = _fw.build(portfolio, root=root, tw=tw,
+                        ledger_entries=(inp.get("transaction_ledger") or {}).get("entries") or [])
+    except _fw.WaterfallRefused as _wfe:
+        raise EngineRefused("FUNDING_WATERFALL_REFUSED (ISA-0858): %s" % _wfe)
+    capital = round(float(_wf["stock_capital_gbp"]), 2)
     cash_convention = {"deployable_gbp": deployable, "deployable_basis": s.get("cash_deployable_basis"),
                        "reserve_gbp": reserve, "capital_for_decision_gbp": capital,
-                       "note": ("cash_deployable is GROSS (cash statement closing balance + MMF); the D23 "
-                                "reserve is subtracted ONCE here (T07)")}
+                       "cash_capital_gbp": _wf["cash_capital_gbp"],
+                       "drawdown_reserved_gbp": _wf["drawdown_reserved_gbp"],
+                       "max_fund_funded_gbp": _wf["max_fund_funded_gbp"],
+                       "sleeve_pct_at_decision": _wf["sleeve_pct"], "band": _wf["band"], "binding": _wf["binding"],
+                       "note": ("cash_deployable is GROSS (cash statement closing balance + MMF); the D23 reserve and "
+                                "fired drawdown tranches are subtracted ONCE (T07, B1.6b); fund trims are added only "
+                                "under D4/D5; the 30% hard ceiling bounds the total (funding_waterfall, ISA-0858)")}
     import new_capital_control as _ncc_m
     ncc = _ncc_m.status(root)
     if store is None:
@@ -1538,6 +1558,13 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     if not bundles:
         bundles = [tuple()]
     rows = evaluate_bundles(bundles, scen, costs_by, capital, cash_rate)
+    try:
+        from portfolio_analytics import MIN_ECONOMIC_TRADE as _min_trade      # one home (waiting_room reads it too)
+        _min_trade = float(_min_trade)
+    except Exception as _mte:                                               # noqa: BLE001
+        if float(_wf["max_fund_funded_gbp"]) > 0:
+            raise EngineRefused("MIN_ECONOMIC_TRADE unreadable (%s) - a fund-trim leg cannot be shown economic" % _mte)
+        _min_trade = 0.0
     import sleeve_risk as _sr
     try:
         pre = _sr.risk_shares(store, portfolio)
@@ -1554,10 +1581,22 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
             r["breaches"] = []
             r["feasible"] = pre_risk.get("gbp_vol") is not None
             continue
-        rk = bundle_risk(store, portfolio, r["bundle"], nav)
+        _ih = inp.get("input_hashes") or {}
+        _mk = ((_ih.get("weekly_store") if inp.get("weekly_store") is store else ("id", id(store))),
+               _ih.get("portfolio"), _sha(portfolio.get("stocks")), tuple(r["bundle"]), round(nav, 2))
+        rk = _BUNDLE_RISK_MEMO.get(_mk) if _mk[0] and _mk[1] else None
+        if rk is None:
+            rk = bundle_risk(store, portfolio, r["bundle"], nav)
+            if _mk[0] and _mk[1]:
+                _BUNDLE_RISK_MEMO[_mk] = rk
+        rk = copy.deepcopy(rk)
         r["risk"] = rk
         r["gbp_vol"] = rk.get("gbp_vol")
         r["breaches"] = constraints_for(r["bundle"], rk, pre_shares, ceiling, max_pos)
+        _trim_r = round(max(float(r["stock_gbp"]) - float(_wf["cash_capital_gbp"]), 0.0), 2)
+        if 0.005 < _trim_r < _min_trade - EPS_GBP:
+            r["breaches"].append({"constraint": "ISA-0858 D4 fund-trim leg below MIN_ECONOMIC_TRADE",
+                                  "observed_gbp": _trim_r, "limit_gbp": _min_trade})
         r["feasible"] = not r["breaches"]
     cmp = compare(rows)
     amb = ambition_view(rows, cmp, scen, costs_by) if cmp.get("state") in ("OK", "DECISION_TIE_UNRESOLVED") else None
@@ -1568,7 +1607,10 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                     "cash: stock spend <= deployable - D23 reserve"],
         "reported_not_binding": ["concentration_control sector/theme caps (V2_FLAGS concentration_gate SHADOW)",
                                  "AI-complex factor cap (Checkpoint-D tick 5 consumes it at the review)"],
-        "pre_trade": pre_risk, "pre_trade_risk_shares": {k: _r(v, 5) for k, v in pre_shares.items()}}
+        "pre_trade": pre_risk, "pre_trade_risk_shares": {k: _r(v, 5) for k, v in pre_shares.items()},
+        "sleeve_bands": ("ISA-0858 D1: hard ceiling %.0f%% (room GBP %.2f), priority band %.0f%%; band now %s"
+                         % (_wf["inputs"]["bands"]["hard_ceiling_pct"], _wf["hard_room_gbp"],
+                            _wf["inputs"]["bands"]["priority_ceiling_pct"], _wf["band"]))}
     receipt["frontier"] = {"n_bundles": len(rows), "n_feasible": sum(1 for r in rows if r["feasible"]),
                            "n_undominated": len(cmp.get("undominated") or []),
                            "robustly_superior": [_brief(r) for r in cmp.get("robustly_superior") or []],
@@ -1645,16 +1687,51 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     receipt["census"]["conservation"] = {"universe": census["n_universe"], "dispositioned": sum(_cnt.values()),
                                          "holds": census["n_universe"] == sum(_cnt.values()),
                                          "every_disposition_typed": all(_r0["disposition"] in DISPOSITIONS for _r0 in recs.values())}
-    receipt["selected_actions"] = [{"ticker": t, "action": "START", "gbp": a,
-                                    "post_trade_weight_pct": _r(a / nav * 100, 3),
-                                    "economic_max_price_major": recs[t]["entry"].get("economic_max_price_major"),
-                                    "valuation_reference_price_major": recs[t]["entry"].get("valuation_reference_price_major"),
-                                    "currency": recs[t]["er12"].get("currency"),
-                                    "central_er12_local_pct": _r(recs[t]["er12"]["central_local"] * 100, 2),
-                                    "net_er12_central_pct": _r((net_return(a, scen[t]["CENTRAL"], costs_by[t]) or 0) * 100, 2),
-                                    "bear_gbp_pct": _r((scen[t]["BUSINESS_BEAR"] or 0) * 100, 2),
-                                    "costs": costs_by[t]}
-                                   for t, a in (sel or {}).get("bundle", ())]
+    def _act(t, a):
+        return {"ticker": t, "action": "START", "gbp": a,
+                "post_trade_weight_pct": _r(a / nav * 100, 3),
+                "economic_max_price_major": recs[t]["entry"].get("economic_max_price_major"),
+                "valuation_reference_price_major": recs[t]["entry"].get("valuation_reference_price_major"),
+                "currency": recs[t]["er12"].get("currency"),
+                "central_er12_local_pct": _r(recs[t]["er12"]["central_local"] * 100, 2),
+                "net_er12_central_pct": _r((net_return(a, scen[t]["CENTRAL"], costs_by[t]) or 0) * 100, 2),
+                "bear_gbp_pct": _r((scen[t]["BUSINESS_BEAR"] or 0) * 100, 2),
+                "costs": costs_by[t]}
+
+    def _fund(actions):
+        _sp = _fw.split_funding(round(sum(float(x["gbp"]) for x in actions), 2), _wf)
+        _cl = float(_sp["cash_gbp"])
+        for x in actions:
+            _c = min(float(x["gbp"]), _cl)
+            _cl = round(_cl - _c, 2)
+            x["funding"] = {"cash_gbp": round(_c, 2), "fund_trims_gbp": round(float(x["gbp"]) - _c, 2),
+                            "sequencing": ("AWAIT_FUND_SETTLEMENT (D8)" if float(x["gbp"]) - _c > EPS_GBP else "CASH")}
+        return _sp
+    receipt["selected_actions"] = [_act(t, a) for t, a in (sel or {}).get("bundle", ())]
+    # ── ISA-0858: how the selection is funded (cash first, then fund trims), the donor plan, sequencing ──
+    _split = _fund(receipt["selected_actions"])
+    _plan = None
+    if _split["fund_trims_gbp"] > EPS_GBP:
+        import waiting_room as _wr
+        import capital_destination as _cd_ro
+        _univ = json.load(open(os.path.join(HERE, "fund_universe.json"), encoding="utf-8"))
+        _plan = _wr.recall(_split["fund_trims_gbp"], portfolio=portfolio, policy=tw, brake=_wf["brake"],
+                           universe=_univ, ranking=_cd_ro.rank_inputs_readonly(_univ, root),
+                           incoming=[{"ticker": a["ticker"], "gbp": a["funding"]["fund_trims_gbp"]}
+                                     for a in receipt["selected_actions"] if a["funding"]["fund_trims_gbp"] > EPS_GBP],
+                           stock_is_usd=any(str(a.get("currency") or "").upper() not in ("GBP", "GBX", "")
+                                            for a in receipt["selected_actions"]))
+    receipt["funding"] = {
+        "authority": "funding_waterfall (ISA-0858, Raj D1/D3/D4/D5/D8, B1.6b)",
+        "waterfall": {k: v for k, v in _wf.items() if k != "inputs"},
+        "sleeve_at_decision": _wf["inputs"]["sleeve"], "drawdown": _wf["inputs"]["drawdown"],
+        "donor_headroom_gbp": _wf["inputs"]["donor_headroom_gbp"],
+        "split": _split, "donor_plan": _plan,
+        "park": _fw.park_reason("STOCK_SLEEVE_ENGINE_ALLOCATED"),
+        "residual_destination": ("ECONOMIC residual -> funds via the waiting room (D3); the decided stock spend waits "
+                                 "in the MMF until executed (OPERATIONAL, D3)")}
+    _plan_ok = (_plan is None) or (_plan.get("state") == "RECALL_PLANNED")
+
     # ── state ────────────────────────────────────────────────────────────────────────────────
     if cmp.get("state") != "OK":
         state = cmp.get("state")
@@ -1665,12 +1742,90 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     authority = _authority_flag()
     receipt["state"] = state
     receipt["engine_authority"] = authority
+    # ISA-0849 (11-Oct-2026): positive new risk needs a COMPLETE book. extract_portfolio now names every
+    # holding row it could not classify or value (summary.book_coverage); while any is unresolved the NAV,
+    # the sleeve weights and the risk inputs are not the whole ISA, so capital authority is withheld (held
+    # review, reductions and the decision record are unaffected). A portfolio extracted before ISA-0849
+    # carries no declaration: NOT_DECLARED is recorded, never upgraded to COMPLETE.
+    _bc = portfolio["summary"].get("book_coverage") if isinstance(portfolio.get("summary"), dict) else None
+    _bc_state = (_bc or {}).get("state") if isinstance(_bc, dict) else None
+    receipt["book_coverage"] = ({"state": _bc_state, "why": (_bc or {}).get("why"),
+                                 "n_unclassified": (_bc or {}).get("n_unclassified"),
+                                 "n_unvalued": (_bc or {}).get("n_unvalued"),
+                                 "unclassified_value_gbp": (_bc or {}).get("unclassified_value_gbp")}
+                                if _bc_state else
+                                {"state": "NOT_DECLARED", "why": "portfolio extracted before ISA-0849 (no book_coverage)"})
+    _book_ok = _bc_state in (None, "COMPLETE")
+    # ISA-0852 (B01-R03): bind the receipt to the objective it was formed against (verify_receipt re-checks it)
+    receipt["hurdle_basis"] = hurdle_basis(root)
+    # ISA-0863 (B05-R05): bind the receipt to the capital-path code/config that formed it (verify_receipt re-checks it)
+    _cp = capital_path_identity()
+    receipt["capital_path"] = _cp
+    _path_ok = _cp.get("state") == "BOUND"
     receipt["capital_authorised"] = bool(state == "DECISION_COMPLETE" and authority == "LIVE"
-                                         and not ncc.get("blocks_new_stock_capital"))
+                                         and not ncc.get("blocks_new_stock_capital") and _book_ok and _path_ok
+                                         and _plan_ok)
     receipt["capital_authorised_basis"] = ("authorised only when the decision is COMPLETE (every required case consumed, "
-                                           "no decision-relevant research pending), the engine flag is LIVE and the "
-                                           "canonical new-capital control is OPEN. Approval and execution revalidation "
-                                           "remain separate (s11).")
+                                           "no decision-relevant research pending), the engine flag is LIVE, the "
+                                           "canonical new-capital control is OPEN and the book is COMPLETE (ISA-0849). "
+                                           "Approval and execution revalidation remain separate (s11)."
+                                           + ("" if _book_ok else " WITHHELD: BOOK_INCOMPLETE - %s" % (_bc or {}).get("why"))
+                                           + ("" if _path_ok else " WITHHELD: CAPITAL_PATH_UNBOUND (ISA-0863) - %s" % _cp.get("why"))
+                                           + ("" if _plan_ok else " WITHHELD: FUND_TRIM_PLAN_%s (ISA-0858) - %s"
+                                              % ((_plan or {}).get("state"), (_plan or {}).get("reason"))))
+    # ── ISA-0860 (Raj 12-Oct-2026): CONFIRM AT DEALING + PRE-AUTHORISED FALLBACKS ─────────────────────────────
+    # A selected name whose eligibility/dealability is UNCERTAIN stays fundable; for every non-empty subset S of such
+    # names the receipt publishes the best bundle EXCLUDING S - the SAME comparator over the SAME exhaustively
+    # searched rows (no new search, no re-score). A fallback is authorised only when the primary is, its comparator
+    # state is OK, every name in it has a complete case, and its fund-trim plan (if any) is planned. Raj records the
+    # refusal (--record-dealability); execution_check then permits the matching fallback - no re-run needed.
+    _confn = sorted(t for t in sel_names if recs.get(t, {}).get("dealability_confirm"))
+    _fbs = []
+    if _confn and cmp.get("state") == "OK":
+        from itertools import combinations as _comb
+        for _k in range(1, len(_confn) + 1):
+            for _S in _comb(_confn, _k):
+                _sub = [r for r in rows if not (set(r["tickers"]) & set(_S))]
+                _c2 = compare(_sub)
+                _s2 = _c2.get("selected")
+                _acts = [_act(t, a) for t, a in (_s2 or {}).get("bundle", ())]
+                _sp2 = _fund(_acts) if _acts else _fw.split_funding(0.0, _wf)
+                _pl2 = None
+                if _acts and _sp2["fund_trims_gbp"] > EPS_GBP:
+                    import waiting_room as _wr2
+                    import capital_destination as _cd_ro2
+                    _u2 = json.load(open(os.path.join(HERE, "fund_universe.json"), encoding="utf-8"))
+                    _pl2 = _wr2.recall(_sp2["fund_trims_gbp"], portfolio=portfolio, policy=tw, brake=_wf["brake"],
+                                       universe=_u2, ranking=_cd_ro2.rank_inputs_readonly(_u2, root),
+                                       incoming=[{"ticker": x["ticker"], "gbp": x["funding"]["fund_trims_gbp"]}
+                                                 for x in _acts if x["funding"]["fund_trims_gbp"] > EPS_GBP],
+                                       stock_is_usd=any(str(x.get("currency") or "").upper() not in ("GBP", "GBX", "")
+                                                        for x in _acts))
+                _miss = sorted({x["ticker"] for x in _acts} - complete)
+                _ok2 = (_c2.get("state") == "OK" and not _miss
+                        and (_pl2 is None or _pl2.get("state") == "RECALL_PLANNED"))
+                _fbs.append({"id": "FB-" + "+".join(_S), "if_refused": list(_S), "comparator_state": _c2.get("state"),
+                             "selected": _brief(_s2), "actions": _acts, "split": _sp2, "donor_plan": _pl2,
+                             "cases_outstanding": _miss,
+                             "authorised": bool(receipt["capital_authorised"] and _ok2),
+                             "authorised_basis": ("primary authorised; comparator OK; every case complete; trim plan planned"
+                                                  if receipt["capital_authorised"] and _ok2 else
+                                                  "NOT authorised: %s" % "; ".join(x for x in (
+                                                      "primary not authorised" if not receipt["capital_authorised"] else "",
+                                                      "comparator %s" % _c2.get("state") if _c2.get("state") != "OK" else "",
+                                                      "cases outstanding %s" % _miss if _miss else "",
+                                                      "trim plan %s" % (_pl2 or {}).get("state") if _pl2 and _pl2.get("state") != "RECALL_PLANNED" else "")
+                                                      if x))})
+    receipt["dealability_confirmation"] = {
+        "authority": "ISA-0860 (Raj 12-Oct-2026: refuse only ESTABLISHED ineligibility; confirm the uncertain at dealing)",
+        "required": [{"ticker": t, "flags": recs[t]["dealability_confirm"]} for t in _confn],
+        "required_tickers": _confn, "fallbacks": _fbs,
+        "sequencing": ("Check the flagged name(s) at the broker FIRST (ISA wrapper). If one is refused, record it "
+                       "(capital_decision_engine --month M --record-dealability TICKER --outcome REFUSED --wrapper ISA|ALL "
+                       "--reason-code CODE --recorded-by Raj) and deal the matching pre-authorised fallback; if it deals, "
+                       "record --outcome DEALT so the flag is never raised again." if _confn else
+                       "no selected name needs a dealing confirmation"),
+        "learning": "every recorded outcome is linked to the flags it answered (broker_dealability.flag_precision)"}
     if sel and sel.get("ambition_band") == "BELOW_20" and amb and amb.get("best_ambition_bundle"):
         receipt["below_20_disclosure"] = amb.get("below_20_selection_reason")
     if sel and sel["bundle"]:
@@ -1725,6 +1880,70 @@ def _authority_flag() -> str:
         return "SHADOW"
 
 
+CAPITAL_PATH_ID = "monthly_capital"
+_CAPITAL_PATH_MEMO: dict = {}
+
+
+def capital_path_identity(refresh: bool = False) -> dict:
+    """ISA-0863 (11-Oct-2026, B05-R05): the identity of the CODE + CONFIG + run surfaces that form and consume a
+    receipt - the same `monthly_capital` path fingerprint R18.6 acceptance binds (system_acceptance.path_fingerprint),
+    computed on the ENGINE'S OWN installation (HERE), never on a data root. Memoised per process (code does not
+    change under a running process; ~1.6 s uncached). Failure is typed UNAVAILABLE, never a silent pass."""
+    if not refresh and "v" in _CAPITAL_PATH_MEMO:
+        return _CAPITAL_PATH_MEMO["v"]
+    try:
+        sys.path.insert(0, HERE)
+        import system_acceptance as _sa
+        fp = _sa.path_fingerprint(HERE, CAPITAL_PATH_ID)
+        try:
+            import release_gate as _rg
+            _bid = (_rg.load_receipt(HERE) or {}).get("build_id")
+        except Exception:                                           # noqa: BLE001
+            _bid = None
+        v = {"state": "BOUND", "path_id": CAPITAL_PATH_ID, "fingerprint": fp["fingerprint"], "build_id": _bid,
+             "n": fp.get("n"), "members": fp.get("members")}
+    except Exception as exc:                                        # noqa: BLE001
+        v = {"state": "UNAVAILABLE", "path_id": CAPITAL_PATH_ID, "why": "%s: %s" % (type(exc).__name__, exc)}
+    _CAPITAL_PATH_MEMO["v"] = v
+    return v
+
+
+def execution_authority(root: str = HERE) -> dict:
+    """ISA-0862 (11-Oct-2026, B05-R07): may an order be placed NOW? Read at the execution boundary, not inherited from
+    the receipt's formation-time capital_authorised. LIVE must verify TRUSTED (R18.5), the engine flag must be LIVE and
+    the canonical new-capital control must not block new stock capital (incl. ACCEPTANCE_NOT_CURRENT, R18.6).
+    Every read failure refuses - UNKNOWN never passes (R4.1)."""
+    out = {"checked": ["release_gate.verify_live", "isa_policy.V2_FLAGS.capital_engine_authority",
+                       "new_capital_control.status"]}
+    try:
+        sys.path.insert(0, HERE)
+        import release_gate as _rg
+        v = _rg.verify_live(root)
+    except Exception as exc:                                        # noqa: BLE001
+        return dict(out, state="REFUSED_AUTHORITY_UNKNOWN", why="LIVE trust could not be read (%s: %s)" % (type(exc).__name__, exc))
+    out["live"] = {"state": v.get("state"), "build_id": v.get("build_id")}
+    if v.get("state") != "TRUSTED":
+        return dict(out, state="REFUSED_LIVE_UNTRUSTED", why="LIVE is %s against %s - no order on an untrusted build (R18.5)"
+                    % (v.get("state"), v.get("build_id")))
+    flag = _authority_flag()
+    out["engine_flag"] = flag
+    if flag != "LIVE":
+        return dict(out, state="REFUSED_ENGINE_NOT_LIVE", why="capital_engine_authority is %s - the engine's receipts are not capital authority" % flag)
+    try:
+        import new_capital_control as _ncc
+        st = _ncc.status(root)
+    except Exception as exc:                                        # noqa: BLE001
+        return dict(out, state="REFUSED_AUTHORITY_UNKNOWN", why="new-capital control unreadable (%s: %s)" % (type(exc).__name__, exc))
+    out["new_capital_control"] = {"state": st.get("state"), "record_id": st.get("record_id"),
+                                  "blocks_new_stock_capital": st.get("blocks_new_stock_capital"),
+                                  "reasons": (st.get("reasons") or [])[:4]}
+    if st.get("blocks_new_stock_capital") is not False:
+        return dict(out, state="REFUSED_NEW_CAPITAL_BLOCKED",
+                    why="the canonical new-capital control blocks new stock capital NOW (%s): %s"
+                        % (st.get("state"), "; ".join(str(x)[:160] for x in (st.get("reasons") or [])[:2]) or "no reason given"))
+    return dict(out, state="CURRENT", why="LIVE TRUSTED %s; engine LIVE; control %s" % (v.get("build_id"), st.get("state")))
+
+
 def old_v_new(path: str, rows, recs, scen, costs_by, capital, cash_rate, sel) -> dict:
     """Same-input comparison with the old greedy plan, split DATA / METHOD / POLICY (s10)."""
     try:
@@ -1757,6 +1976,36 @@ def old_v_new(path: str, rows, recs, scen, costs_by, capital, cash_rate, sel) ->
 # Run-instance metadata that does not change the DECISION: excluded from the decision hash so identical
 # inputs + method -> identical receipt_id (deterministic identity; the ledger is idempotent on it).
 _VOLATILE = ("receipt_id", "content_sha256", "produced_at", "runtime_s", "input_freshness", "_written_to", "_ledger")
+
+
+def hurdle_basis(root: str = HERE) -> dict:
+    """ISA-0852 (B01-R03): the economic objective a receipt is formed against, as a comparable identity.
+    The hurdle is operative required return (target_state, A19) + ER_FRICTION_BUFFER; the goal, schedule and
+    one-offs live in target_state's DECLARED projection (release_gate CONFIG_RUNTIME_KEYS split, ISA-0775), so
+    a reported-only re-derivation or a renderer timestamp does not move this identity, while a changed goal,
+    contribution schedule, one-off, operative window or friction buffer does."""
+    p = os.path.join(root, "target_state.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            ts = json.load(fh)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "UNREADABLE", "why": "%s: %s" % (type(exc).__name__, exc)}
+    try:
+        import scoring_config as _sc852
+        buf = float(_sc852.ER_FRICTION_BUFFER)
+    except Exception:                                                   # noqa: BLE001
+        buf = None
+    op = ts.get("required_return_operative_pct")
+    try:
+        import release_gate as _rg852
+        proj = _rg852._config_file_digest(p, "target_state.json")
+    except Exception as exc:                                            # noqa: BLE001
+        proj = "UNAVAILABLE:%s" % type(exc).__name__
+    return {"state": "DECLARED", "required_return_operative_pct": op,
+            "operative_effective_from": ts.get("operative_effective_from"), "er_friction_buffer_pp": buf,
+            "hurdle_pct": (round(float(op) + buf, 6) if (op is not None and buf is not None) else None),
+            "declared_projection_sha": (proj or "")[:16],
+            "source": "target_state.json (operative anchor + declared goals/schedule/one-offs) + scoring_config.ER_FRICTION_BUFFER"}
 
 
 def _decision_body(receipt: dict) -> dict:
@@ -1815,17 +2064,151 @@ def _ledger_append(receipt: dict, month: str, root: str) -> dict:
 EXECUTION_LEDGER = "capital_execution_ledger.jsonl"
 
 
+GBP_QUOTE_CURRENCIES = ("GBP",)          # MAJOR units only; a pence quote must be converted by the caller (MAJOR units required)
+
+
+def order_pricing(act: dict, ticker: str, price_major: float, quote_currency: str, fx_quote_per_gbp, costs: dict) -> dict:
+    """ISA-0856: whole units and all-in GBP of the order an executable quote implies (costs charged once)."""
+    ccy = str(quote_currency or "").strip().upper()
+    out = {"state": "OK", "quote_currency": ccy}
+    if ccy in GBP_QUOTE_CURRENCIES:
+        fx = 1.0
+    else:
+        try:
+            fx = float(fx_quote_per_gbp)
+        except (TypeError, ValueError):
+            fx = float("nan")
+        if not math.isfinite(fx) or fx <= 0:
+            out.update(state="REFUSED_FX_UNKNOWN", why="a %s quote needs a positive finite fx_quote_per_gbp (%s per GBP) to price the "
+                       "order in GBP - pass --fx (B02-R08)" % (ccy, ccy))
+            return out
+    try:
+        comm = float(costs["commission_gbp"])
+    except (KeyError, TypeError, ValueError):
+        out.update(state="REFUSED_COST_UNKNOWN", why="the receipt carries no commission_gbp - the order cannot be priced")
+        return out
+    fx_frac = 0.0 if ccy in GBP_QUOTE_CURRENCIES else costs.get("fx_dealing_fraction")
+    if fx_frac is None:
+        out.update(state="REFUSED_COST_UNKNOWN", why="the receipt carries no fx_dealing_fraction for a non-GBP order")
+        return out
+    table = costs.get("levy_table") or {}
+    suffix = ("." + ticker.rsplit(".", 1)[1]) if "." in ticker else ""
+    if suffix in table:
+        levy, levy_basis = float(table[suffix]["fraction"]), suffix
+    elif ccy == "USD" and "" in table:
+        levy, levy_basis = float(table[""]["fraction"]), "US listing (no purchase tax)"
+    else:
+        out.update(state="REFUSED_COST_UNKNOWN", why="no purchase-levy entry for %s (suffix %r, currency %s)" % (ticker, suffix, ccy))
+        return out
+    px_gbp = float(price_major) / fx
+    unit_all_in = px_gbp * (1.0 + float(fx_frac) + levy)
+    budget = float(act.get("gbp") or 0) - comm
+    units = int(math.floor(budget / unit_all_in + 1e-9)) if unit_all_in > 0 else 0
+    out.update(fx_quote_per_gbp=fx, price_gbp=round(px_gbp, 6), commission_gbp=comm, fx_dealing_fraction=float(fx_frac),
+               levy_fraction=levy, levy_basis=levy_basis, units=units, approved_gbp=float(act.get("gbp") or 0))
+    if units < 1:
+        out.update(state="REFUSED_UNIT_UNAFFORDABLE", why="one whole unit costs GBP %.2f all-in, above the approved GBP %.2f less "
+                   "commission" % (unit_all_in + comm, float(act.get("gbp") or 0)))
+        return out
+    consid = units * px_gbp
+    out.update(consideration_gbp=round(consid, 2), fx_cost_gbp=round(consid * float(fx_frac), 2),
+               levy_gbp=round(consid * levy, 2), est_total_gbp=round(consid * (1.0 + float(fx_frac) + levy) + comm, 2),
+               why="%d whole units at GBP %.4f + dealing FX %.2f%% + levy %.2f%% + GBP %.2f commission, each charged once"
+                   % (units, px_gbp, 100 * float(fx_frac), 100 * levy, comm))
+    return out
+
+
+def fills_for(receipt_id: str, root: str = HERE) -> dict:
+    """ISA-0855: cumulative recorded fills per ticker for one receipt (execution identities, partials retained)."""
+    p = os.path.join(root, EXECUTION_LEDGER)
+    out = {}
+    if not receipt_id or not os.path.exists(p):
+        return out
+    with open(p, encoding="utf-8") as fh:
+        for ln in fh:
+            if not ln.strip():
+                continue
+            r = json.loads(ln)
+            if r.get("receipt_id") != receipt_id:
+                continue
+            t = out.setdefault(r.get("ticker"), {"n_fills": 0, "quantity": 0.0, "gbp_cost": 0.0, "orders": []})
+            t["n_fills"] += 1
+            t["quantity"] = round(t["quantity"] + float(r.get("quantity") or 0), 6)
+            t["gbp_cost"] = round(t["gbp_cost"] + float(r.get("gbp_cost") or 0), 2)
+            if r.get("order_id") not in t["orders"]:
+                t["orders"].append(r.get("order_id"))
+    return out
+
+
+def active_plan(rc: dict, root: str = HERE, outcomes: Optional[dict] = None) -> dict:
+    """ISA-0860 - which action set of a receipt is LIVE: the primary, or - when Raj has recorded a broker REFUSAL for
+    confirm-required selected name(s) - the pre-authorised fallback for exactly that set. No matching authorised
+    fallback -> NO_AUTHORISED_FALLBACK (re-run the engine; nothing is improvised)."""
+    dc = (rc or {}).get("dealability_confirmation") or {}
+    req = list(dc.get("required_tickers") or [])
+    if outcomes is None:
+        try:
+            import broker_dealability as _bdo
+            outcomes = _bdo.load_outcomes(root)
+        except Exception:                                               # noqa: BLE001
+            outcomes = {}
+    refused = sorted(t for t in req if ((outcomes or {}).get(t) or {}).get("outcome") == "REFUSED")
+    if not refused:
+        return {"plan_id": "PRIMARY", "refused": [], "actions": list((rc or {}).get("selected_actions") or []),
+                "authorised": bool((rc or {}).get("capital_authorised"))}
+    fb = next((f for f in dc.get("fallbacks") or [] if sorted(f.get("if_refused") or []) == refused), None)
+    if fb is None or not fb.get("authorised"):
+        return {"plan_id": None, "refused": refused, "actions": [], "authorised": False,
+                "state": "NO_AUTHORISED_FALLBACK",
+                "why": ("Raj recorded a refusal of %s but the receipt carries %s - re-run the engine"
+                        % (refused, "no fallback for that set" if fb is None else "fallback %s NOT authorised (%s)"
+                           % (fb.get("id"), fb.get("authorised_basis"))))}
+    return {"plan_id": fb["id"], "refused": refused, "actions": list(fb.get("actions") or []), "authorised": True}
+
+
+def record_dealability(month: str, ticker: str, outcome: str, recorded_by: str, root: str = HERE, *,
+                       wrapper: str = "ISA", reason_code: Optional[str] = None, evidence: Optional[str] = None) -> dict:
+    """ISA-0860 - Raj's dealing outcome for a confirm-required name of THIS month's receipt: written ONCE through
+    broker_dealability.record_outcome (the declaration of record + the learning row with the flags it answered);
+    returns the plan that is now active. Refused for a name the receipt did not flag (no silent declarations)."""
+    v = verify_receipt(month, root)
+    rc = v.get("receipt") or {}
+    if v.get("state") != "VALID":
+        raise EngineRefused("record_dealability: receipt is %s - record against a VALID receipt" % v.get("state"))
+    dc = rc.get("dealability_confirmation") or {}
+    flags = {x["ticker"]: x.get("flags") for x in dc.get("required") or []}
+    if ticker not in flags:
+        raise EngineRefused("record_dealability: %s is not a confirm-required name of %s (required %s)"
+                            % (ticker, rc.get("receipt_id"), sorted(flags)))
+    import broker_dealability as _bdr
+    try:
+        w = _bdr.record_outcome(ticker, outcome, recorded_by, root, wrapper=wrapper, reason_code=reason_code,
+                                evidence=evidence, receipt_id=rc.get("receipt_id"), month=month,
+                                flags_at_decision=flags.get(ticker))
+    except _bdr.DealabilityRefused as exc:
+        raise EngineRefused("record_dealability: %s" % exc)
+    return {"state": "RECORDED", "row": w["row"], "active_plan": active_plan(rc, root)}
+
+
 def execution_check(month: str, ticker: str, price_major: float, quote_currency: str, quote_ts: str,
                     cash_available_gbp: Optional[float] = None, root: str = HERE,
-                    now: Optional[datetime.datetime] = None) -> dict:
+                    now: Optional[datetime.datetime] = None, fx_quote_per_gbp: Optional[float] = None,
+                    authority: Optional[dict] = None) -> dict:
     """s11 - validity of ONE selected action at an EXECUTABLE quote, re-checked before every order or
     partial fill. Never places an order. States: EXECUTABLE | REFUSED_* | REPRICE_REQUIRED.
     (a) the receipt verifies against the CURRENT inputs and is DECISION_COMPLETE + capital_authorised;
-    (b) the ticker is a selected action; (c) the quote is a session quote (not a weekend/Sunday analysis
-    close, T57), in the dossier currency, and not older than one day; (d) ER12 recomputed at the
+    (b) the ticker is a selected action; (c) the quote is a positive finite MAJOR-unit price with a
+    timezone-aware time, a session quote (not a weekend/Sunday analysis close, T57), not in the future,
+    in the (non-empty) dossier currency, and not older than one day; (d) ER12 recomputed at the
     executable price still clears the hurdle (economic max, T52); (e) the WHOLE construction is rerun
     with the executable price and must select the same action (an approval cannot silently expand to
-    a different portfolio, T56); (f) cash covers the action."""
+    a different portfolio, T56); (f) current cash is PRESENT, finite, >= 0 and covers the action
+    (ISA-0850: missing cash is REFUSED_CASH_UNKNOWN, never assumed sufficient). Passing is necessary
+    permission to place the order, not an instruction to buy.
+    ISA-0862 (B05-R07): CURRENT executable authority is re-read here (LIVE TRUSTED, engine LIVE, control not
+    blocking) - a receipt's formation-time capital_authorised is not enough. `authority` is a test injection only.
+    ISA-0864 (B05-R08): the APPROVAL axis (Raj's recorded decision on this exact action) is reported beside the
+    state; EXECUTABLE without APPROVED is permission without a decision."""
     now = now or _now()
     out = {"ticker": ticker, "price_major": price_major, "quote_currency": quote_currency, "quote_ts": quote_ts,
            "checked_at": now.isoformat(timespec="seconds"), "checks": []}
@@ -1841,56 +2224,298 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
     out["receipt_id"] = rc.get("receipt_id")
     if rc.get("state") != "DECISION_COMPLETE" or not rc.get("capital_authorised"):
         return done("REFUSED_NOT_AUTHORISED", "receipt state %s, capital_authorised %s" % (rc.get("state"), rc.get("capital_authorised")))
-    sel = {a["ticker"]: a for a in rc.get("selected_actions") or []}
+    # ISA-0860: the ACTIVE plan - primary, or the pre-authorised fallback for Raj's recorded refusal(s)
+    _ap0 = active_plan(rc, root)
+    out["active_plan"] = {k: _ap0.get(k) for k in ("plan_id", "refused", "state", "why")}
+    if not _ap0.get("authorised"):
+        return done("REFUSED_" + (_ap0.get("state") or "NOT_AUTHORISED"), _ap0.get("why") or "no authorised plan")
+    sel = {a["ticker"]: a for a in _ap0["actions"]}
     if ticker not in sel:
-        return done("REFUSED_NOT_SELECTED", "%s is not an action of receipt %s (selected: %s)" % (ticker, rc.get("receipt_id"), sorted(sel)))
+        return done("REFUSED_NOT_SELECTED", "%s is not an action of receipt %s plan %s (actions: %s)"
+                    % (ticker, rc.get("receipt_id"), _ap0["plan_id"], sorted(sel)))
     act = sel[ticker]
+    _dcf = {x["ticker"]: x.get("flags") for x in ((rc.get("dealability_confirmation") or {}).get("required") or [])}
+    if _dcf.get(ticker):
+        out["confirm_at_dealing"] = {"flags": _dcf[ticker],
+                                     "rule": "if the broker refuses it in the ISA, record --record-dealability (REFUSED) and use the fallback"}
+    # ⚑ ISA-0855 (11-Oct-2026, B02-R07/B05-R07): a recorded fill changes the book the receipt was formed on.
+    #   Every action of that receipt - including the filled one - needs a SUCCESSOR receipt formed on the
+    #   post-fill book; record_fill never authorises anything (historic receipts are preserved untouched).
+    _fl = fills_for(rc.get("receipt_id"), root)
+    out["fills_on_receipt"] = {t: {"quantity": v["quantity"], "gbp_cost": v["gbp_cost"], "n_fills": v["n_fills"]}
+                               for t, v in _fl.items()}
+    # ISA-0864: the approval axis is reported on every outcome from here on (distinct from the execution state)
+    out["approval"] = approval_state(month, ticker, rc, root)
+    if ticker in _fl:
+        return done("REFUSED_ALREADY_FILLED", "receipt %s already has %d fill(s) for %s (qty %s, GBP %.2f of GBP %.2f): any further "
+                    "order is a new decision on the post-fill book - re-run the engine" % (rc.get("receipt_id"), _fl[ticker]["n_fills"],
+                    ticker, _fl[ticker]["quantity"], _fl[ticker]["gbp_cost"], float(act.get("gbp") or 0)))
+    if _fl:
+        return done("REFUSED_RERUN_REQUIRED_AFTER_FILL", "receipt %s has recorded fill(s) for %s: the book, cash and risk it was "
+                    "formed on have changed - re-run the engine on the post-fill book (successor receipt) before any further "
+                    "order (B02-R07)" % (rc.get("receipt_id"), sorted(_fl)))
+    # ISA-0862 (B05-R07): current executable authority - read NOW, every failure refuses
+    _auth = authority if authority is not None else execution_authority(root)
+    out["authority"] = _auth
+    if _auth.get("state") != "CURRENT":
+        return done(_auth.get("state") or "REFUSED_AUTHORITY_UNKNOWN", _auth.get("why") or "authority not established")
+    # ISA-0850 (11-Oct-2026, B02-R04/B05-R06): every input the verdict rests on must be PRESENT, FINITE and IN
+    # DOMAIN before EXECUTABLE is reachable - the old checks refused known-bad cases and let unknowns through
+    # (cash None/NaN skipped affordability; a future quote was 'fresh'; an empty currency skipped the check).
     try:
-        qt = datetime.datetime.fromisoformat(str(quote_ts).replace("Z", "+00:00")).replace(tzinfo=None)
+        _px = float(price_major)
+    except (TypeError, ValueError):
+        _px = float("nan")
+    if not math.isfinite(_px) or _px <= 0:
+        return done("REFUSED_QUOTE_INVALID", "price %r is not a positive finite MAJOR-unit quote" % (price_major,))
+    try:
+        qt_raw = datetime.datetime.fromisoformat(str(quote_ts).replace("Z", "+00:00"))
     except ValueError:
         return done("REFUSED_QUOTE_TIME", "quote timestamp %r unparseable" % (quote_ts,))
+    if qt_raw.tzinfo is None:
+        return done("REFUSED_QUOTE_TIME_NAIVE", "quote timestamp %r has no UTC offset - an instant needs one "
+                    "(e.g. 2026-11-02T14:30:00+00:00); a naive time cannot be placed against the session" % (quote_ts,))
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        qt = qt_raw.astimezone(_ZI("Europe/London")).replace(tzinfo=None)
+    except Exception as _tzx:                                           # noqa: BLE001
+        return done("REFUSED_QUOTE_TIME", "quote timezone could not be resolved to Europe/London (%s)" % _tzx)
+    out["quote_ts_london"] = qt.isoformat(timespec="seconds")
+    # ages are measured between INSTANTS (a naive `now` is the host's local time - datetime.astimezone()),
+    # never between two naive clocks that may sit in different zones (the VM runs UTC, the session London)
+    _now_i = now if now.tzinfo is not None else now.astimezone()
+    _age_s = (_now_i - qt_raw).total_seconds()
+    if _age_s < -300:
+        return done("REFUSED_FUTURE_QUOTE", "quote %s is later than the check time %s - a future quote is not evidence"
+                    % (qt_raw.isoformat(), _now_i.isoformat(timespec="seconds")))
     if qt.weekday() >= 5:
         return done("REFUSED_NON_SESSION_QUOTE", "a %s quote is an analysis close, not an executable quote (T57)" % qt.strftime("%A"))
-    if (now - qt).total_seconds() > 86400:
+    if _age_s > 86400:
         return done("REPRICE_REQUIRED", "quote older than one day - fetch a current session quote")
-    if act.get("currency") and quote_currency and str(quote_currency).upper() != str(act["currency"]).upper():
+    if not str(quote_currency or "").strip():
+        return done("REFUSED_CURRENCY", "quote currency is EMPTY - the unit of the price is unknown (MAJOR units required)")
+    if act.get("currency") and str(quote_currency).upper() != str(act["currency"]).upper():
         return done("REFUSED_CURRENCY", "quote currency %s != dossier currency %s (quote in MAJOR units)" % (quote_currency, act["currency"]))
+    try:
+        _cash = float(cash_available_gbp) if cash_available_gbp is not None else float("nan")
+    except (TypeError, ValueError):
+        _cash = float("nan")
+    if not math.isfinite(_cash) or _cash < 0:
+        return done("REFUSED_CASH_UNKNOWN", "current available cash %r is missing, non-finite or negative - "
+                    "affordability cannot be shown, so the order cannot be EXECUTABLE (pass --cash with the "
+                    "broker's current settled cash net of open orders)" % (cash_available_gbp,))
     emax = act.get("economic_max_price_major")
     out["economic_max_price_major"] = emax
     if emax is not None and float(price_major) > float(emax) + 1e-9:
         return done("REFUSED_ABOVE_ECONOMIC_MAX", "price %.4f > economic max %.4f: ER12 at this price is below the hurdle (T52)" % (price_major, emax))
-    if cash_available_gbp is not None and float(cash_available_gbp) + EPS_GBP < float(act.get("gbp") or 0):
-        return done("REPRICE_REQUIRED", "cash GBP %.2f < action GBP %.2f - rerun construction on the actual cash" % (cash_available_gbp, act.get("gbp")))
+    # ⚑ ISA-0858 B1.6b at execution: a drawdown tranche that FIRED since the receipt takes its pounds first, and
+    #   the D23 reserve is never spent - the cash this order may use is current cash less both.
+    try:
+        import funding_waterfall as _fw_x
+        _dds = _fw_x.drawdown_reservation(_fw_x._json(os.path.join(root, "drawdown_state.json"), {}),
+                                          (_fw_x._json(os.path.join(root, "transaction_ledger.json"), {}) or {}).get("entries") or [])
+    except Exception as _ddx:                                           # noqa: BLE001
+        _dds = {"reserved_gbp": None, "why": "%s: %s" % (type(_ddx).__name__, _ddx)}
+    out["drawdown_reservation"] = _dds
+    if _dds.get("reserved_gbp") is None:
+        return done("REFUSED_DRAWDOWN_RESERVATION_UNKNOWN", "the B1.6b drawdown reservation cannot be measured (%s) - "
+                    "cash a fired tranche may own is not spent on a stock (ISA-0858)" % _dds.get("why"))
+    _res_now = float(((rc.get("book") or {}).get("reserve_gbp")) or 0.0)
+    _cash_net = _cash - _res_now - float(_dds["reserved_gbp"])
+    out["cash_for_this_order_gbp"] = round(_cash_net, 2)
+    _trims = float(((act.get("funding") or {}).get("fund_trims_gbp")) or 0.0)
+    if _cash_net + EPS_GBP < float(act.get("gbp") or 0):
+        if _trims > EPS_GBP:
+            return done("AWAITING_FUND_SETTLEMENT", "this action is fund-funded (GBP %.2f of fund trims, ISA-0858 D8): place the "
+                        "fund sells and re-check once the proceeds have SETTLED - cash for this order GBP %.2f < action GBP %.2f"
+                        % (_trims, _cash_net, float(act.get("gbp") or 0)))
+        return done("REPRICE_REQUIRED", "cash GBP %.2f (after the D23 reserve and GBP %.2f of fired drawdown tranches) < action "
+                    "GBP %.2f - rerun construction on the actual cash" % (_cash_net, float(_dds["reserved_gbp"]), act.get("gbp")))
+    # ⚑ ISA-0856 (11-Oct-2026, B02-R08): price the ORDER the quote implies - whole units, quote converted to GBP,
+    #   commission, dealing FX and purchase levy each charged ONCE (the receipt's own MEASURED costs block).
+    _o = order_pricing(act, ticker, float(price_major), quote_currency, fx_quote_per_gbp, rc.get("costs") or {})
+    out["order"] = _o
+    if _o["state"] != "OK":
+        return done(_o["state"], _o["why"])
+    if _o["est_total_gbp"] > _cash_net + EPS_GBP:
+        return done("REPRICE_REQUIRED", "the %d whole units cost GBP %.2f all-in > cash for this order GBP %.2f (current cash "
+                    "less D23 reserve and fired drawdown tranches, ISA-0858)" % (_o["units"], _o["est_total_gbp"], _cash_net))
     rr = build(month, root=root, write=False, price_overrides={ticker: float(price_major)})
-    new_sel = [(a["ticker"], a["gbp"]) for a in rr.get("selected_actions") or []]
-    old_sel = [(a["ticker"], a["gbp"]) for a in rc.get("selected_actions") or []]
+    # ISA-0860: the re-run must select the SAME active plan (primary, or the same fallback for the same refusals)
+    new_sel = [(a["ticker"], a["gbp"]) for a in active_plan(rr, root).get("actions") or []]
+    old_sel = [(a["ticker"], a["gbp"]) for a in _ap0["actions"]]
     out["rerun_selection"] = new_sel
     out["rerun_er12_central_pct"] = next((a.get("central_er12_local_pct") for a in rr.get("selected_actions") or [] if a["ticker"] == ticker), None)
     if new_sel != old_sel:
         return done("REPRICE_REQUIRED", "at the executable price the construction selects %s instead of %s - re-run the decision (T56)" % (new_sel, old_sel))
-    return done("EXECUTABLE", "receipt VALID/COMPLETE/authorised; session quote; below economic max; construction unchanged at the executable price")
+    _ap = (out.get("approval") or {}).get("state")
+    if _ap == "APPROVED":
+        _lim = (out["approval"].get("limit_price_major"))
+        if _lim is not None and float(price_major) > float(_lim) + 1e-9:
+            return done("REFUSED_ABOVE_APPROVED_LIMIT", "price %.4f > the approved limit %.4f (ISA-0864)" % (float(price_major), float(_lim)))
+        if _o.get("est_total_gbp") is not None and out["approval"].get("max_gbp") is not None \
+                and float(_o["est_total_gbp"]) > float(out["approval"]["max_gbp"]) + EPS_GBP:
+            return done("REPRICE_REQUIRED", "the order costs GBP %.2f all-in > the approved maximum GBP %.2f (ISA-0864)"
+                        % (float(_o["est_total_gbp"]), float(out["approval"]["max_gbp"])))
+    return done("EXECUTABLE", "receipt VALID/COMPLETE/authorised; authority CURRENT; session quote; below economic max; "
+                "construction unchanged at the executable price. PERMISSION, NOT AN INSTRUCTION - approval: %s" % (_ap or "UNKNOWN"))
 
 
-def record_fill(month: str, receipt_id: str, ticker: str, order_id: str, quantity: float, price_major: float,
-                gbp_cost: float, root: str = HERE) -> dict:
-    """Append-only, idempotent on (receipt_id, ticker, order_id): a retried capture never duplicates a fill.
-    After a fill the remaining portfolio must be revalidated (state REMAINING_RERUN_REQUIRED)."""
+def record_fill(month: str, receipt_id: str, ticker: str, order_id: str, quantity: float, price_major,
+                gbp_cost: float, root: str = HERE, *, execution_id: Optional[str] = None,
+                quote_currency: Optional[str] = None, fx_quote_per_gbp=None, price_gbp=None,
+                commission_gbp=None, fx_cost_gbp=None, levy_gbp=None, fill_ts: Optional[str] = None,
+                source: Optional[str] = None) -> dict:
+    """Append-only capture of ONE execution (ISA-0855, B02-R06). Order identity and execution identity are
+    separate: idempotent on (receipt, ticker, order_id, execution_id), so distinct partial fills of one order are
+    all retained and an identical replay is not; a row without execution_id is order-level (legacy rows read
+    that way). Prices are typed: price_major is in quote_currency (MAJOR units), price_gbp is the broker's GBP
+    conversion when that is all the broker reports. A fill authorises nothing: every remaining action of the
+    receipt is refused at execution_check until a successor receipt is formed on the post-fill book (B02-R07)."""
+    try:
+        q, g = float(quantity), float(gbp_cost)
+    except (TypeError, ValueError):
+        raise EngineRefused("record_fill: quantity %r / gbp_cost %r are not numbers" % (quantity, gbp_cost))
+    if not (math.isfinite(q) and q > 0 and math.isfinite(g) and g > 0):
+        raise EngineRefused("record_fill: quantity and gbp_cost must be positive finite (got %r, %r)" % (quantity, gbp_cost))
+    if price_major is not None and not quote_currency:
+        raise EngineRefused("record_fill: price_major needs its quote_currency (MAJOR units) - pass price_gbp for a GBP-converted price")
     p = os.path.join(root, EXECUTION_LEDGER)
-    key = "%s|%s|%s" % (receipt_id, ticker, order_id)
+    key = "%s|%s|%s" % (receipt_id, ticker, order_id) + ("|%s" % execution_id if execution_id else "")
     if os.path.exists(p):
         with open(p, encoding="utf-8") as fh:
             for ln in fh:
                 if ln.strip() and json.loads(ln).get("idempotency_key") == key:
                     return {"state": "ALREADY_RECORDED", "idempotency_key": key}
-    row = {"idempotency_key": key, "receipt_id": receipt_id, "month": month, "ticker": ticker, "order_id": order_id,
-           "quantity": quantity, "price_major": price_major, "gbp_cost": gbp_cost, "recorded_at": _now().isoformat()}
+    row = {"idempotency_key": key, "schema": "fill_v2", "receipt_id": receipt_id, "month": month, "ticker": ticker,
+           "order_id": order_id, "execution_id": execution_id, "identity_level": ("EXECUTION" if execution_id else "ORDER"),
+           "quantity": q, "price_major": price_major, "quote_currency": quote_currency, "fx_quote_per_gbp": fx_quote_per_gbp,
+           "price_gbp": price_gbp, "commission_gbp": commission_gbp, "fx_cost_gbp": fx_cost_gbp, "levy_gbp": levy_gbp,
+           "gbp_cost": g, "fill_ts": fill_ts, "source": source, "recorded_at": _now().isoformat()}
+    # ISA-0864 (B05-R08): link the fill to Raj's recorded approval (or record that there was none) - a fact, never a gate
+    try:
+        _vr = verify_receipt(month, root)
+        _rcv = _vr.get("receipt") if _vr.get("receipt_id") == receipt_id else None
+        row["approval_state"] = approval_state(month, ticker, _rcv, root, receipt_id=receipt_id).get("state")
+    except Exception as exc:                                        # noqa: BLE001
+        row["approval_state"] = "UNKNOWN: %s" % exc
     with open(p, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
     return {"state": "RECORDED", "idempotency_key": key,
-            "next": "REMAINING_RERUN_REQUIRED: re-run the engine on the post-fill book before any further order (s11)"}
+            "next": "REMAINING_RERUN_REQUIRED: every remaining action of %s is refused at execution_check until the engine "
+                    "re-runs on the post-fill book (successor receipt)" % receipt_id}
 
 
-def verify_receipt(month: str, root: str = HERE, receipt: Optional[dict] = None) -> dict:
+APPROVAL_LEDGER = "capital_approval_ledger.jsonl"
+
+
+def _approval_rows(root: str = HERE) -> list:
+    p = os.path.join(root, APPROVAL_LEDGER)
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as fh:
+        return [json.loads(ln) for ln in fh if ln.strip()]
+
+
+def approve_action(month: str, ticker: str, approved_by: str, root: str = HERE, *, limit_price_major=None,
+                   max_gbp=None, note: Optional[str] = None) -> dict:
+    """ISA-0864 (11-Oct-2026, B05-R08): record Raj's APPROVAL of ONE action, bound to the receipt's content hash and
+    the exact action tuple. Refused unless the receipt is VALID and capital-authorised and the ticker is selected;
+    a limit may only TIGHTEN the receipt's economic maximum and approved GBP. Append-only, idempotent on
+    (receipt, ticker). An approval authorises nothing by itself: execution_check still decides at the quote."""
+    if not str(approved_by or "").strip():
+        raise EngineRefused("approve_action: approved_by is required (who decided)")
+    v = verify_receipt(month, root)
+    if v.get("state") != "VALID":
+        raise EngineRefused("approve_action: receipt is %s - only a VALID receipt can be approved (%s)" % (v.get("state"), v.get("why")))
+    rc = v["receipt"]
+    if not rc.get("capital_authorised") or rc.get("state") != "DECISION_COMPLETE":
+        raise EngineRefused("approve_action: receipt %s is %s / capital_authorised %s - nothing to approve"
+                            % (rc.get("receipt_id"), rc.get("state"), rc.get("capital_authorised")))
+    _apx = active_plan(rc, root)                    # ISA-0860: approve within the ACTIVE plan only
+    if not _apx.get("authorised"):
+        raise EngineRefused("approve_action: %s" % (_apx.get("why") or "no authorised plan"))
+    sel = {a["ticker"]: a for a in _apx["actions"]}
+    if ticker not in sel:
+        raise EngineRefused("approve_action: %s is not an action of %s plan %s (actions %s)"
+                            % (ticker, rc.get("receipt_id"), _apx["plan_id"], sorted(sel)))
+    act = sel[ticker]
+    emax = act.get("economic_max_price_major")
+    lim = emax if limit_price_major is None else float(limit_price_major)
+    if lim is not None and (not math.isfinite(float(lim)) or float(lim) <= 0):
+        raise EngineRefused("approve_action: limit %r is not a positive finite MAJOR-unit price" % (limit_price_major,))
+    if emax is not None and lim is not None and float(lim) > float(emax) + 1e-9:
+        raise EngineRefused("approve_action: limit %.4f exceeds the receipt's economic max %.4f - an approval may only tighten it" % (float(lim), float(emax)))
+    gbp = float(act.get("gbp") or 0)
+    mg = gbp if max_gbp is None else float(max_gbp)
+    if not math.isfinite(mg) or mg <= 0 or mg > gbp + EPS_GBP:
+        raise EngineRefused("approve_action: max_gbp %r must be positive and <= the approved action GBP %.2f" % (max_gbp, gbp))
+    key = "%s|%s" % (rc.get("receipt_id"), ticker)
+    for r in _approval_rows(root):
+        if r.get("idempotency_key") == key:
+            return {"state": "ALREADY_APPROVED", "idempotency_key": key, "approved_at": r.get("approved_at")}
+    row = {"idempotency_key": key, "schema": "approval_v1", "month": month, "receipt_id": rc.get("receipt_id"),
+           "receipt_sha256": rc.get("content_sha256"), "ticker": ticker, "action": act.get("action"),
+           "action_gbp": gbp, "economic_max_price_major": emax, "limit_price_major": lim, "max_gbp": round(mg, 2),
+           "currency": act.get("currency"), "approved_by": approved_by, "note": note, "approved_at": _now().isoformat()}
+    with open(os.path.join(root, APPROVAL_LEDGER), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    return {"state": "APPROVED", "idempotency_key": key,
+            "note": "approval recorded; execution_check still decides at the executable quote (permission is not an instruction)"}
+
+
+def approval_state(month: str, ticker: str, receipt: Optional[dict], root: str = HERE, *,
+                   receipt_id: Optional[str] = None) -> dict:
+    """ISA-0864: APPROVED (bound to THIS receipt's content) | APPROVAL_STALE (approved on another receipt) | NOT_APPROVED."""
+    rid = (receipt or {}).get("receipt_id") or receipt_id
+    sha = (receipt or {}).get("content_sha256")
+    rows = [r for r in _approval_rows(root) if r.get("ticker") == ticker and r.get("month") == month]
+    hit = [r for r in rows if r.get("receipt_id") == rid and (sha is None or r.get("receipt_sha256") == sha)]
+    if hit:
+        r = hit[-1]
+        return {"state": "APPROVED", "approved_by": r.get("approved_by"), "approved_at": r.get("approved_at"),
+                "limit_price_major": r.get("limit_price_major"), "max_gbp": r.get("max_gbp")}
+    if rows:
+        return {"state": "APPROVAL_STALE", "approved_receipts": sorted({r.get("receipt_id") for r in rows}),
+                "why": "an approval exists for %s on another receipt - a changed decision needs a new approval" % ticker}
+    return {"state": "NOT_APPROVED"}
+
+
+def action_lifecycle(month: str, root: str = HERE) -> dict:
+    """ISA-0864 (B05-R08): the distinct state axes of every action of the month's receipt - RECEIPT
+    (VALID|STALE|ABSENT|CORRUPT), AUTHORISED, APPROVAL, FILL - never collapsed into one word. The execution state
+    (EXECUTABLE / REPRICE_REQUIRED / REFUSED_*) needs a live quote and is produced only by execution_check."""
+    v = verify_receipt(month, root)
+    rc = v.get("receipt") or {}
+    if not rc and v.get("state") == "STALE":
+        # ISA-0864 residual (11-Oct-2026): a STALE receipt still SHOWS its actions with their approvals and fills
+        #   (display only - its RECEIPT axis says STALE, so nothing here is executable). CORRUPT/ABSENT show nothing.
+        try:
+            with open(os.path.join(root, "capital_decision_receipt_%s.json" % month), encoding="utf-8") as fh:
+                rc = json.load(fh)
+        except Exception:                                           # noqa: BLE001
+            rc = {}
+    fl = fills_for(rc.get("receipt_id"), root) if rc else {}
+    rows = []
+    _apl = active_plan(rc, root) if rc else {"plan_id": None, "actions": []}
+    for a in (_apl.get("actions") if _apl.get("plan_id") else rc.get("selected_actions")) or []:
+        t = a["ticker"]
+        f = fl.get(t)
+        rows.append({"ticker": t, "action": a.get("action"), "gbp": a.get("gbp"),
+                     "receipt": v.get("state"), "capital_authorised": rc.get("capital_authorised"),
+                     "approval": approval_state(month, t, rc, root),
+                     "fill": ({"state": "HAS_FILLS", "n_fills": f["n_fills"], "quantity": f["quantity"], "gbp_cost": f["gbp_cost"],
+                               "remaining_gbp": round(max(0.0, float(a.get("gbp") or 0) - f["gbp_cost"]), 2)}
+                              if f else {"state": "NOT_FILLED"})})
+    return {"month": month, "receipt_id": rc.get("receipt_id") or v.get("receipt_id"), "receipt": v.get("state"),
+            "why": v.get("why"), "actions": rows,
+            "active_plan": {k: _apl.get(k) for k in ("plan_id", "refused", "state", "why")},
+            "dealability_confirmation": [x for x in ((rc.get("dealability_confirmation") or {}).get("required") or [])],
+            "note": "EXECUTABLE is a quote-time permission from execution_check, not a state of record; APPROVED is Raj's decision; HAS_FILLS is the broker fact"}
+
+
+def verify_receipt(month: str, root: str = HERE, receipt: Optional[dict] = None,
+                   capital_path_now: Optional[dict] = None) -> dict:
     """The CONSUMER-side binding check (Checkpoint-D / email / capital_destination LIVE): the receipt
     exists, its content hash is intact, and every input hash it was formed on equals the file on
     disk NOW. Anything else is ABSENT / CORRUPT / STALE and is never treated as a decision."""
@@ -1912,10 +2537,39 @@ def verify_receipt(month: str, root: str = HERE, receipt: Optional[dict] = None)
         now = _file_sha(input_path(month, k, root))              # ISA-0832: the archived copy after the purge
         if now != h:
             drift[k] = {"receipt": (h or "")[:12], "now": (now or "")[:12]}
+    # ISA-0852 (B01-R03): a changed goal, schedule, one-off, operative anchor or friction buffer invalidates the
+    #   decision's hurdle - and with it every size and admission the receipt carries. A receipt formed before
+    #   the binding existed has none to check (NOT_DECLARED; it is still bound to its file inputs).
+    _hb = receipt.get("hurdle_basis")
+    if isinstance(_hb, dict):
+        _now = hurdle_basis(root)
+        _keys = ("state", "required_return_operative_pct", "operative_effective_from", "er_friction_buffer_pp",
+                 "hurdle_pct", "declared_projection_sha")
+        _d = {k: {"receipt": _hb.get(k), "now": _now.get(k)} for k in _keys if _hb.get(k) != _now.get(k)}
+        if _d:
+            drift["hurdle_basis"] = _d
+    # ISA-0863 (B05-R05): a receipt formed by other capital-path code/config is not the decision this code would form.
+    #   Legacy receipts (no key) verify on file inputs + hurdle only (NOT_DECLARED); UNAVAILABLE now is never VALID.
+    _cpr = receipt.get("capital_path")
+    if isinstance(_cpr, dict) and _cpr.get("state") == "BOUND":
+        _cpn = capital_path_now if capital_path_now is not None else capital_path_identity()
+        if _cpn.get("state") != "BOUND" or _cpn.get("fingerprint") != _cpr.get("fingerprint"):
+            _ch = sorted(k for k in set(_cpr.get("members") or {}) | set(_cpn.get("members") or {})
+                         if (_cpr.get("members") or {}).get(k) != (_cpn.get("members") or {}).get(k))
+            drift["capital_path"] = {"receipt": (_cpr.get("fingerprint") or "")[:12],
+                                     "now": (_cpn.get("fingerprint") or _cpn.get("state") or "")[:12],
+                                     "receipt_build": _cpr.get("build_id"), "now_build": _cpn.get("build_id"),
+                                     "n_changed": len(_ch), "changed_members": _ch[:20], "why_now": _cpn.get("why")}
     if drift:
         return {"state": "STALE", "receipt_id": receipt.get("receipt_id"), "drift": drift,
-                "why": "an input changed after the receipt was formed - re-run the engine"}
+                "why": ("the decision's hurdle basis changed after the receipt was formed (ISA-0852) - re-run the engine"
+                        if list(drift) == ["hurdle_basis"] else
+                        "the capital-path code/config changed after the receipt was formed (ISA-0863) - re-run the engine"
+                        if list(drift) == ["capital_path"] else
+                        "an input changed after the receipt was formed - re-run the engine")}
     return {"state": "VALID", "receipt_id": receipt.get("receipt_id"), "receipt_state": receipt.get("state"),
+            "hurdle_basis": ("BOUND" if isinstance(_hb, dict) else "NOT_DECLARED"),
+            "capital_path": ("BOUND" if isinstance(_cpr, dict) and _cpr.get("state") == "BOUND" else "NOT_DECLARED"),
             "capital_authorised": receipt.get("capital_authorised"), "receipt": receipt}
 
 
@@ -1934,6 +2588,14 @@ def summary(receipt: dict) -> dict:
             "case_scope_outstanding": (receipt.get("case_scope") or {}).get("outstanding"),
             "census_counts": (receipt.get("census") or {}).get("counts"),
             "comparator_rule": (receipt.get("comparator") or {}).get("rule"),
+            # ISA-0860: the confirm-at-dealing list and the pre-authorised fallbacks (rendered, never recomputed)
+            "dealability_confirmation": {
+                "required": (receipt.get("dealability_confirmation") or {}).get("required") or [],
+                "fallbacks": [{"id": f.get("id"), "if_refused": f.get("if_refused"), "authorised": f.get("authorised"),
+                               "authorised_basis": f.get("authorised_basis"),
+                               "actions": [{"ticker": a.get("ticker"), "gbp": a.get("gbp")} for a in f.get("actions") or []]}
+                              for f in (receipt.get("dealability_confirmation") or {}).get("fallbacks") or []],
+                "sequencing": (receipt.get("dealability_confirmation") or {}).get("sequencing")},
             "search_state": (receipt.get("search") or {}).get("state"),
             "new_capital_control": receipt.get("new_capital_control")}
 
@@ -1955,10 +2617,51 @@ def main(argv=None) -> int:
     if month and "--amend" in argv:
         return amend_cli(month, opt("--amend"), opt("--root", HERE))
     if month and "--execution-check" in argv:
+        # ISA-0850: --cash is required (missing -> REFUSED_CASH_UNKNOWN inside execution_check, never skipped)
         r = execution_check(month, opt("--execution-check"), float(opt("--price")), opt("--currency"),
-                            opt("--quote-ts"), (float(opt("--cash")) if opt("--cash") else None), opt("--root", HERE))
+                            opt("--quote-ts"), opt("--cash"), opt("--root", HERE),
+                            fx_quote_per_gbp=opt("--fx"))           # ISA-0856: required for a non-GBP quote
         print(json.dumps({k: v for k, v in r.items()}, indent=1, default=str))
         return 0 if r["state"] == "EXECUTABLE" else 3
+    if month and "--record-fill" in argv:
+        # ISA-0855: capture ONE execution from the broker record (never estimated); a fill authorises nothing
+        def _f(x):
+            return None if x is None else float(x)
+        try:
+            r = record_fill(month, opt("--receipt"), opt("--record-fill"), opt("--order-id"), float(opt("--quantity")),
+                            _f(opt("--price")), float(opt("--gbp-cost")), opt("--root", HERE),
+                            execution_id=opt("--execution-id"), quote_currency=opt("--currency"),
+                            fx_quote_per_gbp=_f(opt("--fx")), price_gbp=_f(opt("--price-gbp")),
+                            commission_gbp=_f(opt("--commission")), fill_ts=opt("--fill-ts"), source=opt("--source"))
+        except (EngineRefused, TypeError, ValueError) as exc:
+            print("CDE_REFUSED %s" % exc)
+            return 2
+        print(json.dumps(r, indent=1))
+        return 0
+    if month and "--approve" in argv:
+        # ISA-0864: Raj's decision on ONE action of the VALID receipt (limits may only tighten)
+        try:
+            r = approve_action(month, opt("--approve"), opt("--approved-by"), opt("--root", HERE),
+                               limit_price_major=opt("--limit-price"), max_gbp=opt("--max-gbp"), note=opt("--note"))
+        except (EngineRefused, TypeError, ValueError) as exc:
+            print("CDE_REFUSED %s" % exc)
+            return 2
+        print(json.dumps(r, indent=1))
+        return 0
+    if month and "--record-dealability" in argv:
+        # ISA-0860: Raj's dealing outcome for a confirm-required name -> declaration of record + learning row
+        try:
+            r = record_dealability(month, opt("--record-dealability"), opt("--outcome"), opt("--recorded-by"),
+                                   opt("--root", HERE), wrapper=opt("--wrapper", "ISA"), reason_code=opt("--reason-code"),
+                                   evidence=opt("--evidence"))
+        except (EngineRefused, TypeError, ValueError) as exc:
+            print("CDE_REFUSED %s" % exc)
+            return 2
+        print(json.dumps(r, indent=1, default=str))
+        return 0
+    if month and "--lifecycle" in argv:
+        print(json.dumps(action_lifecycle(month, opt("--root", HERE)), indent=1, default=str))
+        return 0
     if month and "--verify" in argv:
         v = verify_receipt(month, opt("--root", HERE))
         v.pop("receipt", None)
@@ -2291,8 +2994,13 @@ def _selftest(verbose: bool = True) -> int:
             r2 = build(month, root=HERE, write=False, inputs=inp)
             ok("T01 REAL MUST-FIRE: scrambling every Source Score leaves the selection identical",
                (r1.get("selected") or {}).get("bundle") == (r2.get("selected") or {}).get("bundle"))
-            ok("T07 REAL: the D23 reserve is subtracted exactly once",
-               abs(r1["book"]["capital_for_decision_gbp"] - (r1["book"]["deployable_gbp"] - r1["book"]["reserve_gbp"])) < 0.005)
+            ok("T07 REAL: the D23 reserve (and any fired drawdown tranche) is subtracted exactly once (ISA-0858 waterfall)",
+               abs(r1["book"]["cash_capital_gbp"] - max(r1["book"]["deployable_gbp"] - r1["book"]["reserve_gbp"]
+                                                        - r1["book"]["drawdown_reserved_gbp"], 0.0)) < 0.005
+               and r1["book"]["capital_for_decision_gbp"] <= r1["book"]["cash_capital_gbp"] + r1["book"]["max_fund_funded_gbp"] + 0.005)
+            ok("ISA-0858 REAL: the receipt carries the funding split and the selection is funded cash-first",
+               (r1.get("funding") or {}).get("split", {}).get("spend_gbp") is not None
+               and all("funding" in a for a in r1.get("selected_actions") or []))
             # ── s12.2 binding: determinism, freshness, consumer verification, idempotent ledger ──
             import shutil, tempfile, time as _time
             r1b = build(month, root=HERE, write=False)

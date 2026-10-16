@@ -660,6 +660,7 @@ def apply_broker_dealability(rows, resolver=None) -> dict:
     except Exception as exc:                                            # noqa: BLE001
         rs, meta = None, {"state": "UNAVAILABLE", "load_error": "%s: %s" % (type(exc).__name__, exc)}
     n_ok = 0
+    n_conf = 0
     for r in rows or []:
         if not isinstance(r, dict):
             continue
@@ -671,6 +672,11 @@ def apply_broker_dealability(rows, resolver=None) -> dict:
         r["broker_venue"] = v.get("venue")
         r["broker_dealability"] = v.get("state")
         r["broker_dealability_why"] = v.get("why")
+        # ISA-0860: fundable-but-confirm flags (eligibility uncertain) travel with the row to the engine
+        r["broker_confirm_required"] = sorted({c.get("code") for c in (v.get("confirm_required") or []) if c.get("code")})
+        r["broker_eligibility"] = (v.get("eligibility") or {}).get("state")
+        if r["broker_confirm_required"]:
+            n_conf += 1
         if v.get("admissible_for_new_capital"):
             n_ok += 1
         else:
@@ -678,9 +684,11 @@ def apply_broker_dealability(rows, resolver=None) -> dict:
             r["deployable_as_switch"] = False
     meta["n_rows"] = len([r for r in rows or [] if isinstance(r, dict)])
     meta["n_dealable_online"] = n_ok
+    meta["n_confirm_required"] = n_conf
     meta["rule"] = ("ISA-0607: only a verified venue declared ONLINE (broker_venues.json) may "
                     "rank as a capital destination; WSE, undeclared, unverified or unknown venues "
-                    "refuse automated new capital")
+                    "refuse automated new capital. ISA-0860: an ESTABLISHED non-ISA-qualifying DR or a recorded "
+                    "broker refusal refuses; an uncertain eligibility stays fundable with broker_confirm_required")
     return meta
 
 

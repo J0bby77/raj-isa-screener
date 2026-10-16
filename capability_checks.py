@@ -105,6 +105,10 @@ def _book():
     portfolio, _u, policy = _cd._fixture()
     p3 = copy.deepcopy(policy)
     p3["scaling_freeze"]["basis"] = "reallocation_only"
+    # ISA-0858: the freeze is RETIRED on LIVE (Raj D5); these checks are of the aug-2026 FIXTURE book and its
+    # frozen policy (the legacy demand-pull path, now SHADOW under the engine), so the fixture states it explicitly.
+    p3["scaling_freeze"]["active"] = True
+    p3["scaling_freeze"].pop("retired", None)
     return portfolio, p3
 
 

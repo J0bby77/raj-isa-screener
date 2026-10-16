@@ -103,6 +103,9 @@ FALLBACK_WRITTEN = {
 # Referenced by fallback code but not needed on the fallback path, each with its reason.
 FALLBACK_EXCLUDED = {
     "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
+    # ISA-0847 (11-Oct-2026): first written by the 11-Oct VCI run (vci_learning, once resolved_count >= gate_n).
+    "vci_calibration_state.json": ("VCI learning calibration state; read by the VCI task via vci_source_score, "
+                                   "never by the weekly screen fallback"),
     # ISA-0483 (26-Sep-2026): source_performance_writer entered the closure via the capture-time runs[]
     # append; the measured PARALLEL log is written only by its --rebuild CLI on OneDrive (ISA-0379).
     "source_performance_log_measured.json": ("ISA-0379 parallel measured log; rebuilt on OneDrive by "

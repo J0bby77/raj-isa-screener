@@ -52,9 +52,66 @@ def _norm_set(xs):
     return {str(x).strip().upper() for x in (xs or []) if str(x).strip()}
 
 
+FUND_NET_TOL_GBP = 1.0   # arithmetic tolerance on net fund flows (rounding of broker amounts) - NOT an economic margin
+
+
+def fund_leg_check(fund_actions, new_capital_control=None, fund_max_gbp=None) -> dict:
+    """ISA-0867 (11-Oct-2026, B06-R02/R03/R06) - tick 12: the decided FUND actions classified by ACTUAL net money,
+    never by their label. net_new = fund BUYs - fund-sleeve SELLs. A net inflow is NEW fund capital: it needs the
+    fund leg OPEN (blocks_new_fund_capital is False - an absent key is unknown and refuses, R4.3) AND must fit the
+    run's router fund offer (fund_max_gbp) - capital the router held for a refused stock decision is not a fund
+    offer and cannot be substituted into funds. A self-funded switch/rebalance or a reduction (net <= 0) is never
+    blocked by new-capital acceptance. A malformed row refuses (UNKNOWN never passes)."""
+    ncc = new_capital_control if isinstance(new_capital_control, dict) else {}
+    rows = list(fund_actions or [])
+    out = {"tick": 12, "n_rows": len(rows), "blocks": [], "fund_max_gbp": fund_max_gbp,
+           "fund_leg_verdict": ("OPEN" if ncc.get("blocks_new_fund_capital") is False else "BLOCKED"),
+           "acceptance_state": (ncc.get("fund_leg") or {}).get("acceptance_state"),
+           "path_id": (ncc.get("fund_leg") or {}).get("path_id", "monthly_capital")}
+    if not rows:
+        return dict(out, state="NO_FUND_ACTIONS", net_new_fund_gbp=0.0)
+    buys = sells = 0.0
+    for i, r in enumerate(rows):
+        side = str((r or {}).get("side") or "").strip().upper()
+        try:
+            g = float((r or {}).get("gbp"))
+        except (TypeError, ValueError):
+            g = float("nan")
+        if side not in ("BUY", "SELL") or not (g == g) or g <= 0 or not str((r or {}).get("fund") or "").strip():
+            out["blocks"].append("tick 12 (ISA-0867): fund action row %d is malformed (fund/side BUY|SELL/positive gbp "
+                                 "required): %r - an unknown flow cannot be classified, so it refuses" % (i, r))
+            continue
+        if side == "BUY":
+            buys += g
+        else:
+            sells += g
+    net = round(buys - sells, 2)
+    out.update(buys_gbp=round(buys, 2), sells_gbp=round(sells, 2), net_new_fund_gbp=net)
+    labels = sorted({str((r or {}).get("label") or "").upper() for r in rows if (r or {}).get("label")})
+    out["labels"] = labels
+    if net > FUND_NET_TOL_GBP:
+        if ncc.get("blocks_new_fund_capital") is not False:
+            out["blocks"].append("tick 12 (ISA-0867/ISA-0833): the decided fund actions put GBP %.2f of NET NEW money into "
+                                 "funds (buys %.2f - fund sells %.2f; labels %s do not change that) while the fund leg is %s "
+                                 "(acceptance %s) - only self-funded switches, rebalances and reductions may proceed"
+                                 % (net, buys, sells, labels or "none", out["fund_leg_verdict"], out["acceptance_state"]))
+        elif fund_max_gbp is None:
+            out["blocks"].append("tick 12 (ISA-0867): GBP %.2f net new fund capital but the run's router fund offer "
+                                 "(fund_max_gbp) was not supplied - the amount cannot be shown to be a fund offer" % net)
+        elif net > float(fund_max_gbp) + FUND_NET_TOL_GBP:
+            out["blocks"].append("tick 12 (ISA-0867, B06-R06): GBP %.2f net new fund capital exceeds the router's fund offer "
+                                 "GBP %.2f - capital held for a refused/blocked stock decision is not a fund offer and is not "
+                                 "substituted into funds" % (net, float(fund_max_gbp)))
+    out["class"] = ("NET_NEW_FUND_CAPITAL" if net > FUND_NET_TOL_GBP else
+                    "SELF_FUNDED_OR_REDUCTION")
+    out["state"] = "BLOCK" if out["blocks"] else "PASS"
+    return out
+
+
 def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
                           step9_records=None, factor_state=None, opportunity_set=None,
-                          new_capital_control=None, decision_receipt=None, engine_authority="SHADOW"):
+                          new_capital_control=None, decision_receipt=None, engine_authority="SHADOW",
+                          fund_max_gbp=None):
     """Return {passed, blocks, chosen, top5}.
       top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
                           cases capped at 5 by the deploy-Source tiebreak — this is that list)
@@ -301,11 +358,54 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
     if len(logged) < min(log_all_n, len(top5)):
         blocks.append(f"only {len(logged)} names logged; log all {log_all_n} (incl PASSES)")
 
+    # (12) ISA-0867 (11-Oct-2026): the decided FUND actions, classified by net money (never by label)
+    _fl = fund_leg_check(decision.get("fund_actions"), new_capital_control, fund_max_gbp)
+    blocks.extend(_fl["blocks"])
+
     return {"passed": not blocks, "blocks": blocks, "chosen": sorted(chosen_set) or None, "top5": top5,
-            "contest_basis": contest_basis}
+            "contest_basis": contest_basis, "fund_leg": _fl}
 
 
-def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG_ALL_N, **ledger_kw):
+def receipt_binding(month=None, receipt_verification=None) -> dict:
+    """ISA-0868 (11-Oct-2026, B10-R09/B11-R02): the join key from a logged decision to the authoritative Capital
+    Decision Receipt - read ONCE at logging time. Unverifiable -> UNBOUND:<state> (recorded, never blocks the log)."""
+    rv = receipt_verification
+    if rv is None:
+        if not month:
+            return {"state": "UNBOUND:NO_MONTH"}
+        try:
+            import capital_decision_engine as _cde
+            rv = _cde.verify_receipt(month)
+        except Exception as exc:                                        # noqa: BLE001
+            return {"state": "UNBOUND:UNREADABLE", "why": "%s: %s" % (type(exc).__name__, exc)}
+    rr = (rv or {}).get("receipt") or {}
+    if (rv or {}).get("state") != "VALID" or not rr:
+        return {"state": "UNBOUND:%s" % ((rv or {}).get("state") or "UNKNOWN"), "receipt_id": (rv or {}).get("receipt_id")}
+    cp = rr.get("capital_path") or {}
+    return {"state": "BOUND", "receipt_id": rr.get("receipt_id"), "receipt_state": rr.get("state"),
+            "capital_authorised": rr.get("capital_authorised"), "build_id": cp.get("build_id"),
+            "capital_path_fingerprint": cp.get("fingerprint"), "_dossiers": rr.get("dossiers") or {},
+            "_selected": {str(a.get("ticker") or "").upper(): a for a in rr.get("selected_actions") or []}}
+
+
+def _binding_for(b: dict, ticker: str) -> dict:
+    if (b or {}).get("state") != "BOUND":
+        return {k: v for k, v in (b or {}).items() if not k.startswith("_")}
+    t = str(ticker).upper()
+    d = (b.get("_dossiers") or {}).get(t) or (b.get("_dossiers") or {}).get(ticker) or {}
+    e = d.get("er12") or {}
+    a = (b.get("_selected") or {}).get(t) or {}
+    out = {k: v for k, v in b.items() if not k.startswith("_")}
+    out.update({"in_receipt": bool(d), "receipt_disposition": d.get("disposition"),
+                "receipt_action": a.get("action"), "receipt_gbp": a.get("gbp"),
+                "er12": ({"central_local": e.get("central_local"), "state": e.get("state"), "route": e.get("route"),
+                          "hv_case_id": e.get("hv_case_id"), "hv_method_id": e.get("hv_method_id"),
+                          "hurdle_pct": e.get("hurdle_pct")} if e else None)})
+    return out
+
+
+def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG_ALL_N, month=None,
+              receipt_verification=None, **ledger_kw):
     """Log the top-N deployment names (incl passes) to the decision ledger so 'the road not taken'
     is captured. ranked: ordered ticker list (e.g. deployment_priority_rank). decisions: {ticker:
     'buy'|'PASS'|'top_up'|...}; anything unlisted defaults to PASS. Returns the logged ticker set."""
@@ -324,10 +424,15 @@ def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG
         except Exception:
             _pre = 0
     logged = []
+    # ISA-0868: bind every logged name to the verified receipt (read once); build/input snapshot from it unless given
+    _rb = receipt_binding(month, receipt_verification) if (month or receipt_verification is not None) else {"state": "UNBOUND:NO_MONTH"}
+    if _rb.get("state") == "BOUND":
+        ledger_kw.setdefault("build_id", _rb.get("build_id"))
+        ledger_kw.setdefault("input_snapshot_id", _rb.get("receipt_id"))
     for t in (ranked or [])[:log_all_n]:
         d = decisions.get(str(t).upper(), "PASS")
         d = _to_ledger_decision(d)   # P2-3: map canonical/stack action -> ledger vocabulary (never raise)
-        _dl.log_decision(ledger_path, t, route, d, **ledger_kw)
+        _dl.log_decision(ledger_path, t, route, d, receipt_binding=_binding_for(_rb, t), **ledger_kw)
         logged.append(str(t).upper())
     if logged:
         if not os.path.exists(ledger_path):
@@ -342,6 +447,29 @@ def log_top10(ledger_path, ranked, decisions=None, route="growth", log_all_n=LOG
             raise RuntimeError(f"A9 VERIFY FAILED: ledger count {_pre}->{_post}, month stamp "
                                f"{_stamp} present={_has_month} — Checkpoint-D tick 3 BLOCKED")
         print(f"LEDGER_VERIFIED entries={_post} (+{_post - _pre}) month={_stamp} path={ledger_path}")
+    return logged
+
+
+def log_fund_actions(ledger_path, fund_actions, month=None, receipt_verification=None, **ledger_kw):
+    """ISA-0858 / ISA-0867 complement (12-Oct-2026): every decided FUND action (Step 10 `decision.fund_actions`,
+    the same rows tick 12 classified) is written to the decision ledger on route `fund`, so next month's Step 1.5
+    confirms it against the dealing record and a fund trade that was NEVER decided surfaces as OFF_FRAMEWORK.
+    BUY -> buy, SELL -> sell (a partial reduction is still a sell of that fund line). A malformed row raises - the
+    validator refused it already, so reaching here with one is a defect, not an input."""
+    if _dl is None:
+        raise RuntimeError("decision_ledger not importable - cannot log fund actions")
+    _rb = receipt_binding(month, receipt_verification) if (month or receipt_verification is not None) else {"state": "UNBOUND:NO_MONTH"}
+    logged = []
+    for r in fund_actions or []:
+        side = str((r or {}).get("side") or "").strip().upper()
+        fund = str((r or {}).get("fund") or "").strip().upper()
+        if side not in ("BUY", "SELL") or not fund:
+            raise ValueError("log_fund_actions: malformed fund action %r (tick 12 should have refused it)" % (r,))
+        _dl.log_decision(ledger_path, fund, "fund", "buy" if side == "BUY" else "sell",
+                         receipt_binding=_binding_for(_rb, fund),
+                         flags=["FUND_ACTION:%s:GBP %.2f:%s" % (side, float(r.get("gbp") or 0), r.get("label") or "")],
+                         **ledger_kw)
+        logged.append((fund, side))
     return logged
 
 
@@ -371,6 +499,22 @@ def _opportunity_set(spec):
         rc = json.load(fh)
     return ((((rc.get("summary") or {}).get("capital_destination") or {}).get("pipeline") or {})
             .get("opportunity_set"))
+
+
+def _fund_max(spec):
+    """ISA-0867: the run's router fund offer (summary.capital_destination.fund_max_gbp), from the spec or run_context."""
+    if spec.get("fund_max_gbp") is not None:
+        return float(spec["fund_max_gbp"])
+    p = spec.get("run_context")
+    if not p:
+        return None
+    try:
+        with open(p, encoding="utf-8") as fh:
+            rc = json.load(fh)
+        v = (((rc.get("summary") or {}).get("capital_destination") or {}).get("fund_max_gbp"))
+        return None if v is None else float(v)
+    except Exception:                                                   # noqa: BLE001
+        return None
 
 
 def _selftest() -> int:
@@ -488,7 +632,56 @@ def _selftest() -> int:
     r23 = validate_checkpoint_d([], _d0, _cs, ["A", "B"], opportunity_set=_ops0,
                                 new_capital_control=_open, decision_receipt=_rcpt, engine_authority="LIVE")
     assert not r23["passed"] and any("not logged" in b for b in r23["blocks"]), "every contest name must be logged"
-    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11: must-fire, negative control, absent verdict)")
+    # ISA-0867 tick 12 - fund actions classified by net money, never by label
+    _fopen = {"state": "OPEN", "blocks_new_stock_capital": False, "blocks_new_fund_capital": False,
+              "fund_leg": {"acceptance_state": "CURRENT", "path_id": "monthly_capital"}}
+    _fblk = dict(_fopen, blocks_new_fund_capital=True, fund_leg={"acceptance_state": "STALE", "path_id": "monthly_capital"})
+    _cashreb = [{"fund": "VUAG", "side": "BUY", "gbp": 5000.0, "label": "REBALANCE"}]
+    f1 = fund_leg_check(_cashreb, _fblk, 8000.0)
+    assert f1["state"] == "BLOCK" and f1["class"] == "NET_NEW_FUND_CAPITAL", "MUST-FIRE (ISA-0867): a cash-funded 'rebalance' is new fund capital"
+    _switch = [{"fund": "SMT", "side": "SELL", "gbp": 5000.0}, {"fund": "VUAG", "side": "BUY", "gbp": 4998.5, "label": "SWITCH"}]
+    f2 = fund_leg_check(_switch, _fblk, 0.0)
+    assert f2["state"] == "PASS" and f2["class"] == "SELF_FUNDED_OR_REDUCTION", "NEGATIVE CONTROL (ISA-0867): a self-funded switch passes a BLOCKED fund leg"
+    f3 = fund_leg_check([{"fund": "SMT", "side": "SELL", "gbp": 3000.0}], _fblk, 0.0)
+    assert f3["state"] == "PASS", "NEGATIVE CONTROL (B06-R02): a reduction is never blocked by acceptance"
+    f4 = fund_leg_check([{"fund": "VUAG", "side": "BUY", "gbp": 9000.0}], _fopen, 6000.0)
+    assert f4["state"] == "BLOCK" and "not a fund offer" in f4["blocks"][0], "MUST-FIRE (B06-R06): net fund buy above the router's fund offer"
+    f5 = fund_leg_check([{"fund": "VUAG", "side": "BUY", "gbp": 5000.0}], _fopen, 6000.0)
+    assert f5["state"] == "PASS", "NEGATIVE CONTROL (ISA-0867): a net fund buy within an OPEN leg's offer passes"
+    f6 = fund_leg_check([{"fund": "VUAG", "side": "BUY", "gbp": 5000.0}], {"state": "OPEN", "blocks_new_stock_capital": False}, 6000.0)
+    assert f6["state"] == "BLOCK", "MUST-FIRE (R4.3): an absent fund verdict is unknown and refuses a net buy"
+    f7 = fund_leg_check([{"fund": "VUAG", "side": "BUY", "gbp": None}], _fopen, 6000.0)
+    assert f7["state"] == "BLOCK" and "malformed" in f7["blocks"][0], "MUST-FIRE (ISA-0867): a malformed row refuses"
+    f8 = fund_leg_check([{"fund": "VUAG", "side": "BUY", "gbp": 2000.0}, {"fund": "VUAG", "side": "BUY", "gbp": 2000.0, "label": "REBALANCE"}], _fblk, 9000.0)
+    assert f8["state"] == "BLOCK" and abs(f8["net_new_fund_gbp"] - 4000.0) < 0.01, "MUST-FIRE (B06-R03): split buys are summed, labels ignored"
+    rf = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TRIM"}, fund_actions=_cashreb), cases, feas,
+                               step9_records=rc, new_capital_control=_fblk, fund_max_gbp=8000.0)
+    assert any("tick 12" in b for b in rf["blocks"]) and rf["fund_leg"]["state"] == "BLOCK", "MUST-FIRE (ISA-0867): tick 12 reaches the validator"
+    rg_ = validate_checkpoint_d(feas, dict(dec, chosen_actions={"NTAP": "TRIM"}), cases, feas, step9_records=rc, new_capital_control=_fblk)
+    assert rg_["fund_leg"]["state"] == "NO_FUND_ACTIONS" and not any("tick 12" in b for b in rg_["blocks"]), "NEGATIVE CONTROL: no fund actions, no tick 12"
+    # ISA-0868 - receipt binding at log time
+    _vb = {"state": "VALID", "receipt": {"receipt_id": "CDR-B", "state": "DECISION_COMPLETE", "capital_authorised": True,
+           "capital_path": {"build_id": "TB-X", "fingerprint": "f" * 64},
+           "selected_actions": [{"ticker": "AAA", "action": "START", "gbp": 5000.0}],
+           "dossiers": {"AAA": {"disposition": "SELECTED", "er12": {"central_local": 0.3, "state": "VALID", "route": "PE",
+                                                                    "hv_case_id": "HV-1", "hv_method_id": "hv@1", "hurdle_pct": 15.7}}}}}
+    _bb = receipt_binding(receipt_verification=_vb)
+    _ba = _binding_for(_bb, "AAA")
+    assert _bb["state"] == "BOUND" and _ba["receipt_id"] == "CDR-B" and _ba["er12"]["central_local"] == 0.3 and _ba["receipt_action"] == "START", \
+        "ISA-0868: a VALID receipt binds the logged name to its receipt id and ER12"
+    assert _binding_for(_bb, "ZZZ")["in_receipt"] is False, "ISA-0868: a name outside the receipt is bound but marked not in receipt"
+    assert receipt_binding(receipt_verification={"state": "STALE", "receipt_id": "CDR-S"})["state"] == "UNBOUND:STALE", \
+        "MUST-FIRE (ISA-0868): a STALE receipt records UNBOUND:STALE, never a binding"
+    if _dl is not None:
+        import tempfile as _tf
+        _td = _tf.mkdtemp(prefix="ckd868_")
+        _lp = os.path.join(_td, "decision_ledger.json")
+        log_top10(_lp, ["AAA", "BBB"], {"AAA": "buy"}, date="2026-11-01", receipt_verification=_vb)
+        _ents = {e["ticker"]: e for e in _dl.load_ledger(_lp)["entries"]}
+        assert _ents["AAA"]["receipt_binding"]["receipt_id"] == "CDR-B" and _ents["AAA"]["build_id"] == "TB-X" \
+            and _ents["AAA"]["input_snapshot_id"] == "CDR-B", "ISA-0868: log_top10 writes the binding, build and snapshot"
+        assert _ents["BBB"]["receipt_binding"]["in_receipt"] is False, "ISA-0868: a PASS outside the receipt is still bound"
+    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11 + ISA-0867 tick 12 + ISA-0868 binding: must-fire, negative control, absent verdict)")
     return 0
 
 
@@ -527,7 +720,8 @@ def main():
                                 s.get("comparative_cases"), s.get("logged_tickers"),
                                 step9_records=_step9_records(s),
                                 opportunity_set=_opportunity_set(s),
-                                new_capital_control=_ncc, decision_receipt=_rcv, engine_authority=_cea)
+                                new_capital_control=_ncc, decision_receipt=_rcv, engine_authority=_cea,
+                                fund_max_gbp=_fund_max(s))
     _rr_ = _rcv.get("receipt") or {}
     res["capital_decision_receipt"] = {"authority": _cea, "verification": _rcv.get("state"),
                                        "receipt_id": _rr_.get("receipt_id"), "state": _rr_.get("state"),
@@ -539,6 +733,10 @@ def main():
     if not res["passed"]:
         print("\nBLOCKED — resolve the above before finalising the Step-10 decision.", file=sys.stderr)
         sys.exit(2)
+    _fa = (s.get("decision") or {}).get("fund_actions")
+    if _fa and s.get("log_fund_actions", True):
+        _lp_fa = s.get("ledger_path") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision_ledger.json")
+        print("FUND_ACTIONS_LOGGED %s" % log_fund_actions(_lp_fa, _fa, month=s.get("month"), receipt_verification=_rcv))
     print("\nCHECKPOINT-D PASSED — decision may proceed.")
 
 

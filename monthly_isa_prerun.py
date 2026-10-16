@@ -870,7 +870,8 @@ def _reconcile_price_unit(fetched, reference, ticker):
 # ---------------------------------------------------------------------------
 def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
                                   challenger_fn=None, sleeve_value_now=None,
-                                  mu_value_now=None, _print=print):
+                                  mu_value_now=None, _print=print, largest_ticker=None,
+                                  largest_value_now=None, largest_weight_pct=None):
     """WP-1/WP-4 (26-Jul-26) - refresh vuag_price_now + iwmo_price_now in ONE yfinance
     batch (closes the gap: no code refresh site existed - was prose-only), then append
     the month's freeze_history entry (idempotent). Fail-safe: fetch failure -> store
@@ -913,11 +914,16 @@ def refresh_counterfactual_prices(store_path, fetch_fn=None, month_str=None,
     if challenger_fn and month_str:
         ch = challenger_fn(store.get("trades"), store.get("vuag_price_now"),
                            store.get("iwmo_price_now"), sleeve_value_now, mu_value_now)
-        hist = store.setdefault("freeze_history", [])
-        if not any(h.get("month") == month_str for h in hist):
-            v, i = ch.get("vs_vuag_exmu_pp"), ch.get("vs_iwmo_exmu_pp")
-            hist.append({"month": month_str, "beats_vuag_exmu": (v is not None and v > 0),
-                         "beats_iwmo_exmu": (i is not None and i > 0)})
+        # ISA-0858: ONE appender (email_prefill.append_freeze_history_entry) writes every P5.4 field the
+        # retention ratchet (the D5 brake) reads - the inline copy that lived here wrote neither `measured`
+        # nor any of them (R4.4: two homes for one rule).
+        chx = None
+        if largest_ticker:
+            chx = challenger_fn(store.get("trades"), store.get("vuag_price_now"), store.get("iwmo_price_now"),
+                                sleeve_value_now, largest_value_now, exclude_ticker=largest_ticker)
+        from email_prefill import append_freeze_history_entry as _afh
+        _afh(store, month_str, ch, exlargest_out=chx, largest_ticker=largest_ticker,
+             largest_weight_pct=largest_weight_pct)
     _json.dump(store, open(store_path, "w", encoding="utf-8"), indent=2)
     return store
 
@@ -975,6 +981,9 @@ def main():
     try:
         import isa_source_cache as _sc_snap
         _sc_snap.enable_snapshot(True)
+        # ISA-0845 (11-Oct-2026, B12-R04): every ast.parse in this pass goes through the one text memo -
+        # measured 60.9 s -> 42.5 s for Steps 0 + 9d with identical results; rollback ISA_AST_CACHE=0.
+        _sc_snap.route_ast_parse()
     except Exception:                                                   # noqa: BLE001
         pass
     errors: list = []
@@ -1416,6 +1425,9 @@ def main():
                 _res = _dl_mod.reconcile_executions_from_transactions(
                     ledger_path, _txns, _held, prior_holdings=_prior_h,
                     date=run_date.isoformat(), evidence=_ev791,
+                    # ISA-0866 rev (12-Oct-2026): a trade in ANY saved export proves its decision
+                    ledger_trades=_dl_mod.load_ledger_trades(
+                        os.path.join(SCRIPT_DIR, "transaction_ledger.json")),
                     # ISA-0704: a dry run executes inside a sandbox copy, so persisting there keeps
                     # parity with the real run (Step 1.5's A13 override log re-reads the ledger).
                     persist=True)
@@ -1423,6 +1435,8 @@ def main():
                 summary["ledger_reconcile"] = _rc
                 summary["ledger_reconcile_source"] = _res["source"]
                 summary["ledger_reconcile_confirmed"] = _res["confirmed"]
+                if _res.get("cash_equivalent_movements"):
+                    summary["cash_equivalent_movements"] = _res["cash_equivalent_movements"]   # ISA-0858
                 if _res["off_framework"]:
                     # Trades with no matching recommendation: acted outside the
                     # framework. Holdings-diffing cannot see these reliably.
@@ -2010,6 +2024,39 @@ def main():
                         "name promoted since its last refresh will read UNMEASURED because it "
                         "was never fetched, not because no data exists."
                         % (type(_e).__name__, _e))
+        print("  UNAVAILABLE — %s" % _e)
+
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 5x(ie) — INSTRUMENT TYPE / ISA ELIGIBILITY (ISA-0860, Raj 12-Oct-2026)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ AFTER the map refresh (it types every VERIFIED symbol, including names admitted above) and BEFORE Step 9,
+    #   whose broker verdict (broker_dealability) reads this cache. OpenFIGI securityType2 is the primary source,
+    #   the constituent-feed description corroborates, a DR's underlying listings are classified against the
+    #   signed HMRC table (recognised_exchanges.json). Incremental and time-boxed; a network failure leaves names
+    #   ELIGIBILITY_UNVERIFIED - FUNDABLE and confirmed at dealing, NEVER refused on missing data.
+    print("\n[5x-ie] Instrument eligibility (instrument_eligibility.refresh, OpenFIGI + HMRC table)...")
+    _mf_begin("5x-ie", "instrument_eligibility")
+    try:
+        import instrument_eligibility as _ie5
+        _ier = _ie5.refresh(budget_s=60)
+        summary["instrument_eligibility"] = {k: _ier.get(k) for k in (
+            "state", "as_of", "n_symbols", "counts", "reason_counts", "fetched", "dr_searched", "errors",
+            "not_isa_qualifying", "confirm_required")}
+        for _e in (_ier.get("errors") or []):
+            warnings.append("Step 5x(ie) INSTRUMENT ELIGIBILITY INCOMPLETE — %s. The affected names read "
+                            "ELIGIBILITY_UNVERIFIED (fundable, confirm at dealing); the next run resumes." % _e)
+        _mf_measure(rows_in=_ier.get("n_symbols"), rows_out=_ier.get("fetched"),
+                    status=("OK" if not _ier.get("errors") else "DEGRADED"),
+                    note="%s: %s" % (_ier.get("state"), _ier.get("counts")))
+        print("  %s — %s symbols %s; fetched %s; NOT qualifying %s"
+              % (_ier.get("state"), _ier.get("n_symbols"), _ier.get("counts"), _ier.get("fetched"),
+                 _ier.get("not_isa_qualifying")))
+    except Exception as _e:                                    # noqa: BLE001
+        summary["instrument_eligibility"] = {"state": "UNAVAILABLE", "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="instrument eligibility unavailable: %s" % _e)
+        warnings.append("Step 5x(ie) INSTRUMENT ELIGIBILITY UNAVAILABLE — %s: %s. The cache on disk is used as "
+                        "it stands; a name without a record reads ELIGIBILITY_UNVERIFIED (fundable, confirm at "
+                        "dealing), never refused on missing data." % (type(_e).__name__, _e))
         print("  UNAVAILABLE — %s" % _e)
 
     print("\n[5y] Weekly GBP total-return store (stock_price_fetch, batched, stdlib only)...")
@@ -3757,6 +3804,49 @@ def main():
         summary["horizon_value"] = {"state": "FAILED", "why": "%s: %s" % (type(_hve).__name__, _hve)}
         warnings.append("Step 8h (ISA-0744): horizon-value E[r] RAISED (%s: %s) - SHADOW only, no "
                         "capital effect" % (type(_hve).__name__, _hve))
+    # — B1/B7: drawdown ladder + regime state (drawdown_monitor.py; every scheduled run) —
+    # ⚑ ISA-0858 (12-Oct-2026, B1.6b): MOVED to run BEFORE Step 6.10. It used to run after the router and
+    #   the engine, so a tranche firing in this run was sized on the same cash the stock decision spent
+    #   (the audit's GBP 9,000 -> GBP 2,583.33 double claim). Fired tranches now claim first.
+    try:
+        import drawdown_monitor as _ddm
+        # ⚑ ISA-0857 (11-Oct-2026, B02-R01): the drawdown reserve reads the ONE current funding figure the
+        #   engine and router read - summary.cash_deployable_gbp (cash-statement closing + MMF when the statement
+        #   is newer, else the broker-file cash; MMF already inside it, so it is not added again, B02-R03).
+        #   cash_effective_gbp is the broker-file diagnostic and could be stale by the whole intervening movement.
+        _cash = summary.get("cash_deployable_gbp")
+        if _cash is None:
+            raise ValueError("ISA-0857: summary.cash_deployable_gbp absent - the drawdown reserve has no current "
+                             "funding figure and is not computed (never on the stale broker-file cash)")
+        _cash = float(_cash)
+        _mmf = 0.0
+        import scoring_config as _sc3
+        _reserve = _ddm.compute_reserve(_cash, _mmf, 0.0,
+                                        getattr(_sc3, "DRAWDOWN_BUFFER_GBP", 500.0)
+                                        if "_sc3" in dir() else 500.0)
+        import yfinance as _yf
+        _h = _yf.Ticker("VUAG.L").history(period="2y")
+        _closes = list(_h["Close"].dropna()) if _h is not None and len(_h) else []
+        if _closes:
+            _dstate = _ddm.load_state()
+            _dstate, _fired = _ddm.update_ladder(_dstate, _closes)
+            _ddm.record_tranches(_dstate, _fired, _reserve)          # ISA-0858 B1.6b: size + key at fire time
+            _regime, _rbasis = _ddm.classify_regime(_closes, _dstate["drawdown_pct"])
+            _dstate["regime_state"], _dstate["regime_basis"] = _regime, _rbasis
+            _dstate["reserve_gbp"] = _reserve
+            _ddm.save_state(_dstate)
+            _dblock = _ddm.emit_block(_dstate, _fired, _reserve)
+            summary["drawdown"] = _dblock
+            summary["regime_state"] = _regime
+            if _fired:
+                flags.append({"type": "DRAWDOWN_TRIGGER",
+                              "message": json.dumps(_dblock.get("DRAWDOWN_TRIGGER"))})
+            print(f"  B1: {_dblock['standing_line']}")
+        else:
+            warnings.append("B1 drawdown monitor: no VUAG history this run")
+    except Exception as _e:
+        warnings.append(f"B1 drawdown monitor skipped: {_e}")
+
     # ── Step 6.10 — THE MARGINAL-POUND ROUTER (20-Aug-2026) ───────────────────────────────────
     # ⚑ WHY THIS STEP EXISTS. `capital_destination` was built 16-Aug-2026, closed five register
     # items, carried 22 green assertions — and was called by NOTHING. Same shape as the three
@@ -3836,6 +3926,14 @@ def main():
                        ", ".join(_ncc610.get("failed_contracts") or []) or
                        "; ".join(_ncc610.get("reasons") or [])[:200],
                        float(_sl.get("held_pending_stock_decision_gbp") or 0.0)))
+            _fl610 = _sl.get("fund_leg") or {}
+            if _fl610.get("verdict") != "OPEN":
+                # ISA-0833: the fund leg's acceptance verdict refuses new fund capital this occurrence.
+                warnings.append(
+                    "Step 6.10b NEW FUND CAPITAL BLOCKED (ISA-0833, acceptance %s): GBP %.2f held as cash, "
+                    "not routed to funds; rebalances/reductions unaffected. %s"
+                    % (_fl610.get("acceptance_state"), float(_fl610.get("held_as_cash_gbp") or 0.0),
+                       "; ".join(_fl610.get("reasons") or ["fund verdict absent - refused (R4.3)"])[:200]))
             if (_sl.get("executability") or {}).get("state") == "NOT_EXECUTABLE":
                 warnings.append(
                     "Step 6.10b STOCK CAP IS NOT EXECUTABLE: GBP %.2f is below the smallest "
@@ -4972,12 +5070,22 @@ def main():
         _slv = (_pd4.get("summary") or {}).get("stock_sleeve_value_gbp")
         _muv = next((x.get("value_gbp") for x in (_pd4.get("stocks") or [])
                      if str(x.get("ticker", "")).upper() == "MU"), 0.0)
+        _lg = max((x for x in (_pd4.get("stocks") or []) if x.get("ticker")),
+                  key=lambda x: float(x.get("value_gbp") or 0.0), default=None)
+        _nav4 = float((_pd4.get("summary") or {}).get("total_value_gbp") or 0.0)
         import datetime as _dt4
         _st4 = refresh_counterfactual_prices(
             os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"),
             month_str=_dt4.datetime.now().strftime("%Y-%m"), challenger_fn=_ccf,
-            sleeve_value_now=_slv, mu_value_now=_muv)
+            sleeve_value_now=_slv, mu_value_now=_muv,
+            largest_ticker=(_lg or {}).get("ticker"), largest_value_now=(_lg or {}).get("value_gbp"),
+            largest_weight_pct=(round(float(_lg["value_gbp"]) / _nav4 * 100, 3) if _lg and _nav4 else None))
         print(f"  A14: challenger prices refreshed ({'ok' if _st4 else 'SKIPPED - fetch failed'})")
+        if not _st4:
+            # ISA-0858: a silent skip left no 2026-10 entry - the D5 brake (retention ratchet) loses a month
+            warnings.append("A14 REFRESH FAILED: VUAG/IWMO prices could not be refreshed, so this month's "
+                            "freeze_history entry was NOT written - the retention ratchet (the D5 brake on "
+                            "fund-funded stock capital) loses a measured month. Re-run the pre-run Step A14.")
     except Exception as _e:
         warnings.append(f"A14 refresh skipped: {_e}")
     try:
@@ -5107,47 +5215,6 @@ def main():
 
     if reversal_worklist:
         summary["reversal_worklist"] = reversal_worklist
-
-    # — B1/B7: drawdown ladder + regime state (drawdown_monitor.py; every scheduled run) —
-    try:
-        import drawdown_monitor as _ddm
-        _cash = (summary.get("cash_effective_gbp") or 0.0)
-        _mmf = 0.0
-        try:
-            import scoring_config as _sc3
-            _ceq = set(getattr(_sc3, "CASH_EQUIVALENT_TICKERS", []) or [])
-            if _ceq and os.path.exists(portfolio_path):
-                with open(portfolio_path, encoding="utf-8") as f:
-                    _pd4 = json.load(f)
-                _mmf = sum((h.get("value_gbp") or 0.0)
-                           for h in _pd4.get("funds", []) + _pd4.get("stocks", [])
-                           if h.get("ticker") in _ceq)
-        except Exception:
-            pass
-        _reserve = _ddm.compute_reserve(_cash, _mmf, 0.0,
-                                        getattr(_sc3, "DRAWDOWN_BUFFER_GBP", 500.0)
-                                        if "_sc3" in dir() else 500.0)
-        import yfinance as _yf
-        _h = _yf.Ticker("VUAG.L").history(period="2y")
-        _closes = list(_h["Close"].dropna()) if _h is not None and len(_h) else []
-        if _closes:
-            _dstate = _ddm.load_state()
-            _dstate, _fired = _ddm.update_ladder(_dstate, _closes)
-            _regime, _rbasis = _ddm.classify_regime(_closes, _dstate["drawdown_pct"])
-            _dstate["regime_state"], _dstate["regime_basis"] = _regime, _rbasis
-            _dstate["reserve_gbp"] = _reserve
-            _ddm.save_state(_dstate)
-            _dblock = _ddm.emit_block(_dstate, _fired, _reserve)
-            summary["drawdown"] = _dblock
-            summary["regime_state"] = _regime
-            if _fired:
-                flags.append({"type": "DRAWDOWN_TRIGGER",
-                              "message": json.dumps(_dblock.get("DRAWDOWN_TRIGGER"))})
-            print(f"  B1: {_dblock['standing_line']}")
-        else:
-            warnings.append("B1 drawdown monitor: no VUAG history this run")
-    except Exception as _e:
-        warnings.append(f"B1 drawdown monitor skipped: {_e}")
 
     # — B2: MMF cash-yield sweep rule (D14) — mechanical SWEEP/reverse-sweep line —
     try:

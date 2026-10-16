@@ -60,6 +60,34 @@ def _today() -> str:
     return datetime.date.today().isoformat()
 
 
+def classify_declared_only(names, ledger_entries, book_date, declared=None) -> dict:
+    """ISA-0866 rev c (12-Oct-2026) - why is a DECLARED name absent from the broker book?
+
+    Reads the persistent dealing record (`transaction_ledger.json` entries, tickers resolved by the
+    importer), matching the declared ticker and its `aliases`. CLOSED: the record has trades for the
+    name, they net to zero units, and the last one is a SELL dated on or before the book date - the
+    position was sold, the declaration is inert. Anything else - no trades in the record, units still
+    open, or a trade AFTER the book date (the 12-Sep NTAP case: bought after the snapshot) - stays a
+    STALE SLEEVE, because then the book really is missing money. Never guesses (R2.10).
+    Returns {"stale": [...], "closed": {ticker: sold_on}}."""
+    out = {"stale": [], "closed": {}}
+    for t in sorted(names or []):
+        keys = {str(t).upper()} | {str(a).upper() for a in
+                                    (((declared or {}).get(t) or {}).get("aliases") or [])}
+        tr = sorted((e for e in (ledger_entries or [])
+                     if e.get("type") in ("buy", "sell") and str(e.get("ticker") or "").upper() in keys),
+                    key=lambda e: str(e.get("date") or ""))
+        net = sum((float(e.get("quantity") or 0.0) if e["type"] == "buy"
+                   else -float(e.get("quantity") or 0.0)) for e in tr)
+        last = tr[-1] if tr else None
+        if (last is not None and last["type"] == "sell" and abs(net) < 1e-6 and book_date
+                and str(last.get("date") or "9999") <= str(book_date)):
+            out["closed"][t] = str(last.get("date"))
+        else:
+            out["stale"].append(t)
+    return out
+
+
 def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[str] = None,
            store: Optional[dict] = None, dry_run: bool = False,
            record_lifecycle: Optional[bool] = None, lifecycle_observer: str = "monthly_prerun",
@@ -182,16 +210,67 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
         return {"state": "UNAVAILABLE", "rows": [], "summary": {},
                 "warnings": warn + ["Step 6.5: position_sizing unavailable (%s: %s)"
                                     % (type(exc).__name__, exc)]}
+    # ⚑ ISA-0866 amendment (Raj 12-Oct-2026): a HELD direct stock absent from the registry is declared FROM ITS
+    #   DECISION RECORD before anything reads the registry (FORWARD_LED -> is_binary false; VCI -> route recorded,
+    #   V-1 stands until the VCI run declares it). Never from prose, never by hand, never on a dry run.
+    try:
+        with open(os.path.join(root, "decision_ledger.json"), encoding="utf-8") as _dlf:
+            _dl_entries = json.load(_dlf).get("entries") or []
+    except Exception:                                                # noqa: BLE001
+        _dl_entries = []
+    try:
+        _drd = _ps.declare_held_from_decision_record(sorted(_held_tk), _dl_entries, root=root, today=today,
+                                                     dry_run=dry_run, book_date=_book_date)
+        if _drd.get("declared"):
+            declared = dict(declared or {}, **{t: _drd["positions_after"][t] for t in _drd["declared"]})
+            warn.append("Step 6.5 (ISA-0866): %s %s declared FORWARD_LED / is_binary false FROM THE DECISION RECORD (%s)."
+                        % (", ".join(_drd["declared"]), "would be" if dry_run else "were",
+                           "; ".join("%s <- %s" % (t, ((_drd["positions_after"].get(t) or {}).get("route_source") or {}).get("decision_id"))
+                                     for t in _drd["declared"])))
+        for _t in _drd.get("pending_vci") or []:
+            warn.append("Step 6.5 (ISA-0866): %s is a HELD VCI-route stock with no declared binary state - route VCI "
+                        "recorded; the VCI run must declare its catalyst (V-1 refusal stands until it does)." % _t)
+        for _t, _o in sorted((_drd.get("unresolved") or {}).items()):
+            warn.append("Step 6.5 (ISA-0866): %s is HELD and undeclared and its decision record is %s%s - the route "
+                        "cannot be established mechanically; declare it (V-1 refusal stands)."
+                        % (_t, _o.get("state"), (" " + str(_o.get("routes"))) if _o.get("routes") else ""))
+    except Exception as _dre:                                        # noqa: BLE001
+        _drd = {"state": "DECLARE_FAILED", "why": "%s: %s" % (type(_dre).__name__, _dre)}
+        warn.append("Step 6.5 (ISA-0866): declaring held stocks from the decision record FAILED (%s) - undeclared "
+                    "holdings stay refused (V-1)." % _drd["why"])
     _declared_only = sorted({t for t, v in (declared or {}).items()
                              if not str(t).startswith("_")} - _held_tk)
-    if _declared_only:
+    # ISA-0866 rev c: a declared name the dealing record shows SOLD is not a stale sleeve.
+    try:
+        with open(os.path.join(root, "transaction_ledger.json"), encoding="utf-8") as _tlf:
+            _tl_entries = json.load(_tlf).get("entries") or []
+    except Exception:                                                # noqa: BLE001
+        _tl_entries = []          # no record -> every declared-only name stays STALE (never guessed)
+    _decl_cls = classify_declared_only(_declared_only, _tl_entries, _book_date, declared)
+    if _decl_cls["stale"]:
         warn.append(
             "Step 6.5 ⚑ STALE SLEEVE: %s is DECLARED in vci_binary_positions.json but absent "
             "from %s, so it is not in the risk denominator. Every weight, risk share and "
             "ceiling verdict below is computed on a sleeve that is missing that money and is "
             "NOT current. Re-run after the next portfolio extract before acting on any "
             "REFUSE or IN_BREACH verdict."
-            % (", ".join(_declared_only), os.path.basename(portfolio_path)))
+            % (", ".join(_decl_cls["stale"]), os.path.basename(portfolio_path)))
+    if _decl_cls["closed"]:
+        # ISA-0858: the registry declares EVERY held direct stock (forward-led and VCI alike); a SOLD declaration is
+        # moved to `retired` by its producer on a real run (record kept), never on a dry run.
+        try:
+            _ret = _ps.retire_closed_declarations(_decl_cls["closed"], root=root, today=today, dry_run=dry_run)
+        except Exception as _rex:                                    # noqa: BLE001
+            _ret = {"state": "RETIRE_FAILED", "why": "%s: %s" % (type(_rex).__name__, _rex), "retired": []}
+        _decl_cls["retirement"] = _ret
+        warn.append(
+            "Step 6.5 (ISA-0866/ISA-0858): %s - DECLARED in vci_binary_positions.json but SOLD per the "
+            "dealing record on or before the %s book, so the declaration is inert (not held, not "
+            "in any budget or verdict). The book is current. Registry: %s%s."
+            % (", ".join("%s (sold %s)" % (k, v) for k, v in sorted(_decl_cls["closed"].items())),
+               _book_date or "?", _ret.get("state"),
+               (" " + ", ".join(_ret.get("retired") or [])) if _ret.get("retired") else
+               (" - " + _ret["why"] if _ret.get("why") else "")))
 
     # ── D17 obligations: lifecycle first, so the queue's claims are current ──────────────
     try:
@@ -439,6 +518,12 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
 
     summary = {
         "as_of": today, "n_held": len(rows),
+        # ISA-0866 rev c: why each declared-but-not-held name is absent (dealing record)
+        "declared_not_held": {"stale_sleeve": _decl_cls["stale"],
+                              "closed_per_dealing_record": _decl_cls["closed"],
+                              "declared_from_decision_record": {k: _drd.get(k) for k in ("state", "declared", "pending_vci")}
+                              if isinstance(_drd, dict) else None,
+                              "retirement": _decl_cls.get("retirement")},
         "underwritten": uw.get("underwritten"),
         "not_underwritten": uw.get("not_underwritten"),
         "sleeve_gbp": round(sleeve_gbp, 2), "min_entry_gbp": round(min_entry, 2),
@@ -610,6 +695,30 @@ def _selftest(verbose: bool = True) -> int:
         review(os.path.join(HERE, "portfolio_data_sep_2026.json"), dry_run=True)
         ok(os.path.getmtime(_st) == _m0,
            "⚑ dry_run=True must NOT write the obligation store")
+
+    # ── ISA-0866 rev c — declared-but-not-held names are classified from the dealing record ──
+    _led = [{"date": "2026-07-10", "type": "buy", "ticker": "ABCL", "quantity": 209},
+            {"date": "2026-09-14", "type": "sell", "ticker": "ABCL", "quantity": 209},
+            {"date": "2026-06-01", "type": "buy", "ticker": "ONT", "quantity": 880},
+            {"date": "2026-09-18", "type": "sell", "ticker": "ONT", "quantity": 880},
+            {"date": "2026-09-08", "type": "buy", "ticker": "NEWB", "quantity": 37},
+            {"date": "2026-07-01", "type": "buy", "ticker": "PART", "quantity": 10},
+            {"date": "2026-08-01", "type": "sell", "ticker": "PART", "quantity": 4}]
+    _c = classify_declared_only(["ABCL", "ONTL", "NEWB", "PART", "NONE"], _led, "2026-10-02",
+                                {"ONTL": {"aliases": ["ONT"]}})
+    ok(_c["closed"] == {"ABCL": "2026-09-14", "ONTL": "2026-09-18"},
+       "⚑ ISA-0866 rev c MUST-FIRE: a declared name the dealing record shows SOLD (incl. via an "
+       "alias) is CLOSED with its sale date, not a stale sleeve: %s" % _c)
+    ok(_c["stale"] == ["NEWB", "NONE", "PART"],
+       "ISA-0866 rev c NEGATIVE CONTROL: open units, a partial sale or no record at all stay STALE: %s" % _c)
+    _c2 = classify_declared_only(["NEWB"], _led, "2026-08-31")
+    ok(_c2["stale"] == ["NEWB"] and not _c2["closed"],
+       "ISA-0866 rev c NEGATIVE CONTROL: a name BOUGHT after the book date (the 12-Sep NTAP case) "
+       "remains a STALE SLEEVE: %s" % _c2)
+    _c3 = classify_declared_only(["ABCL"], _led, "2026-09-01")
+    ok(_c3["stale"] == ["ABCL"],
+       "ISA-0866 rev c NEGATIVE CONTROL: a sale AFTER the book date does not close the declaration "
+       "for that book: %s" % _c3)
 
     # ⚑ NEGATIVE CONTROL (R5.5): an unreadable portfolio must yield UNAVAILABLE with a named
     #   warning, never an empty-and-therefore-clean review.

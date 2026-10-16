@@ -83,6 +83,48 @@ def classify_security_type(company_desc, ticker=None):
 
 COMMON, NON_COMMON, UNKNOWN = "common", "non_common", "unknown"
 
+# ── ISA-0860 (12-Oct-2026) — INSTRUMENT FORM, a SECOND and ORTHOGONAL fact ─────────────────────────────
+# `classify_security_type` answers the ECONOMIC question (is this the ordinary equity?) and correctly calls an
+# ADS "common". ISA wrapper eligibility asks a LEGAL question it cannot answer: a depositary receipt qualifies
+# only if its UNDERLYING shares would (HMRC). VEON ("VEON Ltd. ADS") read "common" and took an October capital
+# slot AJ Bell will not hold in an ISA. The FORM is therefore recorded separately; neither function overrides
+# the other. This is the corroborating source to OpenFIGI securityType2 (Raj 12-Oct-2026: OpenFIGI primary,
+# feed description cross-checks; a disagreement reads CONFIRM_REQUIRED, never a refusal).
+DIRECT, DEPOSITARY_RECEIPT = "direct", "depositary_receipt"
+_DR_MARKERS = ("american depositary", "american depository", "global depositary", "global depository",
+               "depositary receipt", "depository receipt", "new york registry share", "ny registry share")
+_DR_WORDS = ("ads", "adr", "adrs", "gdr", "gdrs")
+_DIRECT_MARKERS = ("common stock", "common share", "ordinary share", "ordinary stock",
+                   "shares of beneficial interest")
+
+
+def _words(d: str):
+    import re as _re
+    return set(_re.findall(r"[a-z0-9]+", d))
+
+
+def classify_instrument_form(company_desc, ticker=None):
+    """'depositary_receipt' | 'direct' | 'unknown' from the feed description. A NY registry share is reported
+    as a depositary-form line (OpenFIGI types it Depositary Receipt) - its eligibility is then decided by the
+    underlying listing or Raj's declaration, never assumed. An undescribed line stays UNKNOWN (never guessed)."""
+    d = str(company_desc or "").lower()
+    if not d.strip():
+        return UNKNOWN
+    if any(m in d for m in _DR_MARKERS) or (_words(d) & set(_DR_WORDS)):
+        return DEPOSITARY_RECEIPT
+    if "depositary share" in d or "depository share" in d:
+        return DEPOSITARY_RECEIPT               # the preferred wrapper (ACGLN) - non_common anyway
+    if any(m in d for m in _DIRECT_MARKERS):
+        return DIRECT
+    return UNKNOWN
+
+
+def us_listed_ordinary_shares(company_desc) -> bool:
+    """True when a US-venue feed line names 'Ordinary Shares' - the NASDAQ feed's wording for a non-US issuer
+    whose shares (not a DR) trade in the US (GLBE, FROG, MNDY, CRDO ...). ⚑ A WEAK predictor of a broker custody
+    or CREST-settlement refusal (GLBE, Raj 11-Oct-2026): consumers may FLAG on it, never refuse (ISA-0860)."""
+    return "ordinary share" in str(company_desc or "").lower()
+
 
 def _selftest():
     cases = [
@@ -112,6 +154,25 @@ def _selftest():
     # The ADS rule must beat the 'depositary share' non-common rule, not merely coexist with it.
     assert classify_security_type("X American Depositary Shares") == COMMON
     assert classify_security_type("X Depositary Shares") == NON_COMMON
+    # ISA-0860: the FORM is orthogonal - an ADS is economically common AND a depositary receipt
+    _form = [("VEON Ltd. ADS", DEPOSITARY_RECEIPT), ("argenx SE American Depositary Shares", DEPOSITARY_RECEIPT),
+             ("Genmab A/S ADS", DEPOSITARY_RECEIPT), ("BeOne Medicines Ltd. American Depositary Shares", DEPOSITARY_RECEIPT),
+             ("ASML Holding N.V. New York Registry Shares", DEPOSITARY_RECEIPT), ("KANZHUN LIMITED American Depository Shares", DEPOSITARY_RECEIPT),
+             ("Apple Inc. Common Stock", DIRECT), ("Global-E Online Ltd. Ordinary Shares", DIRECT),
+             ("Matador Resources Company", UNKNOWN), ("Adsboard Corp Common Stock", DIRECT), ("", UNKNOWN), (None, UNKNOWN)]
+    _badf = [(d, classify_instrument_form(d), e) for d, e in _form if classify_instrument_form(d) != e]
+    assert not _badf, f"instrument form misclassified: {_badf}"
+    assert classify_security_type("VEON Ltd. ADS") == COMMON and classify_instrument_form("VEON Ltd. ADS") == DEPOSITARY_RECEIPT
+    assert us_listed_ordinary_shares("Global-E Online Ltd. Ordinary Shares") and not us_listed_ordinary_shares("Apple Inc. Common Stock")
+    # R5.5 labelled controls for the ISA-0860 form classifier (a broken classifier must fail these)
+    assert classify_instrument_form("Adsboard Corp Common Stock") == DIRECT, \
+        "NEGATIVE CONTROL: 'ads' inside a word is not an ADS - a substring match must fail this"
+    assert classify_instrument_form("Matador Resources Company") == UNKNOWN, \
+        "NEGATIVE CONTROL: an undescribed line stays UNKNOWN - a classifier that defaults to direct must fail this"
+    assert classify_instrument_form("VEON Ltd. ADS") == DEPOSITARY_RECEIPT, \
+        "MUST-FIRE: VEON's own feed wording is a depositary receipt - the economic 'common' class must not mask it"
+    assert not us_listed_ordinary_shares("Global-E Online Ltd. ADS"), \
+        "NEGATIVE CONTROL: the custody signal is the 'Ordinary Shares' wording only, never any foreign issuer"
     print(f"SELFTEST PASS — {len(cases) + 2} assertions (preferred wrappers, tangible equity "
           f"units, ADS/ADR both spellings, NY registry shares, precedence of ADS over "
           f"'depositary share', undescribed names stay UNKNOWN and are never guessed)")

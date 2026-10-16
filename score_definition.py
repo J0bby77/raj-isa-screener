@@ -59,7 +59,11 @@ def _strip(tree):
 def identity(texts: Dict[str, str]) -> dict:
     """Identity of a scoring definition from module SOURCE TEXTS (so a historical version can be
     identified from its archived source without importing it)."""
-    trees = {m: ast.parse(t) for m, t in texts.items() if m != "scoring_config"}
+    # ISA-0845 (11-Oct-2026): _strip() below MUTATES these trees, so they are parsed as private copies
+    # (compile(..., PyCF_ONLY_AST) is ast.parse without the shared isa_source_cache memo) - a shared tree
+    # handed out by the memo must never be rewritten (isa_source_cache CONTRACT).
+    trees = {m: compile(t, "<score_definition:%s>" % m, "exec", ast.PyCF_ONLY_AST)
+             for m, t in texts.items() if m != "scoring_config"}
     funcs = {m: {n.name: n for n in t.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
              for m, t in trees.items()}
     alias = {}
@@ -101,7 +105,7 @@ def identity(texts: Dict[str, str]) -> dict:
                         stack.append((mod, fn.attr))
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in CFG_ALIASES:
                 cfgnames.add(n.attr)
-    fsig = {"%s.%s" % k: hashlib.sha256(ast.dump(_strip(ast.parse(ast.unparse(funcs[k[0]][k[1]]))),
+    fsig = {"%s.%s" % k: hashlib.sha256(ast.dump(_strip(compile(ast.unparse(funcs[k[0]][k[1]]), "<score_definition>", "exec", ast.PyCF_ONLY_AST)),
                                                  include_attributes=False).encode()).hexdigest()[:16]
             for k in sorted(seen)}
     cvals = {}

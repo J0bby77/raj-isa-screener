@@ -473,10 +473,16 @@ def _render_capital_router(d):
     out = h3("Marginal-pound router &mdash; where this month&#39;s capital is routed")
     if v.get("new_capital_control_line"):                    # ISA-0807 — the binding refusal first
         out += para("<strong>" + se(v["new_capital_control_line"]) + "</strong>")
+    if v.get("fund_leg_line"):                               # ISA-0833 — the fund leg's refusal next
+        out += para("<strong>" + se(v["fund_leg_line"]) + "</strong>")
     if v.get("decision_engine_line"):                        # ISA-0804 — the engine receipt (SHADOW/LIVE)
         out += para(se(v["decision_engine_line"]))
+    if v.get("dealability_line"):                            # ISA-0860 — confirm at dealing + fallbacks
+        out += para("<strong>" + se(v["dealability_line"]) + "</strong>")
     if v.get("engine_authority_line"):                       # ISA-0811 — receipt allocation + legacy SHADOW
         out += para("<strong>" + se(v["engine_authority_line"]) + "</strong>")
+    if v.get("funding_park_line"):                           # ISA-0858 - funding split + D3 park
+        out += para(se(v["funding_park_line"]))
     for k in ("split_line", "split_reason_line", "executability_line", "freeze_line",
               "ranking_line", "c1_line"):
         if v.get(k):
@@ -921,6 +927,9 @@ def build_s7(data):
 
     if d.get("notes"):
         inner += para(se(d["notes"]))
+    # ISA-0860 fix-on-finding: measurement / coverage / instrument eligibility (build_integrity_block s7)
+    for _il in d.get("integrity_lines") or []:
+        inner += para(se(_il), muted=True, small=True)
 
     # Fix Pack A14 (P2): VUAG counterfactual line + D6 probation rule
     _cf = d.get("vuag_counterfactual") or {}
@@ -1250,6 +1259,9 @@ def build_s11(data):
         _pre += para(f'<strong>Override log (A13):</strong> {se(d["override_summary"])}')
     if d.get("ledger_echo"):
         _pre += para(se(d["ledger_echo"]), muted=True, small=True)
+    # ISA-0860 fix-on-finding: framework health (build_integrity_block s11 - execution ledger, integrity queue)
+    for _il in d.get("integrity_lines") or []:
+        _pre += para(se(_il), muted=True, small=True)
     if not items:
         return _pre + para("No retrospective items this month.", muted=True)
 
@@ -1807,6 +1819,17 @@ def main():
                     (_rc.get("summary") or {}).get("held_underwriting"),
                     (((_rc.get("summary") or {}).get("held_position_review") or {})
                      .get("thesis_lineage")))
+            # ⚑ ISA-0860 FIX-ON-FINDING (12-Oct-2026): build_integrity_block was the DECLARED renderer of six
+            #   summary keys and had ZERO callers - coverage, the symbol map and the integrity queue reached no
+            #   email. Wired here (renderer only, R20.2); pair_summary_key_disposition now refuses an uncalled one.
+            _smi = _rc.get("summary") or {}
+            _ib = _ep_uw.build_integrity_block(
+                fetch_report=_smi.get("fetch_report"), correlation_coverage=_smi.get("correlation_coverage"),
+                integrity_report=_smi.get("integrity_report"), execution_ledger=_smi.get("execution_ledger"),
+                symbol_map_refresh=_smi.get("symbol_map_refresh"), fetch_universe=_smi.get("fetch_universe"),
+                instrument_eligibility=_smi.get("instrument_eligibility"))
+            data["s7_stock_sleeve"]["integrity_lines"] = _ib.get("s7_lines") or []
+            data.setdefault("s11_retrospective", {})["integrity_lines"] = _ib.get("s11_lines") or []
         except FileNotFoundError:
             _errs.append(f"run_context_{_month}.json does not exist — the router plan and its "
                          f"judgement scope cannot be read")
@@ -1886,6 +1909,7 @@ def main():
                 _ncc_live = _ncc_m.status()
             except Exception as _ncc_e:                                 # noqa: BLE001
                 _ncc_live = {"state": "UNKNOWN", "blocks_new_stock_capital": True,
+                             "blocks_new_fund_capital": True,
                              "reasons": ["control unreadable: %s" % _ncc_e]}
             if _ncc_live.get("blocks_new_stock_capital") is not False and not _blk.get("new_capital_control_line"):
                 _blk["new_capital_control_line"] = _ep.new_capital_control_line(
@@ -1894,6 +1918,13 @@ def main():
                     "ISA-0807: the new-stock-capital control is %s at email build time but the "
                     "pre-run plan was formed without it - re-run the pre-run router before relying "
                     "on any stock figure in this section." % _ncc_live.get("state"))
+            # ISA-0833: the fund verdict is re-read too; a refusal the bundle did not carry still renders.
+            if _ncc_live.get("blocks_new_fund_capital") is not False and not _blk.get("fund_leg_line"):
+                _blk["fund_leg_line"] = _ep.fund_leg_line(None, _ncc_live)
+                _blk.setdefault("warnings", []).append(
+                    "ISA-0833: new fund capital is refused at email build time (acceptance %s) - no fund "
+                    "purchase from new money in this section is authorised."
+                    % ((_ncc_live.get("fund_leg") or {}).get("acceptance_state") or "UNREADABLE"))
             # ISA-0804: the ONE Capital Decision Receipt, re-verified at build time against the
             # CURRENT inputs (a receipt formed on other inputs renders STALE, never as current).
             _cde_m = None
@@ -1907,11 +1938,12 @@ def main():
             _cde_sum = _engine_summary_for_render(_cde_sum, _cdv,
                                                   getattr(_cde_m, "summary", None))
             _blk["decision_engine_line"] = _ep.decision_engine_line(_cde_sum, _cdv.get("state"))
+            _blk["dealability_line"] = _ep.dealability_confirmation_line(_cde_sum)       # ISA-0860
             data.setdefault("meta", {})["capital_decision_engine"] = {
                 "verification": _cdv.get("state"), "receipt_id": (_cde_sum or {}).get("receipt_id"),
                 "state": (_cde_sum or {}).get("state"), "authority": (_cde_sum or {}).get("engine_authority")}
             data.setdefault("meta", {})["new_capital_control"] = {
-                k: _ncc_live.get(k) for k in ("state", "blocks_new_stock_capital", "record_id",
+                k: _ncc_live.get(k) for k in ("state", "blocks_new_stock_capital", "blocks_new_fund_capital", "record_id",
                                               "failed_contracts", "policy_state", "policy_hard_max")}
             data.setdefault("s2_capital_allocation", {})["capital_router"] = _blk
             data.setdefault("meta", {})["judgement_gate"] = {

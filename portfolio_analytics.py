@@ -57,6 +57,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # from there on the same principle.
 from extract_cash_statement import (  # noqa: E402
     CASH_BUFFER_MIN, STANDING_ORDER, STANDING_ORDER_ACTIVE, STANDING_ORDER_PAUSED_FROM)
+# ISA-0808 (Raj decision 10-Oct-2026, October build S1a): no automatic phase switch.
+PHASE_STATUS_RETIRED = "AUTHORISED_TARGETS_FIXED"
+PHASE_POLICY = ("NO_AUTOMATIC_SWITCH - the Phase-1 -> Phase-2 re-target at two consecutive months "
+                ">= 15% was retired on 11-Oct-2026 (ISA-0808); phase2_* values are non-operative "
+                "reference data and current authorised targets remain until an explicit review "
+                "approves replacements")
 AJ_BELL_DEALING_COST = 5.0       # £5 per trade
 # ⚑ CORRECTED 05-Aug-2026 (register H13). This read 0.0075 and was wrong: AJ Bell's own cash
 # statement carries literal `FX Charge (0.50%)` rows, and the COCO purchase executed at
@@ -356,7 +362,9 @@ def build_capital_summary(
     cash_deployable = portfolio["summary"]["cash_deployable_gbp"]
 
     phase = target_weights["_meta"]["current_phase"]
-    phase2_trigger = target_weights["thresholds"]["phase_transition_pct"]
+    # ISA-0808 (Raj 10-Oct-2026): the automatic Phase-1 -> Phase-2 switch is RETIRED.
+    # thresholds.phase_transition_pct no longer exists; the current authorised targets stand
+    # until an explicit review approves replacements.
     stock_target_low  = target_weights["stock_sleeve"]["phase1_target_low"] if phase == 1 else target_weights["stock_sleeve"]["phase2_target_low"]
     stock_target_high = target_weights["stock_sleeve"]["phase1_target_high"] if phase == 1 else target_weights["stock_sleeve"]["phase2_target_high"]
 
@@ -367,16 +375,16 @@ def build_capital_summary(
     typical_position_low  = target_weights["thresholds"]["typical_stock_position_low"] * total
     typical_position_high = target_weights["thresholds"]["typical_stock_position_high"] * total
 
-    # Standing order note
-    so_note = (
-        (f"Standing order: £{STANDING_ORDER:,.0f}/month reserved for stock sleeve. "
-         f"Does NOT flow to funds even if no stock action taken — adds to cash buffer.")
-        if STANDING_ORDER_ACTIVE else
-        (f"Standing order: PAUSED since {STANDING_ORDER_PAUSED_FROM} (Raj, job security). "
-         f"No monthly inflow — cash is not replenished and every deployment is from the "
-         f"existing balance.")
-    )
-
+    # Standing-order note (ISA-0851): the ONE schedule reader; an expected contribution is never cash.
+    try:
+        import contribution_schedule as _cs851
+        _so = _cs851.state()
+        so_note = _cs851.describe(_so) + (
+            " - while ACTIVE it is reserved for the stock sleeve and, if no stock action is taken, adds to cash "
+            "only once the cash statement shows it credited." if _so.get("state") == _cs851.ACTIVE else
+            " - no monthly inflow: every deployment is from the existing balance.")
+    except Exception as _e:                                             # noqa: BLE001
+        so_note = "S/O state UNKNOWN (%s) - no contribution is assumed." % _e
     return {
         "total_portfolio_gbp":          total,
         "cash_effective_gbp":           cash_effective,
@@ -394,7 +402,7 @@ def build_capital_summary(
         "typical_position_high_gbp":     round(typical_position_high, 2),
         "standing_order_note":           so_note,
         "phase":                         phase,
-        "phase_transition_trigger_pct":  phase2_trigger,
+        "phase_policy":                  PHASE_POLICY,
     }
 
 
@@ -532,46 +540,18 @@ def run_analytics(
         })
 
     # ---------------------------------------------------------------------------
-    # Phase status check (Section 8A.5)
+    # Phase status (ISA-0808, Raj 10-Oct-2026): the automatic Phase-2 switch at two
+    # consecutive months >= 15% is RETIRED. Status is reported, never a trigger.
     # ---------------------------------------------------------------------------
-    phase2_trigger = target_weights["thresholds"]["phase_transition_pct"]
     prior_stock_pct = None
     if prior_portfolio:
         prior_stock_pct = prior_portfolio.get("summary", {}).get("stock_sleeve_pct", 0) / 100
-
-    current_above_trigger = stock_sleeve_pct >= phase2_trigger
-
-    if prior_stock_pct is not None:
-        prior_above_trigger = prior_stock_pct >= phase2_trigger
-    else:
-        prior_above_trigger = None
-
-    if current_above_trigger and prior_above_trigger:
-        phase_status = "TRANSITION_CONFIRMED"
-        phase_note   = (
-            f"PHASE TRANSITION CONFIRMED — stock sleeve at {stock_sleeve_pct*100:.1f}% for two consecutive months. "
-            f"Claude must shift to Phase 2 target weights at Step 8A.5."
-        )
-    elif current_above_trigger and prior_above_trigger is None:
-        phase_status = "ABOVE_TRIGGER_PRIOR_UNKNOWN"
-        phase_note   = (
-            f"Stock sleeve at {stock_sleeve_pct*100:.1f}% — above {phase2_trigger*100:.0f}% trigger. "
-            f"Prior month data not available — cannot confirm consecutive. "
-            f"Check prior portfolio manually at Step 8A.5."
-        )
-    elif current_above_trigger and not prior_above_trigger:
-        phase_status = "ABOVE_TRIGGER_FIRST_MONTH"
-        phase_note   = (
-            f"Stock sleeve at {stock_sleeve_pct*100:.1f}% — crossed {phase2_trigger*100:.0f}% trigger this month. "
-            f"Transition NOT YET CONFIRMED — must remain above {phase2_trigger*100:.0f}% for a second consecutive month."
-        )
-    else:
-        pct_below = round((phase2_trigger - stock_sleeve_pct) * 100, 1)
-        phase_status = "PHASE_1_ACTIVE"
-        phase_note   = (
-            f"Phase 1 active — stock sleeve at {stock_sleeve_pct*100:.1f}%. "
-            f"{pct_below:.1f}pp below {phase2_trigger*100:.0f}% trigger. Transition not yet confirmed."
-        )
+    phase_status = PHASE_STATUS_RETIRED
+    phase_note   = (
+        f"Authorised targets fixed (phase {phase}) - stock sleeve at {round(stock_sleeve_pct * 100, 2):.1f}%. "
+        f"There is no automatic phase switch (ISA-0808); fund targets change only by an explicit "
+        f"review that approves replacements."
+    )
 
     # ---------------------------------------------------------------------------
     # Stock sleeve return check
@@ -701,12 +681,6 @@ def run_analytics(
                            f"trade: {rc['rebalance_trade']['trade_action']} £{rc['rebalance_trade']['abs_trade_gbp']:,.0f}",
                 "action":  "Escalate to Step 10 Category 7",
             })
-    if phase_status in ("TRANSITION_CONFIRMED", "ABOVE_TRIGGER_FIRST_MONTH"):
-        flags.append({
-            "type":    "PHASE_STATUS",
-            "message": phase_note,
-            "action":  "Execute Step 8A.5 phase transition check",
-        })
 
     return {
         "_meta": {
@@ -740,7 +714,8 @@ def run_analytics(
             "note":              phase_note,
             "current_pct":       round(stock_sleeve_pct * 100, 2),
             "prior_pct":         round(prior_stock_pct * 100, 2) if prior_stock_pct is not None else None,
-            "trigger_pct":       round(phase2_trigger * 100, 1),
+            "trigger_pct":       None,
+            "policy":            PHASE_POLICY,
         },
         "section_a": section_a,
         "section_b": section_b,

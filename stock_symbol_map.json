@@ -1,8 +1,8 @@
 {
  "_what": "P1.2c VERIFIED ticker->Yahoo symbol map. An entry exists ONLY where (a) an index screen, the broker, a VCI artefact, the VCI watchlist or the declared benchmark list named the ticker, AND (b) the live listing's EXCHANGE is one its declared venue permits. \u2691 A symbol match is NOT a check: a bare `ONT` returns meta.symbol 'ONT' for Onterris, Inc. The EXCHANGE is the falsifier. \u2691 REFRESHED BY THE RUN THAT CONSUMES IT (Step 5x, ISA-0577) \u2014 this file was a hand-run artefact frozen at 2026-08-28 while the universe grew every month, and 119 of 178 names (66.9%) were unmapped, unfetched and sized on A2.3's adverse 0.70. \u2691 APPEND-ONLY: an existing entry is never re-decided (R4.8). \u2691 GENERATED \u2014 never hand-edited (R14.3).",
  "built_on": "2026-08-28",
- "n_map": 213,
- "n_refused": 1,
+ "n_map": 217,
+ "n_refused": 0,
  "map": {
   "AVGO": "AVGO",
   "MU": "MU",
@@ -216,7 +216,11 @@
   "TJX": "TJX",
   "VEON": "VEON",
   "VIAV": "VIAV",
-  "WDAY": "WDAY"
+  "WDAY": "WDAY",
+  "AEVA": "AEVA",
+  "LAES": "LAES",
+  "OUST": "OUST",
+  "SATL": "SATL"
  },
  "verified": [
   {
@@ -317,6 +321,19 @@
    "company": "Airbnb Inc. Class A Common Stock",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "AEVA",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "NMS"
+   ],
+   "source": "artefact:vci_prescore_oct_2026.json",
+   "company": "Aeva Technologies, Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "scoring_venue": "NMS",
+   "admitted_on": "2026-10-12"
   },
   {
    "ticker": "AGYS",
@@ -1471,7 +1488,7 @@
    "source": "declared alias FRO.OL -> FRO.OL (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "FRO.OL",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-10-03"
+   "admitted_on": "2026-10-12"
   },
   {
    "ticker": "FROG",
@@ -2123,6 +2140,19 @@
    "admitted_on": "2026-09-03"
   },
   {
+   "ticker": "LAES",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "NMS"
+   ],
+   "source": "artefact:vci_prescore_oct_2026.json",
+   "company": "SEALSQ Corp",
+   "verified_by": "exchange_vs_declared_venue",
+   "scoring_venue": "NMS",
+   "admitted_on": "2026-10-12"
+  },
+  {
    "ticker": "LFST",
    "currency": "USD",
    "exchange": "NMS",
@@ -2743,6 +2773,19 @@
    "verified_by": "exchange_vs_declared_venue"
   },
   {
+   "ticker": "OUST",
+   "currency": "USD",
+   "exchange": "NMS",
+   "expected_exchanges": [
+    "NMS"
+   ],
+   "source": "constituents_history",
+   "company": "Ouster Inc. Common Stock",
+   "verified_by": "exchange_vs_declared_venue",
+   "scoring_venue": "NMS",
+   "admitted_on": "2026-10-12"
+  },
+  {
    "ticker": "P",
    "currency": "USD",
    "exchange": "NYQ",
@@ -2860,19 +2903,12 @@
    "currency": "USD",
    "exchange": "NMS",
    "expected_exchanges": [
-    "ASE",
-    "BTS",
-    "NCM",
-    "NGM",
-    "NMS",
-    "NYQ",
-    "NYS",
-    "PCX"
+    "NMS"
    ],
    "source": "declared alias QBTS -> QBTS (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "QBTS",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-10-03"
+   "admitted_on": "2026-10-12"
   },
   {
    "ticker": "RACE.MI",
@@ -3101,6 +3137,19 @@
    "company": "Sanmina Corporation Common Stock",
    "verified_by": "exchange_vs_declared_venue",
    "admitted_on": "2026-09-03"
+  },
+  {
+   "ticker": "SATL",
+   "currency": "USD",
+   "exchange": "NCM",
+   "expected_exchanges": [
+    "NCM"
+   ],
+   "source": "artefact:vci_prescore_oct_2026.json",
+   "company": "Satellogic Inc.",
+   "verified_by": "exchange_vs_declared_venue",
+   "scoring_venue": "NCM",
+   "admitted_on": "2026-10-12"
   },
   {
    "ticker": "SHOP",
@@ -3802,33 +3851,16 @@
    "admitted_on": "2026-09-03"
   }
  ],
- "refused": [
-  {
-   "ticker": "SATL",
-   "group": "VCI",
-   "source": "artefact:vci_prescore_sep_2026.json",
-   "company": "Satellogic Inc.",
-   "declared_venue": null,
-   "fix": "declare the intended listing in stock_price_fetch.SYMBOL_MAP, one line, \"SATL\": \"<symbol>.<venue suffix>\" \u2014 deliberately, never guessed",
-   "reason": "CANNOT FORM A VENUE EXPECTATION \u2014 its provenance asserts no exchange, so nothing the fetch returns could contradict it. A bare ticker admitted on the strength of the answer alone is the ONT/Onterris defect wearing the verifier's own uniform."
-  }
- ],
- "refreshed_on": "2026-10-03",
+ "refused": [],
+ "refreshed_on": "2026-10-12",
  "alias_verification": [
   {
    "alias": "ABCL",
    "symbol": "ABCL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
-    "ASE",
-    "BTS",
-    "NCM",
-    "NGM",
-    "NMS",
-    "NYQ",
-    "NYS",
-    "PCX"
+    "NMS"
    ],
    "exchange": "NMS",
    "currency": "USD",
@@ -3838,7 +3870,7 @@
    "alias": "AVGO",
    "symbol": "AVGO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3857,7 +3889,7 @@
    "alias": "COCO",
    "symbol": "COCO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3876,7 +3908,7 @@
    "alias": "FRO",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "identity": {
     "listing": "FRO.OL",
     "venue": "OSL",
@@ -3904,7 +3936,7 @@
    "alias": "FRO.OL",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "OSL"
    ],
@@ -3916,7 +3948,7 @@
    "alias": "IWMO.L",
    "symbol": "IWMO.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3929,7 +3961,7 @@
    "alias": "MU",
    "symbol": "MU",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -3948,7 +3980,7 @@
    "alias": "ONT",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3961,7 +3993,7 @@
    "alias": "ONT.L",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -3974,16 +4006,9 @@
    "alias": "QBTS",
    "symbol": "QBTS",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
-    "ASE",
-    "BTS",
-    "NCM",
-    "NGM",
-    "NMS",
-    "NYQ",
-    "NYS",
-    "PCX"
+    "NMS"
    ],
    "exchange": "NMS",
    "currency": "USD",
@@ -3993,7 +4018,7 @@
    "alias": "SWDA.L",
    "symbol": "SWDA.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4006,7 +4031,7 @@
    "alias": "VUAG.L",
    "symbol": "VUAG.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4019,7 +4044,7 @@
    "alias": "VWRL.L",
    "symbol": "VWRL.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-03",
+   "verified_on": "2026-10-12",
    "expected_exchanges": [
     "IOB",
     "LSE"

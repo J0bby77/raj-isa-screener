@@ -250,6 +250,13 @@ def freeze_state(policy=None) -> dict:
     """-> whether a recall is permitted TODAY, read from the freeze's one home (ISA-0387)."""
     tw = policy or json.load(open(HERE / "target_weights.json"))
     fz = tw.get("scaling_freeze") or {}
+    if fz.get("retired"):
+        # ISA-0858 D5 (Raj 11-Oct-2026): the reallocation_only bar is RETIRED; the brake on fund-funded stock
+        # capital is the retention ratchet, applied by funding_waterfall / recall(brake=) - not by this record.
+        return {"state": "RETIRED", "reason": ("the scaling freeze was RETIRED %s by %s; fund-funded stock capital "
+                                               "is braked by the retention step-down ratchet (D5) and bounded by "
+                                               "the 25%% priority band (D4)"
+                                               % ((fz.get("retired") or {}).get("on"), (fz.get("retired") or {}).get("by")))}
     if not fz.get("active"):
         return {"state": "PERMITTED", "reason": "no scaling freeze is active"}
     basis = fz.get("basis")
@@ -273,7 +280,7 @@ def freeze_state(policy=None) -> dict:
                        "barred by it")}
 
 
-def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by_sedol=None):
+def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by_sedol=None, incoming=None):
     """-> the donor ranking, READ from `capital_destination.donor_order` (A7 / ISA-0440).
 
     ⚑ THIS USED TO REVERSE THE BUY KEY, AND THAT WAS WRONG IN A WAY R4.4 DOES NOT CATCH. The old
@@ -289,13 +296,15 @@ def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by
     `band_low`.
     """
     import capital_destination as CD
-    portfolio = portfolio or json.load(open(HERE / "portfolio_data_aug_2026.json"))
+    # ISA-0858 (12-Oct-2026, fixed on finding): the default book was the literal AUGUST file - the ISA-0488
+    # class in the sell leg. The current book has one home (capital_destination._load_portfolio).
+    portfolio = portfolio or CD._load_portfolio()
     universe = universe or json.load(open(HERE / "fund_universe.json"))
     tw = policy or json.load(open(HERE / "target_weights.json"))
     total = float(portfolio["summary"]["total_value_gbp"])
     parked = (outstanding().get("by_fund_gbp") or {})
     a7 = CD.donor_order(portfolio=portfolio, universe=universe, ranking=ranking, policy=tw,
-                        frs_by_sedol=frs_by_sedol, nav_gbp=total)
+                        frs_by_sedol=frs_by_sedol, nav_gbp=total, incoming=incoming)
 
     cands = []
     for d in a7["donors"]:
@@ -315,6 +324,7 @@ def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by
             "donor_rank": d["donor_rank"],
             "why": d["why"],
             "rank": d["rank"],
+            "p2b": d.get("p2b"), "p2c": d.get("p2c"),
         })
     return {"state": a7["state"], "as_of": _today(),
             "basis": ("capital_destination.donor_order — the A7 sell-side ordering, READ not "
@@ -327,14 +337,14 @@ def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by
 
 
 def recall(amount_gbp: float, *, portfolio=None, universe=None, ranking=None, policy=None,
-           stock_is_usd=True, honour_freeze=True, ledger_path=None) -> dict:
+           stock_is_usd=True, honour_freeze=True, ledger_path=None, brake=None, incoming=None) -> dict:
     """-> the donor plan for GBP `amount_gbp` of stock capital, or the REFUSAL, with its reason."""
     if not ENABLED:
         return {"state": "DISABLED", "reason": "waiting_room.ENABLED is False (R4.13)"}
     tw = policy or json.load(open(HERE / "target_weights.json"))
     fz = freeze_state(tw)
     cost = round_trip_cost(amount_gbp, stock_is_usd=stock_is_usd)
-    order = donor_order(portfolio, universe, ranking, tw)
+    order = donor_order(portfolio, universe, ranking, tw, incoming=incoming)
     out = {"_meta": {"module": "waiting_room.py", "schema_version": SCHEMA_VERSION,
                      "as_of": _today(), "item": "ISA-0390", "enabled": ENABLED},
            "requested_gbp": round(amount_gbp, 2),
@@ -353,6 +363,13 @@ def recall(amount_gbp: float, *, portfolio=None, universe=None, ranking=None, po
         out["state"] = "REFUSED_BY_FREEZE"
         out["plan"] = []
         out["reason"] = fz["reason"]
+        return out
+    # ISA-0858 D5: the retention-ratchet brake binds fund-funded stock capital (an unevaluated brake refuses).
+    out["brake"] = brake
+    if brake is not None and not brake.get("permits_fund_funded"):
+        out["state"] = "REFUSED_BY_BRAKE"
+        out["plan"] = []
+        out["reason"] = "%s: %s" % (brake.get("label"), brake.get("why") or brake.get("basis"))
         return out
     if cost.get("state") != "MEASURED":
         out["state"] = "REFUSED_COST_UNMEASURED"
@@ -389,6 +406,8 @@ def recall(amount_gbp: float, *, portfolio=None, universe=None, ranking=None, po
             break
 
     out["plan"] = plan
+    out["settlement"] = ("SETTLE_FIRST (ISA-0858 D8): place the fund sells, release the stock order only after the "
+                         "proceeds settle; never bridge from the D23 reserve or the drawdown reservation")
     out["shortfall_gbp"] = round(remaining, 2)
     out["state"] = "RECALL_PLANNED" if remaining <= 0.005 else "RECALL_PARTIAL"
     out["reason"] = (
@@ -438,7 +457,8 @@ def _cd_above_band_high(order_out):
     a restatement of the first.
     """
     tw = json.load(open(HERE / "target_weights.json"))
-    portfolio = json.load(open(HERE / "portfolio_data_aug_2026.json"))
+    import capital_destination as CD
+    portfolio = CD._load_portfolio()          # ISA-0858: the SAME current book donor_order reads
     total = float(portfolio["summary"]["total_value_gbp"])
     out = []
     for d in order_out["donors"]:
@@ -484,7 +504,7 @@ def _a7_p1_is_decisive(tw2) -> bool:
     it where it was.
     """
     import capital_destination as CD
-    portfolio = json.load(open(HERE / "portfolio_data_aug_2026.json"))
+    portfolio = CD._load_portfolio()          # ISA-0858: the SAME current book donor_order reads
     total = float(portfolio["summary"]["total_value_gbp"])
     was = CD.A7_DONOR_ORDER_ENABLED
     try:
@@ -565,13 +585,26 @@ def selftest(verbose=True) -> int:
     ck("a lot whose parts do not sum to its whole is REFUSED (R5.2 negative control)", bad)
 
     # ── §3 recall ─────────────────────────────────────────────────────────────────────────────
-    r = recall(4000.0, ledger_path=tmp)
+    tw = json.load(open(HERE / "target_weights.json"))
+    # ⚑ ISA-0858: the freeze is RETIRED on LIVE (Raj D5); its mechanism is still tested, on an ACTIVE fixture
+    _twf = json.loads(json.dumps(tw))
+    _twf["scaling_freeze"]["active"] = True
+    _twf["scaling_freeze"].pop("retired", None)
+    r = recall(4000.0, policy=_twf, ledger_path=tmp)
     ck("the ACTIVE reallocation_only freeze BARS the recall (ISA-0387 interaction)",
        r["state"] == "REFUSED_BY_FREEZE" and r["freeze"]["state"] == "BARRED")
     ck("the refusal names the earliest date the freeze could lift",
        bool(r["freeze"].get("earliest_override")) and bool(r["freeze"].get("earliest_mechanical")))
+    ck("ISA-0858 (D5): on the LIVE policy the freeze reads RETIRED, not active",
+       freeze_state(tw)["state"] == "RETIRED")
+    _fired = {"state": "FIRES", "permits_fund_funded": False, "label": "brake FIRED", "basis": "fixture"}
+    ck("ISA-0858 MUST-FIRE (D5b): a FIRED retention brake REFUSES the fund-funded recall",
+       recall(4000.0, policy=tw, ledger_path=tmp, brake=_fired)["state"] == "REFUSED_BY_BRAKE")
+    _unm = {"state": "ACTIVE_UNMEASURED", "permits_fund_funded": True, "label": "brake UNMEASURED"}
+    _ru = recall(4000.0, policy=tw, ledger_path=tmp, brake=_unm)
+    ck("ISA-0858 (D5a): an UNMEASURED brake permits the recall, which plans settle-first",
+       _ru["state"] in ("RECALL_PLANNED", "RECALL_PARTIAL") and "SETTLE_FIRST" in (_ru.get("settlement") or ""))
 
-    tw = json.load(open(HERE / "target_weights.json"))
     tw2 = json.loads(json.dumps(tw))
     tw2["scaling_freeze"]["active"] = False
     r2 = recall(4000.0, policy=tw2, ledger_path=tmp)
@@ -606,6 +639,8 @@ def selftest(verbose=True) -> int:
 
     # ── R4.3 negative control: an ACTIVE freeze with no basis REFUSES, never permits ──────────
     tw3 = json.loads(json.dumps(tw))
+    tw3["scaling_freeze"]["active"] = True
+    tw3["scaling_freeze"].pop("retired", None)
     tw3["scaling_freeze"].pop("basis", None)
     ck("an ACTIVE freeze with NO declared basis REFUSES the recall (R4.3 — never PASS)",
        freeze_state(tw3)["state"] == "REFUSED")

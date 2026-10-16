@@ -639,6 +639,23 @@ def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> 
             "trailing_return": "VETO ONLY, never a ranker — proved behaviourally in §5"}
 
 
+def rank_inputs_readonly(universe, root=None) -> dict:
+    """ISA-0858 (12-Oct-2026): rank_inputs WITHOUT side effects - C1/C2 read the month's already-produced
+    strategic_allocation_YYYY_MM.json / process_concentration_YYYY_MM.json (newest by name) instead of rebuilding
+    and re-writing them. For callers that must stay pure (the capital decision engine and its execution check). An
+    absent artefact makes that criterion UNAVAILABLE (constant), never rebuilt."""
+    root = Path(root or HERE)
+
+    def _latest(prefix):
+        c = sorted(root.glob(prefix + "_20[0-9][0-9]_[01][0-9].json"))
+        try:
+            return json.loads(c[-1].read_text(encoding="utf-8")) if c else None
+        except Exception:                                               # noqa: BLE001
+            return None
+    return rank_inputs(universe, saa=_latest("strategic_allocation") or {},
+                       pc=_latest("process_concentration") or {"state": "ABSENT"})
+
+
 def _deviation_key(candidate: dict) -> tuple:
     """C5, and NOTHING ABOVE IT. Retained as the tie-break and as the R4.13 rollback target.
 
@@ -811,10 +828,18 @@ def donor_key(candidate: dict) -> tuple:
     frs = candidate.get("frs_vote") or {}
     band_rank = _FRS_BAND_ORDER.get(frs.get("band"), 9)
     frs_val = frs.get("frs")
+    p2b = candidate.get("p2b") or {}
+    p2c = candidate.get("p2c") or {}
     return (
         -float((candidate.get("p1") or {}).get("gbp") or 0.0),        # P1  most overweight first
         -int((r.get("c1") or {}).get("c1", 0)),                       # P2  widens a bet -> sell
         -int((r.get("c2") or {}).get("c2", 0)),                       #     adds to concentration
+        # ISA-0858 D7 (Raj 12-Oct-2026): P2b MORE look-through overlap with the incoming stock -> sell first;
+        # P2c SMALLER whole-book risk increase of the swap -> sell first; an unmeasured term never argues for
+        # selling (constant 0 overlap; unmeasured delta-sigma sorts AFTER every measured one).
+        -float(p2b.get("overlap") or 0.0),
+        (0 if p2c.get("delta_sigma_gbp") is not None else 1),
+        (0.0 if p2c.get("delta_sigma_gbp") is None else float(p2c["delta_sigma_gbp"])),
         -int((candidate.get("p3") or {}).get("p3", 0)),               # P3  dear to keep -> sell
         band_rank,                                                    # P4  FRS VOTES, last
         0 if frs.get("dominated_by") else 1,
@@ -824,8 +849,128 @@ def donor_key(candidate: dict) -> tuple:
     )
 
 
+def _incoming_overlap(fund_ticker: str, incoming, vectors: dict, countries: dict) -> dict:
+    """ISA-0858 D7 P2b - GBP-weighted share of the donor fund's look-through exposure that sits in the incoming
+    stock(s)' country (fund_exposure_vectors x stock_country_map, both one-home declared stores). Selling a fund
+    that already carries the incoming exposure keeps the book's look-through mix closest to unchanged. Sector is
+    UNMEASURED: no declared fund sector vector exists (named, not assumed)."""
+    inc = [x for x in (incoming or []) if x.get("ticker") and float(x.get("gbp") or 0) > 0]
+    if not inc:
+        return {"state": "NO_INCOMING", "overlap": 0.0}
+    vec = (vectors or {}).get(fund_ticker)
+    if not vec:
+        return {"state": "UNMEASURED", "overlap": 0.0, "why": "no declared exposure vector for %s" % fund_ticker}
+    tot, acc, unknown = 0.0, 0.0, []
+    for x in inc:
+        c = ((countries or {}).get(str(x["ticker"]).upper().split(".")[0]) or {}).get("country")
+        if not c:
+            unknown.append(x["ticker"])
+            continue
+        g = float(x["gbp"])
+        tot += g
+        acc += g * float(vec.get(c) or 0.0)
+    if unknown:
+        return {"state": "UNMEASURED", "overlap": 0.0,
+                "why": "incoming stock(s) %s have no declared country (stock_country_map.pending_declaration)" % unknown}
+    return {"state": "MEASURED", "overlap": round(acc / tot, 6) if tot else 0.0, "basis": "country look-through; sector UNMEASURED"}
+
+
+def _fund_levels(sedol: str, universe: dict, nav_dir=None) -> dict:
+    u = ((universe or {}).get("funds", universe) or {}).get(sedol) or {}
+    nav_dir = Path(nav_dir or HERE / "nav_cache")
+    for c in (u.get("yf_symbol"), u.get("isin"), sedol, "%s.L" % sedol):
+        if not c:
+            continue
+        for stem in (c, "POLAR_" + str(c)):
+            p = nav_dir / f"{stem}.csv"
+            if p.exists():
+                out = {}
+                with open(p, newline="") as fh:
+                    for row in list(csv.reader(fh))[1:]:
+                        try:
+                            out[row[0][:10]] = float(row[1])
+                        except (ValueError, IndexError):
+                            continue
+                return out
+    return {}
+
+
+def _swap_delta_sigma(portfolio: dict, universe: dict, donors, incoming, amount_gbp: float, store=None) -> dict:
+    """ISA-0858 D7 P2c - annualised GBP volatility of the WHOLE BOOK (funds from weekly NAV closes, direct
+    stocks from the stock return store, cash/MMF at zero) after selling `amount_gbp` of each donor and buying the
+    incoming stock(s) pro rata, minus before. -> {sedol: {...}}. MEASURED when every held component and the
+    incoming names have a series on the risk window, else PROXY (the covered book), and UNMEASURED for a donor
+    with no series."""
+    import math
+    inc = [x for x in (incoming or []) if x.get("ticker") and float(x.get("gbp") or 0) > 0]
+    if not inc or not amount_gbp:
+        return {}
+    try:
+        import sleeve_risk as _sr
+        import stock_return_store as _srs
+        store = store if store is not None else _srs.load()
+    except Exception as exc:                                            # noqa: BLE001
+        return {d: {"state": "UNMEASURED", "delta_sigma_gbp": None, "why": "store unavailable: %s" % exc} for d in donors}
+    stocks = {str(x["ticker"]): float(x.get("value_gbp") or 0.0) for x in portfolio.get("stocks") or []}
+    inc_t = [str(x["ticker"]) for x in inc]
+    have = [t for t in set(stocks) | set(inc_t) if _sr._levels(store, t)]
+    missing_inc = [t for t in inc_t if t not in have]
+    if missing_inc:
+        return {d: {"state": "UNMEASURED", "delta_sigma_gbp": None,
+                    "why": "incoming %s has no weekly series in the store" % missing_inc} for d in donors}
+    dates = _sr.window_dates(store, have)
+    if len(dates) < 10:
+        return {d: {"state": "UNMEASURED", "delta_sigma_gbp": None, "why": "risk window < 10 weeks"} for d in donors}
+    funds = {f["ticker"]: float(f["value_gbp"]) for f in portfolio.get("funds") or []}
+    series, partial = {}, [t for t in stocks if t not in have]
+
+    def _at(levels, d):
+        ks = [k for k in levels if k <= d]
+        return levels[max(ks)] if ks else None
+    for t in have:
+        lv = _sr._levels(store, t)
+        series[t] = [lv.get(d) for d in dates]
+    for sd in funds:
+        lv = _fund_levels(sd, universe)
+        if not lv:
+            partial.append(sd)
+            continue
+        series[sd] = [_at(lv, d) for d in dates]
+    rets = {}
+    for k, lv in series.items():
+        if any(v is None for v in lv):
+            partial.append(k)
+            continue
+        rets[k] = [lv[i] / lv[i - 1] - 1.0 for i in range(1, len(lv))]
+    keys = sorted(rets)
+    n = len(rets[keys[0]]) if keys else 0
+    mu = {k: sum(rets[k]) / n for k in keys}
+    cov = {(a, b): sum((rets[a][i] - mu[a]) * (rets[b][i] - mu[b]) for i in range(n)) / max(n - 1, 1)
+           for a in keys for b in keys}
+
+    def sig(w):
+        v = sum(w.get(a, 0.0) * w.get(b, 0.0) * cov[(a, b)] for a in keys for b in keys)
+        return math.sqrt(max(v, 0.0) * 52.0)
+    base = {k: v for k, v in list(stocks.items()) + list(funds.items()) if k in rets}
+    s0 = sig(base)
+    tot_inc = sum(float(x["gbp"]) for x in inc)
+    out = {}
+    for d in donors:
+        if d not in rets:
+            out[d] = {"state": "UNMEASURED", "delta_sigma_gbp": None, "why": "no NAV series for %s on the window" % d}
+            continue
+        w = dict(base)
+        w[d] = w.get(d, 0.0) - float(amount_gbp)
+        for x in inc:
+            w[str(x["ticker"])] = w.get(str(x["ticker"]), 0.0) + float(amount_gbp) * float(x["gbp"]) / tot_inc
+        out[d] = {"state": "PROXY" if partial else "MEASURED", "delta_sigma_gbp": round(sig(w) - s0, 2),
+                  "book_sigma_gbp_before": round(s0, 2), "window_weeks": n,
+                  "uncovered": sorted(set(partial)) or None}
+    return out
+
+
 def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
-                frs_by_sedol=None, nav_gbp=None) -> dict:
+                frs_by_sedol=None, nav_gbp=None, incoming=None, swap_gbp=None) -> dict:
     """-> the A7 donor ranking. ONE home; `waiting_room` and `fund_action_stack` both read it.
 
     `frs_by_sedol` is OPTIONAL and is the P4 vote only: {sedol: {"frs": float|None,
@@ -866,6 +1011,22 @@ def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
         c["p3"] = _p3_cost_to_keep(r, dear, (vote.get("crystallisation_gbp")))
         cands.append(c)
 
+    # ── ISA-0858 D7: P2b / P2c for the incoming stock(s) - computed only when there is an incoming leg ──
+    if incoming:
+        try:
+            _vec = json.loads((HERE / "fund_exposure_vectors.json").read_text(encoding="utf-8")).get("vectors") or {}
+        except Exception:                                               # noqa: BLE001
+            _vec = {}
+        try:
+            _ctry = json.loads((HERE / "stock_country_map.json").read_text(encoding="utf-8")).get("stocks") or {}
+        except Exception:                                               # noqa: BLE001
+            _ctry = {}
+        _amt = float(swap_gbp if swap_gbp is not None else sum(float(x.get("gbp") or 0) for x in incoming))
+        _ds = _swap_delta_sigma(portfolio, universe, [c["sedol"] for c in cands], incoming, _amt)
+        for c in cands:
+            c["p2b"] = _incoming_overlap(c["sedol"], incoming, _vec, _ctry)
+            c["p2c"] = _ds.get(c["sedol"]) or {"state": "UNMEASURED", "delta_sigma_gbp": None}
+
     if A7_DONOR_ORDER_ENABLED:
         cands.sort(key=donor_key)
     else:
@@ -883,8 +1044,11 @@ def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
         "nav_gbp": round(nav, 2),
         "ocf_dear_tercile_pct": dear,
         "frs_supplied": bool(frs_by_sedol),
+        "incoming": incoming or None,
         "order": ["P1 pounds above declared band_high",
                   "P2 look-through / concentration relief (c1, c2 — READ from rank_inputs)",
+                  "P2b look-through overlap with the incoming stock(s) - more overlap sold first (ISA-0858 D7)",
+                  "P2c whole-book delta-sigma of the swap - smaller risk increase sold first; MEASURED/PROXY (ISA-0858 D7)",
                   "P3 cost to keep, ORDINAL (OCF tercile; a crystallised discount DEMOTES)",
                   "P4 FRS band, dominance, FRS — A VOTE, NOT AUTHORITY (A7)",
                   "P5 value desc, sedol — determinism only"],
@@ -910,6 +1074,11 @@ def _donor_why(c: dict) -> str:
     if int((r.get("c2") or {}).get("c2", 0)) > 0:
         return "P2: adds to %s, already at or above declared materiality" % (
             ", ".join((r.get("c2") or {}).get("over_materiality") or []) or "a declared cluster")
+    if float((c.get("p2b") or {}).get("overlap") or 0.0) > 0:
+        _ds = (c.get("p2c") or {}).get("delta_sigma_gbp")
+        return ("P2b: %.1f%% of this fund's look-through sits in the incoming stock's country%s"
+                % (float(c["p2b"]["overlap"]) * 100,
+                   "" if _ds is None else "; P2c swap delta-sigma GBP %+.2f (%s)" % (_ds, c["p2c"].get("state"))))
     p3 = int((c.get("p3") or {}).get("p3", 0))
     if p3 != 0:
         return "P3: %s" % (c["p3"].get("basis") or "")
@@ -1158,12 +1327,26 @@ def _smallest_declared_position_gbp(policy: dict, total_gbp: float):
 # Production never passes it (None -> the LIVE control is read).
 NCC_OPEN_FIXTURE = {"control": "new_capital_control", "state": "OPEN",
                     "blocks_new_stock_capital": False, "failed_contracts": [],
+                    "blocks_new_fund_capital": False,                  # ISA-0833: fixture states the fund verdict
+                    "fund_leg": {"path_id": "monthly_capital", "acceptance_state": "FIXTURE", "reasons": []},
                     "record_id": "FIXTURE", "reasons": [], "policy_state": "RESOLVED",
                     "policy_hard_max": "NOT_A_POLICY_LIMIT",
                     # ISA-0811: these fixtures size the LEGACY demand-pull path (its own regression
                     # suite). A fixture declares the engine authority it assumes; the production control
                     # reading (new_capital_control.status) never carries this key.
                     "fixture_engine_authority": "SHADOW"}
+
+
+def _park(state: str, gbp: float, decided_pending_gbp: float = 0.0) -> dict:
+    """ISA-0858 D3 - where stock-intended capital that is not (yet) in a stock waits, and why. One home for the
+    rule: funding_waterfall.park_reason."""
+    import funding_waterfall as _fw
+    pr = _fw.park_reason(state)
+    out = dict(pr, gbp=round(float(gbp), 2))
+    if decided_pending_gbp:
+        out["decided_trade_pending_execution"] = dict(_fw.park_reason("DECIDED_TRADE_PENDING_EXECUTION"),
+                                                      gbp=round(float(decided_pending_gbp), 2))
+    return out
 
 
 def _sleeve_split_open(*a, **k):
@@ -1181,6 +1364,9 @@ def _new_capital_control_status() -> dict:
     except Exception as exc:                                            # noqa: BLE001
         return {"control": "new_capital_control", "state": "UNKNOWN",
                 "blocks_new_stock_capital": True, "failed_contracts": [],
+                "blocks_new_fund_capital": True,                       # ISA-0833: unreadable = refused
+                "fund_leg": {"path_id": "monthly_capital", "acceptance_state": "UNREADABLE",
+                             "reasons": ["control unreadable: %s: %s" % (type(exc).__name__, exc)]},
                 "scope": "ALL_POSITIVE_NEW_STOCK_EXPOSURE",
                 "reasons": ["control unreadable: %s: %s" % (type(exc).__name__, exc)],
                 "policy_state": "UNKNOWN", "policy_hard_max": "UNKNOWN"}
@@ -1621,6 +1807,7 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             "ISA-0390 recall leg is barred would pre-empt the stock decision the block defers."
             % (_ncc.get("state"), _held))
         out["held_pending_stock_decision_gbp"] = _held
+        out["park"] = _park("REFUSED_NEW_STOCK_CAPITAL_BLOCKED", _held)
         _rows = [{"ticker": c.get("ticker"), "allocated_gbp": 0.0,
                   "state": "REFUSED_NEW_STOCK_CAPITAL_BLOCKED",
                   "skip_reason": ("new stock capital is blocked by the canonical control (%s); "
@@ -1700,6 +1887,7 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                                    "GBP %.2f is HELD AS CASH until the decision completes - never routed by the "
                                    "legacy path" % (_why, _held)),
                 "held_pending_stock_decision_gbp": _held,
+                "park": _park("REFUSED_RECEIPT_NOT_AUTHORISED", _held),
                 "allocation": {"state": "REFUSED_RECEIPT_NOT_AUTHORISED", "allocated_gbp": 0.0,
                                "cash_reserve_gbp": _res, "reserve_held_gbp": _res,
                                "held_pending_stock_decision_gbp": _held, "rows": [],
@@ -1711,11 +1899,18 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                 "decision_owner": "capital_decision_engine"})
         else:
             _acts = [a for a in (_rr.get("selected_actions") or []) if float(a.get("gbp") or 0) > 0]
-            _spent = round(sum(float(a["gbp"]) for a in _acts), 2)
-            if _spent > float(amount_gbp) - _res + TOL_GBP:
-                raise DestinationRefused("ISA-0811: receipt %s spends GBP %.2f > available GBP %.2f after the "
-                                         "reserve - the receipt was formed on a different book"
-                                         % (_rr.get("receipt_id"), _spent, float(amount_gbp) - _res))
+            _spent_all = round(sum(float(a["gbp"]) for a in _acts), 2)
+            # ⚑ ISA-0858: a fund-funded leg (D4) is paid by fund-sleeve SALES, not from this cash pool; fired
+            #   drawdown tranches (B1.6b) are claimed before stocks AND before funds. Receipts formed before
+            #   ISA-0858 carry no funding block: every pound is cash and no tranche is reserved (unchanged).
+            _spent = round(sum(float(((a.get("funding") or {}).get("cash_gbp")) if (a.get("funding") or {}).get("cash_gbp")
+                                     is not None else a["gbp"]) for a in _acts), 2)
+            _trimmed = round(_spent_all - _spent, 2)
+            _ddres = float((((_rr.get("funding") or {}).get("waterfall") or {}).get("drawdown_reserved_gbp")) or 0.0)
+            if _spent > float(amount_gbp) - _res - _ddres + TOL_GBP:
+                raise DestinationRefused("ISA-0811: receipt %s spends GBP %.2f of cash > available GBP %.2f after the "
+                                         "reserve and fired drawdown tranches - the receipt was formed on a different book"
+                                         % (_rr.get("receipt_id"), _spent, float(amount_gbp) - _res - _ddres))
             # ⚑ stock_max_gbp is the legacy DEMAND-PULL CAP quantity, computed only by
             #   position_sizing.stock_max (one computer, ISA-0695) and now run in SHADOW. Under engine authority
             #   the stock capital is the RECEIPT's allocation: published as engine_allocated_gbp, never written
@@ -1729,13 +1924,20 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                       "economic_max_price_major": a.get("economic_max_price_major"),
                       "currency": a.get("currency")} for a in _acts]
             out.update({
-                "state": "STOCK_SLEEVE_ENGINE_ALLOCATED", "stock_max_gbp": 0.0, "engine_allocated_gbp": _spent,
+                "state": "STOCK_SLEEVE_ENGINE_ALLOCATED", "stock_max_gbp": 0.0, "engine_allocated_gbp": _spent_all,
+                "engine_allocated_cash_gbp": _spent, "engine_allocated_fund_funded_gbp": _trimmed,
+                "drawdown_reserved_gbp": _ddres,
                 "stock_max_note": "under engine authority the cap quantity is not the authority; stock capital = engine_allocated_gbp (receipt)",
-                "fund_max_gbp": round(max(float(amount_gbp) - _spent - _res, 0.0), 2),
-                "fund_max_basis": ("amount - engine-selected stock GBP %.2f - D23 reserve GBP %.2f; the residual is "
-                                   "routed by the fund router (receipt %s)" % (_spent, _res, _rr.get("receipt_id"))),
-                "allocation": {"state": "OK", "allocated_gbp": _spent, "n_opened": len(_rows), "rows": _rows,
-                               "residual_gbp": round(max(float(amount_gbp) - _spent - _res, 0.0), 2),
+                "fund_max_gbp": round(max(float(amount_gbp) - _spent - _res - _ddres, 0.0), 2),
+                "fund_max_basis": ("amount - engine-selected stock CASH GBP %.2f - D23 reserve GBP %.2f - fired drawdown "
+                                   "tranches GBP %.2f; fund-funded stock GBP %.2f comes from fund sales (D4, settle-first); "
+                                   "the residual is routed by the fund router (receipt %s)"
+                                   % (_spent, _res, _ddres, _trimmed, _rr.get("receipt_id"))),
+                "park": _park("STOCK_SLEEVE_ENGINE_ALLOCATED", round(max(float(amount_gbp) - _spent - _res - _ddres, 0.0), 2),
+                              decided_pending_gbp=_spent),
+                "allocation": {"state": "OK", "allocated_gbp": _spent_all, "n_opened": len(_rows), "rows": _rows,
+                               "allocated_cash_gbp": _spent, "allocated_fund_funded_gbp": _trimmed,
+                               "residual_gbp": round(max(float(amount_gbp) - _spent - _res - _ddres, 0.0), 2),
                                "cash_reserve_gbp": _res, "reserve_held_gbp": _res,
                                "min_entry_gbp": (_rr.get("min_entry_gbp")), "starter_gbp": None,
                                "source": "capital_decision_receipt"},
@@ -1744,7 +1946,7 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                                   "receipts": [{"ticker": r["ticker"], "gbp": r["allocated_gbp"],
                                                 "approval_reference": "%s|%s|%.2f" % (_rr.get("receipt_id"), r["ticker"], r["allocated_gbp"]),
                                                 "execution_check": ("python3 capital_decision_engine.py --month %s --execution-check %s "
-                                                                    "--price <session quote, major units> --currency %s --quote-ts <ISO>"
+                                                                    "--price <session quote, major units> --currency %s --quote-ts <ISO with UTC offset> --cash <current cash GBP>"
                                                                     % (receipt_month, r["ticker"], r.get("currency"))),
                                                 "state": "APPROVAL_PENDING"} for r in _rows],
                                   "basis": "the receipt is the authority; approval and execution revalidation remain separate (s10/s11)"},
@@ -2188,6 +2390,29 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                  "only top one up — it is GBP 0 of executable capital reported as a non-zero "
                  "number, which is a stored value that says one thing and IS another"),
     }
+    # ⚑⚑ ISA-0833 (POL-1, Raj 04-Oct-2026) — THE FUND LEG'S ONE ACCEPTANCE GATE. The canonical control
+    # names a fund verdict from the SAME acceptance currency as the stock leg; this is the one point
+    # where new money is offered to funds (build() routes exactly fund_max_gbp). A refused fund leg
+    # HOLDS the offer as cash; fund-internal rebalances, reductions and sells never pass through here.
+    _fund_blocked = bool(_ncc.get("blocks_new_fund_capital", True))   # absent key = unknown = refuse (R4.3)
+    _fund_offer = round(float(out.get("fund_max_gbp") or 0.0), 2)
+    out["fund_leg"] = {"verdict": ("BLOCKED" if _fund_blocked else "OPEN"),
+                       "acceptance_state": (_ncc.get("fund_leg") or {}).get("acceptance_state"),
+                       "path_id": (_ncc.get("fund_leg") or {}).get("path_id", "monthly_capital"),
+                       "offered_before_gate_gbp": _fund_offer,
+                       "held_as_cash_gbp": (_fund_offer if _fund_blocked else 0.0),
+                       "reasons": ((_ncc.get("fund_leg") or {}).get("reasons")
+                                   or (["fund verdict absent from the control reading - unknown, refused (R4.3)"]
+                                       if "blocks_new_fund_capital" not in _ncc else [])),
+                       "scope": "new money routed to funds; rebalances/reductions/sells unaffected"}
+    if _fund_blocked and _fund_offer > 0:
+        out["fund_max_gbp"] = 0.0
+        out["held_fund_leg_gbp"] = _fund_offer
+        out["fund_max_basis"] = ("ISA-0833: NEW FUND CAPITAL BLOCKED (%s) - GBP %.2f that would have been offered "
+                                 "to the fund sleeve is HELD AS CASH until system acceptance of path monthly_capital "
+                                 "is CURRENT. Previously: %s"
+                                 % ("; ".join(out["fund_leg"]["reasons"])[:300], _fund_offer,
+                                    str(out.get("fund_max_basis") or "")[:300]))
     if out.get("state") not in SLEEVE_SPLIT_STATES:                   # R5.1 — producer asserts
         raise DestinationRefused(
             "sleeve_split produced state %r, outside the declared vocabulary %s (ISA-0683). A new "
@@ -3990,8 +4215,16 @@ def summary_for_run_context(doc: dict) -> dict:
     # ISA-0807: the canonical new-stock-capital control as the router read it (render only)
     "new_capital_control": _sl.get("new_capital_control") or {},
     "held_pending_stock_decision_gbp": _sl.get("held_pending_stock_decision_gbp"),
+    # ISA-0833: the fund leg's acceptance verdict as the router applied it (render only)
+    "fund_leg": _sl.get("fund_leg") or {},
+    "held_fund_leg_gbp": _sl.get("held_fund_leg_gbp"),
     # ISA-0811: the engine receipt the router consumed (or refused), its allocation and the SHADOW legacy plan
     "engine_allocated_gbp": _sl.get("engine_allocated_gbp"),
+    # ISA-0858: the funding split (cash vs fund-funded, D4), fired drawdown tranches (B1.6b) and the D3 park
+    "engine_allocated_cash_gbp": _sl.get("engine_allocated_cash_gbp"),
+    "engine_allocated_fund_funded_gbp": _sl.get("engine_allocated_fund_funded_gbp"),
+    "drawdown_reserved_gbp": _sl.get("drawdown_reserved_gbp"),
+    "park": _sl.get("park") or {},
     "decision_receipt": _sl.get("decision_receipt"),
     "legacy_greedy_shadow": _sl.get("legacy_greedy_shadow"),
     "sequencer": _sl.get("sequencer") or {},
@@ -4466,6 +4699,37 @@ def _selftest(verbose=True) -> int:
                        sequence={"order": ["FIX7"], "basis": "fixture_order"})
     ck("NEGATIVE CONTROL ISA-0807: an OPEN control leaves the demand-pull router in charge",
        _n7["state"] != "STOCK_SLEEVE_REFUSED" and _n7.get("held_pending_stock_decision_gbp") is None)
+    # ── ISA-0833 — the fund leg's one acceptance gate, through the REAL sleeve_split ─────────────
+    _fb7 = dict(NCC_OPEN_FIXTURE, blocks_new_fund_capital=True,
+                fund_leg={"path_id": "monthly_capital", "acceptance_state": "STALE",
+                          "reasons": ["ACCEPTANCE_NOT_CURRENT (fixture)"]})
+    _f7 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_fb7,
+                       sequence={"order": ["FIX7"], "basis": "fixture_order"})
+    ck("NEGATIVE CONTROL ISA-0833: an OPEN fund verdict leaves the fund offer untouched",
+       _n7["fund_leg"]["verdict"] == "OPEN" and _n7["fund_leg"]["held_as_cash_gbp"] == 0.0
+       and _n7["fund_max_gbp"] == _n7["fund_leg"]["offered_before_gate_gbp"])
+    ck("MUST-FIRE ISA-0833: a STALE acceptance refuses NEW fund capital and HOLDS the offer as cash",
+       _n7["fund_max_gbp"] > 0 and _f7["fund_max_gbp"] == 0.0 and _f7["fund_leg"]["verdict"] == "BLOCKED"
+       and abs(_f7["held_fund_leg_gbp"] - _n7["fund_max_gbp"]) <= TOL_GBP
+       and "ISA-0833" in _f7["fund_max_basis"])
+    ck("NEGATIVE CONTROL ISA-0833: the fund gate does not touch the stock decision",
+       _f7["state"] == _n7["state"] and _f7["stock_max_gbp"] == _n7["stock_max_gbp"])
+    _fk7 = {k: v for k, v in NCC_OPEN_FIXTURE.items() if k not in ("blocks_new_fund_capital", "fund_leg")}
+    _fx7 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_fk7,
+                        sequence={"order": ["FIX7"], "basis": "fixture_order"})
+    ck("FAIL-CLOSED ISA-0833: a control reading without a fund verdict refuses the fund leg (R4.3)",
+       _fx7["fund_max_gbp"] == 0.0 and _fx7["fund_leg"]["verdict"] == "BLOCKED")
+    import glob as _g833
+    _consumers = sorted(os.path.basename(f) for f in _g833.glob(os.path.join(str(HERE), "*.py"))
+                        if "blocks_new_fund_capital" in open(f, encoding="utf-8", errors="ignore").read())
+    ck("NEGATIVE CONTROL ISA-0833: only the control and this router read the fund verdict - fund-internal "
+       "rebalances (portfolio_analytics / fund_action_stack) and reductions cannot be gated by it",
+       set(_consumers) <= {"new_capital_control.py", "capital_destination.py", "consistency_check.py",
+                           "email_prefill.py", "monthly_isa_prerun.py", "build_monthly_isa_email.py",
+                           # ISA-0867 (11-Oct-2026): Checkpoint-D tick 12 reads the verdict for NET-NEW fund money only
+                           #   and passes every self-funded switch/rebalance and reduction (its own must-fire rows)
+                           "checkpoint_d.py"}
+       and "portfolio_analytics.py" not in _consumers and "fund_action_stack.py" not in _consumers)
     # ── ISA-0804 — engine authority LIVE fails CLOSED until the receipt consumer is certified ──
     import isa_policy as _pol_e
     _prev_e = _pol_e.V2_FLAGS.get("capital_engine_authority")
