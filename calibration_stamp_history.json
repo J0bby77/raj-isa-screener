@@ -139,6 +139,13 @@
     "schema_version": "1.0",
     "stamped_at": "2026-10-10"
   },
+  "2026-10-16|MIDCAP400": {
+    "fingerprint": "7e6fc8157576",
+    "group": "MIDCAP400",
+    "run_date": "2026-10-16",
+    "schema_version": "1.0",
+    "stamped_at": "2026-10-16"
+  },
   "_pool_exclusions": {
     "2026-08-07|SP500": {
       "approved_by": "raj",

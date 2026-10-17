@@ -11,7 +11,7 @@
       "fetch_failure",
       "UNKNOWN"
     ],
-    "updated": "2026-10-10T08:24:20+00:00"
+    "updated": "2026-10-16T08:13:02+00:00"
   },
   "names": {
     "F250-SPI|AAS.L": {
@@ -1669,12 +1669,26 @@
       "group": "MIDCAP400",
       "last_price": null,
       "last_seen": "2026-08-21",
+      "reason": "fetch_failure",
+      "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
+      "returned_on": "2026-10-16",
+      "runs_missing": 1,
+      "status": "returned",
+      "terminal_return_pct": null,
+      "ticker": "CDE"
+    },
+    "MIDCAP400|CPRI": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
       "reason": "UNKNOWN",
       "reason_source": null,
       "runs_missing": 1,
       "status": "suspected_gone",
       "terminal_return_pct": null,
-      "ticker": "CDE"
+      "ticker": "CPRI"
     },
     "MIDCAP400|DINO": {
       "first_missing": "2026-09-18",
@@ -1682,10 +1696,11 @@
       "group": "MIDCAP400",
       "last_price": null,
       "last_seen": "2026-08-21",
-      "reason": "UNKNOWN",
-      "reason_source": null,
+      "reason": "fetch_failure",
+      "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
+      "returned_on": "2026-10-16",
       "runs_missing": 1,
-      "status": "suspected_gone",
+      "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DINO"
     },
@@ -1695,10 +1710,11 @@
       "group": "MIDCAP400",
       "last_price": null,
       "last_seen": "2026-08-21",
-      "reason": "UNKNOWN",
-      "reason_source": null,
+      "reason": "fetch_failure",
+      "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
+      "returned_on": "2026-10-16",
       "runs_missing": 1,
-      "status": "suspected_gone",
+      "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ENTG"
     },
@@ -1710,10 +1726,50 @@
       "last_seen": "2026-08-21",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "EWBC"
+    },
+    "MIDCAP400|ILMN": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "ILMN"
+    },
+    "MIDCAP400|LSCC": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "fetch_failure",
+      "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
+      "returned_on": "2026-09-18",
+      "runs_missing": 1,
+      "status": "returned",
+      "terminal_return_pct": null,
+      "ticker": "LSCC"
+    },
+    "MIDCAP400|OLN": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "OLN"
     },
     "MIDCAP400|OVV": {
       "first_missing": "2026-09-18",
@@ -1723,10 +1779,36 @@
       "last_seen": "2026-08-21",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "OVV"
+    },
+    "MIDCAP400|P": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "P"
+    },
+    "MIDCAP400|RGA": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "RGA"
     },
     "MIDCAP400|RGLD": {
       "first_missing": "2026-09-18",
@@ -1736,10 +1818,36 @@
       "last_seen": "2026-08-21",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "RGLD"
+    },
+    "MIDCAP400|SAM": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "SAM"
+    },
+    "MIDCAP400|TWLO": {
+      "first_missing": "2026-10-16",
+      "first_seen": "2026-08-21",
+      "group": "MIDCAP400",
+      "last_price": null,
+      "last_seen": "2026-09-18",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "TWLO"
     },
     "MIDCAP400|WBS": {
       "first_missing": "2026-09-18",
@@ -1749,7 +1857,7 @@
       "last_seen": "2026-08-21",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "WBS"
