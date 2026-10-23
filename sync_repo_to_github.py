@@ -102,6 +102,12 @@ FALLBACK_WRITTEN = {
 
 # Referenced by fallback code but not needed on the fallback path, each with its reason.
 FALLBACK_EXCLUDED = {
+    # ISA-0727 B (18-Oct-2026): appended only by the local-primary screen_completion watch (capital_decision_engine);
+    # build_email renders its newest row and, absent here, states "no watch recorded here" (never a silent pass).
+    "capital_decision_ledger.jsonl": ("the capital receipt store; screen_completion reads only its PRESENCE to decide the watch "
+                                      "runs locally - absent in a fallback workspace, so the watch is NOT_RUN (ISA-0727 B)"),
+    "capital_receipt_validity_log.jsonl": ("approved-pending watch log; written on OneDrive by the local screen_completion, "
+                                           "a fallback email states it absent - never synced (it carries the receipt state)"),
     "vci_learning_store.json": "path constant only in scoring_config; read by the VCI task, not the screen",
     # ISA-0847 (11-Oct-2026): first written by the 11-Oct VCI run (vci_learning, once resolved_count >= gate_n).
     "vci_calibration_state.json": ("VCI learning calibration state; read by the VCI task via vci_source_score, "
@@ -122,6 +128,9 @@ FALLBACK_EXCLUDED = {
     # version/changelog/sha256, published in every concentration record.
     "concentration_theme_taxonomy.json": ("ISA-0700 declared theme taxonomy; monthly router only "
                                           "(concentration_control), not the weekly screen fallback"),
+    "theme_auto_classifications.json": ("ISA-0700 P-B7 runtime overlay of automatic theme memberships; written and read "
+                                        "by the monthly pre-run/router only, never by the weekly screen fallback"),
+    "theme_autoclassify_rules.json": ("ISA-0700 P-B7 declared auto-classification rules; monthly pre-run Step 8t only"),
     "concentration_taxonomy_exception_review.json": ("ISA-0700 GENERATED exception-review list "
                                                      "(concentration_control --exception-review) for Raj's "
                                                      "adjudication; monthly/interactive only, never read by "

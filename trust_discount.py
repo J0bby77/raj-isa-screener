@@ -89,7 +89,7 @@ def is_closed_end(u):
     return (u or {}).get("structure") == "closed_end"
 
 
-def discount(sedol, universe, price, price_date, store=None):
+def discount(sedol, universe, price, price_date, store=None, as_of=None):
     """-> dict with a Metric|Missing discount. Never returns 0.0 for 'unknown'."""
     u = (universe or {}).get(sedol) or {}
     src_name = f"trust_nav_observations:{sedol}"
@@ -106,6 +106,14 @@ def discount(sedol, universe, price, price_date, store=None):
     out["applicable"] = True
     store = store if store is not None else load_observations()
     obs = [o for o in store.get("observations", []) if o["sedol"] == sedol]
+    # ⚑ POINT-IN-TIME (ISA-0127, 18-Oct-2026): a BUILD as of a date uses only observations on or before it.
+    #   With one observation the rule was invisible; with an autonomous daily source a build 'as of 31-Jul'
+    #   would otherwise read October's NAV. Production is unchanged (build's as_of = the run date). A direct
+    #   call without as_of keeps the documented matched-pair preference across a broker-date gap (C3/C4).
+    if as_of is not None:
+        _ao = (as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of))[:10]
+        obs = [o for o in obs if str(o.get("as_of"))[:10] <= _ao]
+    obs.sort(key=lambda o: o["as_of"])
     if not obs:
         out["discount_pct"] = as_dict(Missing(
             "no NAV observation on record. There is no NAV feed for UK investment trusts in this "
@@ -317,6 +325,240 @@ def capture_status(store=None, universe=None, as_of=None):
     return out
 
 
+# ── ISA-0127 (18-Oct-2026): AUTONOMOUS CAPTURE FROM THE MANAGER'S OWN RNS ──────────────────────
+# The 06-Aug note above said the NAV "cannot be automated" - true of the feeds this framework had. Scottish
+# Mortgage publishes a daily regulatory 'Net Asset Value(s)' RNS (Cum/Ex, Par/Fair, pence), reachable on its
+# Investegate company page. The AIC convention is Cum Fair. Each observation is a MATCHED PAIR: the RNS
+# NAV as at date D with the trust's unadjusted market close on the SAME date D (yfinance auto_adjust=False -
+# an adjusted close is rescaled at every dividend and is not the price anyone traded at).
+RNS_LIST_URL = "https://www.investegate.co.uk/company/{epic}?page={page}"
+RNS_NAV_FIELD = "Cum Fair NAV"
+RNS_CAPTURE_MIN_AGE_DAYS = 7     # the pre-run records a new observation when the newest is older than this
+
+
+class RnsLayoutError(RuntimeError):
+    """The Investegate page no longer has the shape this parser was written against."""
+
+
+def parse_rns_list(html_text):
+    """[(release_date, url, title)] from an Investegate company page. RAISES on layout change."""
+    import re
+    if "announcement-table" not in html_text:
+        raise RnsLayoutError("no announcement-table on the Investegate company page")
+    rows = re.findall(r'<tr>\s*<td>(\d{1,2} \w{3} \d{4})</td>.*?announcement-link" href="([^"]+)">([^<]+)</a>',
+                      html_text, re.S)
+    if not rows:
+        raise RnsLayoutError("announcement-table has no parseable rows")
+    out = []
+    for d, url, title in rows:
+        out.append((dt.datetime.strptime(d, "%d %b %Y").date(), url, title.strip()))
+    return out
+
+
+def parse_rns_nav(html_text):
+    """{as_of, cum_par_p, cum_fair_p, ex_par_p, ex_fair_p} from a 'Net Asset Value(s)' announcement.
+    The as-at date is the one printed beneath the trust's name in the body (the release is the next
+    business day). RAISES when any field or the date is missing."""
+    import re, html as _h
+    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html_text, flags=re.S)
+    txt = re.sub(r"\s+", " ", _h.unescape(re.sub(r"<[^>]+>", " ", txt)))
+    m = re.search(r"Investment Trust PLC \(SMT\) (\d{1,2} \w+ \d{4})", txt) or \
+        re.search(r"\(\w{2,5}\) (\d{1,2} \w+ \d{4}) Legal Entity Identifier", txt)
+    if not m:
+        raise RnsLayoutError("NAV announcement carries no as-at date")
+    out = {"as_of": dt.datetime.strptime(m.group(1), "%d %B %Y").date()}
+    for key, label in (("cum_par_p", "Cum Par NAV"), ("cum_fair_p", "Cum Fair NAV"),
+                       ("ex_par_p", "Ex Par NAV"), ("ex_fair_p", "Ex Fair NAV")):
+        mm = re.search(re.escape(label) + r" ([0-9][0-9,]*\.?[0-9]*)p", txt)
+        if not mm:
+            raise RnsLayoutError("NAV announcement has no '%s' figure" % label)
+        out[key] = float(mm.group(1).replace(",", ""))
+    return out
+
+
+def _http_get(url, timeout=20):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ISA research)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def _yf_unadjusted_closes(symbol, start, end):
+    """{date: close} unadjusted (auto_adjust=False), or {} on any failure."""
+    try:
+        import yfinance as yf
+        h = yf.Ticker(symbol).history(start=start.isoformat(), end=(end + dt.timedelta(days=1)).isoformat(),
+                                      auto_adjust=False)["Close"]
+        return {(i.date() if hasattr(i, "date") else dt.date.fromisoformat(str(i)[:10])): float(v)
+                for i, v in h.items() if v == v and v > 0}
+    except Exception:                                                   # noqa: BLE001
+        return {}
+
+
+def rns_nav_targets(sedol, u):
+    """The declared RNS route for a closed-end fund (`rns_nav: {epic, field}` in fund_universe), or None."""
+    r = (u or {}).get("rns_nav") or {}
+    return r if r.get("epic") else None
+
+
+def capture_rns(as_of, universe=None, store_path=None, *, get=None, closes=None, months=0, budget_s=15.0):
+    """Record matched NAV/price observations from the trust's own RNS for every closed-end fund declaring
+    `rns_nav`. months=0 (the pre-run): the newest announcement, if the newest observation on record is older
+    than RNS_CAPTURE_MIN_AGE_DAYS. months=N (one-off backfill): one observation per month-end for the last N
+    months. Content-keyed: re-running adds nothing. Returns a typed per-fund report; never raises for a
+    source failure (the capture_status request then stays visible)."""
+    import time as _t
+    import fund_performance as fp
+    t0 = _t.time()
+    get = get or _http_get
+    closes = closes or _yf_unadjusted_closes
+    universe = universe if universe is not None else fp.load_universe()
+    funds = universe.get("funds", universe)
+    path = store_path or OBS_PATH
+    store = load_observations(path)
+    rep = {}
+    for sedol, u in funds.items():
+        if str(sedol).startswith("_") or not is_closed_end(u):
+            continue
+        rt = rns_nav_targets(sedol, u)
+        if not rt:
+            rep[sedol] = {"state": "NOT_DECLARED", "why": "no rns_nav route declared in fund_universe"}
+            continue
+        obs = sorted((o for o in store.get("observations", []) if o["sedol"] == sedol), key=lambda o: o["as_of"])
+        newest = dt.date.fromisoformat(obs[-1]["as_of"]) if obs else None
+        if months == 0 and newest and (as_of - newest).days <= RNS_CAPTURE_MIN_AGE_DAYS:
+            rep[sedol] = {"state": "CURRENT", "newest": newest.isoformat(), "why": "observation within %d days" % RNS_CAPTURE_MIN_AGE_DAYS}
+            continue
+        try:
+            rows, page = [], 1
+            oldest_needed = (as_of.replace(day=1) - dt.timedelta(days=31 * months)) if months else as_of
+            while page <= (months + 2 if months else 1):
+                lst = parse_rns_list(get(RNS_LIST_URL.format(epic=rt["epic"], page=page)))
+                rows += [r for r in lst if "net-asset-value" in r[1].lower() or "net asset value" in r[2].lower()]
+                if lst[-1][0] < oldest_needed or _t.time() - t0 > budget_s:
+                    break
+                page += 1
+            rows = [r for r in rows if r[0] <= as_of]
+            if not rows:
+                rep[sedol] = {"state": "SOURCE_FAILED", "why": "no NAV announcement on the RNS list"}
+                continue
+            if months:
+                # one per month: the FIRST release of the following month carries the month-end NAV
+                by_month = {}
+                for d, url, title in sorted(rows, key=lambda r: r[0]):
+                    by_month.setdefault((d.year, d.month), (d, url))
+                picks = [by_month[k] for k in sorted(by_month)][-(months + 1):]
+            else:
+                picks = [max(rows, key=lambda r: r[0])[:2]]
+            navs = []
+            for d, url in picks:
+                if _t.time() - t0 > budget_s:
+                    break
+                navs.append(dict(parse_rns_nav(get(url)), url=url, released=d))
+            if not navs:
+                rep[sedol] = {"state": "SOURCE_FAILED", "why": "budget spent before any announcement was read"}
+                continue
+            lo, hi = min(n["as_of"] for n in navs), max(n["as_of"] for n in navs)
+            px = closes(u.get("yf_symbol"), lo - dt.timedelta(days=5), hi)
+            scale = 100.0 if u.get("price_unit") == "GBp" else 1.0
+            added, unmatched = [], []
+            for n in sorted(navs, key=lambda n: n["as_of"]):
+                field = rt.get("field") or RNS_NAV_FIELD
+                key = {"Cum Fair NAV": "cum_fair_p", "Cum Par NAV": "cum_par_p", "Ex Fair NAV": "ex_fair_p",
+                       "Ex Par NAV": "ex_par_p"}[field]
+                nav = round(n[key] / 100.0, 6)
+                price = px.get(n["as_of"])
+                if price is None:
+                    unmatched.append(n["as_of"].isoformat())
+                    continue
+                store, ok = record_observation(
+                    store, sedol, n["as_of"].isoformat(), nav,
+                    "Investegate RNS 'Net Asset Value(s)' released %s (%s, %s) + %s unadjusted close same date (yfinance)"
+                    % (n["released"].isoformat(), n["url"], field, u.get("yf_symbol")),
+                    price=round(price / scale, 6), as_of_confidence="stated",
+                    note="ISA-0127 autonomous capture; Cum Par %.2fp / Cum Fair %.2fp / Ex Par %.2fp / Ex Fair %.2fp"
+                         % (n["cum_par_p"], n["cum_fair_p"], n["ex_par_p"], n["ex_fair_p"]))
+                if ok:
+                    added.append(n["as_of"].isoformat())
+            rep[sedol] = {"state": "RECORDED" if added else ("UNMATCHED_PRICE" if unmatched else "ALREADY_PRESENT"),
+                          "added": added, "unmatched_price_dates": unmatched,
+                          "why": "%d NAV announcement(s) read" % len(navs)}
+        except Exception as e:                                          # noqa: BLE001
+            rep[sedol] = {"state": "SOURCE_FAILED", "why": "%s: %s" % (type(e).__name__, str(e)[:200])}
+    if any(r.get("added") for r in rep.values()):
+        save_observations(store, path)
+    return {"as_of": as_of.isoformat(), "funds": rep, "secs": round(_t.time() - t0, 1)}
+
+
+def _selftest():
+    """ISA-0127 offline selftest: RNS list/NAV parsers, matched-pair capture, dedupe, failure typing."""
+    import tempfile, shutil
+    fails = []
+
+    def ok(name, cond, detail=None):
+        print(("PASS " if cond else "FAIL ") + name + ("" if cond else "  -> %r" % (detail,)))
+        if not cond:
+            fails.append(name)
+    row = ('<tr>\n<td>%s</td>\n<td>11:27 AM</td><td>RNS</td><td>\n<a class="announcement-link" href="%s">%s</a>'
+           '\n</td></tr>')
+    lst = ('<div class="announcement-table"><table>' + row % ("16 Oct 2026", "https://x/net-asset-value-s-/2", "Net Asset Value(s)")
+           + row % ("16 Oct 2026", "https://x/transaction-in-own-shares/3", "Transaction in Own Shares")
+           + row % ("01 Oct 2026", "https://x/net-asset-value-s-/1", "Net Asset Value(s)") + "</table></div>")
+    got = parse_rns_list(lst)
+    ok("RNS list parser reads date, url, title", got[0] == (dt.date(2026, 10, 16), "https://x/net-asset-value-s-/2", "Net Asset Value(s)"), got[:1])
+    try:
+        parse_rns_list("<html>blocked</html>")
+        ok("MUST-FIRE: a list page without the announcement table RAISES", False)
+    except RnsLayoutError:
+        ok("MUST-FIRE: a list page without the announcement table RAISES", True)
+    body = ("<p>Scottish Mortgage Investment Trust PLC (SMT) 15 October 2026 Legal Entity Identifier : X</p>"
+            "<p>Cum Par NAV 1714.96p</p><p>Cum Fair NAV 1,753.50p</p><p>Ex Par NAV 1712.46p</p><p>Ex Fair NAV 1751.00p</p>")
+    n = parse_rns_nav(body)
+    ok("RNS NAV parser reads the as-at date (not the release date) and all four figures",
+       n == {"as_of": dt.date(2026, 10, 15), "cum_par_p": 1714.96, "cum_fair_p": 1753.5, "ex_par_p": 1712.46, "ex_fair_p": 1751.0}, n)
+    try:
+        parse_rns_nav(body.replace("Cum Fair NAV 1,753.50p", ""))
+        ok("MUST-FIRE: an announcement missing the Cum Fair figure RAISES (never a guessed NAV)", False)
+    except RnsLayoutError:
+        ok("MUST-FIRE: an announcement missing the Cum Fair figure RAISES (never a guessed NAV)", True)
+    tmp = tempfile.mkdtemp(prefix="td_st_")
+    try:
+        sp = os.path.join(tmp, "obs.json")
+        U = {"funds": {"SMT": {"name": "SMT", "structure": "closed_end", "yf_symbol": "SMT.L", "price_unit": "GBp",
+                               "rns_nav": {"epic": "SMT", "field": "Cum Fair NAV"}},
+                       "OE": {"name": "Open", "structure": "oeic"}}}
+        pages = {"https://www.investegate.co.uk/company/SMT?page=1": lst, "https://x/net-asset-value-s-/2": body}
+        r = capture_rns(dt.date(2026, 10, 18), U, sp, get=lambda url: pages[url],
+                        closes=lambda sym, a, b: {dt.date(2026, 10, 15): 1545.0})
+        o = load_observations(sp)["observations"]
+        ok("MUST-FIRE: the newest RNS NAV is recorded as a MATCHED pair (NAV GBP, same-date unadjusted price GBP)",
+           r["funds"]["SMT"]["state"] == "RECORDED" and len(o) == 1 and o[0]["as_of"] == "2026-10-15"
+           and abs(o[0]["nav"] - 17.535) < 1e-9 and abs(o[0]["price"] - 15.45) < 1e-9, (r, o))
+        r2 = capture_rns(dt.date(2026, 10, 30), U, sp, get=lambda url: pages[url],
+                         closes=lambda sym, a, b: {dt.date(2026, 10, 15): 1545.0})
+        ok("R5.14 repeat: re-reading the same announcement adds nothing (content-keyed)",
+           r2["funds"]["SMT"]["state"] == "ALREADY_PRESENT" and len(load_observations(sp)["observations"]) == 1, r2)
+        r3 = capture_rns(dt.date(2026, 10, 19), U, sp, get=lambda url: (_ for _ in ()).throw(AssertionError("fetched")))
+        ok("R5.14 T: an observation within 7 days is CURRENT and nothing is fetched", r3["funds"]["SMT"]["state"] == "CURRENT", r3)
+        r4 = capture_rns(dt.date(2026, 11, 30), U, os.path.join(tmp, "o2.json"), get=lambda url: pages[url],
+                         closes=lambda sym, a, b: {})
+        ok("NEGATIVE CONTROL: no same-date price -> UNMATCHED_PRICE, nothing recorded (a discount across two dates is not one)",
+           r4["funds"]["SMT"]["state"] == "UNMATCHED_PRICE" and not os.path.exists(os.path.join(tmp, "o2.json")), r4)
+        r5 = capture_rns(dt.date(2026, 11, 30), U, os.path.join(tmp, "o3.json"), get=lambda url: "<html>blocked</html>")
+        ok("MUST-FIRE: a blocked source is SOURCE_FAILED (typed), never a silent pass", r5["funds"]["SMT"]["state"] == "SOURCE_FAILED", r5)
+        ok("NEGATIVE CONTROL: an open-ended fund is never captured", "OE" not in r5["funds"])
+        _st = {"observations": [{"sedol": "SMT", "as_of": "2026-07-31", "nav": 15.0, "price": 13.8, "source": "t"},
+                                {"sedol": "SMT", "as_of": "2026-10-15", "nav": 17.5, "price": 15.9, "source": "t"}]}
+        _dj = discount("SMT", U["funds"], 13.8, dt.date(2026, 7, 31), _st, as_of=dt.date(2026, 7, 31))
+        ok("MUST-FIRE (PIT): a build as of 31-Jul never reads the 15-Oct observation", _dj.get("nav_as_of") == "2026-07-31", _dj.get("nav_as_of"))
+        _dk = discount("SMT", U["funds"], 15.9, dt.date(2026, 10, 18), _st, as_of=dt.date(2026, 10, 18))
+        ok("NEGATIVE CONTROL (PIT): at the run date the newest observation is used", _dk.get("nav_as_of") == "2026-10-15", _dk.get("nav_as_of"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("trust_discount selftest: %d FAIL(s)" % len(fails))
+    return len(fails)
+
+
 def build(portfolio=None, universe=None, out_path=None, as_of=None):
     import fund_performance as fp
     universe = universe if universe is not None else fp.load_universe()
@@ -334,7 +576,7 @@ def build(portfolio=None, universe=None, out_path=None, as_of=None):
             res["open_ended_skipped"].append(sedol)
             continue
         h = holdings.get(sedol) or {}
-        d = discount(sedol, universe, h.get("price"), as_of, store)
+        d = discount(sedol, universe, h.get("price"), as_of, store, as_of=as_of)
         d["value_gbp"] = h.get("value_gbp")
         d["crystallisation"] = crystallisation_cost(d, h.get("value_gbp"))
         res["closed_end_holdings"].append(d)
@@ -361,7 +603,16 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=None)
     ap.add_argument("--record", nargs=4, metavar=("SEDOL", "AS_OF", "NAV", "SOURCE"),
                     help="append a declared NAV observation")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--capture-rns", type=int, default=None, metavar="MONTHS",
+                    help="ISA-0127: record matched RNS NAV observations (0 = newest; N = one per month-end for N months)")
     a = ap.parse_args()
+    if a.selftest:
+        sys.exit(1 if _selftest() else 0)
+    if a.capture_rns is not None:
+        print(json.dumps(capture_rns(dt.date.fromisoformat(a.as_of) if a.as_of else dt.date.today(),
+                                     months=a.capture_rns, budget_s=150.0), indent=1, default=str))
+        sys.exit(0)
     if a.record:
         st = load_observations()
         st, added = record_observation(st, a.record[0], a.record[1], float(a.record[2]),

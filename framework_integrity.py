@@ -461,9 +461,7 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     # --- ISA-0743/0699 (24-Sep-2026): the E[r] row adapter, so CAP-expected_return is observable --
     ("expected_return", "expected_return_for_row", "live_run",
      "CAP-expected_return producer - the one row adapter every E[r] stamp goes through"),
-    # --- ISA-0740 (24-Sep-2026): approval-preserving execution ceiling, SHADOW -----------------
-    ("execution_ceiling", "shadow_month", "live_run",
-     "CAP-execution_ceiling producer - one ceiling per case captured this month, pre-run Step 8x (SHADOW)"),
+    # --- ISA-0740 execution_ceiling.shadow_month: RETIRED 18-Oct-2026 (ISA-0727 Q1) - no longer a live caller ------
     # --- ISA-0744 (24-Sep-2026): 12-month horizon-value E[r], SHADOW ----------------------------
     ("horizon_value", "shadow_month", "live_run",
      "CAP-horizon_value producer - one horizon-value case per PIT-captured name, pre-run Step 8h (SHADOW)"),
@@ -2616,7 +2614,9 @@ def _selftest() -> int:
     _pr = os.path.join(HERE, "monthly_isa_prerun.py")
     if os.path.exists(_pr):
         _t = ast.parse(open(_pr, encoding="utf-8").read())
-        _main = next((n for n in _t.body if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+        # ISA-0845 CA(4): the pass is main() + _prerun_phase_b (the assurance phase, moved verbatim)
+        _main = ast.Module(body=[n for n in _t.body if isinstance(n, ast.FunctionDef)
+                                 and n.name in ("main", "_prerun_phase_b")], type_ignores=[]) or None
         _lines = {}
         for _n in ast.walk(_main) if _main else []:
             if isinstance(_n, ast.Call):

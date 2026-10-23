@@ -887,9 +887,90 @@ def _selftest() -> int:
        compute_decision_bucket("T3-A", "vci", acs_score=None, **_kw).startswith("ACS Unavailable"))
     ok("ISA-0792 NEGATIVE CONTROL: a real low ACS (52) is still 'Below VCI Threshold'",
        compute_decision_bucket("T3-A", "vci", acs_score=52, **_kw) == "Below VCI Threshold")
+    # B14-R04 (18-Oct-2026): fresh T1 receipt; cached booleans are diagnostic only
+    ok("B14-R04 typed bool: 'true'/'FALSE'/1/0 parse; NaN/''/None/'maybe' -> None (UNKNOWN, never a pass)",
+       [_typed_bool(x) for x in (True, "true", "FALSE", 1, 0, float("nan"), "", None, "maybe", 2)]
+       == [True, True, False, True, False, None, None, None, None, None])
+    try:
+        import t1_gates as _t1x
+        _ent = {"ticker": "XFAIL", "normalised_score": 80, "revision_stage": "Sustained",
+                "expected_return_12_24m": None, "er_state": "MISSING_REQUIRED_INPUT",
+                "t1_qualified": True, "t1_gate_detail": {"t1_qualified": True}}
+        _det = _t1x.evaluate(_ent, {})
+        _rc = _t1_fresh_receipt(_det, _ent, _typed_bool(_ent["t1_qualified"]), _ent["t1_gate_detail"])
+        ok("B14-R04 MUST-FIRE: a cached t1_qualified=True cannot override a failing fresh E[r] evaluation",
+           _det["t1_qualified"] is False and _rc["t1_qualified"] is False and _rc["cached_disagrees"] is True, _rc)
+        _ent2 = dict(_ent, expected_return_12_24m=40.0, er_state="VALID_MECHANICAL", er_status="measured",
+                     t1_qualified="True")
+        _rc2 = _t1_fresh_receipt({"t1_qualified": True}, _ent2, _typed_bool(_ent2["t1_qualified"]), None)
+        ok("B14-R04 POSITIVE CONTROL: a qualifying fresh verdict agrees with its (string) cached True - no disagreement",
+           _rc2["t1_qualified"] is True and _rc2["cached_disagrees"] is False and _rc2["cached_t1_qualified"] is True
+           and len(_rc2["input_digest"]) == 16 and _rc2["input_digest"] != _rc["input_digest"], _rc2)
+    except Exception as _xe:                                            # noqa: BLE001
+        ok("B14-R04 fixtures evaluable", False, "%s: %s" % (type(_xe).__name__, _xe))
+    import ast as _ast
+    _src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    _bad = [n for n in _ast.walk(_ast.parse(_src)) if isinstance(n, _ast.Dict)
+            and any(isinstance(k, _ast.Constant) and k.value == "t1_qualified" for k in n.keys)
+            and "wt_entry" in _ast.unparse(n.values[[i for i, k in enumerate(n.keys)
+                                                     if isinstance(k, _ast.Constant) and k.value == "t1_qualified"][0]])]
+    ok("B14-R04 STRUCTURAL: no record's t1_qualified is taken from the cached wt_entry", not _bad,
+       [_ast.unparse(x)[:120] for x in _bad])
+    # ISA-0817: the corporate_events section helper (consumer side, no network)
+    import corporate_events as _cex
+    _sec = _cex.section_for_step9(["SPI.L", "MU"], {"as_of": "2026-10-18", "verdicts": {
+        "SPI.L": {"symbol": "SPI.L", "state": "OFFEREE_IN_OFFER_PERIOD", "flags": ["offer_period_offeree"],
+                  "venue_class": "UK"}}}, "2026-10-18")
+    ok("ISA-0817 step9 section: offeree carried with its flag; a name outside the store reads SOURCE_FAILED",
+       _sec["verdicts"]["SPI.L"]["flags"] == ["offer_period_offeree"]
+       and _sec["verdicts"]["MU"]["state"] == "SOURCE_FAILED", _sec)
     print("step9_pre_builder selftest: %d FAIL(s)" % len(fails))
     assert not fails, "step9_pre_builder negative controls must not fail: %s" % fails
     return 0
+
+
+def _typed_bool(v):
+    """B14-R04: explicit parse of a stored boolean - True/False, 'true'/'FALSE'/'1'/'0', 1/0; NaN, '', None and
+    anything else -> None (UNKNOWN, never a pass)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        if v != v:                                       # NaN
+            return None
+        return bool(v) if v in (0, 1) else None
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("true", "1", "yes"):
+            return True
+        if t in ("false", "0", "no"):
+            return False
+    return None
+
+
+_T1_INPUT_FIELDS = ("normalised_score", "revision_stage", "expected_return_12_24m", "er_state", "er_status",
+                    "val_hist_pe_premium_disc", "disqualifier_flags", "review_flags", "reversal_unresolved",
+                    "screen_sightings", "t1_gate_overrides", "catalyst_date", "catalyst_within_90d")
+
+
+def _t1_fresh_receipt(detail, ev_entry, cached_q, cached_detail):
+    """The B14-R04 entry-qualification receipt: what was evaluated, under which definition, on which input."""
+    import hashlib as _hl
+    try:
+        import score_definition as _sd
+        _cur = _sd.current_identity()
+        _defn = {"id": _cur.get("id"), "hash": _cur.get("hash")}
+    except Exception as _e:                                             # noqa: BLE001
+        _defn = {"id": None, "hash": None, "error": "%s: %s" % (type(_e).__name__, _e)}
+    inp = {k: (ev_entry or {}).get(k) for k in _T1_INPUT_FIELDS}
+    digest = _hl.sha256(json.dumps(inp, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    fresh = detail.get("t1_qualified") is True
+    return {"basis": "FRESH_EVALUATION (B14-R04): t1_gates.evaluate on this run's record; cached values are diagnostic only",
+            "evaluated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "score_definition": _defn, "input_digest": digest,
+            "t1_qualified": fresh, "t1_gate_failed": (detail.get("t1_gate_failed") if not fresh else None),
+            "cached_t1_qualified": cached_q,
+            "cached_disagrees": (cached_q is not None and cached_q != fresh),
+            "cached_detail_present": bool(cached_detail)}
 
 
 def main():
@@ -1120,15 +1201,18 @@ def main():
                     _ev_entry["screen_sightings"] = None
                 _ss_state = ("MEASURED_AT_PRODUCER" if _ev_entry["screen_sightings"] is not None
                              else "UNMEASURED_PANEL_UNREADABLE")
-            _t1_detail = wt_entry.get("t1_gate_detail")
-            if (not _t1_detail or (_t1_detail.get("screen_sightings") is None
-                                   and _ev_entry.get("screen_sightings") is not None)):
-                _t1_detail = _t1.evaluate(_ev_entry, ts)
+            # ⚑ B14-R04 / ISA-0616 residual (18-Oct-2026): entry qualification is a FRESH receipt bound to this
+            #   run's input, definition and cutoff. The cached `t1_qualified` / `t1_gate_detail` on the watchlist
+            #   entry (stamped by an earlier rerank) used to WIN whenever present, so a cached True could override a
+            #   failing fresh E[r] / revisions / catalyst evaluation. It is now a DIAGNOSTIC only.
+            _t1_cached_detail = wt_entry.get("t1_gate_detail")
+            _t1_cached_q = _typed_bool(wt_entry.get("t1_qualified"))
+            _t1_detail = _t1.evaluate(_ev_entry, ts)
+            _t1_receipt = _t1_fresh_receipt(_t1_detail, _ev_entry, _t1_cached_q, _t1_cached_detail)
             base_record["screen_sightings_state"] = _ss_state
             base_record.update({
-                "t1_qualified":    bool(wt_entry.get("t1_qualified")
-                                        if wt_entry.get("t1_qualified") is not None
-                                        else _t1_detail["t1_qualified"]),
+                "t1_qualified":    bool(_t1_detail["t1_qualified"] is True),
+                "t1_receipt":      _t1_receipt,
                 "stage_gate":      _t1_detail["stage_gate"],
                 "late_cycle_flag": _t1_detail["late_cycle_flag"],
                 # A5 v3 (D18/D19): evidence CERTIFICATION.
@@ -1693,6 +1777,33 @@ def main():
     for _r in deployment_priority_rank:
         _r["feasible"] = _r.get("ticker") in _feas
         _r["feasible_rank"] = _feas.get(_r.get("ticker"))
+    # ── ISA-0817 (Raj D1-D3, 18-Oct-2026) — offer-period / corporate-action state for EVERY name this
+    #   artefact carries plus the held book, read from the GENERATED corporate_events.json (Step 5x-ce; no network
+    #   here). The engine classifies the flag codes (FLAG_TAXONOMY); a name missing from this section reads
+    #   SOURCE_FAILED there, never 'no event'. An unreadable store is NAMED in the section, never an empty pass.
+    _ce_syms = set(tickers_scored)
+    for _lst in (main_t1, main_t2, main_t3, vci_t1a, vci_t2a, vci_t3a, pool_t1, pool_t2, pool_t3,
+                 deployment_priority_rank):
+        _ce_syms.update(r.get("ticker") for r in _lst if isinstance(r, dict) and r.get("ticker"))
+    try:
+        _pp_ce = getattr(args, "portfolio", None)
+        if _pp_ce:
+            _ce_syms.update(st.get("ticker") for st in (json.load(open(_pp_ce, encoding="utf-8")).get("stocks") or [])
+                            if st.get("ticker"))
+    except Exception:                                                   # noqa: BLE001
+        pass
+    try:
+        import corporate_events as _ce9
+        _ce_doc = _ce9.load(os.path.dirname(os.path.abspath(__file__)))
+        _corporate_events = _ce9.section_for_step9(_ce_syms, _ce_doc)
+    except Exception as _cee:                                           # noqa: BLE001
+        _corporate_events = {"verdicts": {}, "counts": {}, "error": "%s: %s" % (type(_cee).__name__, _cee),
+                             "consequence": "every name reads NOT_IN_SECTION -> offer_state_source_failed (REVIEW)"}
+    for _r in list(deployment_priority_rank) + list(_deployable_stack):
+        _v = (_corporate_events.get("verdicts") or {}).get(_r.get("ticker")) or {}
+        _r["corporate_event_state"] = _v.get("state", "NOT_IN_SECTION")
+        _r["corporate_event_flags"] = list(_v.get("flags") or [])
+
     # Produce output
     output = {
         "_meta": {
@@ -1760,6 +1871,8 @@ def main():
         "opportunity_set":         _opp,
         # ISA-0616: THE canonical C-1 (current admissibility) verdict for every name scored this run.
         "current_admissibility":   _c1,
+        # ISA-0817: offer-period / corporate-action verdicts (engine FLAG_TAXONOMY classifies the codes).
+        "corporate_events":        _corporate_events,
     }
 
     with open(args.out, "w", encoding="utf-8") as f:

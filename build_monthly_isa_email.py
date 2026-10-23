@@ -477,6 +477,11 @@ def _render_capital_router(d):
         out += para("<strong>" + se(v["fund_leg_line"]) + "</strong>")
     if v.get("decision_engine_line"):                        # ISA-0804 — the engine receipt (SHADOW/LIVE)
         out += para(se(v["decision_engine_line"]))
+    if v.get("concentration_line"):                          # ISA-0465/0700 — caps SHADOW result + LIVE decision prompt
+        _cl = se(v["concentration_line"])
+        out += para(("<strong>" + _cl + "</strong>") if "DECISION REQUIRED" in v["concentration_line"] else _cl)
+    if v.get("switch_contest_line"):                         # ISA-0621 — SHADOW switch contest (held stocks as donors)
+        out += para(se(v["switch_contest_line"]))
     if v.get("dealability_line"):                            # ISA-0860 — confirm at dealing + fallbacks
         out += para("<strong>" + se(v["dealability_line"]) + "</strong>")
     if v.get("engine_authority_line"):                       # ISA-0811 — receipt allocation + legacy SHADOW
@@ -752,14 +757,19 @@ def build_s6(data):
     inner = ""
     # B3 (P2): AI-complex factor look-through — computed line, coverage-honest
     if d.get("factor_line"):
-        _fcol = C["red"] if "BREACH" in str(d["factor_line"]) else C["green"]
+        # B08-R02 (P-B6): green ONLY when OK holds at the upper bound; a floor under the cap is amber
+        _fl = str(d["factor_line"])
+        _fcol = C["red"] if "BREACH" in _fl else (C["green"] if "OK even at the upper bound" in _fl else C["amber"])
         inner += para(f'<strong style="color:{_fcol}">{se(d["factor_line"])}</strong>')
     if d.get("semis_line"):
-        _scol = C["red"] if "WATCH (" in str(d["semis_line"]) else C["green"]
+        _scol = C["red"] if "WATCH (" in str(d["semis_line"]) else (
+            C["amber"] if ("NOT ESTABLISHED" in str(d["semis_line"]) or "UNAVAILABLE" in str(d["semis_line"])) else C["green"])
         inner += para(f'<strong style="color:{_scol}">{se(d["semis_line"])}</strong>')
         if d.get("factor_unclassified"):
             inner += para(f'B3: unclassified names need a factor_map entry: '
                           f'{se(str(d["factor_unclassified"]))}', muted=True, small=True)
+    if d.get("exposure_line"):
+        inner += para(se(str(d["exposure_line"])), muted=True, small=True)
 
     inner += kpi_row(d.get("kpis", []))
 
@@ -961,6 +971,24 @@ def build_s8(data):
         inner += h3("Fund Action Stack &mdash; retention, anchor rule and agenda")
         inner += para(f"<strong>{se(fas.get('headline', ''))}</strong>"
                       + (f" &nbsp;|&nbsp; as at {se(fas.get('as_of', ''))}" if fas.get("as_of") else ""))
+        for _tdx in fas.get("trust_discounts") or []:
+            if _tdx.get("discount_pct") is None:
+                inner += para(f'<strong style="color:{C["amber"]}">&#9888; {se(str(_tdx.get("name")))}: closed-end discount '
+                              f'UNMEASURED</strong> (ISA-0127)', small=True)
+                continue
+            _pc = _tdx.get("percentile")
+            inner += para(f"<strong>{se(str(_tdx.get('name')))}:</strong> "
+                          f"{abs(_tdx['discount_pct']):.1f}% {'discount' if _tdx['discount_pct'] < 0 else 'premium'} to NAV "
+                          f"as at {se(str(_tdx.get('as_of')))} ({se(str(_tdx.get('basis')))})"
+                          + (f" &mdash; {_pc:.0f}th percentile of {_tdx.get('n')} matched observations (0 = widest)"
+                             if _pc is not None else f" &mdash; {_tdx.get('n') or 0} of 12 observations needed for wide/narrow")
+                          + (f"; selling forgoes &pound;{abs(_tdx['crystallisation_gbp']):,.0f} of underlying assets"
+                             if _tdx.get("crystallisation_gbp") else "") + " (ISA-0127)", small=True)
+        _nf = fas.get("nav_freshness") or {}
+        if _nf.get("headline"):
+            _nf_bad = bool(_nf.get("not_fresh")) or not _nf.get("available")
+            inner += para((f'<strong style="color:{C["amber"]}">&#9888; ' if _nf_bad else "<strong>")
+                          + se(_nf["headline"]) + "</strong> (ISA-0869)", small=True)
         # ── A7 / ISA-0440 — SAY WHAT THE ORDER MEANS, IN THE SAME BREATH AS THE ORDER ────────
         # ⚑ The rank column used to mean "worst FRS first" and now means "sell first". A reader
         # who carries the old reading into the new list reads a fund at #1 as condemned when it
@@ -1546,13 +1574,45 @@ LEAN_SECTION_PRIORITY = [
     "s3_investment_cases",
     "s8_fund_review",          # 85% of the ISA, and now carries the retention agenda
     "s7_stock_sleeve",
+    # ⚑ ISA-0642 B10-R05 (4), 19-Oct-2026: BY MATERIALITY. The portfolio snapshot ("where do I stand",
+    #   now also the actual-account YTD) and the stock sleeve outrank the liquidation tracker, macro and
+    #   retrospective; October's lean copy had dropped s6 and s7 while keeping none of their warnings.
+    "s6_portfolio_snapshot",
     "s4_liquidation_tracker",
     "s5_watchlist",
-    "s6_portfolio_snapshot",
     "s9_macro",
     "s11_retrospective",
 ]
 LEAN_NEVER_OMIT = ("s1_decision_summary",)
+
+# ⚑ ISA-0642 B10-R05 (1), 19-Oct-2026: a WARNING is any block-level row (<p>, <li>, <tr>) whose visible
+#   text carries one of these state words. Mechanical, so a lean copy can be PROVEN to carry every one:
+#   the warning set of the full report must be a subset of the lean copy's (lean_report.warnings_coverage,
+#   consistency pair_lean_carries_every_warning).
+LEAN_WARNING_RE = re.compile(r"\b(REFUSED\w*|UNKNOWN|UNVERIFIED\w*|DEGRADED|CONFIRM AT DEALING|CONFIRM_AT_DEALING|"
+                             r"BLOCKED|STALE|UNRECONCILED|INVALIDATED|NOT_DEALABLE\w*|ABSENT)\b")
+_LEAN_BLOCK_RE = re.compile(r"<(p|li|tr)\b[^>]*>(.*?)</\1>", re.S | re.I)
+
+
+def warning_lines(html_text):
+    """The warning rows of a rendered body, as normalised visible text, in order, de-duplicated."""
+    import html as _h
+    out = []
+    for m in _LEAN_BLOCK_RE.finditer(html_text or ""):
+        t = re.sub(r"\s+", " ", _h.unescape(re.sub(r"<[^>]+>", " ", m.group(2)))).strip()
+        if t and LEAN_WARNING_RE.search(t) and t not in out:
+            out.append(t)
+    return out
+
+
+def _carried_block(carried):
+    """Rendered INSIDE s1 (never omitted): every warning row of every omitted section, verbatim."""
+    rows = "".join("<li>%s</li>" % se(t) for _, t in carried)
+    return ('<div style="margin:10px 0;padding:8px 12px;border-left:3px solid #f59e0b">'
+            '<p style="margin:4px 0"><strong>Carried from omitted sections (%d warning row(s)).</strong> '
+            'These rows appear in sections this emailed copy omits; they are repeated here verbatim so no '
+            'refusal, UNKNOWN, DEGRADED or confirm-at-dealing state is lost with its section (ISA-0642).</p>'
+            '<ul style="margin:4px 0 4px 18px">%s</ul></div>' % (len(carried), rows))
 
 
 def _omitted_notice(key, num, title, nbytes, full_path):
@@ -1576,6 +1636,16 @@ def apply_lean(html, budget=LEAN_DEFAULT_BUDGET):
                   "within_budget": after <= budget, "style_classes": s1["classes"],
                   "style_attrs_replaced": s1["replaced"],
                   "pct_saved": round(100.0 * (before - after) / max(1, before), 1)}
+
+
+def _with_warning_coverage(data, body, rep):
+    """ISA-0642 B10-R05 (1): prove the lean copy carries every warning row of the full report."""
+    full = warning_lines(build_email_body(data))
+    lean = set(warning_lines(body))
+    missing = [t for t in full if t not in lean]
+    rep["warnings_coverage"] = {"n_full": len(full), "n_lean": len(lean), "missing": missing,
+                                "ok": not missing, "rule": "set(warnings in full) is a subset of set(warnings in lean)"}
+    return rep
 
 
 def build_lean_body(data, budget=LEAN_DEFAULT_BUDGET, full_path=None, max_rounds=len(SECTION_ORDER) + 1):
@@ -1607,14 +1677,14 @@ def build_lean_body(data, budget=LEAN_DEFAULT_BUDGET, full_path=None, max_rounds
         rounds.append({"included": len(include), "bytes": comp["bytes_final"]})
         if comp["within_budget"] or len(include) <= len(LEAN_NEVER_OMIT):
             rep["rounds"] = rounds
-            return body, rep
+            return body, _with_warning_coverage(data, body, rep)
         droppable = [k for k in reversed(include) if k not in LEAN_NEVER_OMIT]
         if not droppable:
             rep["rounds"] = rounds
-            return body, rep
+            return body, _with_warning_coverage(data, body, rep)
         include.remove(droppable[0])
     rep["rounds"] = rounds
-    return body, rep
+    return body, _with_warning_coverage(data, body, rep)
 
 
 def build_email_body(data, lean=False, budget=LEAN_DEFAULT_BUDGET, full_path=None,
@@ -1631,6 +1701,13 @@ def build_email_body(data, lean=False, budget=LEAN_DEFAULT_BUDGET, full_path=Non
 
     # Header
     parts.append(build_header(meta))
+    _hdr_at = len(parts)
+    # ⚑ ISA-0642 B10-R05 (5): a body built from the TEMPLATE (a historical mock-up with June-2026 example
+    #   values) is labelled NON-CURRENT at the top; main() refuses to write it as a sendable email.
+    if data.get("_template_marker"):
+        parts.append(para('<strong>NON-CURRENT EXAMPLE.</strong> This body was built from '
+                          'email_data_monthly_isa_TEMPLATE.json (%s). Every figure in it is an illustrative '
+                          'example, not this month\'s review.' % se(str(data.get("_template_marker")))))
 
     # CAPTURE LAYER ITEM 2 (Dashboard Spec 7.6A) — machine vital signs, readable in fifteen
     # seconds, directly under the header. Deliberately NOT a numbered section: SECTION_ORDER
@@ -1658,6 +1735,18 @@ def build_email_body(data, lean=False, budget=LEAN_DEFAULT_BUDGET, full_path=Non
         omitted = [(k, len(built[k].encode())) for k in built if k not in include]
         assert set(k for k in LEAN_NEVER_OMIT if k in built) <= include, \
             "lean rendering attempted to omit a section that must never be omitted"
+        if omitted:
+            # ⚑ ISA-0642 B10-R05 (1)+(2): every warning row of an omitted section is carried INTO s1,
+            #   and a standing top line names every omission and where the full report is.
+            carried = [(k, t) for k, _ in omitted for t in warning_lines(built[k])]
+            if carried and "s1_decision_summary" in built:
+                built["s1_decision_summary"] = built["s1_decision_summary"] + _carried_block(carried)
+            _names = ", ".join("%s %s" % (SECTION_NUMBERS.get(k, "?"), SECTION_TITLES.get(k, k)) for k, _ in omitted)
+            parts.insert(_hdr_at, para('<strong>Emailed copy omits %d section(s):</strong> %s. The complete report '
+                                       'is %s; %d warning row(s) from them are carried into Section 1.'
+                                       % (len(omitted), se(_names),
+                                          se(os.path.basename(full_path)) if full_path else "the saved report",
+                                          len(carried)), small=True))
 
     for section_key in SECTION_ORDER:
         if section_key not in built:
@@ -1827,7 +1916,8 @@ def main():
                 fetch_report=_smi.get("fetch_report"), correlation_coverage=_smi.get("correlation_coverage"),
                 integrity_report=_smi.get("integrity_report"), execution_ledger=_smi.get("execution_ledger"),
                 symbol_map_refresh=_smi.get("symbol_map_refresh"), fetch_universe=_smi.get("fetch_universe"),
-                instrument_eligibility=_smi.get("instrument_eligibility"))
+                instrument_eligibility=_smi.get("instrument_eligibility"),
+                corporate_events=_smi.get("corporate_events"))
             data["s7_stock_sleeve"]["integrity_lines"] = _ib.get("s7_lines") or []
             data.setdefault("s11_retrospective", {})["integrity_lines"] = _ib.get("s11_lines") or []
         except FileNotFoundError:
@@ -1939,6 +2029,14 @@ def main():
                                                   getattr(_cde_m, "summary", None))
             _blk["decision_engine_line"] = _ep.decision_engine_line(_cde_sum, _cdv.get("state"))
             _blk["dealability_line"] = _ep.dealability_confirmation_line(_cde_sum)       # ISA-0860
+            # ISA-0465/0700 (19-Oct-2026): the concentration SHADOW result + LIVE readiness, every run (Raj's reminder)
+            try:
+                import concentration_control as _ccm_e
+                _rd465 = _ccm_e.live_readiness()
+            except Exception as _rde:                                   # noqa: BLE001
+                _rd465 = {"state": "UNREADABLE", "blockers": ["%s: %s" % (type(_rde).__name__, _rde)]}
+            _blk["concentration_line"] = _ep.concentration_line(_cde_sum, _rd465)
+            _blk["switch_contest_line"] = _ep.switch_contest_line(_cde_sum)                # ISA-0621
             data.setdefault("meta", {})["capital_decision_engine"] = {
                 "verification": _cdv.get("state"), "receipt_id": (_cde_sum or {}).get("receipt_id"),
                 "state": (_cde_sum or {}).get("state"), "authority": (_cde_sum or {}).get("engine_authority")}
@@ -1974,6 +2072,13 @@ def main():
                   "No email body was written.")
             sys.exit(3)
         print("  PLACEHOLDERS ALLOWED (--allow-placeholders): SHADOW/rehearsal build - NOT sendable.")
+    # ⚑ ISA-0642 B10-R05 (5): the template is a historical mock-up; its marker must be removed when populated.
+    if data.get("_template_marker"):
+        print("  TEMPLATE MARKER present (%s): the data still carries the template's example values." % data["_template_marker"])
+        if not args.allow_placeholders:
+            print("ERROR (ISA-0642): remove `_template_marker` only after every example value is replaced. "
+                  "No email body was written.")
+            sys.exit(3)
     lean_rep = {}
     if args.lean:
         with open(full_path, "w", encoding="ascii", errors="xmlcharrefreplace") as f:
@@ -1996,6 +2101,25 @@ def main():
     if args.lean:
         json.dump(lean_rep, open(os.path.splitext(args.output)[0] + "_lean_report.json", "w"),
                   indent=2)
+        # ⚑ ISA-0642 B10-R05 (3): the omission pattern is APPENDED, never overwritten, so the drop
+        #   order can be reviewed run over run (artefact contract: lean_history.jsonl APPEND_ONLY_HISTORY).
+        try:
+            import datetime as _dt0642
+            _wc = lean_rep.get("warnings_coverage") or {}
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean_history.jsonl"), "a",
+                      encoding="utf-8") as _lh:
+                _lh.write(json.dumps({"built_at": _dt0642.datetime.now().isoformat(timespec="seconds"),
+                                      "email": os.path.basename(args.output),
+                                      "subject_month": (data.get("meta") or {}).get("run_month_label"),
+                                      "sections_omitted": [x.get("section") for x in lean_rep.get("sections_omitted", [])],
+                                      "bytes_full": lean_rep.get("full_bytes"), "bytes_final": lean_rep.get("bytes_final"),
+                                      "within_budget": lean_rep.get("within_budget"),
+                                      "warnings_full": _wc.get("n_full"), "warnings_missing": len(_wc.get("missing") or [])}) + "\n")
+        except Exception as _e0642:                                   # noqa: BLE001
+            print("  WARN lean_history.jsonl not appended: %s: %s" % (type(_e0642).__name__, _e0642))
+        _wc = lean_rep.get("warnings_coverage") or {}
+        print("  LEAN: warning rows carried %s/%s%s" % (_wc.get("n_full", 0) - len(_wc.get("missing") or []), _wc.get("n_full"),
+              "" if _wc.get("ok", True) else "  \u2691 MISSING %d - do not send this copy" % len(_wc.get("missing") or [])))
         print(f"  LEAN: {lean_rep['full_bytes']:,} -> {lean_rep['bytes_final']:,} bytes "
               f"({lean_rep['pct_saved']}% from style compression alone, "
               f"{lean_rep['style_classes']} classes over {lean_rep['style_attrs_replaced']} "
@@ -2049,6 +2173,8 @@ def _selftest():
     _h804 = _render_capital_router({"capital_router": {"split_line": "x",
                                                        "decision_engine_line": "Capital decision engine (ISA-0804, SHADOW, receipt CDR-T)"}})
     assert "CDR-T" in _h804, "MUST-FIRE ISA-0804: the receipt line must render in the router section"
+    _h465 = _render_capital_router({"capital_router": {"split_line": "x", "concentration_line": "Concentration caps ... DECISION REQUIRED (Raj)"}})
+    assert "DECISION REQUIRED" in _h465 and "<strong>" in _h465, "MUST-FIRE ISA-0465: the decision prompt renders, emphasised"
     assert "ISA-0804" not in _render_capital_router({"capital_router": {"split_line": "x"}}), \
         "NEGATIVE CONTROL ISA-0804: no receipt line, nothing invented"
     # ISA-0816 — the verified receipt supersedes the bundle's copy; a non-VALID one never does
@@ -2102,7 +2228,40 @@ def _selftest():
     _m = _ins793.getsource(main)
     assert "sys.exit(3)" in _m and _m.index("unfilled_placeholders(full_body)") < _m.index("open(args.output, \"w\""), \
         "ISA-0793: the gate runs BEFORE the email body file is written"
-    print("build_monthly_isa_email selftest OK (ISA-0722 section 7 table + ISA-0727 approval gate + ISA-0793 placeholder gate)")
+    # ── ISA-0642 B10-R05 ────────────────────────────────────────────────────────────────
+    _pl = {"meta": {}, "s7_stock_sleeve": {"v21": {"absent_line": "PLANTED engine output ABSENT for the lean test"}}}
+    _rep = {}
+    _lb = build_email_body(_pl, lean=True, include_sections={"s1_decision_summary"}, lean_report=_rep, full_path="x_full.html")
+    assert "Carried from omitted sections" in _lb and "PLANTED engine output ABSENT" in _lb, \
+        "⚑ MUST-FIRE ISA-0642: a warning planted in s7 reaches the lean copy (inside s1)"
+    assert "Emailed copy omits" in _lb and "x_full.html" in _lb, "ISA-0642: the top line names omissions and the full report"
+    _rc0642 = _with_warning_coverage(_pl, _lb, {})["warnings_coverage"]
+    assert _rc0642["ok"] and _rc0642["n_full"] >= 1, ("ISA-0642: coverage proven", _rc0642)
+    _bad = _with_warning_coverage(_pl, build_email_body(_pl, lean=False).replace("PLANTED engine output ABSENT", "x"), {})
+    assert not _bad["warnings_coverage"]["ok"], "MUST-FIRE ISA-0642: a lost warning is reported missing"
+    _clean = build_email_body({"meta": {}, "s7_stock_sleeve": {"v21": {"absent_line": "all fine"}}}, lean=True,
+                              include_sections={"s1_decision_summary"}, lean_report={})
+    assert "Carried from omitted sections" not in _clean, "NEGATIVE CONTROL ISA-0642: no warnings -> no block"
+    assert "Emailed copy omits" not in build_email_body({"meta": {}}, lean=False), "NEGATIVE CONTROL: full report has no omission line"
+    _pr = LEAN_SECTION_PRIORITY
+    assert all(_pr.index(a) < _pr.index(b) for a in ("s6_portfolio_snapshot", "s7_stock_sleeve")
+               for b in ("s4_liquidation_tracker", "s9_macro", "s11_retrospective")), "ISA-0642 (4): materiality order"
+    assert "NON-CURRENT EXAMPLE" in build_email_body({"meta": {}, "_template_marker": "T"}), "MUST-FIRE ISA-0642 (5)"
+    assert "NON-CURRENT EXAMPLE" not in build_email_body({"meta": {}}), "NEGATIVE CONTROL ISA-0642 (5)"
+    _m0642 = _ins793.getsource(main)
+    assert _m0642.index('data.get("_template_marker")') < _m0642.index("open(args.output, \"w\""), \
+        "ISA-0642 (5): the template refusal runs BEFORE the email body file is written"
+    # account-return renderer (email_prefill.apply_account_return)
+    _ok = {"state": "OK", "twr_pct": 16.94, "mwr_pct": 17.53, "start": {"date": "2025-12-31", "value_gbp": 104781.0, "source": "Q4"},
+           "end": {"date": "2026-10-02", "value_gbp": 160391.1, "source": "x"}, "flows_total_gbp": 34000.0, "basis": "APPROXIMATE TWR"}
+    _s6 = _ep.apply_account_return({"performance": [{"period": "YTD", "portfolio": "+24.56%"}]},
+                                   {"calendar_ytd": _ok, "tax_year_to_date": {"state": "UNVERIFIED_FLOWS", "why": "w"}})
+    _p = [r["period"] for r in _s6["performance"]]
+    assert _p[0].startswith("YTD (X-Ray") and "+16.94%" in [r["portfolio"] for r in _s6["performance"]] \
+        and "UNVERIFIED_FLOWS" in [r["portfolio"] for r in _s6["performance"]], ("MUST-FIRE ISA-0642 (6) renderer", _s6)
+    assert "ABSENT" in _ep.apply_account_return({}, None)["account_return_line"], "NEGATIVE CONTROL ISA-0642 (6): absent is stated"
+    print("build_monthly_isa_email selftest OK (ISA-0722 section 7 table + ISA-0727 approval gate + ISA-0793 placeholder gate "
+          "+ ISA-0642 lean warnings carried / top line / coverage / materiality order / template marker / account-return renderer)")
     return 0
 
 if __name__ == "__main__":

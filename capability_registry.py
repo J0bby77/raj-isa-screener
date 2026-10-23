@@ -660,6 +660,20 @@ def live_state(cap: dict, chain: dict) -> dict:
             "why": "PRODUCED -> EXECUTED -> CONSUMED -> DECISION-EFFECTIVE all green (R4.14)"}
 
 
+RETIRED_STATES = ("RETIRED_SUPERSEDED",)
+
+
+def retirement_valid(cap: dict, ids) -> bool:
+    """ISA-0727 (18-Oct-2026): a capability RETIRED by a recorded decision leaves the LIVE/NOT-LIVE denominator only with
+    a complete retirement record - on, by, authority, item, and superseded_by naming ANOTHER capability in the registry.
+    It stays in the registry (the _denominator_ids floor still holds: retired is relabelled, never deleted) and is
+    reported in its own list. An incomplete record keeps it in the chain (a retirement cannot be used to hide a gap)."""
+    r = (cap or {}).get("retirement") or {}
+    return bool((cap or {}).get("production_status") in RETIRED_STATES and r.get("on") and r.get("by")
+                and r.get("authority") and r.get("item") and r.get("superseded_by") in set(ids)
+                and r.get("superseded_by") != (cap or {}).get("id"))
+
+
 def reconcile(root: str = HERE, ledger: Optional[dict] = None,
               registry: Optional[dict] = None) -> dict:
     """Every capability's R4.14 chain, ranked by GBP exposure. The KR12 input."""
@@ -678,7 +692,13 @@ def reconcile(root: str = HERE, ledger: Optional[dict] = None,
     suites = _suite_states(root)
     open_items = _open_item_ids(root)
     rows = []
+    retired = []
+    _ids727 = {c.get("id") for c in doc["capabilities"]}
     for cap in doc["capabilities"]:
+        if retirement_valid(cap, _ids727):
+            retired.append({"id": cap["id"], "name": cap["name"], "production_status": cap.get("production_status"),
+                            "retirement": cap.get("retirement")})
+            continue
         chain = evidence_chain(cap, on_disk, live, root, suites=suites, bound=bound)
         ls = live_state(cap, chain)
         rows.append({"id": cap["id"], "name": cap["name"],
@@ -723,6 +743,7 @@ def reconcile(root: str = HERE, ledger: Optional[dict] = None,
         "production_orchestrator_calls_unbound": sum(1 for r in rows
                                                      if r["chain"]["EXECUTED"].get("kind") == "EXECUTION_NOT_RUN_BOUND"),
         "live": n_live,
+        "retired": len(retired),
         "registered_non_live": sum(1 for r in rows if not r["live"]["live"]
                                    and r["not_live_reason"]["state"] == "REGISTERED"),
         "by_stage_state": {st: {k: sum(1 for r in rows if r["chain"][st]["state"] == k)
@@ -742,6 +763,7 @@ def reconcile(root: str = HERE, ledger: Optional[dict] = None,
         "gbp_exposure_not_live": round(exposure_not_live, 2),
         "blocked_at": by_stage,
         "rows": rows,
+        "retired": retired,
         "basis": ("R4.14. A capability is LIVE only when evidence proves PRODUCED -> EXECUTED -> "
                   "CONSUMED -> DECISION-EFFECTIVE through the real intended path. The Atlas "
                   "answers only the first (R15.5)."),
@@ -760,9 +782,12 @@ def unobserved_producers(root: str = HERE, registry: Optional[dict] = None) -> d
     except Exception as exc:                                            # noqa: BLE001
         return {"state": "UNKNOWN", "why": "framework_integrity unavailable: %s" % exc, "rows": []}
     rows = []
+    _ids = {c.get("id") for c in doc["capabilities"]}
     for cap in doc["capabilities"]:
         p = cap.get("producer")
         if _is_undeclared(p):
+            continue
+        if retirement_valid(cap, _ids):          # ISA-0727: a RETIRED producer is deliberately no longer run
             continue
         if p not in man or not sites.get(p):
             rows.append({"id": cap["id"], "producer": p, "in_manifest": p in man,
@@ -1096,6 +1121,20 @@ def _selftest(verbose: bool = True) -> int:
            "exposure come from quantity_register.json",
            any(c0["producer"] != UNDECLARED and c0["gbp_exposure"]
                for c0 in seeded["capabilities"]))
+
+    # ── ISA-0727: retirement by recorded decision (relabelled, never deleted) ───────────
+    _rr = {"id": "CAP-r", "name": "r_old", "production_status": "RETIRED_SUPERSEDED",
+           "retirement": {"on": "2026-10-18", "by": "test", "authority": "Raj Q1", "item": "ISA-0727", "superseded_by": "CAP-x"}}
+    ok("ISA-0727 MUST-FIRE: a complete retirement record superseded by another registered capability is RETIRED",
+       retirement_valid(_rr, {"CAP-x", "CAP-r"}))
+    ok("ISA-0727 NEGATIVE CONTROL: a retirement whose superseder is not in the registry is NOT retired (no hiding a gap)",
+       not retirement_valid(_rr, {"CAP-r"}))
+    ok("ISA-0727 NEGATIVE CONTROL: a retirement without its authority is NOT retired",
+       not retirement_valid(dict(_rr, retirement=dict(_rr["retirement"], authority=None)), {"CAP-x", "CAP-r"}))
+    ok("ISA-0727 NEGATIVE CONTROL: a capability cannot be superseded by itself",
+       not retirement_valid(dict(_rr, retirement=dict(_rr["retirement"], superseded_by="CAP-r")), {"CAP-r"}))
+    ok("ISA-0727 NEGATIVE CONTROL: production_status other than RETIRED_* never retires, whatever the record",
+       not retirement_valid(dict(_rr, production_status="SHADOW"), {"CAP-x", "CAP-r"}))
 
     # ── A12: the observer is not in its own consumer scan ────────────────────────────
     ok("⚑ SELF-EXCLUSION (A12/R10): capability_registry is not a candidate consumer of its own "

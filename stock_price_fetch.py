@@ -509,11 +509,8 @@ def last_settled_friday(today: Optional[datetime.date] = None) -> datetime.date:
     intraday level be stored as that week's close and then be skipped as "current" forever, so
     a Friday run steps back a week. Being one week conservative costs a refetch; being one day
     optimistic writes a wrong number that nothing would ever revisit."""
-    d = today or datetime.date.today()
-    back = (d.weekday() - 4) % 7                       # 4 = Friday
-    if back == 0:                                      # today IS Friday: not settled yet
-        back = 7
-    return d - datetime.timedelta(days=back)
+    # ⚑ ISA-0756: ONE HOME - stock_return_store.last_settled_friday (the freshness contract's clock).
+    return srs.last_settled_friday(today or datetime.date.today())
 
 
 def is_current(store: dict, ticker: str, today: Optional[datetime.date] = None) -> bool:
@@ -735,7 +732,7 @@ def _corr(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
 
 
 def matrix(store: Optional[dict] = None, tickers: Optional[Sequence[str]] = None,
-           *, weeks: Optional[int] = None) -> dict:
+           *, weeks: Optional[int] = None, as_of=None) -> dict:
     """The pairwise correlation matrix over the last `weeks` COMMON Fridays.
 
     ⚑ ISA-0680 (23-Sep-2026): `weeks` defaults to THE declared risk window,
@@ -749,7 +746,7 @@ def matrix(store: Optional[dict] = None, tickers: Optional[Sequence[str]] = None
         import isa_policy as _pol_0680
         weeks = int(_pol_0680.RISK_WINDOW_WEEKS)
     store = store if store is not None else srs.load()
-    cov = srs.coverage(store, list(tickers) if tickers else None)
+    cov = srs.coverage(store, list(tickers) if tickers else None, as_of=as_of)   # ISA-0756: injected clock
     live = [t for t, v in cov["names"].items() if v["status"] != "STALE"]
     series = {}
     for t in live:

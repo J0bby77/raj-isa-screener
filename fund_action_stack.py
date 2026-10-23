@@ -446,12 +446,21 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
         trust_error = f"{type(_e).__name__}: {_e}"
 
     held = {}
+    # ⚑ ISA-0869 (18-Oct-2026): ONE DOOR (fund_performance.nav_series_for - declared local_series first,
+    #   then the feed). This loop used `yf_symbol or isin` itself, so Polar (no yfinance feed) had NO
+    #   series here while every other consumer read its declared one. Every fund's NAV freshness is
+    #   typed beside it (FRESH / STALE_CACHE(as_of) / SOURCE_FAILED ...), never blank.
+    _nav_state = fp._load_nav_state()
+    nav_fresh = {}
     for sedol, u in funds.items():
         if str(sedol).startswith("_"):
             continue
-        sym = u.get("yf_symbol") or u.get("isin")
-        series = fp.fetch_nav_history(sym, use_cache=True, refresh=refresh,
-                                      scale=fp._scale_for(u)) if sym else []
+        try:
+            series = fp.nav_series_for(sedol, u, refresh=refresh)
+        except Exception:                                               # noqa: BLE001
+            series = []
+        nav_fresh[sedol] = dict(fp.nav_freshness(sedol, u, as_of, series=series, state=_nav_state),
+                                name=u.get("name"))
         monthly = _monthly_returns(series)
         mean5, sd5 = _ann_stats(monthly, 5)
         mean3, sd3 = _ann_stats(monthly, 3)
@@ -975,6 +984,9 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
             "discount_unavailable_reason": (
                 ((trust.get(sedol) or {}).get("discount_pct") or {}).get("reason")),
             "crystallisation": (trust.get(sedol) or {}).get("crystallisation"),
+            # ISA-0127: the discount's place in its own matched history (published only at N >= 12)
+            "discount_history_n": (trust.get(sedol) or {}).get("history_n"),
+            "discount_history_percentile": (trust.get(sedol) or {}).get("history_percentile"),
             "return_basis_caveat": (
                 "price return = NAV return + change in the discount; this holding's trailing "
                 "figures mix the manager's result with a change in sentiment about the trust"
@@ -990,6 +1002,11 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                  f"£{abs(_cry.get('cost_gbp') or 0):,.0f} of underlying assets, which belongs in "
                  f"the retain-vs-redeploy comparison alongside dealing costs. Its trailing "
                  f"returns are PRICE returns and therefore carry the discount's own movement."
+                 + (f" The discount sits at the {trust[sedol]['history_percentile']:.0f}th percentile of "
+                    f"{trust[sedol].get('history_n')} matched observations (0 = widest on record)."
+                    if trust[sedol].get("history_percentile") is not None else
+                    f" Discount history: {trust[sedol].get('history_n') or 0} matched observation(s), "
+                    f"12 needed before wide/narrow can be said.")
                  if _d.get("present") else
                  f"⚑ CLOSED-END and the discount is UNMEASURED: {_d.get('reason')}. Its trailing "
                  f"returns are price returns, so they are not the manager's result alone."))
@@ -1292,8 +1309,20 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
              "shortfall_pp": (round(r["bucket_minimum_pct"] - r["realised_5y_ann"], 2)
                               if r["realised_5y_ann"] is not None else None)}
             for r in rows if r["anchor_rule_pass"] is False],
+        "nav_freshness": {
+            "basis": ("ISA-0869: each fund's newest NAV vs the run date; FRESH = within %d days "
+                      "(fund_performance.NAV_FRESH_MAX_DAYS); producer = pre-run Step 6.04 "
+                      "refresh_nav_cache (nav_cache_state.json)" % fp.NAV_FRESH_MAX_DAYS),
+            "as_of": as_of.isoformat(),
+            "funds": nav_fresh,
+            "counts": {k: sum(1 for v in nav_fresh.values() if v["state"] == k) for k in fp.NAV_STATES},
+            "not_fresh": sorted([{"sedol": k, "name": v.get("name"), "state": v["state"], "newest": v["newest"],
+                                  "age_days": v["age_days"], "why": v.get("why")}
+                                 for k, v in nav_fresh.items() if v["state"] != "FRESH"], key=lambda x: x["sedol"]),
+        },
         "summary": {
             "n_funds": len(rows),
+            "nav_not_fresh": sum(1 for v in nav_fresh.values() if v["state"] != "FRESH"),
             "hold_add": sum(1 for r in rows if r["band"] == "HOLD/ADD"),
             "retain_only": sum(1 for r in rows if r["band"] == "RETAIN-ONLY"),
             "dead_money": sum(1 for r in rows if r["band"] == "DEAD MONEY"),
@@ -1364,6 +1393,18 @@ def _selftest():
              "fee_efficiency": None, "mandate_integrity": None}
     avail = sum(WEIGHTS[k] for k, v in empty.items() if v is not None)
     assert avail < 50, "an all-missing fund must fall below the measurement threshold"
+
+    # ISA-0869: one door + typed freshness (structural + behavioural)
+    import fund_performance as _fp869
+    _bsrc = open(os.path.abspath(__file__), encoding="utf-8").read()
+    _bbody = _bsrc[_bsrc.index("def build("):_bsrc.index("# ---------------------------------------------------------------- selftest")]
+    assert "fp.nav_series_for(sedol, u" in _bbody and 'u.get("yf_symbol") or u.get("isin")' not in _bbody, \
+        "ISA-0869 MUST-FIRE: build() reads NAV through nav_series_for only (a second door went missing Polar's series)"
+    assert _fp869.nav_freshness("Z", {}, dt.date(2026, 10, 31), series=[], state={"funds": {}})["state"] == "NO_SERIES", \
+        "ISA-0869 NEGATIVE CONTROL: a fund with no series is NO_SERIES, never FRESH"
+    assert _fp869.nav_freshness("Z", {}, dt.date(2026, 10, 31), series=[(dt.date(2026, 8, 4), 1.0)],
+                                state={"funds": {}})["state"] == "STALE_CACHE", \
+        "ISA-0869 NEGATIVE CONTROL: an 88-day-old NAV must not read FRESH"
 
     # anchor rule direction
     bm = _bucket_minimums()

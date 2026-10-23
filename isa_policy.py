@@ -127,6 +127,8 @@ V2_FLAGS: Dict[str, bool] = {
     # A2.3's adverse 0.70 and capped at STARTER. False reproduces 02-Sep-2026 behaviour exactly.
     "symbol_map_refresh":         True,   # P1.2c: Step 5x refreshes the ticker->Yahoo symbol map
     "instrument_eligibility_refresh": True,   # ISA-0860 (12-Oct-2026): Step 5x-ie OpenFIGI fetch; False -> no fetch, the cache is re-evaluated offline
+    "corporate_events": True,                 # ISA-0817 (18-Oct-2026): offer-period / corporate-action flags; False -> verdict DISABLED, no flag (pre-0817)
+    "corporate_events_refresh": True,         # ISA-0817: Step 5x-ce fetch (Takeover Panel, EDGAR, RNS); False -> no fetch, store re-evaluated offline
     "stock_return_fetch":         True,   # P1: populate the weekly GBP total-return store
     "stock_candidate_pipeline":   True,   # P3: a real candidate list reaches stock_max
     "deployment_sequencer":       True,   # P6: correlation orders the queue, never the score
@@ -146,6 +148,13 @@ V2_FLAGS: Dict[str, bool] = {
     # the ONE stock-capital authority; no receipt / not VALID / not DECISION_COMPLETE -> REFUSAL,
     # never the greedy fallback (spec s12). OFF: the engine is not invoked (UNKNOWN, never PASS).
     "capital_engine_authority":   "LIVE",
+    # ISA-0621 (October P-B9, 19-Oct-2026): "SHADOW" | "LIVE" - the switch contest (held stocks as DONORS inside the
+    # engine's finite contest). LIVE BY RAJ'S DECISION (19-Oct-2026 18:58, "promote this live before the forthcoming
+    # pre-run"), waiving R18.2's SHADOW period and superseding ISA-0167's SHADOW-until-measured constraint. LIVE: the
+    # contest's selection over AUTHORITY-ELIGIBLE donors (resolved case, outside the 182-day min-hold) becomes the
+    # receipt's selection WHEN IT SELLS something; a no-sale answer leaves the new-money selection untouched. Rollback:
+    # "SHADOW" (the section is still computed and rendered, nothing is adopted).
+    "switch_contest":             "LIVE",
     # ⚑ ISA-0490 (29-Aug-2026). The three flags above were ON and the three modules they
     # govern were GREEN, and `build()` still called none of them: it passed candidates=None
     # to sleeve_split, which read it as [] and routed every pound to funds. A flag that is ON

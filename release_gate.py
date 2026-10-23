@@ -207,6 +207,8 @@ def run_surface_fingerprint(root: str = HERE) -> dict:
 CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "target_weights.json",
                 "threshold_register.json", "quantity_register.json", "negative_claims.json",
                 "degradation_bands.json", "concentration_theme_taxonomy.json",
+                # ISA-0700 P-B7 (19-Oct-2026): the auto-classification rules decide memberships the caps act on
+                "theme_autoclassify_rules.json",
                 # ISA-0473: the write-once grandfather baseline of the deliverable intake gate is
                 # signed - an unsigned edit could otherwise grandfather a violating deliverable.
                 os.path.join("Dashboard", "state", "deliverable_intake_baseline.json"),

@@ -212,6 +212,21 @@ def normalise(raw: dict, located: dict = None) -> dict:
     }
 
 
+def drift_pp_per_day(blk: dict):
+    """ISA-0569: MEASURED drift of one fund's vector - the largest per-country change (pp of the fund) between its
+    current and previous capture, per day. None when there is no previous capture (not measured, never zero)."""
+    pc = (blk or {}).get("previous_capture") or {}
+    if not pc.get("raw") or not pc.get("as_of") or not blk.get("as_of"):
+        return None
+    days = (dt.date.fromisoformat(blk["as_of"]) - dt.date.fromisoformat(pc["as_of"])).days
+    if days <= 0:
+        return None
+    a, _ = normalise(blk["raw"], (blk.get("located_residual") or {}).get("weights"))
+    b, _ = normalise(pc["raw"])
+    mx = max(abs(a.get(c, 0.0) - b.get(c, 0.0)) for c in set(a) | set(b)) * 100.0
+    return round(mx / days, 6)
+
+
 def build(sources_path=None, out_path=None, as_of=None) -> dict:
     if not ENABLED:
         return {"state": "DISABLED", "reason": "fund_exposure_vectors.ENABLED is False (R4.13)"}
@@ -235,6 +250,10 @@ def build(sources_path=None, out_path=None, as_of=None) -> dict:
             "dimension": blk.get("dimension"),
             "note": blk.get("note"),
             "located_residual": blk.get("located_residual"),
+            # ISA-0569 (P-B8): what the source itself publishes now, and the measured drift of this vector
+            "source_check": blk.get("source_check"),
+            "previous_capture_as_of": (blk.get("previous_capture") or {}).get("as_of"),
+            "drift_pp_per_day": drift_pp_per_day(blk),
             "diagnostics": diag,
             "region_rollup": _rollup(vec),
         }
@@ -301,6 +320,70 @@ def _rollup(vec: dict) -> dict:
         if r:
             out[r] = round(out.get(r, 0.0) + w, 6)
     return dict(sorted(out.items()))
+
+
+# ── ISA-0569 (P-B8, 19-Oct-2026): ONE vector life, DERIVED from XR1's tolerance and the measured drift ─────────
+# Before: STALE_AFTER_DAYS (183) was declared here and XR1_MAX_TOL_PP (2.0) in consistency_check, never reconciled:
+# on 31-Aug three Asian vectors 81 days old were 'fresh' by one and 2.07pp wrong on China by the other. The life is
+# now the age at which the portfolio-level split can be expected to move by the tolerance:
+#     life_days = tol_pp / sqrt( sum_k (w_k * d_k)^2 )          (independent drifts, root-sum-square)
+# w_k = the fund's share of the equity book; d_k = its MEASURED drift (pp of the fund per day, largest country
+# move between two captures); a fund with no measured pair takes the MEDIAN measured drift (basis RSS_PROXY);
+# with no measurement at all the declared STALE_AFTER_DAYS stands (DECLARED_FALLBACK). The worst-case (all drifts
+# aligned, simple sum) life is published beside it as a bound. Capped at LIFE_CAP_DAYS.
+LIFE_CAP_DAYS = 365
+
+
+def derived_life(doc: dict, weights: dict, tol_pp: float) -> dict:
+    pf = (doc or {}).get("per_fund") or {}
+    meas = {sd: m.get("drift_pp_per_day") for sd, m in pf.items() if isinstance(m.get("drift_pp_per_day"), (int, float))}
+    if not meas:
+        return {"life_days": STALE_AFTER_DAYS, "basis": "DECLARED_FALLBACK", "n_measured": 0, "worst_case_life_days": None,
+                "why": "no fund has two captures yet - drift unmeasured"}
+    vals = sorted(meas.values())
+    med = vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2.0
+    terms, s_lin, used = 0.0, 0.0, {}
+    for sd in pf:
+        w = float((weights or {}).get(sd) or 0.0)
+        d = meas.get(sd, med)
+        used[sd] = {"drift_pp_per_day": round(d, 6), "basis": "MEASURED" if sd in meas else "PROXY_MEDIAN", "weight": round(w, 4)}
+        terms += (w * d) ** 2
+        s_lin += w * d
+    rss = terms ** 0.5
+    life = min(LIFE_CAP_DAYS, int(tol_pp / rss)) if rss > 0 else LIFE_CAP_DAYS
+    return {"life_days": life, "basis": "RSS_MEASURED" if len(meas) == len(pf) else "RSS_PROXY",
+            "n_measured": len(meas), "median_drift_pp_per_day": round(med, 6), "tol_pp": tol_pp,
+            "worst_case_life_days": (min(LIFE_CAP_DAYS, int(tol_pp / s_lin)) if s_lin > 0 else None),
+            "per_fund": used}
+
+
+def freshness(doc: dict, weights: dict, tol_pp: float, as_of: str) -> dict:
+    """ISA-0569: ages at `as_of` (the BOOK's date - never frozen at build), the derived life, and a grade for every
+    vector beyond it: NEGLECTED (the source publishes something newer that was not taken), SOURCE_LAG (the source
+    itself has nothing newer - re-capture cannot help), UNCHECKED (nobody established the source's currency)."""
+    life = derived_life(doc, weights, tol_pp)
+    out = {"as_of": as_of, "life": life, "per_fund": {}, "stale": [], "neglected": [], "source_lag": [], "unchecked": []}
+    for sd, m in ((doc or {}).get("per_fund") or {}).items():
+        age = (dt.date.fromisoformat(as_of) - dt.date.fromisoformat(m["as_of"])).days
+        sc = m.get("source_check") or {}
+        src = sc.get("source_as_of")
+        if src and src > m["as_of"]:
+            grade = "NEGLECTED"
+        elif src and sc.get("state") in ("CURRENT", "CURRENT_MISMATCH", "NEWER_APPLIED", "SOURCE_OLDER"):
+            grade = "SOURCE_LAG"
+        else:
+            grade = "UNCHECKED"
+        beyond = age > life["life_days"]
+        out["per_fund"][sd] = {"age_days": age, "beyond_life": beyond, "grade": grade, "source_as_of": src,
+                               "source_state": sc.get("state"), "checked_on": sc.get("checked_on")}
+        if beyond:
+            out["stale"].append(sd)
+            out[{"NEGLECTED": "neglected", "SOURCE_LAG": "source_lag", "UNCHECKED": "unchecked"}[grade]].append(sd)
+    out["line"] = ("Fund vector life %d days (%s, %d measured drift pair(s); worst-case %s days): %d beyond it - "
+                   "%d source lag (nothing newer published), %d neglected, %d unchecked"
+                   % (life["life_days"], life["basis"], life.get("n_measured", 0), life.get("worst_case_life_days"),
+                      len(out["stale"]), len(out["source_lag"]), len(out["neglected"]), len(out["unchecked"])))
+    return out
 
 
 def report(doc=None) -> str:
@@ -388,10 +471,13 @@ def selftest(verbose=True) -> int:
        "Ranmore reads 9.87% unattributed, not -0.00",
        abs(d["per_fund"]["BR2Q8G6"]["diagnostics"]["unattributed_total_pct"] - 9.87) < 0.02
        and abs(d["per_fund"]["BR2Q8G6"]["diagnostics"]["unattributed_pct"]) < 0.01)
-    ck("ISA-0403: report() flags on the HONEST measure — the 5 funds above the threshold are "
-       "named, where v1.0.0 named 0 of them",
-       sum(1 for m in d["per_fund"].values()
-           if m["diagnostics"]["unattributed_total_pct"] > UNATTRIBUTED_REPORT_PP) == 5)
+    # ⚑ RESTATED 19-Oct-2026 (ISA-0569): the literal "5 funds" would go red the first time the monthly refresh
+    #   took a newer table - a correct data change. The property: report() flags exactly the funds whose HONEST
+    #   unattributed share exceeds the threshold, and Ranmore (9.87% outside its table) is among them.
+    _rep = report(d)
+    _over = [sd for sd, m in d["per_fund"].items() if m["diagnostics"]["unattributed_total_pct"] > UNATTRIBUTED_REPORT_PP]
+    ck("ISA-0403: report() flags on the HONEST measure - every fund above the threshold is named (Ranmore included)",
+       "BR2Q8G6" in _over and _rep.count("UNATTRIBUTED") == len(_over))
     ck("ISA-0403: a residual the SOURCE ITSELF LOCATES is ATTRIBUTED — Royal London carries "
        "Japan at HL's own regional figure, not zero",
        abs(d["vectors"]["BF93W97"].get("Japan", 0.0) - 0.060894) < 1e-4
@@ -400,6 +486,28 @@ def selftest(verbose=True) -> int:
        all(k in COUNTRY_TO_REGION for v in d["vectors"].values() for k in v))
     ck("the region roll-up reproduces the vector (R5.2, two derivations)",
        all(abs(sum(m["region_rollup"].values()) - 1.0) <= 0.02 for m in d["per_fund"].values()))
+
+    # ── ISA-0569 (P-B8): derived life + freshness grades ────────────────────────────────────────
+    _doc = {"per_fund": {"A": {"as_of": "2026-03-31", "drift_pp_per_day": 0.04,
+                               "source_check": {"state": "CURRENT", "source_as_of": "2026-03-31"}},
+                         "B": {"as_of": "2026-06-30", "drift_pp_per_day": None,
+                               "source_check": {"state": "CURRENT_MISMATCH", "source_as_of": "2026-07-31"}},
+                         "C": {"as_of": "2026-01-31", "drift_pp_per_day": None, "source_check": None}}}
+    _fr = freshness(_doc, {"A": 0.5, "B": 0.3, "C": 0.2}, 2.0, "2026-10-31")
+    ck("ISA-0569: life is DERIVED from tolerance and measured drift (RSS; 2.0 / sqrt((.5*.04)^2+(.3*.04)^2+(.2*.04)^2) = 81 days)",
+       _fr["life"]["life_days"] == 81 and _fr["life"]["basis"] == "RSS_PROXY" and _fr["life"]["worst_case_life_days"] == 50)
+    ck("ISA-0569 MUST-FIRE: beyond life with the source at the SAME date is SOURCE_LAG (re-capture cannot help)",
+       _fr["per_fund"]["A"]["grade"] == "SOURCE_LAG" and "A" in _fr["source_lag"])
+    ck("ISA-0569 MUST-FIRE: beyond life with a NEWER source not taken is NEGLECTED",
+       _fr["per_fund"]["B"]["grade"] == "NEGLECTED" and "B" in _fr["neglected"])
+    ck("ISA-0569 NEGATIVE CONTROL: never checked -> UNCHECKED, never assumed current", "C" in _fr["unchecked"])
+    ck("ISA-0569: ages are taken at the given date, not frozen at build", _fr["per_fund"]["A"]["age_days"] == 214)
+    ck("ISA-0569 NEGATIVE CONTROL: with no measured drift the declared life stands (DECLARED_FALLBACK)",
+       derived_life({"per_fund": {"X": {"drift_pp_per_day": None}}}, {"X": 1.0}, 2.0)["life_days"] == STALE_AFTER_DAYS)
+    ck("ISA-0569: measured drift on a real two-capture pair is computed, never zero-filled",
+       drift_pp_per_day({"as_of": "2026-07-31", "raw": {"Japan": 60.0, "China": 40.0},
+                         "previous_capture": {"as_of": "2026-05-31", "raw": {"Japan": 50.0, "China": 50.0}}}) == round(10.0 / 61, 6)
+       and drift_pp_per_day({"as_of": "2026-07-31", "raw": {"Japan": 100.0}}) is None)
 
     # ── negative controls: a genuinely broken input must FAIL (R5.5) ──────────────────────────
     broken = {"schema_version": "1.0.0", "_meta": {},

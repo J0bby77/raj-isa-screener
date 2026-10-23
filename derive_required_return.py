@@ -869,13 +869,20 @@ def _cash_statement_flows(folder=None):
     except Exception as e:                                       # noqa: BLE001
         return None, f"cash statement parse failed: {type(e).__name__}: {e}"
     rows, n_seen = [], 0
+    # ⚑ ISA-0642 (19-Oct-2026): an EXTERNAL flow is a subscription OR a TRANSFER_IN (cash moved in
+    #   from another account - Raj 13/19-Oct-2026: BB8HNPI). FLOW_CATEGORIES is the ALLOWANCE set;
+    #   the anchor's flow ledger needs the external set, or a transfer-in is booked as growth.
+    #   `res["rows"]` is the CURRENT tax year only (extract_cash_statement one-view contract), so
+    #   `coverage_from` below stays true when a prior-year export is saved beside it.
+    _ext = getattr(ecs, "EXTERNAL_FLOW_CATEGORIES", ecs.FLOW_CATEGORIES)
     for r in res.get("rows") or []:
-        if r.get("category") not in ecs.FLOW_CATEGORIES:
+        if r.get("category") not in _ext:
             continue
         n_seen += 1
         amt = float(r.get("receipt_gbp") or 0) - abs(float(r.get("payment_gbp") or 0))
         rows.append({"date": str(r["date"])[:10], "amount_gbp": round(amt, 2),
-                     "kind": "contribution" if amt >= 0 else "withdrawal",
+                     "kind": ("transfer_in" if r.get("category") == "TRANSFER_IN"
+                              else "contribution" if amt >= 0 else "withdrawal"),
                      "status": "realised",
                      "source": f"{r.get('source_file')} :: {r.get('description')}",
                      "as_of": res.get("as_of"),

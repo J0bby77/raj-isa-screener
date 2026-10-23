@@ -2,6 +2,11 @@
 """
 execution_ceiling.py - ISA-0740 (Raj 24-Sep-2026): the APPROVAL-PRESERVING EXECUTION CEILING.
 
+⚑⚑ RETIRED 18-Oct-2026 (ISA-0727 Q1, Raj 13-Oct-2026 09:55 BST): superseded by the Capital Decision Engine's live
+   economic maximum (entry.economic_max_price_major; execution_check REFUSED_ABOVE_ECONOMIC_MAX), the ONE
+   execution-price limit. No orchestrator calls this module (pre-run Step 8x removed); it is kept, not deleted,
+   so its selftest and history stay reproducible. Capability row: CAP-execution_ceiling (RETIRED_SUPERSEDED).
+
 ⚑ WHAT THIS IS, AND WHAT IT IS NOT. An INTERIM_STEP_TO_TARGET execution invariant. It is NOT a
 valuation model, NOT a fair value and NOT a replacement for canonical E[r] (the target
 terminal-value E[r] is ISA-0744, SHADOW research). It answers exactly one question: given an

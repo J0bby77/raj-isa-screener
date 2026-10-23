@@ -93,9 +93,30 @@ FX_RATE_SOURCE = ("AJ Bell cash statement 2026-27, literal 'FX Charge (0.50%)' r
 
 OPENING_BALANCE_RE = re.compile(r"^\s*\*+\s*balance\s*b/?f\s*\*+", re.I)
 
+# ⚑ ISA-0642 (19-Oct-2026). TRANSFER_IN — cash moved INTO this ISA from another account, by
+# Raj's decision: "TFER FROM BB8HNPI" GBP 1,477.83 (01-May-2025) is the transfer of value from the
+# adviser platform (AJ Bell Investcentre, BB8HNPI) when Raj stopped using a financial adviser
+# (13-Oct-2026), and "Residual Funds from BB8HNPI" GBP 0.74 (24-Jun-2026) "would have been a
+# rounding transfer in" (19-Oct-2026). Neither is an allowance subscription, and neither is
+# investment growth: it is an EXTERNAL FLOW. The rule is mechanical — the text after "from" must
+# be ONE account-like token (letters AND digits, 6-10 characters) — so "Residual Funds from
+# Artemis SmartGARP" (a fund, not an account) is not caught by it and stays a SELL.
+TRANSFER_IN_RE = re.compile(r"^\s*(?:tfer|transfer|residual\s+funds)\s+from\s+(\S+)\s*$", re.I)
+
+
+def _is_account_transfer_in(d):
+    m = TRANSFER_IN_RE.match(str(d or ""))
+    if not m:
+        return False
+    tok = m.group(1).upper()
+    return (bool(re.fullmatch(r"[A-Z0-9]{6,10}", tok)) and any(c.isdigit() for c in tok)
+            and any(c.isalpha() for c in tok))
+
+
 # Order matters: the first rule that matches wins, so the specific precede the general.
 CLASSIFIERS = [
     ("OPENING_BALANCE", lambda d: bool(OPENING_BALANCE_RE.match(d))),
+    ("TRANSFER_IN",     _is_account_transfer_in),
     ("CONTRIBUTION",    lambda d: any(k in d.lower() for k in
                                       ("faster payment in", "direct debit payment",
                                        "debit card payment", "bank transfer in"))),
@@ -110,6 +131,10 @@ CLASSIFIERS = [
     ("TRANSFER",        lambda d: "transfer" in d.lower()),
 ]
 FLOW_CATEGORIES = {"CONTRIBUTION"}          # what counts against the ISA allowance
+# ⚑ ISA-0642: what is an EXTERNAL flow (money that is neither growth nor a position carried
+# forward). A superset of FLOW_CATEGORIES: a TRANSFER_IN is a flow for return measurement and the
+# anchor's flow ledger, but it is NOT a subscription and never touches the allowance.
+EXTERNAL_FLOW_CATEGORIES = {"CONTRIBUTION", "TRANSFER_IN"}
 
 
 def classify(description):
@@ -163,14 +188,60 @@ def _num(v):
         return 0.0
 
 
+def _category_totals(rows):
+    totals = {}
+    for r in rows:
+        totals.setdefault(r["category"], {"n": 0, "receipts": 0.0, "payments": 0.0})
+        t = totals[r["category"]]
+        t["n"] += 1; t["receipts"] += r["receipt_gbp"]; t["payments"] += r["payment_gbp"]
+    for t in totals.values():
+        t["receipts"] = round(t["receipts"], 2)
+        t["payments"] = round(t["payments"], 2)
+        t["net"] = round(t["receipts"] - abs(t["payments"]), 2)
+    return totals
+
+
+def _flow_recon(rows):
+    """opening + SUM(receipts - payments) vs the stated closing balance, over ONE tax year's rows."""
+    opening = next((r for r in rows if r["category"] == "OPENING_BALANCE"), None)
+    ob = opening["receipt_gbp"] if opening else None
+    close = rows[-1]["balance_gbp"] if rows else None
+    if not rows or ob is None:
+        return ob, close, None
+    flow = sum(r["receipt_gbp"] - abs(r["payment_gbp"]) for r in rows
+               if r["category"] != "OPENING_BALANCE")
+    implied = round(ob + flow, 2)
+    return ob, close, {"ok": abs(implied - (close or 0)) <= 0.05, "implied": implied, "stated": close,
+                       "delta": round(implied - (close or 0), 2)}
+
+
+def _external_flow_rows(rows):
+    return [{"date": r["date"], "description": r["description"], "category": r["category"],
+             "amount_gbp": round(r["receipt_gbp"] - abs(r["payment_gbp"]), 2),
+             "reference": r["reference"], "source_file": r["source_file"]}
+            for r in rows if r["category"] in EXTERNAL_FLOW_CATEGORIES]
+
+
 def parse(folder=None, files=None, as_of=None):
+    """⚑ ISA-0642 (19-Oct-2026): ONE CURRENT-TAX-YEAR VIEW.
+
+    Every consumer of this function — the allowance, the I11-I15 invariants, the opening and
+    closing balance, category_totals (fees, FX), the cash rate (return_architecture), deployable
+    cash and the account-identity check (extract_portfolio / monthly_isa_prerun), the anchor flow
+    ledger (derive_required_return) and the I10 ledger join — reads `rows`, and `rows` holds ONLY
+    the rows of the tax year containing `as_of` (decided from ROW DATES, never filenames). Rows of
+    earlier tax years are RETURN-FLOW EVIDENCE: they are published under `prior_tax_years` and
+    reach nothing else (Raj 13-Oct-2026). Before this, saving the 2025/26 export beside the
+    2026/27 one silently made the opening balance GBP 0.00 (the 2025/26 B/F), spread fees over two
+    years, fed 2025/26 deposits into the anchor flow ledger and failed I14 on a 2025 row.
+    """
     import openpyxl
     folder = folder or os.path.dirname(HERE)
     files = files if files is not None else find_files(folder)
     as_of = as_of or dt.date.today()
-    res = {"as_of": as_of.isoformat(), "source_files": [os.path.basename(f) for f in files],
+    res = {"as_of": as_of.isoformat(), "source_files": [], "files_on_disk": [os.path.basename(f) for f in files],
            "fx_rate_pct": FX_RATE_PCT, "fx_rate_source": FX_RATE_SOURCE,
-           "rows": [], "reconciled": False, "invariants": {}, "warnings": []}
+           "rows": [], "reconciled": False, "invariants": {}, "warnings": [], "prior_tax_years": []}
     if not files:
         res["warnings"].append("no Cash Statement*.xlsx found — allowance stays UNRECONCILED. "
                                "WARN, never ERROR: an absent file is a missing input, not a "
@@ -180,6 +251,7 @@ def parse(folder=None, files=None, as_of=None):
     rows = []
     for fp in files:
         wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+        frows = []
         for ws in wb.worksheets:
             hdr = None
             for raw in ws.iter_rows(values_only=True):
@@ -191,7 +263,7 @@ def parse(folder=None, files=None, as_of=None):
                 desc = str(r.get("description") or "").strip()
                 if d is None and not OPENING_BALANCE_RE.match(desc):
                     continue
-                rows.append({
+                frows.append({
                     "date": d.isoformat() if d else None,
                     "description": desc,
                     "reference": str(r.get("reference") or "").strip(),
@@ -204,25 +276,86 @@ def parse(folder=None, files=None, as_of=None):
                     "source_file": os.path.basename(fp),
                 })
             break                                     # single-sheet export by design
-    rows.sort(key=lambda x: (x["date"] or "0000-00-00", x["reference"]))
-    res["rows"] = rows
+        # ⚑ ISA-0642 fix-on-finding (19-Oct-2026): AJ Bell exports NEWEST FIRST, and same-day rows
+        # often all carry reference "-". The old sort key (date, reference) therefore put same-day
+        # rows in an arbitrary order and `closing = rows[-1]` read the wrong row: on 02-Apr-2026 it
+        # took GBP 3,469.30 (the direct debit) instead of GBP 3,469.64 (the later rebate), and the
+        # 06-Apr B/F sorted AFTER that day's deposit. The export's own sequence is the truth: its
+        # direction is read from the dates (first vs last dated row), and rows are ordered by
+        # (date, position in time) — never by a reference string.
+        _dated = [x["date"] for x in frows if x["date"]]
+        _newest_first = bool(_dated) and _dated[0] > _dated[-1]
+        n = len(frows)
+        for i, x in enumerate(frows):
+            x["_seq"] = (n - 1 - i) if _newest_first else i
+        rows.extend(frows)
+    rows.sort(key=lambda x: (x["date"] or "0000-00-00", x["source_file"], x["_seq"]))
+    for x in rows:
+        x["file_order"] = x.pop("_seq")
 
     ty_start = tax_year_start(as_of)
     res["tax_year_start"] = ty_start.isoformat()
-    in_ty = [r for r in rows if r["date"] and dt.date.fromisoformat(r["date"]) >= ty_start]
 
-    totals = {}
+    # ── the tax year of every row, from its DATE; an undated B/F row takes its file's year ──
+    def _row_ty(r):
+        return tax_year_start(dt.date.fromisoformat(r["date"])) if r["date"] else None
+    file_ty = {}
     for r in rows:
-        totals.setdefault(r["category"], {"n": 0, "receipts": 0.0, "payments": 0.0})
-        t = totals[r["category"]]
-        t["n"] += 1; t["receipts"] += r["receipt_gbp"]; t["payments"] += r["payment_gbp"]
-    for t in totals.values():
-        t["receipts"] = round(t["receipts"], 2)
-        t["payments"] = round(t["payments"], 2)
-        t["net"] = round(t["receipts"] - abs(t["payments"]), 2)
-    res["category_totals"] = totals
+        t = _row_ty(r)
+        if t is not None:
+            file_ty.setdefault(r["source_file"], set()).add(t)
+    cur_files = sorted(f for f, tys in file_ty.items() if ty_start in tys)
+    def _is_current(r):
+        t = _row_ty(r)
+        return (t == ty_start) if t is not None else (r["source_file"] in cur_files)
+    cur = [r for r in rows if _is_current(r)]
+    prior = [r for r in rows if not _is_current(r)]
+    res["rows"] = cur
+    res["source_files"] = cur_files
 
-    contrib_rows = [r for r in in_ty if r["category"] == "CONTRIBUTION"]
+    # ── prior tax years: RETURN-FLOW EVIDENCE only ─────────────────────────────────────────
+    by_ty = {}
+    for r in prior:
+        t = _row_ty(r)
+        if t is None:
+            tys = sorted(file_ty.get(r["source_file"]) or [])
+            t = tys[0] if tys else None
+        if t is None or t > ty_start:
+            continue                                  # a row AFTER the current tax year is not evidence of the past
+        by_ty.setdefault(t, []).append(r)
+    for t in sorted(by_ty):
+        ys = by_ty[t]
+        ob, close, recon = _flow_recon(ys)
+        fl = _external_flow_rows(ys)
+        unc = [r for r in ys if r["category"] == "UNCLASSIFIED"]
+        res["prior_tax_years"].append({
+            "tax_year_start": t.isoformat(), "role": "RETURN_FLOW_EVIDENCE_ONLY",
+            "source_files": sorted({r["source_file"] for r in ys}), "n_rows": len(ys),
+            "first_date": next((r["date"] for r in ys if r["date"]), None),
+            "last_date": next((r["date"] for r in reversed(ys) if r["date"]), None),
+            "opening_balance_gbp": ob, "closing_balance_gbp": close, "flows_reconcile": recon,
+            "external_flows": fl, "external_flow_total_gbp": round(sum(x["amount_gbp"] for x in fl), 2),
+            "category_totals": _category_totals(ys),
+            "unclassified": [{"date": r["date"], "description": r["description"][:60]} for r in unc],
+            "rows": ys})
+        if unc:
+            res["warnings"].append("prior tax year from %s carries %d UNCLASSIFIED row(s) %s — reported as "
+                                   "evidence only; it does not touch the current-year allowance"
+                                   % (t.isoformat(), len(unc), [r["description"][:40] for r in unc[:3]]))
+    res["evidence_note"] = ("prior-tax-year rows are RETURN-FLOW EVIDENCE only (Raj 13-Oct-2026, ISA-0642): never in "
+                            "the allowance, the invariants, category_totals, the cash rate, deployable cash, the "
+                            "account-identity check or the anchor flow ledger")
+
+    if not cur_files:
+        res["warnings"].append(
+            "no Cash Statement on disk covers the CURRENT tax year from %s (files on disk: %s) — the allowance "
+            "stays UNRECONCILED until Raj saves 'Cash Statement Current Tax Year %d-%d.xlsx'. A prior-year "
+            "file is evidence of past flows, never of this year's allowance."
+            % (ty_start.isoformat(), res["files_on_disk"], ty_start.year, ty_start.year + 1))
+        return res
+
+    res["category_totals"] = _category_totals(cur)
+    contrib_rows = [r for r in cur if r["category"] == "CONTRIBUTION"]
     used = round(sum(r["receipt_gbp"] for r in contrib_rows), 2)
     res["allowance"] = {
         "tax_year_start": ty_start.isoformat(),
@@ -231,38 +364,52 @@ def parse(folder=None, files=None, as_of=None):
         "annual_gbp": ISA_ALLOWANCE_GBP,
         "contribution_rows": contrib_rows,
         "source": "AJ Bell Cash Statement (CONTRIBUTION rows only; the opening balance "
-                  "carried forward is a POSITION and is excluded — see I12)",
+                  "carried forward is a POSITION and is excluded — see I12; a TRANSFER_IN is an "
+                  "external flow, not a subscription — see EXTERNAL_FLOW_CATEGORIES)",
     }
-    opening = next((r for r in rows if r["category"] == "OPENING_BALANCE"), None)
-    res["opening_balance_gbp"] = opening["receipt_gbp"] if opening else None
-    res["closing_balance_gbp"] = rows[-1]["balance_gbp"] if rows else None
+    fl_cur = _external_flow_rows(cur)
+    res["external_flows"] = {"rows": fl_cur, "total_gbp": round(sum(x["amount_gbp"] for x in fl_cur), 2),
+                             "categories": sorted(EXTERNAL_FLOW_CATEGORIES)}
+    ob, close, recon = _flow_recon(cur)
+    res["opening_balance_gbp"] = ob
+    res["closing_balance_gbp"] = close
 
-    # ── invariants ──────────────────────────────────────────────────────────────────
+    # continuity across the year boundary (informational: a break means a missing export period)
+    if res["prior_tax_years"] and ob is not None:
+        last = res["prior_tax_years"][-1]
+        pc = last.get("closing_balance_gbp")
+        res["cross_year_continuity"] = {
+            "ok": pc is not None and abs(pc - ob) <= 0.05, "prior_closing_gbp": pc, "current_opening_gbp": ob,
+            "prior_tax_year_start": last["tax_year_start"],
+            "note": "the prior year's closing balance must equal this year's B/F; informational, never gates"}
+        if not res["cross_year_continuity"]["ok"]:
+            res["warnings"].append("cross-year continuity break: prior closing GBP%s vs current B/F GBP%s"
+                                   % (pc, ob))
+
+    # ── invariants (CURRENT tax year only) ──────────────────────────────────────────────
     inv = res["invariants"]
     inv["I11_contribution_within_allowance"] = {
         "ok": 0 <= used <= ISA_ALLOWANCE_GBP, "value": used}
     inv["I12_opening_balance_not_a_contribution"] = {
-        "ok": all(r["category"] != "CONTRIBUTION" for r in rows
+        "ok": all(r["category"] != "CONTRIBUTION" for r in cur
                   if OPENING_BALANCE_RE.match(r["description"])),
         "opening_balance_gbp": res["opening_balance_gbp"],
         "note": "the * BALANCE B/F * row is a position carried forward; counting it would "
                 "overstate the allowance by its own value"}
-    if rows and res["opening_balance_gbp"] is not None:
-        flow = sum(r["receipt_gbp"] - abs(r["payment_gbp"]) for r in rows
-                   if r["category"] != "OPENING_BALANCE")
-        implied = round(res["opening_balance_gbp"] + flow, 2)
-        inv["I13_flows_reconcile_to_closing_balance"] = {
-            "ok": abs(implied - (res["closing_balance_gbp"] or 0)) <= 0.05,
-            "implied": implied, "stated": res["closing_balance_gbp"],
-            "delta": round(implied - (res["closing_balance_gbp"] or 0), 2),
-            "note": "opening + SUM(receipts - payments) must equal the stated closing balance; "
-                    "a break means a row was mis-signed or dropped"}
-    unclassified = [r for r in rows if r["category"] == "UNCLASSIFIED"]
+    if recon is not None:
+        inv["I13_flows_reconcile_to_closing_balance"] = dict(recon, note=(
+            "opening + SUM(receipts - payments) must equal the stated closing balance; "
+            "a break means a row was mis-signed or dropped"))
+    unclassified = [r for r in cur if r["category"] == "UNCLASSIFIED"]
     inv["I14_every_row_classified"] = {
         "ok": not unclassified, "n": len(unclassified),
         "examples": [r["description"][:60] for r in unclassified[:5]],
         "note": "an unmatched description is reported, never bucketed into the nearest "
-                "plausible category"}
+                "plausible category (scope: the CURRENT tax year - ISA-0642)"}
+    inv["I15_one_file_per_current_tax_year"] = {
+        "ok": len(cur_files) == 1, "files": cur_files,
+        "note": ("two exports covering the same tax year would count every deposit twice; the "
+                 "allowance is REFUSED rather than de-duplicated by guesswork (ISA-0642)")}
     res["reconciled"] = all(v.get("ok") for v in inv.values())
     if not res["reconciled"]:
         res["warnings"].append("one or more invariants failed — allowance is NOT reconciled")
@@ -358,7 +505,11 @@ def _selftest():
         ("Fund Cash Rebate May26", "REBATE"),
         ("Purchase 28 The Vita Coco Co Inc", "BUY"),
         ("Sale 40 PAYLOCITY HLDG COR COM", "SELL"),
-        ("Residual Funds from BB8HNPI", "SELL"),
+        ("Residual Funds from BB8HNPI", "TRANSFER_IN"),      # Raj 19-Oct-2026: rounding transfer in
+        ("TFER FROM BB8HNPI", "TRANSFER_IN"),                # Raj 13-Oct-2026: adviser-platform transfer
+        ("Residual Funds from Artemis SmartGARP", "SELL"),   # a FUND, not an account: must NOT be a transfer
+        ("Transfer from ISA cash", "TRANSFER"),              # two tokens: not an account transfer-in
+        ("Bank transfer in", "CONTRIBUTION"),
         ("Equalisation Acc Units", "UNCLASSIFIED"),
         ("", "UNCLASSIFIED"),
     ]
@@ -413,10 +564,68 @@ def _selftest():
         empty = parse(folder=os.path.join(td, "nope"), as_of=dt.date(2026, 8, 5))
         assert empty["reconciled"] is False and empty["warnings"], empty
         assert "allowance" not in empty, "an absent file must not produce an allowance figure"
-    print("SELFTEST PASS — 27 assertions (17 classification rules incl. 2 that must NOT match, "
-          "3 B/F spellings, allowance = 8,750 / 11,250, opening balance excluded, "
+
+        # ── ISA-0642: a PRIOR-YEAR export beside the current one ─────────────────────────
+        wp = openpyxl.Workbook(); wsp = wp.active
+        wsp.append(["Date", "Description", "Reference", "Settlement date",
+                    "Receipt (GBP)", "Payment (GBP)", "Balance (GBP)"])
+        wsp.append([dt.datetime(2025, 4, 6), "* BALANCE B/F *", "-", "-", 0, 0, 0])
+        wsp.append([dt.datetime(2025, 5, 1), "TFER FROM BB8HNPI", "P1", "-", 1477.83, 0, 1477.83])
+        wsp.append([dt.datetime(2025, 6, 1), "Some Unknown Row", "P2", "-", 0, 0, 1477.83])
+        wsp.append([dt.datetime(2026, 1, 30), "Faster Payment In", "P3", "-", 11500, 0, 12977.83])
+        wsp.append([dt.datetime(2026, 2, 2), "Purchase 1 Fund", "P4", "-", 0, 9508.19, 3469.64])
+        wp.save(os.path.join(td, "Cash Statement Previous Tax Year 2025 - 2026.xlsx"))
+        r2 = parse(folder=td, as_of=dt.date(2026, 8, 5))
+        assert r2["source_files"] == ["Cash Statement Current Tax Year 2026-2027.xlsx"], r2["source_files"]
+        assert r2["reconciled"] is True, (r2["warnings"], r2["invariants"])
+        assert r2["allowance"]["used_gbp"] == 8750.0, r2["allowance"]["used_gbp"]
+        assert r2["opening_balance_gbp"] == 3469.64, "the CURRENT year's B/F, never the prior file's"
+        assert all(x["date"] >= "2026-04-06" for x in r2["rows"]), "a prior-year row reached `rows`"
+        assert r2["category_totals"] == r["category_totals"], "fees/FX must not span two tax years"
+        assert r2["invariants"]["I14_every_row_classified"]["ok"], "a PRIOR-year unknown row must not fail I14"
+        py = r2["prior_tax_years"]
+        assert len(py) == 1 and py[0]["tax_year_start"] == "2025-04-06" and py[0]["role"] == "RETURN_FLOW_EVIDENCE_ONLY"
+        assert py[0]["external_flow_total_gbp"] == 12977.83, py[0]["external_flow_total_gbp"]
+        assert [x["category"] for x in py[0]["external_flows"]] == ["TRANSFER_IN", "CONTRIBUTION"]
+        assert py[0]["unclassified"] and any("prior tax year" in w for w in r2["warnings"]), "evidence gap must be REPORTED"
+        assert r2["cross_year_continuity"]["ok"] is True, r2["cross_year_continuity"]
+        assert r2["external_flows"]["total_gbp"] == 8750.0
+        # MUST-FIRE (order): a NEWEST-FIRST export with two same-day '-' rows closes on the LATER row
+        wo = openpyxl.Workbook(); wso = wo.active
+        wso.append(["Date", "Description", "Reference", "Settlement date",
+                    "Receipt (GBP)", "Payment (GBP)", "Balance (GBP)"])
+        wso.append([dt.datetime(2026, 4, 9), "Fund Cash Rebate Feb", "-", "-", 0.34, 0, 1250.34])
+        wso.append([dt.datetime(2026, 4, 9), "Direct debit payment", "-", "-", 1250, 0, 1250.0])
+        wso.append([dt.datetime(2026, 4, 6), "* BALANCE B/F *", "-", "-", 0, 0, 0])
+        td3 = os.path.join(td, "newest_first"); os.makedirs(td3)
+        wo.save(os.path.join(td3, "Cash Statement Current Tax Year 2026-2027.xlsx"))
+        r6 = parse(folder=td3, as_of=dt.date(2026, 8, 5))
+        assert r6["closing_balance_gbp"] == 1250.34, r6["closing_balance_gbp"]
+        assert r6["rows"][0]["category"] == "OPENING_BALANCE"
+        assert r6["invariants"]["I13_flows_reconcile_to_closing_balance"]["ok"], r6["invariants"]
+        # NEGATIVE CONTROL: the SAME unknown row in the CURRENT year still fails I14
+        ws.append([dt.datetime(2026, 8, 4), "Some Unknown Row", "R7", "-", 0, 0, 10864.64])
+        wb.save(p)
+        r3 = parse(folder=td, as_of=dt.date(2026, 8, 5))
+        assert r3["reconciled"] is False and not r3["invariants"]["I14_every_row_classified"]["ok"]
+        # MUST-FIRE: two exports covering the current tax year -> I15 refuses (no double count)
+        wb.save(os.path.join(td, "Cash Statement Current Tax Year 2026-2027 (1).xlsx"))
+        r4 = parse(folder=td, as_of=dt.date(2026, 8, 5))
+        assert r4["invariants"]["I15_one_file_per_current_tax_year"]["ok"] is False and r4["reconciled"] is False
+        # only a prior-year file, as_of in the NEXT tax year: no allowance figure, a precise warning
+        td2 = os.path.join(td, "only_prior"); os.makedirs(td2)
+        wp.save(os.path.join(td2, "Cash Statement Previous Tax Year 2025 - 2026.xlsx"))
+        r5 = parse(folder=td2, as_of=dt.date(2026, 5, 1))
+        assert "allowance" not in r5 and r5["reconciled"] is False and r5["rows"] == []
+        assert any("CURRENT tax year" in w for w in r5["warnings"]), r5["warnings"]
+        assert r5["prior_tax_years"] and r5["prior_tax_years"][0]["external_flow_total_gbp"] == 12977.83
+    print("SELFTEST PASS — 22 classification rules (incl. TRANSFER_IN x2 and 2 that must NOT be "
+          "transfers), 3 B/F spellings, allowance = 8,750 / 11,250, opening balance excluded, "
           "I11/I12/I14 green, negative control proving the trap is worth exactly 3,469.64, "
-          "absent file warns without stating a figure)")
+          "absent file warns without stating a figure; ISA-0642: prior-year file is evidence only "
+          "(current B/F, fees one year, prior unknown row reported not failing, flows 12,977.83, "
+          "continuity), newest-first same-day order closes on the later row, current-year unknown row still fails I14, two current files -> I15 refuses, "
+          "prior-only -> no allowance + precise warning)")
     return ok
 
 

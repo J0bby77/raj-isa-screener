@@ -113,28 +113,323 @@ def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale
         c = _read_cache(symbol)
         if c:
             return [(d, v / scale) for d, v in c] if scale != 1.0 else c
+    # ⚑ ISA-0869 (18-Oct-2026): a refresh that fails, returns nothing, or returns a series that does not
+    #   ADVANCE and COVER the cache leaves the cache in place and returns it (typed STALE by
+    #   refresh_nav_cache / nav_freshness) - it used to return [] (a fund silently without NAV).
+    cached = _read_cache(symbol) if use_cache else None
+
+    def _cached_or_empty():
+        if not cached:
+            return []
+        return [(d, v / scale) for d, v in cached] if scale != 1.0 else cached
+    series = _yf_history(symbol, period)
+    if series is None:
+        return _cached_or_empty()
+    series = _hold_depth(series, cached)
+    if not _series_supersedes(series, cached):
+        return _cached_or_empty()
+    if series and use_cache:
+        _write_cache(symbol, series)
+    if scale != 1.0:
+        series = [(d, c / scale) for d, c in series]
+    return series
+
+
+def _yf_history(symbol, period="max"):
+    """[(date, close)] auto-adjusted (dividends reinvested) from yfinance, or None on any failure.
+    A FULL history every time, never an increment: auto_adjust rescales the past at each
+    distribution, so an increment spliced onto an older adjusted cache would drop the dividend."""
     try:
         import yfinance as yf
     except ImportError:
-        return []
+        return None
     try:
         h = yf.Ticker(symbol).history(period=period, auto_adjust=True)["Close"]
-    except Exception:
-        return []
+    except Exception:                                                   # noqa: BLE001
+        return None
     series = []
     for idx, val in h.items():
         try:
             d = idx.date() if hasattr(idx, "date") else dt.date.fromisoformat(str(idx)[:10])
             if val == val and val > 0:          # NaN-safe
                 series.append((d, float(val)))
-        except Exception:
+        except Exception:                                               # noqa: BLE001
             continue
     series.sort()
-    if series and use_cache:
-        _write_cache(symbol, series)
-    if scale != 1.0:
-        series = [(d, c / scale) for d, c in series]
-    return series
+    return series or None
+
+
+def _hold_depth(new, cached):
+    """A refresh EXTENDS a cached series; it never changes where it starts. Measured 18-Oct-2026: yfinance
+    1.7.0 `period=max` returns history back to 2013 (SMT to the 1960s) where the caches (1.5.1) begin
+    2016-08-05 - and the mandate-drift noise floors (benchmark_registry, first-half vs second-half of a
+    fund's OWN history) were measured on the 2016+ depth: a deeper history moved the Vanguard Japan control
+    from |dbeta| 0.057 to 0.090, above its 0.06 floor. Changing history depth is a methodology decision
+    (re-measure the floors), not a freshness fix, so the depth is held (ISA-0869; follow-on registered)."""
+    if not new or not cached:
+        return new
+    start = cached[0][0]
+    return [p for p in new if p[0] >= start]
+
+
+def _series_supersedes(new, cached, start_slack_days=7):
+    """A fetched series may replace the cache only if it ADVANCES (newest date later) and still
+    COVERS the cache's start - a truncated provider response must never shorten history."""
+    if not new:
+        return False
+    if not cached:
+        return True
+    return new[-1][0] > cached[-1][0] and new[0][0] <= cached[0][0] + dt.timedelta(days=start_slack_days)
+
+
+# ---------------------------------------------------------------- NAV freshness (ISA-0869)
+NAV_STATE = os.path.join(SCRIPT_DIR, "nav_cache_state.json")
+NAV_STALE_BDAYS = 5            # refresh when the newest NAV is older than run date - 5 business days
+NAV_FRESH_MAX_DAYS = 10        # the consumer bar: a held fund's NAV must be within 10 days (pair)
+NAV_REFRESH_HOURS = 18         # an attempt inside 18 h is not repeated (re-run protocol)
+FT_HIST_URL = ("https://markets.ft.com/data/equities/ajax/get-historical-prices"
+               "?startDate={start}&endDate={end}&symbol={xid}")
+FT_JUNCTION_TOL_PCT = 0.05     # FT vs the cached series on overlapping dates
+NAV_STATES = ("FRESH", "STALE_CACHE", "SOURCE_FAILED", "SOURCE_DISAGREES", "MANUAL_SERIES", "NO_SERIES")
+
+
+def _bdays_after(d0, d1):
+    """Weekdays in (d0, d1]."""
+    if d0 is None or d1 is None or d1 <= d0:
+        return 0
+    n, d = 0, d0
+    while d < d1:
+        d += dt.timedelta(days=1)
+        if d.weekday() < 5:
+            n += 1
+    return n
+
+
+def nav_needs_refresh(newest, as_of):
+    return newest is None or _bdays_after(newest, as_of) > NAV_STALE_BDAYS
+
+
+class FtLayoutError(RuntimeError):
+    """The FT historical-prices payload no longer has the shape this parser was written against."""
+
+
+def parse_ft_history(raw):
+    """[(date, close)] ascending from the FT `get-historical-prices` JSON (rows of an HTML table:
+    long date, open, high, low, close, volume). RAISES on layout change, never returns a guess."""
+    import re
+    try:
+        html = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)["html"]
+    except Exception as e:                                              # noqa: BLE001
+        raise FtLayoutError("FT payload is not the {html: ...} JSON: %s" % e)
+    rows = re.findall(r"<tr>(.*?)</tr>", html, re.S)
+    out = []
+    for r in rows:
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", r, re.S)
+        if len(cells) < 5:
+            raise FtLayoutError("FT row has %d cells, expected >= 5" % len(cells))
+        m = re.search(r'mod-ui-hide-small-below">([^<]+)<', cells[0])
+        if not m:
+            raise FtLayoutError("FT row date cell has no long-form date")
+        try:
+            d = dt.datetime.strptime(m.group(1).strip(), "%A, %B %d, %Y").date()
+            c = float(re.sub(r"<[^>]+>", "", cells[4]).replace(",", "").strip())
+        except ValueError as e:
+            raise FtLayoutError("FT row unparseable: %s" % e)
+        if c > 0:
+            out.append((d, c))
+    return sorted(set(out))
+
+
+def _http_get(url, timeout=20):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ISA research)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def merge_ft_series(cached, ft):
+    """Cached history (before FT's first date) + FT daily closes. Returns (series, check) where
+    check names the junction evidence; a disagreement on overlapping dates returns (None, check)."""
+    cached = cached or []
+    ftd = dict(ft)
+    overlap = [(d, v, ftd[d]) for d, v in cached if d in ftd]
+    bad = [(d.isoformat(), v, f) for d, v, f in overlap if abs(f / v - 1.0) * 100 > FT_JUNCTION_TOL_PCT]
+    check = {"overlap_points": len(overlap), "disagreements": bad[:5], "tolerance_pct": FT_JUNCTION_TOL_PCT}
+    if bad:
+        return None, check
+    first = ft[0][0]
+    merged = [(d, v) for d, v in cached if d < first] + list(ft)
+    return merged, check
+
+
+def _load_nav_state(path=None):
+    try:
+        with open(path or NAV_STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:                                                   # noqa: BLE001
+        return {}
+
+
+def refresh_nav_cache(as_of, budget_s=25.0, universe=None, *, get=None, yf_history=None,
+                      now=None, state_path=None, cache_dir=None):
+    """ISA-0869 producer (pre-run Step 6.04). Brings every fund's NAV cache up to the run date:
+      - yfinance funds: FULL re-fetch when the newest NAV is > NAV_STALE_BDAYS business days old;
+        replaces the cache only if it advances and covers it (_series_supersedes);
+      - funds declaring `ft_xid` (no yfinance feed, e.g. Polar IE00B42W4J83): FT daily closes
+        merged onto the declared local_series cache, junction-checked (merge_ft_series);
+      - a declared manual local_series without a feed: MANUAL_SERIES (never refreshed here).
+    Every fund leaves with a typed state (NAV_STATES) + newest NAV date + why; nothing is blank.
+    Writes nav_cache_state.json. Never raises for a source failure."""
+    import time as _t
+    global CACHE_DIR
+    t0 = _t.time()
+    now = now or dt.datetime.utcnow()
+    get = get or _http_get
+    yf_history = yf_history or _yf_history
+    universe = universe or load_universe()
+    funds = universe.get("funds", universe)
+    prev = _load_nav_state(state_path).get("funds", {})
+    _cd0 = CACHE_DIR
+    if cache_dir:
+        CACHE_DIR = cache_dir
+    out = {}
+    try:
+        for sedol, u in funds.items():
+            if str(sedol).startswith("_") or not isinstance(u, dict):
+                continue
+            ls = u.get("local_series") or {}
+            sym = u.get("yf_symbol") or u.get("isin")
+            route = "FT" if u.get("ft_xid") else ("MANUAL" if ls else "YF")
+            key = (ls.get("cache") if route != "YF" else None)
+            if route == "YF":
+                cached = _read_cache(sym) if sym else None
+            else:
+                cp = os.path.join(os.path.dirname(CACHE_DIR), key) if key else None
+                cached = _read_csv_series(cp) if cp else None
+            newest = cached[-1][0] if cached else None
+            rec = {"sedol": sedol, "name": u.get("name"), "route": route, "symbol": sym,
+                   "ft_xid": u.get("ft_xid"), "newest_before": newest.isoformat() if newest else None}
+            p = prev.get(sedol) or {}
+            recent = False
+            try:
+                recent = (now - dt.datetime.fromisoformat(p.get("attempted_at", "1970-01-01T00:00:00"))
+                          ).total_seconds() < NAV_REFRESH_HOURS * 3600 and p.get("as_of_run") == as_of.isoformat()
+            except ValueError:
+                recent = False
+            fetched = False
+            if route == "MANUAL":
+                rec["state"], rec["why"] = "MANUAL_SERIES", "declared manual local_series; no feed"
+            elif not nav_needs_refresh(newest, as_of):
+                rec["state"], rec["why"] = "FRESH", "cache within %d business days of the run date" % NAV_STALE_BDAYS
+            elif recent and p.get("state") in ("SOURCE_FAILED", "SOURCE_DISAGREES", "STALE_CACHE"):
+                rec["state"], rec["why"] = p["state"], "attempted at %s (< %d h ago): %s" % (
+                    p.get("attempted_at"), NAV_REFRESH_HOURS, p.get("why"))
+                rec["attempted_at"] = p.get("attempted_at")
+            elif _t.time() - t0 > budget_s:
+                rec["state"], rec["why"] = "STALE_CACHE", "refresh budget %.0f s spent before this fund" % budget_s
+            else:
+                fetched = True
+                rec["attempted_at"] = now.isoformat(timespec="seconds")
+                if route == "YF":
+                    new = yf_history(sym) if sym else None
+                    new = _hold_depth(new, cached) if new else new
+                    if new is None:
+                        rec["state"], rec["why"] = "SOURCE_FAILED", "yfinance returned nothing for %s" % sym
+                    elif not _series_supersedes(new, cached):
+                        rec["state"], rec["why"] = "STALE_CACHE", (
+                            "yfinance series (newest %s) does not advance/cover the cache" % new[-1][0])
+                    else:
+                        _write_cache(sym, new)
+                        newest = new[-1][0]
+                        rec["state"] = "FRESH" if not nav_needs_refresh(newest, as_of) else "STALE_CACHE"
+                        rec["why"] = "re-fetched %d points" % len(new)
+                else:   # FT
+                    start = (newest - dt.timedelta(days=45)) if newest else as_of - dt.timedelta(days=365 * 5)
+                    try:
+                        ft = parse_ft_history(get(FT_HIST_URL.format(
+                            start=start.strftime("%Y/%m/%d"), end=as_of.strftime("%Y/%m/%d"), xid=u["ft_xid"])))
+                    except Exception as e:                              # noqa: BLE001
+                        ft, rec["why"] = None, "FT fetch/parse failed: %s: %s" % (type(e).__name__, str(e)[:160])
+                        rec["state"] = "SOURCE_FAILED"
+                    if ft:
+                        merged, chk = merge_ft_series(cached, ft)
+                        rec["junction"] = chk
+                        if merged is None:
+                            rec["state"], rec["why"] = "SOURCE_DISAGREES", "FT disagrees with the cached series on overlapping dates"
+                        elif not _series_supersedes(merged, cached):
+                            rec["state"], rec["why"] = "STALE_CACHE", "FT series does not advance the cache"
+                        else:
+                            _write_csv_series(cp, merged)
+                            newest = merged[-1][0]
+                            rec["state"] = "FRESH" if not nav_needs_refresh(newest, as_of) else "STALE_CACHE"
+                            rec["why"] = "FT merged %d daily closes" % len(ft)
+                    elif ft is not None and rec.get("state") != "SOURCE_FAILED":
+                        rec["state"], rec["why"] = "SOURCE_FAILED", "FT returned no rows"
+            if not newest and rec["state"] in ("FRESH", "STALE_CACHE"):
+                rec["state"] = "NO_SERIES"
+            rec["newest"] = newest.isoformat() if newest else None
+            rec["age_days"] = (as_of - newest).days if newest else None
+            rec["fetched_this_call"] = fetched
+            rec["as_of_run"] = as_of.isoformat()
+            if not fetched and rec["state"] != "STALE_CACHE" and p.get("attempted_at") and "attempted_at" not in rec:
+                rec["attempted_at"] = p.get("attempted_at")
+            out[sedol] = rec
+    finally:
+        CACHE_DIR = _cd0
+    doc = {"schema_version": 1, "as_of_run": as_of.isoformat(), "written_at": now.isoformat(timespec="seconds"),
+           "basis": "ISA-0869: typed NAV freshness per fund; FRESH = newest NAV within %d business days of the run date"
+                    % NAV_STALE_BDAYS,
+           "counts": {k: sum(1 for r in out.values() if r["state"] == k) for k in NAV_STATES},
+           "funds": out, "secs": round(_t.time() - t0, 1)}
+    try:
+        with open(state_path or NAV_STATE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError:
+        pass
+    return doc
+
+
+def _read_csv_series(path):
+    if not path or not os.path.exists(path):
+        return None
+    out = []
+    with open(path, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            try:
+                out.append((dt.date.fromisoformat(r["date"]), float(r["close"])))
+            except (ValueError, KeyError):
+                continue
+    return sorted(out) or None
+
+
+def _write_csv_series(path, series):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh); w.writerow(["date", "close"])
+        for d, c in series:
+            w.writerow([d.isoformat(), ("%.6f" % c).rstrip("0").rstrip(".")])
+    os.replace(tmp, path)
+
+
+def nav_freshness(sedol, u, as_of, series=None, state=None):
+    """{state, newest, age_days, why} for one fund - the consumer view (never blank)."""
+    st = ((state if state is not None else _load_nav_state()).get("funds") or {}).get(sedol) or {}
+    if series is None:
+        try:
+            series = nav_series_for(sedol, u)
+        except Exception:                                               # noqa: BLE001
+            series = []
+    newest = series[-1][0] if series else None
+    age = (as_of - newest).days if newest else None
+    if not newest:
+        s = "NO_SERIES"
+    elif age is not None and age <= NAV_FRESH_MAX_DAYS:
+        s = "FRESH"
+    else:
+        s = st.get("state") if st.get("state") in ("SOURCE_FAILED", "SOURCE_DISAGREES", "MANUAL_SERIES") else "STALE_CACHE"
+    return {"state": s, "newest": newest.isoformat() if newest else None, "age_days": age,
+            "producer_state": st.get("state"), "why": st.get("why") or ("no refresh record" if not st else None)}
 
 
 # ---------------------------------------------------------------- local series (ISA-0307)
@@ -384,7 +679,7 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
                             f"as at {man['as_of']} (stamped, not inferred).")
         return out
 
-    if u.get("resolution_status") != "resolved" or not u.get("yf_symbol"):
+    if u.get("resolution_status") != "resolved" or not (u.get("yf_symbol") or u.get("local_series")):
         r = u.get("unresolved_reason", "no yf_symbol")
         out["status"] = "unresolved"
         out["fallback"] = u.get("fallback")
@@ -393,13 +688,15 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
                                  "annualised": as_dict(Missing(r, as_of, "fund_universe"))}
         return out
 
-    sym = u["yf_symbol"]
-    src = (f"local_series:{u['local_series']['path']}" if u.get("local_series")
+    sym = u.get("yf_symbol")
+    src = ((f"local_series:{u['local_series']['cache']}+ft:{u['ft_xid']}" if u.get("ft_xid")
+            else f"local_series:{u['local_series']['path']}") if u.get("local_series")
            else f"yfinance:{sym}")
     scale = _scale_for(u)
     series = (load_local_series(u) if u.get("local_series")
               else fetch_nav_history(sym, refresh=refresh, scale=scale))
     out["nav_points"] = len(series)
+    out["nav_freshness"] = nav_freshness(sedol, u, as_of, series=series)     # ISA-0869: typed, never blank
     if series:
         out["nav_range"] = [series[0][0].isoformat(), series[-1][0].isoformat()]
         # DECLARED inception (KID/factsheet), carried so that an absent window can be
@@ -581,7 +878,132 @@ def append_history(perf_by_sedol, est_by_sedol, run_date):
     return HISTORY_CSV
 
 
+def _selftest():
+    """ISA-0869 offline selftest (no network): FT parser, junction merge, supersede guard, the refresh
+    producer's typed states, cache fallback on a failed refresh, freshness boundary (R5.14 matrix)."""
+    import tempfile, shutil
+    fails = []
+
+    def ok(name, cond, detail=None):
+        print(("PASS " if cond else "FAIL ") + name + ("" if cond else "  -> %r" % (detail,)))
+        if not cond:
+            fails.append(name)
+    D = dt.date
+    row = ('<tr><td class="mod-ui-table__cell--text"><span class="mod-ui-hide-small-below">%s</span>'
+           '<span class="mod-ui-hide-medium-above">x</span></td><td>1</td><td>1</td><td>1</td><td>%s</td>'
+           '<td><span>0</span></td></tr>')
+    fx = json.dumps({"data": {}, "html": row % ("Thursday, October 15, 2026", "202.38")
+                     + row % ("Wednesday, October 14, 2026", "1,209.21")})
+    got = parse_ft_history(fx)
+    ok("FT parser reads date + close (thousands separator) ascending",
+       got == [(D(2026, 10, 14), 1209.21), (D(2026, 10, 15), 202.38)], got)
+    try:
+        parse_ft_history(json.dumps({"data": {}, "html": "<tr><td>Oct 15</td><td>1</td></tr>"}))
+        ok("MUST-FIRE: an FT layout change RAISES (never a guessed series)", False)
+    except FtLayoutError:
+        ok("MUST-FIRE: an FT layout change RAISES (never a guessed series)", True)
+    try:
+        parse_ft_history("<html>blocked</html>")
+        ok("MUST-FIRE: a non-JSON FT payload RAISES", False)
+    except FtLayoutError:
+        ok("MUST-FIRE: a non-JSON FT payload RAISES", True)
+    cached = [(D(2026, 7, 31), 193.97), (D(2026, 8, 4), 205.35)]
+    m, chk = merge_ft_series(cached, [(D(2026, 8, 4), 205.35), (D(2026, 8, 5), 204.61)])
+    ok("NEGATIVE CONTROL: FT agreeing on the overlap extends the cache",
+       m == [(D(2026, 7, 31), 193.97), (D(2026, 8, 4), 205.35), (D(2026, 8, 5), 204.61)] and chk["overlap_points"] == 1, (m, chk))
+    m2, chk2 = merge_ft_series(cached, [(D(2026, 8, 4), 210.0), (D(2026, 8, 5), 204.61)])
+    ok("MUST-FIRE: FT disagreeing with the cache on an overlapping date is REFUSED", m2 is None and chk2["disagreements"], chk2)
+    full = [(D(2016, 8, 5) + dt.timedelta(days=i), 1.0 + i / 1000) for i in range(0, 3700, 7)]
+    ok("MUST-FIRE: a truncated provider series never replaces the cache",
+       not _series_supersedes(full[100:] + [(full[-1][0] + dt.timedelta(days=30), 9.0)], full))
+    ok("MUST-FIRE: a series that does not advance never replaces the cache", not _series_supersedes(full[:-1], full))
+    ok("NEGATIVE CONTROL: an advancing covering series replaces it",
+       _series_supersedes(full + [(full[-1][0] + dt.timedelta(days=7), 9.0)], full))
+    ok("business-day arithmetic: Fri->Mon is 1", _bdays_after(D(2026, 10, 16), D(2026, 10, 19)) == 1)
+    deep = [(D(2013, 1, 2) + dt.timedelta(days=i), 1.0) for i in range(0, 5000, 7)]
+    held = _hold_depth(deep, full)
+    ok("MUST-FIRE: a deeper provider history is trimmed to the cache's start (depth held, ISA-0869)",
+       held and held[0][0] >= full[0][0] and held[-1] == deep[-1], held[:1])
+    ok("NEGATIVE CONTROL: with no cache the provider's full depth is kept", _hold_depth(deep, None) == deep)
+
+    tmp = tempfile.mkdtemp(prefix="fp_st_")
+    try:
+        cdir = os.path.join(tmp, "nav_cache"); os.makedirs(cdir)
+        stp = os.path.join(tmp, "nav_cache_state.json")
+        old_hist = [(D(2026, 5, 1) + dt.timedelta(days=i), 10.0 + i / 100) for i in range(0, 96)]   # newest 04-Aug
+        global CACHE_DIR
+        _cd = CACHE_DIR
+        CACHE_DIR = cdir
+        _write_cache("GOOD", old_hist); _write_cache("DOWN", old_hist)
+        CACHE_DIR = _cd
+        _write_csv_series(os.path.join(cdir, "POLAR.csv"), [(D(2026, 7, 31), 193.97), (D(2026, 8, 4), 205.35)])
+        _write_csv_series(os.path.join(cdir, "MAN.csv"), [(D(2026, 7, 31), 5.0)])
+        U = {"funds": {"G": {"name": "Good", "yf_symbol": "GOOD"}, "X": {"name": "Down", "yf_symbol": "DOWN"},
+                       "P": {"name": "Polar", "ft_xid": "1", "local_series": {"cache": "nav_cache/POLAR.csv"}},
+                       "M": {"name": "Manual", "local_series": {"cache": "nav_cache/MAN.csv"}}}}
+        new_hist = old_hist + [(D(2026, 8, 5) + dt.timedelta(days=i), 11.0) for i in range(0, 86)]  # to 29-Oct
+        yfh = lambda sym: new_hist if sym == "GOOD" else None                               # noqa: E731
+        ftp = json.dumps({"html": row % ("Tuesday, August 04, 2026", "205.35") + row % ("Thursday, October 29, 2026", "220.00")})
+        T = D(2026, 10, 30)
+        now = dt.datetime(2026, 10, 31, 9, 30)
+        r = refresh_nav_cache(T, universe=U, get=lambda url: ftp, yf_history=yfh, now=now, state_path=stp, cache_dir=cdir)
+        f = r["funds"]
+        ok("MUST-FIRE: a stale yfinance cache is re-fetched -> FRESH", f["G"]["state"] == "FRESH" and f["G"]["newest"] == "2026-10-29", f["G"])
+        CACHE_DIR = cdir
+        down = _read_cache("DOWN")
+        CACHE_DIR = _cd
+        ok("MUST-FIRE: a failed refresh is SOURCE_FAILED, typed with its NAV date, and the cache is KEPT",
+           f["X"]["state"] == "SOURCE_FAILED" and f["X"]["newest"] == "2026-08-04" and down == old_hist, f["X"])
+        ok("FT route merges daily closes onto the declared series (junction checked) -> FRESH",
+           f["P"]["state"] == "FRESH" and f["P"]["newest"] == "2026-10-29" and f["P"]["junction"]["overlap_points"] == 1, f["P"])
+        ok("a declared manual series is MANUAL_SERIES (never silently fresh)", f["M"]["state"] == "MANUAL_SERIES", f["M"])
+        ok("state file written with counts", json.load(open(stp))["counts"]["FRESH"] == 2)
+        r2 = refresh_nav_cache(T, universe=U, get=lambda url: (_ for _ in ()).throw(AssertionError("no fetch")),
+                               yf_history=lambda s_: (_ for _ in ()).throw(AssertionError("no fetch")),
+                               now=now + dt.timedelta(minutes=5), state_path=stp, cache_dir=cdir)
+        ok("R5.14 repeat_same_occurrence: a re-run within 18 h fetches nothing and keeps the typed states",
+           r2["funds"]["X"]["state"] == "SOURCE_FAILED" and r2["funds"]["G"]["state"] == "FRESH"
+           and not any(v["fetched_this_call"] for v in r2["funds"].values()), r2["funds"])
+        r3 = refresh_nav_cache(D(2026, 11, 27), universe=U, get=lambda url: "<html>x</html>", yf_history=lambda s_: None,
+                               now=dt.datetime(2026, 11, 28, 9, 30), state_path=stp, cache_dir=cdir)
+        ok("R5.14 next_occurrence: a month later every fund is re-attempted; FT layout failure -> SOURCE_FAILED",
+           r3["funds"]["G"]["state"] == "SOURCE_FAILED" and r3["funds"]["P"]["state"] == "SOURCE_FAILED"
+           and r3["funds"]["G"]["fetched_this_call"], r3["funds"])
+        r4 = refresh_nav_cache(D(2026, 11, 27), universe=U, budget_s=-1, yf_history=lambda s_: None,
+                               now=dt.datetime(2026, 11, 29, 9, 30), state_path=os.path.join(tmp, "s4.json"), cache_dir=cdir)
+        ok("budget spent -> STALE_CACHE (typed), never a silent pass", r4["funds"]["G"]["state"] == "STALE_CACHE", r4["funds"]["G"])
+        # fetch_nav_history: failed refresh falls back to the cache, never []
+        global _yf_history
+        _yh = _yf_history
+        CACHE_DIR = cdir
+        try:
+            _yf_history = lambda sym, period="max": None                                     # noqa: E731
+            ok("MUST-FIRE (ISA-0869 CA2): fetch_nav_history(refresh=True) on a failed fetch returns the CACHE, not []",
+               fetch_nav_history("DOWN", refresh=True) == old_hist)
+            _yf_history = lambda sym, period="max": old_hist[:10]                            # noqa: E731
+            ok("MUST-FIRE: a truncated refresh never overwrites the cache", fetch_nav_history("DOWN", refresh=True) == old_hist
+               and _read_cache("DOWN") == old_hist)
+        finally:
+            _yf_history = _yh
+            CACHE_DIR = _cd
+        # freshness boundary (R5.14 T-1 / T / T+1 around the 10-day bar)
+        ser = [(D(2026, 10, 20), 1.0)]
+        st0 = {"funds": {}}
+        ok("R5.14 T-1: 9 days old is FRESH", nav_freshness("Z", {}, D(2026, 10, 29), series=ser, state=st0)["state"] == "FRESH")
+        ok("R5.14 T: exactly 10 days old is FRESH", nav_freshness("Z", {}, D(2026, 10, 30), series=ser, state=st0)["state"] == "FRESH")
+        ok("R5.14 T+1: 11 days old is STALE_CACHE (typed)",
+           nav_freshness("Z", {}, D(2026, 10, 31), series=ser, state=st0)["state"] == "STALE_CACHE")
+        ok("NEGATIVE CONTROL: no series is NO_SERIES, never FRESH",
+           nav_freshness("Z", {}, D(2026, 10, 31), series=[], state=st0)["state"] == "NO_SERIES")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("fund_performance selftest: %d FAIL(s)" % len(fails))
+    return len(fails)
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(1 if _selftest() else 0)
     as_of = dt.date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else dt.date.today()
     r = all_fund_performance(as_of)
     print(json.dumps({k: v for k, v in r.items() if not k.startswith("_")},

@@ -1905,7 +1905,9 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             #   ISA-0858 carry no funding block: every pound is cash and no tranche is reserved (unchanged).
             _spent = round(sum(float(((a.get("funding") or {}).get("cash_gbp")) if (a.get("funding") or {}).get("cash_gbp")
                                      is not None else a["gbp"]) for a in _acts), 2)
-            _trimmed = round(_spent_all - _spent, 2)
+            # ISA-0621: a switch's buys are partly paid by its own stock SALE proceeds - neither cash nor fund trims
+            _salef = round(sum(float(((a.get("funding") or {}).get("sale_proceeds_gbp")) or 0.0) for a in _acts), 2)
+            _trimmed = round(_spent_all - _spent - _salef, 2)
             _ddres = float((((_rr.get("funding") or {}).get("waterfall") or {}).get("drawdown_reserved_gbp")) or 0.0)
             if _spent > float(amount_gbp) - _res - _ddres + TOL_GBP:
                 raise DestinationRefused("ISA-0811: receipt %s spends GBP %.2f of cash > available GBP %.2f after the "

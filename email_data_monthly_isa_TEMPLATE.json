@@ -1,4 +1,5 @@
 {
+  "_template_marker": "NON-CURRENT EXAMPLE - illustrative June-2026 values; delete this key only after every value is replaced (ISA-0642)",
   "_instructions": "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci) that controls rendering. The 'energy' pipeline was RETIRED 26-Jul-2026 — energy names use growth_stock. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
   "meta": {
     "run_date_display": "Saturday 1 June 2026",

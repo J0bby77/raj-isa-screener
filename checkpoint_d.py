@@ -228,14 +228,37 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
                 blocks.append(f"{c} late_cycle_flag (A15): extended multiple + late stage — "
                               f"document the cause (documented_causes[{c}]) before BUY")
 
-    # (5) Doc B B3: while the AI-complex factor cap is in BREACH, a chosen BUY that raises the
-    #     factor weight is BLOCKED (factor_state = {"breach": bool, "classes": {ticker: 0/0.5/1}}).
-    if factor_state and factor_state.get("breach"):
+    # (5) Doc B B3 — AI-complex factor cap, judged on the NET post-trade book (ISA-0621 / ISA-0465, Raj 19-Oct-2026:
+    #     "a like-for-like AI-capex switch is never blocked"). The production CLI passes the receipt's own verdict:
+    #       factor_state = {"mode": SHADOW|LIVE, "net": {"verdict": PASS|FAIL|UNAVAILABLE, "tickers": [...]},
+    #                       "breach": <pre-trade lower bound > cap>, "classes": {ticker: 0/0.5/1}}
+    #     * the chosen set IS the receipt's plan -> its net-book verdict decides (FAIL blocks; UNAVAILABLE blocks
+    #       only while the pre-trade bound is already in breach);
+    #     * a chosen set the receipt never evaluated -> the conservative GROSS test (any factor-class BUY while in
+    #       breach), named as such;
+    #     * mode != LIVE -> recorded in `factor_tick`, never a block (the caps' SHADOW period; one LIVE decision).
+    #     A legacy state with no `mode` keeps its old binding meaning (tests_jul2026 fixtures).
+    _factor_tick = {"state": "NOT_EVALUATED", "why": "no factor_state passed"}
+    if factor_state:
+        _mode = factor_state.get("mode", "LIVE")
+        _net = factor_state.get("net") or {}
         _fc = {str(k).upper(): v for k, v in (factor_state.get("classes") or {}).items()}
-        for c in chosen_set:
-            if (_fc.get(c) or 0) > 0:
-                blocks.append(f"{c} raises AI-complex weight while cap is in BREACH (B3/D15) — "
-                              f"de-concentrate first or choose a non-factor name")
+        _would = []
+        if _net and _norm_set(_net.get("tickers") or []) == chosen_set:
+            _v = _net.get("verdict")
+            _basis = "NET_POST_TRADE (receipt plan)"
+            if _v == "FAIL" or (_v != "PASS" and factor_state.get("breach")):
+                _would = [f"the chosen plan {sorted(chosen_set)} raises the AI-complex factor above the {factor_state.get('cap_pct', 30)}% cap "
+                          f"on the net post-trade book (B3/D15; verdict {_v}) — de-concentrate first or choose a non-factor plan"]
+        else:
+            _basis = "GROSS_FALLBACK (chosen set not evaluated by the receipt)"
+            if factor_state.get("breach"):
+                _would = [f"{c} raises AI-complex weight while cap is in BREACH (B3/D15) — de-concentrate first or choose a "
+                          f"non-factor name" for c in sorted(chosen_set) if (_fc.get(c) or 0) > 0]
+        _factor_tick = {"state": ("BLOCK" if (_would and _mode == "LIVE") else "WOULD_BLOCK_SHADOW" if _would else "PASS"),
+                        "mode": _mode, "basis": _basis, "would_block": _would}
+        if _mode == "LIVE":
+            blocks.extend(_would)
 
     # (6) FALSIFICATION TEST (WP-D, 29-Jul-2026 — assessment §5.3).
     #     Ticks 1-2 prove the chosen name beat the other four. They do NOT test whether all five
@@ -362,8 +385,53 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
     _fl = fund_leg_check(decision.get("fund_actions"), new_capital_control, fund_max_gbp)
     blocks.extend(_fl["blocks"])
 
+    # (13) ISA-0621 (LIVE switch, Raj 19-Oct-2026): a switch's buys are funded by its SALES, so the decision must
+    #      carry exactly the receipt's sales (B07-R10: one action tuple across receipt, Checkpoint-D, report, ledger).
+    #      decision["sales"] = {ticker: "EXIT"|"TRIM"}. A sale not in the receipt's plan is not a contest decision
+    #      (held-position sells are decided in Step 5), so it is refused here.
+    _rr13 = (decision_receipt or {}).get("receipt") or {}
+    _rs13 = {str(x.get("ticker") or "").upper(): x.get("action") for x in (_rr13.get("selected_sales") or [])}
+    _ds13 = {str(k).upper(): v for k, v in (decision.get("sales") or {}).items()}
+    _rb13 = {str(x.get("ticker") or "").upper() for x in (_rr13.get("selected_actions") or [])}
+    if _rs13 and (chosen_set & _rb13):
+        _miss13 = sorted(t for t in _rs13 if _ds13.get(t) != _rs13[t])
+        if _miss13:
+            blocks.append("tick 13 (ISA-0621): the receipt's switch sells %s to fund the chosen buys - record "
+                          "decision['sales'] = %s or the buys are unfunded" % (_miss13, {t: _rs13[t] for t in _miss13}))
+    _extra13 = sorted(set(_ds13) - set(_rs13))
+    if _extra13:
+        blocks.append("tick 13 (ISA-0621): sale(s) %s are not in the receipt's switch plan - a held-position sale outside "
+                      "the contest is decided in Step 5, not here" % _extra13)
+
     return {"passed": not blocks, "blocks": blocks, "chosen": sorted(chosen_set) or None, "top5": top5,
-            "contest_basis": contest_basis, "fund_leg": _fl}
+            "contest_basis": contest_basis, "fund_leg": _fl, "factor_tick": _factor_tick}
+
+
+def factor_state_from_receipt(receipt_verification):
+    """ISA-0621 (P-B9): the tick-5 input built from the ONE receipt (renderer, never a recomputation - R20.2).
+    None when the receipt carries no factor section (pre-P-B9 receipt or unreadable), so tick 5 reports
+    NOT_EVALUATED rather than inventing a verdict."""
+    rc = (receipt_verification or {}).get("receipt") or {}
+    f = rc.get("factor")
+    if not isinstance(f, dict):
+        return None
+    pre = f.get("pre_trade") or {}
+    sel = f.get("selected") or {}
+    classes = {}
+    try:
+        import factor_lookthrough as _flt
+        fm = _flt.load_map().get("stocks") or {}
+        tm = _flt._theme_layer(None)
+        for t in (f.get("selected_tickers") or []):
+            c = fm.get(t)
+            if c is None:
+                c, _ = _flt._theme_class(t, tm)
+            classes[t] = c if c is not None else 1.0          # unclassified counts IN the factor (conservative)
+    except Exception:                                           # noqa: BLE001
+        classes = {t: 1.0 for t in (f.get("selected_tickers") or [])}
+    return {"mode": f.get("mode") or "UNKNOWN", "cap_pct": f.get("cap_pct"), "breach": bool(pre.get("breach")),
+            "net": {"verdict": sel.get("state") if sel else "PASS", "tickers": f.get("selected_tickers") or []},
+            "classes": classes}
 
 
 def receipt_binding(month=None, receipt_verification=None) -> dict:
@@ -681,6 +749,35 @@ def _selftest() -> int:
         assert _ents["AAA"]["receipt_binding"]["receipt_id"] == "CDR-B" and _ents["AAA"]["build_id"] == "TB-X" \
             and _ents["AAA"]["input_snapshot_id"] == "CDR-B", "ISA-0868: log_top10 writes the binding, build and snapshot"
         assert _ents["BBB"]["receipt_binding"]["in_receipt"] is False, "ISA-0868: a PASS outside the receipt is still bound"
+    # ── ISA-0621 tick 5: net-book factor (Raj 19-Oct-2026) ─────────────────────────────────────────
+    _fs_fail = {"mode": "LIVE", "breach": True, "cap_pct": 30, "net": {"verdict": "FAIL", "tickers": ["NTAP"]}, "classes": {"NTAP": 1.0}}
+    _r5 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, factor_state=_fs_fail)
+    assert _r5["factor_tick"]["state"] == "BLOCK" and any("net post-trade book" in b for b in _r5["blocks"]), \
+        "MUST-FIRE (ISA-0621): a LIVE net-book FAIL on the receipt's own plan blocks"
+    _fs_sw = {"mode": "LIVE", "breach": True, "cap_pct": 30, "net": {"verdict": "PASS", "tickers": ["NTAP"]}, "classes": {"NTAP": 1.0}}
+    _r5b = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, factor_state=_fs_sw)
+    assert _r5b["factor_tick"]["state"] == "PASS" and not any("AI-complex" in b for b in _r5b["blocks"]), \
+        "NEGATIVE CONTROL (Raj 19-Oct): a like-for-like AI switch (net verdict PASS) is never blocked although the name is AI-class and the cap is in breach"
+    _r5c = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, factor_state=dict(_fs_fail, mode="SHADOW"))
+    assert _r5c["factor_tick"]["state"] == "WOULD_BLOCK_SHADOW" and not any("AI-complex" in b for b in _r5c["blocks"]), \
+        "ISA-0621: SHADOW records the would-block and binds nothing"
+    _fs_off = {"mode": "LIVE", "breach": True, "cap_pct": 30, "net": {"verdict": "PASS", "tickers": ["OTHER"]}, "classes": {"NTAP": 1.0}}
+    _r5d = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, factor_state=_fs_off)
+    # tick 13 - LIVE switch sales carried by the decision
+    _rsw = {"state": "VALID", "receipt": {"selected_actions": [{"ticker": "NTAP", "gbp": 5000.0}],
+                                          "selected_sales": [{"ticker": "MU", "action": "EXIT", "gbp": 5698.42}]}}
+    _r13 = validate_checkpoint_d(feas, dec, cases, feas, step9_records=rc, decision_receipt=_rsw)
+    assert any("tick 13" in b and "MU" in b for b in _r13["blocks"]), "MUST-FIRE (ISA-0621): a switch buy without its sale is blocked"
+    _r13b = validate_checkpoint_d(feas, dict(dec, sales={"MU": "EXIT"}), cases, feas, step9_records=rc, decision_receipt=_rsw)
+    assert not any("tick 13" in b for b in _r13b["blocks"]), "NEGATIVE CONTROL (ISA-0621): the receipt's sale recorded -> no tick-13 block"
+    _r13c = validate_checkpoint_d(feas, dict(dec, sales={"AVGO": "EXIT"}), cases, feas, step9_records=rc)
+    assert any("tick 13" in b and "AVGO" in b for b in _r13c["blocks"]), "MUST-FIRE (ISA-0621): an off-receipt sale is refused"
+    assert _r5d["factor_tick"]["basis"].startswith("GROSS_FALLBACK") and _r5d["factor_tick"]["state"] == "BLOCK", \
+        "ISA-0621: a chosen set the receipt never evaluated falls back to the conservative gross test"
+    assert factor_state_from_receipt({"receipt": {}}) is None, "NEGATIVE CONTROL: a pre-P-B9 receipt yields no invented factor state"
+    _fr = factor_state_from_receipt({"receipt": {"factor": {"mode": "SHADOW", "cap_pct": 30, "pre_trade": {"breach": False},
+                                                             "selected": {"state": "PASS"}, "selected_tickers": ["NTAP"]}}})
+    assert _fr["mode"] == "SHADOW" and _fr["net"] == {"verdict": "PASS", "tickers": ["NTAP"]}, "ISA-0621: the receipt's verdict reaches tick 5"
     print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11 + ISA-0867 tick 12 + ISA-0868 binding: must-fire, negative control, absent verdict)")
     return 0
 
@@ -719,6 +816,7 @@ def main():
     res = validate_checkpoint_d(s.get("top5"), s.get("decision"),
                                 s.get("comparative_cases"), s.get("logged_tickers"),
                                 step9_records=_step9_records(s),
+                                factor_state=factor_state_from_receipt(_rcv),          # ISA-0621: tick 5 finally wired
                                 opportunity_set=_opportunity_set(s),
                                 new_capital_control=_ncc, decision_receipt=_rcv, engine_authority=_cea,
                                 fund_max_gbp=_fund_max(s))

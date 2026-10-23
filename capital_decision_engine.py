@@ -98,7 +98,26 @@ FLAG_TAXONOMY = {
                             "surfaced, never auto-capped by adopted policy"),
     "ai_disruption_severe": ("UNDERWRITING_INPUT", "deployment_flags (score 4, surfaced)",
                              "review flag by adopted policy, not a gate"),
+    # ISA-0817 (Raj D1-D3, 18-Oct-2026) - produced by corporate_events.py (Step 5x-ce), carried on step9_pre's
+    # `corporate_events` section. The offeree block lifts by itself when the name leaves the source table.
+    "offer_period_offeree": ("HARD_BLOCK", "corporate_events (Takeover Panel table / EDGAR subject-company filing)",
+                             "offeree in an offer period: the price is pinned to offer terms, growth worlds do not "
+                             "apply - no NEW capital (held: REVIEW only, never a sell)"),
+    "corporate_action_pending": ("REVIEW_REQUIRED", "corporate_events (EDGAR M&A-party/financing, RNS headlines)",
+                                 "acquirer side / capital raise / disposal / special distribution / unconfirmed offer "
+                                 "headline - the case must be refreshed after the event (B09-R02)"),
+    "offer_state_source_failed": ("REVIEW_REQUIRED", "corporate_events (source unreadable or store aged)",
+                                  "offer state UNESTABLISHED on a sourceable venue - never read as 'no event'"),
+    "price_pinned_suspect": ("REVIEW_REQUIRED", "corporate_events (weekly-store pin detector, unsourced venues)",
+                             "price behaves as if pinned to offer terms on a venue with no offer-state source"),
+    "news_corporate_event_unconfirmed": ("REVIEW_REQUIRED", "corporate_events (SECONDARY news search, venues with no "
+                                         "primary register - Raj D2b 18-Oct-2026)",
+                                         "a headline names the issuer with an offer / corporate-action term - the case "
+                                         "must confirm or rebut it from a primary source (R6.3: never HARD)"),
 }
+
+# ISA-0817: the only HARD flags a typed adjudication may clear - a stale external source, never adopted policy.
+ADJUDICABLE_HARD_FLAGS = ("offer_period_offeree",)
 
 # s9.3 — the ONLY fields a case amendment may touch.
 AMENDMENT_ALLOWLIST = {
@@ -592,12 +611,15 @@ def _watch_records(step9: dict) -> Dict[str, dict]:
     return out
 
 
-def classify_flags(wrec: Optional[dict], adjudications: Optional[dict] = None) -> dict:
-    """s5.2 -> {hard:[...], review_unresolved:[...], underwriting:[...], rows:[...]}."""
+def classify_flags(wrec: Optional[dict], adjudications: Optional[dict] = None,
+                   extra_codes: Optional[list] = None) -> dict:
+    """s5.2 -> {hard:[...], review_unresolved:[...], underwriting:[...], rows:[...]}.
+    `extra_codes`: flag codes from a producer that is not the watchlist record (ISA-0817 corporate_events)."""
     _fi_mark("capital_decision_engine", "classify_flags")
     adj = adjudications or {}
     w = wrec or {}
-    codes = list(w.get("disqualifier_flags") or []) + list(w.get("review_flags") or [])
+    codes = (list(w.get("disqualifier_flags") or []) + list(w.get("review_flags") or [])
+             + list(extra_codes or []))
     if w.get("late_cycle_flag"):
         codes.append("late_cycle_flag")
     if w.get("stage_gate") == "BLOCKED_PENDING_CASE":
@@ -610,10 +632,16 @@ def classify_flags(wrec: Optional[dict], adjudications: Optional[dict] = None) -
         state = "ACTIVE"
         if cls == "REVIEW_REQUIRED" and a in ("RESOLVED_BENIGN", "CONFIRMED_ADVERSE"):
             state = a
+        elif cls == "HARD_BLOCK" and code in ADJUDICABLE_HARD_FLAGS and a == "RESOLVED_BENIGN":
+            # ISA-0817 (Raj D1): a STALE source (the offer ended, the table not yet updated) is cleared by a typed
+            # adjudication; adopted value-trap HARD flags stay unadjudicable (s5.2).
+            state = a
         rows.append({"code": code, "class": cls, "owner": owner, "why": why, "adjudication": a,
                      "state": state})
-        if cls == "HARD_BLOCK":
+        if cls == "HARD_BLOCK" and state != "RESOLVED_BENIGN":
             hard.append(code)                       # no case or return may override (s5.2)
+        elif cls == "HARD_BLOCK":
+            pass                                    # ISA-0817 stale-source adjudication (row kept, state shown)
         elif cls == "REVIEW_REQUIRED":
             if state == "CONFIRMED_ADVERSE":
                 hard.append(code)
@@ -624,9 +652,32 @@ def classify_flags(wrec: Optional[dict], adjudications: Optional[dict] = None) -
     return {"rows": rows, "hard": hard, "review_unresolved": review, "underwriting": uw}
 
 
-def risk_gate(store: dict, portfolio: dict, ticker: str) -> dict:
+def risk_gate(store: dict, portfolio: dict, ticker: str, as_of=None) -> dict:
     """ISA-0600 addition gate (Dimson beta <= SLEEVE_BETA_MAX vs the held sleeve) through its ONE
-    home, sleeve_risk.gate_add. UNMEASURED is never PASS (s6, T44)."""
+    home, sleeve_risk.gate_add. UNMEASURED is never PASS (s6, T44).
+
+    ⚑ ISA-0756 (B05-R04), 19-Oct-2026: CAPITAL ADMISSIBILITY = A FRESH RISK STORE AT THE RUN'S CLOCK.
+    An ADDITION (new capital) whose risk would be measured on a store that is STALE_INPUT for the
+    candidate or any held sleeve name - at `as_of`, the run date, through the ONE freshness contract
+    (stock_return_store.freshness) - is REFUSED_STALE_INPUT. A same-run Step 5y refresh makes every
+    fetched name FRESH, so this refuses only when that refresh failed. Reductions never pass through
+    this gate, so risk reduction is never blocked."""
+    if as_of is not None:
+        try:
+            import stock_return_store as _srs756
+            held = [s.get("ticker") for s in (portfolio.get("stocks") or [])
+                    if s.get("ticker") and float(s.get("value_gbp") or 0) > 0]
+            fr = _srs756.freshness(store, sorted(set(held + [ticker])), as_of=as_of)
+            if fr["stale_input"]:
+                return {"ticker": ticker, "verdict": "REFUSED_STALE_INPUT", "stale_names": fr["stale_input"],
+                        "expected_latest_observation": fr["expected_latest_observation"],
+                        "reason": ("weekly risk store STALE_INPUT at %s for %s (>= %d settled Fridays missing) - "
+                                   "a new-capital addition is not sized on a stale covariance (ISA-0756); "
+                                   "a same-run Step 5y refresh restores admissibility"
+                                   % (fr["as_of"], ", ".join(fr["stale_input"]), fr["stale_after_missed"]))}
+        except Exception as exc:                                    # noqa: BLE001
+            return {"ticker": ticker, "verdict": "UNMEASURED",
+                    "reason": "risk-store freshness unavailable: %s: %s" % (type(exc).__name__, exc)}
     try:
         import sleeve_risk as _sr
         return _sr.gate_add(store, portfolio, ticker)
@@ -660,9 +711,13 @@ def build_census(inp: dict, pipeline: dict, store: dict, hurdle_pct: float, as_o
     return _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, None)
 
 
-def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_overrides):
+def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_overrides, switch_mode=False):
     """Every scored security -> exactly ONE disposition with typed reasons (s3.2). Stage numbers
-    need not match the old 84->69->25->11 funnel; the old funnel is retained for comparison."""
+    need not match the old 84->69->25->11 funnel; the old funnel is retained for comparison.
+
+    switch_mode (ISA-0621, SHADOW switch contest only): the two gates that say "this name needs a DONOR" - the
+    ISA-0600 addition beta gate and a REPLACEMENT_ONLY admission - do not stop the chain; the record carries
+    `switch_only` and continues through every later gate. The LIVE census is always switch_mode=False."""
     _fi_mark("capital_decision_engine", "build_census")
     step9 = inp["step9_pre"]
     hv_by = {c["ticker"]: c for c in (inp["horizon_value"].get("cases") or []) if c.get("ticker")}
@@ -679,6 +734,11 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                 vci.add(r["ticker"])
     universe = sorted(set(hv_by) | set(wrecs) | set(dpr) | set(pcands) | set(held))
     am_all = amendments or {}
+    # ISA-0817: offer-period / corporate-action verdicts from the pre-run (step9_pre `corporate_events`, written by
+    # step9_pre_builder from corporate_events.json). ABSENT (a step9 older than ISA-0817) is NAMED on every record and
+    # on the receipt - never read as 'no event'.
+    _ce_sec = step9.get("corporate_events")
+    _ce_v = ((_ce_sec or {}).get("verdicts") or {}) if isinstance(_ce_sec, dict) else {}
     recs = {}
     for t in universe:
         am = am_all.get(t) or {}
@@ -694,7 +754,17 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
         rec["er12"] = er12_case(t, hv_by.get(t), pit.get(t), as_of, hurdle_pct, am)
         if price_overrides and t in price_overrides:
             rec["er12"] = reprice_er12(rec["er12"], price_overrides[t])
-        rec["flags"] = classify_flags(w, am.get("flag_adjudication"))
+        _cev = _ce_v.get(t) if _ce_sec is not None else None
+        if _ce_sec is not None and _cev is None:
+            # present section, name missing (or the builder could not read the store): UNESTABLISHED -> REVIEW
+            _cev = {"state": "NOT_IN_SECTION", "flags": ["offer_state_source_failed"], "confirm_required": [],
+                    "why": ["name absent from step9_pre corporate_events (%s)"
+                            % ((_ce_sec or {}).get("error") or "not in the produced population")]}
+        rec["corporate_event"] = ({k: _cev.get(k) for k in ("state", "flags", "confirm_required", "why", "evidence",
+                                                            "store_as_of", "held_note")}
+                                  if _cev else {"state": ("ABSENT_SECTION_PRE_ISA0817" if _ce_sec is None
+                                                          else "NOT_IN_SECTION")})
+        rec["flags"] = classify_flags(w, am.get("flag_adjudication"), (_cev or {}).get("flags"))
         rec["entry"] = {"pct_vs_entry": d.get("pct_vs_entry", w.get("pct_vs_entry")),
                         "entry_level_status": w.get("entry_level_status"),
                         "role": "REFERENCE ONLY - the binding economics are ER12 at the executable price and the economic max price (s7)"}
@@ -740,7 +810,8 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                                           source="step9_pre.deployment_priority_rank",
                                           note="scored but not progressed to the deployment population (tier/viability)"))
         # ISA-0860: the pre-run's confirm-at-dealing flags (fundable; the receipt pre-authorises fallbacks)
-        rec["dealability_confirm"] = sorted(set((d or {}).get("broker_confirm_required") or []))
+        rec["dealability_confirm"] = sorted(set((d or {}).get("broker_confirm_required") or [])
+                                            | set((_cev or {}).get("confirm_required") or []))   # ISA-0817 D2
         if disp is None and d and d.get("broker_dealability") not in (None, "DEALABLE_ONLINE"):
             disp = "IDENTITY_REFUSED"
             rec["reasons"].append(_reason("identity", "NOT_DEALABLE_ONLINE", d.get("broker_dealability"),
@@ -764,6 +835,8 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                 disp = "NOT_IN_SCOPE"
                 rec["reasons"].append(_reason("route", "HELD_NOT_A_TOPUP_CANDIDATE", source="capital_pipeline",
                                               note="held position not offered as a top-up this run; sells/trims are reviewed in Step 5"))
+            elif switch_mode and adm.get("verdict") == "REPLACEMENT_ONLY" and pc.get("qualifies") is not False:
+                rec["switch_only"] = "REPLACEMENT_ONLY_NEEDS_DONOR"
             elif adm.get("verdict") == "REPLACEMENT_ONLY" or pc.get("qualifies") is False:
                 disp = "ROUTE_UNAVAILABLE"
                 rec["reasons"].append(_reason("route", "REPLACEMENT_ONLY_NO_DONOR", adm.get("breaches"),
@@ -792,10 +865,13 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                                                   hurdle_pct, "scoring_config.ER_DEPLOY_FLOOR (gross, canonical)"))
         # ── risk BEFORE research: a measured hard risk breach outranks a pending case (s6) ──
         if disp is None:
-            rg = risk_gate(store, inp["portfolio"], t)
+            rg = risk_gate(store, inp["portfolio"], t, as_of=as_of)          # ISA-0756: the run's clock
             rec["risk_gate"] = {k: rg.get(k) for k in ("verdict", "beta", "beta_max", "rho", "weeks",
-                                                       "zero_return_share", "reason", "residual_vol_annual")}
-            if rg.get("verdict") == "BLOCKED":
+                                                       "zero_return_share", "reason", "residual_vol_annual",
+                                                       "stale_names")}
+            if rg.get("verdict") == "BLOCKED" and switch_mode:
+                rec["switch_only"] = "SLEEVE_BETA_GATE_ADDITION_ONLY"
+            elif rg.get("verdict") == "BLOCKED":
                 disp = "RISK_BLOCKED"
                 rec["reasons"].append(_reason("risk", "SLEEVE_BETA_GATE", _r(rg.get("beta"), 3), rg.get("beta_max"),
                                               "sleeve_risk.gate_add (ISA-0600)", rg.get("reason")))
@@ -819,15 +895,18 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
             corr = (pc.get("correlation") or {})
             rec["correlation"] = {k: corr.get(k) for k in ("measured", "rho_sleeve", "rho_max_pairwise", "rho_basis")}
             rec["correlation_admission"] = ((corr.get("admission") or {}).get("verdict"))
-            if rg.get("verdict") != "PASS":
+            if rg.get("verdict") != "PASS" and not (switch_mode and rg.get("verdict") == "BLOCKED"):
                 disp = "RISK_UNKNOWN"
-                rec["reasons"].append(_reason("risk", "RISK_UNMEASURED", rg.get("verdict"), "PASS",
+                rec["reasons"].append(_reason("risk", ("RISK_INPUT_STALE" if rg.get("verdict") == "REFUSED_STALE_INPUT"
+                                                       else "RISK_UNMEASURED"), rg.get("verdict"), "PASS",
                                               "sleeve_risk.gate_add", (rg.get("reason") or "")[:240] +
                                               " - no conservative proxy contract exists, so the addition is refused (s6, T44)"))
             elif not corr.get("measured"):
                 disp = "RISK_UNKNOWN"
                 rec["reasons"].append(_reason("risk", "CORRELATION_UNMEASURED", corr.get("rho_basis"), "MEASURED",
                                               "deployment_sequencer", "the adverse 0.70 default is not a measurement"))
+            elif rec["correlation_admission"] == "REPLACEMENT_ONLY" and switch_mode:
+                rec["switch_only"] = rec.get("switch_only") or "REPLACEMENT_ONLY_NEEDS_DONOR"
             elif rec["correlation_admission"] == "REPLACEMENT_ONLY":
                 disp = "ROUTE_UNAVAILABLE"
                 rec["reasons"].append(_reason("route", "REPLACEMENT_ONLY_NO_DONOR",
@@ -861,7 +940,17 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
     counts = {}
     for r in recs.values():
         counts[r["disposition"]] = counts.get(r["disposition"], 0) + 1
+    _ce_counts = {}
+    for r in recs.values():
+        _s = (r.get("corporate_event") or {}).get("state")
+        _ce_counts[_s] = _ce_counts.get(_s, 0) + 1
     return {"records": recs, "n_universe": len(universe), "counts": counts,
+            "corporate_events": {"section_present": _ce_sec is not None,
+                                 "store_as_of": (_ce_sec or {}).get("store_as_of") if isinstance(_ce_sec, dict) else None,
+                                 "store_state": (_ce_sec or {}).get("store_state") if isinstance(_ce_sec, dict) else None,
+                                 "counts_by_state": _ce_counts,
+                                 "hard_blocked": sorted(t for t, r in recs.items()
+                                                        if "offer_period_offeree" in (r.get("flags") or {}).get("hard", []))},
             "conservation": {"universe": len(universe), "dispositioned": sum(counts.values()),
                              "holds": len(universe) == sum(counts.values()),
                              "undispositioned": [t for t, r in recs.items() if not r.get("disposition")]},
@@ -1077,6 +1166,37 @@ def bundle_risk(store: dict, portfolio: dict, bundle: Tuple, nav_gbp: float) -> 
     return out
 
 
+def concentration_eval(bundle: Tuple, held: Dict[str, float], nav: float, tax: dict) -> dict:
+    """ISA-0465 / B08-R04/R05 (19-Oct-2026): Raj's adopted direct-stock caps on ONE candidate bundle's
+    POST-TRADE book - sector <= 12% of total ISA, theme <= 50% of the post-trade stock sleeve - through the
+    ONE home (concentration_control.book_invariant: only a class whose exposure INCREASES can breach, so
+    an existing breach is separated from a worsening addition). An ADDITION whose sector or theme is
+    UNMAPPED is UNKNOWN_CLASSIFICATION (it cannot silently receive headroom - the same rule as
+    concentration_control.gate). Returns {state PASS|FAIL, violations, unknown_additions}."""
+    import concentration_control as _ccm
+    book = dict(held)
+    unknown = []
+    for t, a in bundle:
+        a = float(a)
+        if a < 0:
+            # ⚑ ISA-0621 (Raj 19-Oct-2026): a DONOR leg reduces the book - the caps judge the NET post-trade book,
+            #   so a same-theme switch that does not raise the theme's GBP never breaches (book_invariant's
+            #   increase test). Before P-B9 every leg <= 0 was skipped, i.e. a sale was invisible to the caps.
+            book[t] = max(book.get(t, 0.0) + a, 0.0)
+            continue
+        if a == 0:
+            continue
+        book[t] = book.get(t, 0.0) + a
+        if _ccm._sector(tax, t) is None or _ccm._themes(tax, t) is None:
+            unknown.append(t)
+    book = {k: v for k, v in book.items() if v > EPS_GBP}
+    inv = _ccm.book_invariant(book, nav_gbp=nav, tax=tax, pre_book=held)
+    viol = list(inv["violations"]) + [{"kind": "UNKNOWN_CLASSIFICATION", "class": t} for t in sorted(set(unknown))]
+    return {"state": "PASS" if not viol else "FAIL", "violations": viol, "unknown_additions": sorted(set(unknown)),
+            "sector_exposure_pct_nav": inv.get("sector_exposure_pct_nav"),
+            "theme_exposure_pct_sleeve": inv.get("theme_exposure_pct_sleeve")}
+
+
 def constraints_for(bundle: Tuple, risk: dict, pre_shares: Dict[str, float], ceiling_pct: float,
                     max_pos_gbp: float) -> List[dict]:
     """Every authorised hard constraint on the FINAL bundle -> list of breaches (empty = feasible)."""
@@ -1100,6 +1220,603 @@ def constraints_for(bundle: Tuple, risk: dict, pre_shares: Dict[str, float], cei
         if a > max_pos_gbp + EPS_GBP:
             br.append({"constraint": "max_stock_position_pct", "ticker": t, "observed": a, "limit": max_pos_gbp})
     return br
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0621 (October P-B9, 19-Oct-2026) — THE SWITCH CONTEST (B07-R01..R05/R07/R09/R11), SHADOW
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Until P-B9 the contest above decided only where NEW cash goes: a held stock was never a DONOR, so no
+# part of the framework asked whether a pound already invested would be better placed elsewhere
+# (GBP 12,274.81 of direct stocks on 02-Oct-2026), and a name barred from additions by the ISA-0600 beta
+# gate was never offered as a REPLACEMENT although Raj's design call (ISA-0600) is that "a switch is
+# judged on net delta-sigma". The switch contest is the SAME contest with donor legs added:
+#   * the same joint worlds (S_E + S_B), the same measured costs, the same comparator (compare());
+#   * donor amounts: EXIT, or TRIM to a ladder rung strictly below the holding (a residual is 0 or a rung -
+#     adopted D5 "a position reaches 3.5% or it does not exist", applied to the residual - DECLARED), every
+#     sale >= MIN_ECONOMIC_TRADE; a name is never bought and sold in one plan;
+#   * wealth is MARGINAL to holding every donor (the hold path keeps the s4.1 hypothetical horizon exit, so
+#     every alternative carries one convention; acquisition cost never enters - FP-Q04; ISA: no tax);
+#   * risk is the post-trade stock-sleeve GBP volatility on the actual post-trade weights INCLUDING donor
+#     reductions and unchanged holdings (B08-R03); SWITCH-ONLY receivers (stopped only by the beta gate or a
+#     REPLACEMENT_ONLY admission) must be donor-funded and their switch component non-increasing in sleeve
+#     sigma (ISA-0600: the beta cap is the special case where the donor is cash);
+#   * concentration (ISA-0465) and the AI factor (B3/D15) are judged on the NET post-trade book (Raj
+#     19-Oct-2026: a like-for-like AI-capex switch is never blocked).
+# AUTHORITY: isa_policy.V2_FLAGS['switch_contest']. LIVE by Raj's decision (19-Oct-2026 18:58), which waives R18.2's
+# SHADOW period and supersedes ISA-0167's SHADOW-until-measured constraint. LIVE: when the selection over
+# AUTHORITY-ELIGIBLE donors (resolved ER12 case, outside the 182-day min-hold) SELLS something, build() adopts it -
+# the sales are `selected_sales`, the buys stay `selected_actions` (every existing consumer keeps its meaning) and
+# the sold names join case_scope. A no-sale answer never replaces the new-money selection (regret is not
+# independent of irrelevant alternatives; adding rows must not reshuffle a no-switch decision). SHADOW: computed and
+# rendered, nothing adopted. A failure here is recorded and never fails the decision.
+# PARITY (falsifier): the zero-donor restriction of this contest must reproduce the LIVE rows exactly; if it
+# does not, the section is PARITY_FAILED and publishes no selection.
+SWITCH_MAX_PLANS = 400_000          # search budget for the extended contest; exceeded -> SEARCH_INCOMPLETE
+def switch_authority() -> str:
+    """isa_policy.V2_FLAGS['switch_contest'] - LIVE by Raj's 19-Oct-2026 decision. Unreadable -> SHADOW (a
+    contest that cannot establish its authority never moves capital)."""
+    try:
+        import isa_policy as _pol
+        v = _pol.V2_FLAGS["switch_contest"] if "switch_contest" in _pol.V2_FLAGS else "SHADOW"
+        return v if v in ("SHADOW", "LIVE") else "SHADOW"
+    except Exception:                                               # noqa: BLE001
+        return "SHADOW"
+
+
+SWITCH_AUTHORITY = "SHADOW"         # the safe default; the live value is switch_authority()
+SWITCH_LEDGER = "switch_shadow_ledger.jsonl"
+
+
+def hold_wealth(amount_gbp: float, r_gbp: float, c: dict) -> float:
+    """Terminal net GBP wealth of an amount ALREADY HELD, earning r_gbp to the horizon, after the same
+    hypothetical horizon exit every alternative carries (s4.1). No entry cost: it is already owned, and
+    what was paid for it is accounting, not a future fee (FP-Q04)."""
+    a = float(amount_gbp)
+    if a <= EPS_GBP:
+        return 0.0
+    return a * (1.0 + r_gbp) * (1.0 - c["fx_fraction"]) - c["commission_gbp"]
+
+
+def sale_proceeds(amount_gbp: float, c: dict) -> float:
+    """Cash from selling `amount_gbp` of a holding NOW: dealing FX on non-GBP proceeds + commission;
+    no purchase levy on a sale; an ISA pays no capital-gains tax (counted once, B07-R04)."""
+    a = float(amount_gbp)
+    if a <= EPS_GBP:
+        return 0.0
+    return a * (1.0 - c["fx_fraction"]) - c["commission_gbp"]
+
+
+def donor_levels(held_gbp: float, nav: float, ladder_pcts, min_trade: float) -> List[float]:
+    """Legal sale amounts for one held donor (B07-R02): EXIT (sell everything), or TRIM to a ladder rung
+    strictly below the holding. A residual is therefore 0 or a rung - never a sub-scale remnant - and every
+    sale clears MIN_ECONOMIC_TRADE. Ascending, de-duplicated."""
+    h = round(float(held_gbp), 2)
+    out = set()
+    if h >= min_trade - EPS_GBP:
+        out.add(h)
+    for pct in ladder_pcts:
+        s = round(h - float(pct) / 100.0 * nav, 2)
+        if min_trade - EPS_GBP <= s < h - EPS_GBP:
+            out.add(s)
+    return sorted(out)
+
+
+def _switch_admissibility(t: str, rec: dict, scen_t: Optional[dict], min_hold: dict, as_of: str) -> dict:
+    """Is a held name a lawful DONOR, and may a plan selling it carry authority? The SAME case standard as a
+    receiver: a donor's opportunity cost is its own forward case, so an unresolved case is evaluated as a
+    DIAGNOSTIC only (never invented, never zero - B07-R08) and enters case_scope."""
+    er = (rec or {}).get("er12") or {}
+    st = er.get("state")
+    if (rec or {}).get("route") == "vci" or (rec or {}).get("vci_listed") and st in (None, "UNKNOWN", "MISSING"):
+        return {"evaluated": False, "authority_eligible": False, "code": "DONOR_INADMISSIBLE_ROUTE",
+                "why": "VCI route: no ER12 exists (underwritten by bottleneck FV / ACS) - no return is invented"}
+    if st in (None, "UNKNOWN", "MISSING") or er.get("central_local") is None:
+        return {"evaluated": False, "authority_eligible": False, "code": "DONOR_ER12_UNKNOWN",
+                "why": "no forward case for the held name - its opportunity cost cannot be stated"}
+    if scen_t is None or any(scen_t.get(k) is None for k in S_E + S_B):
+        return {"evaluated": False, "authority_eligible": False, "code": "DONOR_DOWNSIDE_INPUT_MISSING",
+                "why": "a material world (business bear / market drawdown) is unmeasured for the held name"}
+    reasons = []
+    if st != "VALID":
+        reasons.append({"code": "DONOR_CASE_" + str(st), "why": "the held name's ER12 is %s (%s): resolved only by a "
+                        "sourced case amendment" % (st, (er.get("hv_triggers") or er.get("why") or "")) })
+    mh = ((min_hold or {}).get("positions") or {}).get(t) or {}
+    until = mh.get("min_hold_until") if isinstance(mh, dict) else mh
+    if not (min_hold or {}).get("enforced"):
+        reasons.append({"code": "DONOR_MIN_HOLD_UNVERIFIED", "why": (min_hold or {}).get("why") or "min-hold state unreadable"})
+    elif until and str(until)[:10] > str(as_of)[:10]:
+        reasons.append({"code": "DONOR_IN_MIN_HOLD", "why": "182-day anti-churn min-hold (scoring_config.MIN_HOLD_DAYS) "
+                        "runs until %s; exemptions are judged in held_position_review, not here" % str(until)[:10]})
+    return {"evaluated": True, "authority_eligible": not reasons, "code": "DONOR_ADMISSIBLE" if not reasons
+            else reasons[0]["code"], "reasons": reasons}
+
+
+def plan_risk(store: dict, portfolio: dict, legs: Tuple, switch_only: set, memo: dict) -> dict:
+    """Post-action risk of ONE plan on the WHOLE stock sleeve (B07-R05, B08-R03): donor reductions, receiver
+    additions and every unchanged holding at their actual post-trade weights, one covariance basis
+    (sleeve_risk). Ordinary receivers keep the ISA-0600 beta test at the post-trade weights; switch-only
+    receivers are judged by the switch component's sleeve-sigma change instead (Raj's ISA-0600 design call)."""
+    import sleeve_risk as _sr
+    held = {s["ticker"]: float(s.get("value_gbp") or 0.0) for s in (portfolio.get("stocks") or []) if s.get("ticker")}
+    post = dict(held)
+    for t, a in legs:
+        post[t] = post.get(t, 0.0) + float(a)
+    post = {k: v for k, v in post.items() if v > EPS_GBP}
+    key = (tuple(sorted((k, round(v, 4)) for k, v in post.items())),
+           tuple(sorted((t, round(float(a), 4)) for t, a in legs if t in switch_only)))
+    if key in memo:
+        return copy.deepcopy(memo[key])
+    pf = {"stocks": [{"ticker": t, "value_gbp": v} for t, v in post.items()]}
+    tot = sum(post.values())
+    out = {"sleeve_gbp": round(tot, 2)}
+    try:
+        rs = _sr.risk_shares(store, pf)
+        out.update({"sleeve_sigma": rs["sleeve_sigma_ann"], "gbp_vol": rs["sleeve_sigma_ann"] * tot,
+                    "risk_shares": {k: round(v, 5) for k, v in rs["shares"].items()},
+                    "risk_window": rs.get("risk_window"), "n_weeks": rs.get("n_weeks"), "state": "MEASURED"})
+    except Exception as exc:                                        # noqa: BLE001
+        out.update({"state": "UNMEASURED", "why": "%s: %s" % (type(exc).__name__, exc)})
+        memo[key] = out
+        return copy.deepcopy(out)
+    betas = {}
+    for t, a in legs:
+        if float(a) > 0 and t not in switch_only:
+            # COST ONLY: gate_add measures t against the post-trade sleeve EXCLUDING t (self-excluded), so its verdict
+            # depends on t and the other names' post-trade values - never on t's own amount; memoised on exactly that.
+            gk = ("gate", t, tuple(sorted((k, v) for k, v in post.items() if k != t)))
+            g = memo.get(gk)
+            if g is None:
+                g = _sr.gate_add(store, pf, t)
+                memo[gk] = g
+            betas[t] = {"verdict": g.get("verdict"), "beta": g.get("beta"), "beta_max": g.get("beta_max")}
+    out["post_trade_beta"] = betas
+    sw = [(t, float(a)) for t, a in legs if t in switch_only and float(a) > 0]
+    if sw:
+        try:
+            tot0 = sum(held.values())
+            w0 = {k: v / tot0 for k, v in held.items() if v > EPS_GBP}
+            book = dict(held)
+            for t, a in legs:
+                if float(a) < 0:
+                    book[t] = book.get(t, 0.0) + float(a)
+            for t, a in sw:
+                book[t] = book.get(t, 0.0) + a
+            w1 = {k: v / tot0 for k, v in book.items() if v > EPS_GBP}
+            s0, s1 = _sr.sigma(store, w0), _sr.sigma(store, w1)
+            out["switch_delta_sigma"] = {"state": "MEASURED", "sigma_before": s0, "sigma_after": s1, "delta_sigma": s1 - s0,
+                                         "risk_improving": s1 <= s0 + 1e-12, "legs": sw,
+                                         "basis": "sleeve_risk.sigma on the held sleeve's value (delta_sigma_switch generalised to many legs)"}
+        except Exception as exc:                                    # noqa: BLE001
+            out["switch_delta_sigma"] = {"state": "UNMEASURED", "why": "%s: %s" % (type(exc).__name__, exc)}
+    memo[key] = out
+    return copy.deepcopy(out)
+
+
+def _vector_legal(sold: dict, eligible) -> bool:
+    """Which donor vectors are enumerated: any combination of AUTHORITY-ELIGIBLE donors (what can be adopted), and
+    at most ONE sale involving a donor that is not authority-eligible (the diagnostic: what each held name's sale would
+    do once its case/min-hold clears). Bounds the diagnostic's cost without touching the adoptable set."""
+    return eligible is None or len(sold) <= 1 or set(sold) <= set(eligible)
+
+
+def bruteforce_switch_plans(donors: Dict[str, List[float]], receivers: List[dict], capital: float, min_entry: float,
+                            proceeds: Dict[str, Dict[float, float]], eligible=None) -> set:
+    """INDEPENDENT ORACLE for the extended enumeration (B07 testing: a brute-force donor x receiver search).
+    One Cartesian product over every donor option and every receiver option {0, each level, PARTIAL}, filtered
+    by legality - it shares no loop with switch_plans()."""
+    dn = sorted(donors)
+    rv = sorted(receivers, key=lambda x: x["ticker"])
+    lv = {x["ticker"]: sorted({round(float(v), 2) for v in (x.get("levels") or [x["cap_gbp"]])}) for x in rv}
+    mins = {x["ticker"]: float(x.get("min_gbp", min_entry)) for x in rv}
+    so = {x["ticker"] for x in rv if x.get("switch_only")}
+    res = set()
+    dopts = [[0.0] + list(donors[t]) for t in dn]
+    ropts = [[0] + lv[x["ticker"]] + ["P"] for x in rv]
+    for dch in itertools.product(*dopts):
+        sold = {t: s for t, s in zip(dn, dch) if s}
+        if not (eligible is None or len(sold) <= 1 or all(t in eligible for t in sold)):
+            continue
+        pr = round(sum(proceeds[t][s] for t, s in sold.items()), 2)
+        cap2 = round(capital + pr, 2)
+        for rch in itertools.product(*ropts):
+            if sum(1 for c in rch if c == "P") > 1:
+                continue
+            names = [x["ticker"] for x, c in zip(rv, rch) if c]
+            if set(names) & set(sold):
+                continue
+            full = sum(c for c in rch if c not in (0, "P"))
+            if full > cap2 + EPS_GBP:
+                continue
+            rem = round(cap2 - full, 2)
+            b = []
+            ok = True
+            for x, c in zip(rv, rch):
+                t = x["ticker"]
+                if c == "P":
+                    if rem <= EPS_GBP or not (mins[t] - EPS_GBP <= rem < lv[t][-1] - EPS_GBP) or \
+                            any(abs(rem - v) <= EPS_GBP for v in lv[t]):
+                        ok = False
+                        break
+                    b.append((t, rem))
+                elif c:
+                    b.append((t, c))
+            if not ok:
+                continue
+            if sum(a for t, a in b if t in so) > pr + EPS_GBP:
+                continue
+            res.add((tuple(sorted(sold.items())), tuple(sorted(b))))
+    return res
+
+
+def switch_plans(donors: Dict[str, List[float]], receivers: List[dict], capital: float, min_entry: float,
+                 proceeds: Dict[str, Dict[float, float]], eligible=None) -> Tuple[List[Tuple], dict]:
+    """PRODUCTION enumeration of the extended legal action space: every donor vector x every legal receiver
+    bundle at that vector's capital (legal_bundles, unchanged), less plans that buy and sell one name or fund a
+    switch-only receiver from anything but donor proceeds. -> ([(sold_tuple, bundle)], certificate)."""
+    dn = sorted(donors)
+    out, visited = [], 0
+    for dv in itertools.product(*[[0.0] + list(donors[t]) for t in dn]):
+        sold = {t: s for t, s in zip(dn, dv) if s}
+        if not _vector_legal(sold, eligible):
+            continue
+        pr = round(sum(proceeds[t][s] for t, s in sold.items()), 2)
+        rv = [x for x in receivers if x["ticker"] not in sold]
+        bundles, cert = legal_bundles(rv, round(capital + pr, 2), min_entry)
+        if cert["state"] != "COMPLETE":
+            return [], {"state": "SEARCH_INCOMPLETE", "why": "a donor vector's receiver space exceeds the search budget",
+                        "visited": visited}
+        so = {x["ticker"] for x in rv if x.get("switch_only")}
+        for b in bundles:
+            visited += 1
+            if sum(a for t, a in b if t in so) > pr + EPS_GBP:
+                continue
+            out.append((tuple(sorted(sold.items())), tuple(sorted(b))))
+            if len(out) > SWITCH_MAX_PLANS:
+                return [], {"state": "SEARCH_INCOMPLETE", "budget": SWITCH_MAX_PLANS, "visited": visited,
+                            "why": "the extended action space exceeds the declared budget - no best-so-far is called optimal"}
+    out = sorted(set(out))
+    return out, {"state": "COMPLETE", "n_donors": len(dn), "n_receivers": len(receivers), "visited": visited,
+                 "plans": len(out), "rule": "donor: 0 | EXIT | TRIM-to-rung (sale >= MIN_ECONOMIC_TRADE); every combination of "
+                 "authority-eligible donors, at most one sale of a not-yet-eligible donor (diagnostic); receivers: "
+                 "legal_bundles at capital + net sale proceeds; switch-only receivers donor-funded; no buy+sell of one name"}
+
+
+def factor_eval(legs: Tuple, portfolio: dict, nav: float, fctx: dict) -> dict:
+    """ISA-0465 P-B6 finding / Raj 19-Oct-2026: the B3/D15 AI-complex factor test on ONE plan's NET post-trade
+    book. The lower bound (factor_lookthrough, unchanged method) is recomputed with donor reductions and receiver
+    additions applied; a plan FAILS only if the post-trade lower bound exceeds the cap AND the plan raised the
+    factor's GBP (an existing breach is separated from a worsening addition - the same rule as the theme caps).
+    A like-for-like AI switch that does not raise the exposure therefore never fails."""
+    import factor_lookthrough as _flt
+    pre = fctx.get("pre") or {}
+    stocks = [dict(s) for s in (portfolio.get("stocks") or [])]
+    idx = {s.get("ticker"): s for s in stocks}
+    for t, a in legs:
+        a = float(a)
+        if t in idx:
+            idx[t]["value_gbp"] = max(float(idx[t].get("value_gbp") or 0.0) + a, 0.0)
+        elif a > 0:
+            s = {"ticker": t, "value_gbp": a}
+            stocks.append(s)
+            idx[t] = s
+    p2 = {"summary": {"total_value_gbp": nav}, "funds": portfolio.get("funds") or [],
+          "stocks": [s for s in stocks if float(s.get("value_gbp") or 0.0) > EPS_GBP]}
+    try:
+        post = _flt.compute(p2, fctx["fmap"], declared=fctx.get("declared"), themes=fctx.get("themes"))
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNAVAILABLE", "why": "%s: %s" % (type(exc).__name__, exc)}
+    lo, cap = post.get("lower_bound_pct"), post.get("cap_pct")
+    if lo is None or pre.get("lower_bound_gbp") is None:
+        return {"state": "UNAVAILABLE", "why": "no lower bound (no NAV or the pre-trade bound is unavailable)",
+                "post_lower_pct": lo, "cap_pct": cap}
+    inc = float(post["lower_bound_gbp"]) > float(pre["lower_bound_gbp"]) + EPS_GBP
+    return {"state": "FAIL" if (lo > cap and inc) else "PASS", "post_lower_pct": lo, "pre_lower_pct": pre.get("lower_bound_pct"),
+            "post_lower_gbp": post["lower_bound_gbp"], "pre_lower_gbp": pre["lower_bound_gbp"], "cap_pct": cap,
+            "raises_factor": inc, "post_unclassified": post.get("unclassified")}
+
+
+def switch_contest(ctx: dict) -> dict:
+    """The SHADOW switch contest (see the block comment above). `ctx` carries the LIVE build's own objects so
+    nothing is re-derived (R4.4): inp, pipeline, store, hurdle, as_of, amendments, price_overrides, recs, eligible,
+    scen, costs_by, costs, capital, cash_capital, cash_rate, portfolio, nav, min_entry, tw, min_trade, conc, fctx,
+    pre_shares, pre_risk, ceiling, max_pos, live_rows, live_selected, complete, root."""
+    _fi_mark("capital_decision_engine", "switch_contest")
+    import position_sizing as _ps
+    nav, portfolio, store = ctx["nav"], ctx["portfolio"], ctx["store"]
+    held = {s["ticker"]: float(s.get("value_gbp") or 0.0) for s in (portfolio.get("stocks") or [])
+            if s.get("ticker") and float(s.get("value_gbp") or 0.0) > EPS_GBP}
+    scen = dict(ctx["scen"])
+    costs_by = dict(ctx["costs_by"])
+    _auth = switch_authority()
+    out = {"authority": _auth,
+           "authority_basis": ("LIVE by Raj's decision 19-Oct-2026 18:58 (waives R18.2's SHADOW period; supersedes ISA-0167's "
+                               "SHADOW-until-measured constraint): adopted only when the authority-eligible selection SELLS"
+                               if _auth == "LIVE" else
+                               "SHADOW (isa_policy.V2_FLAGS['switch_contest']): computed and rendered, never adopted"),
+           "analysis": "AA-2026-10-19-ISA-0621-SWITCH-CONTEST-8dab5f98 (v2; v1 f8b73ce1)"}
+    # ── 1. donors ─────────────────────────────────────────────────────────────────────────────
+    try:
+        import position_alerts as _pa
+        mh = _pa.min_hold_state(root=ctx.get("root"))
+    except Exception as exc:                                        # noqa: BLE001
+        mh = {"enforced": False, "why": "min-hold state unreadable: %s" % exc}
+    ladder_pcts = sorted(_ps.ladder(ctx["tw"]).values())
+    recs = ctx["recs"]
+    donors, dinfo = {}, {}
+    for t, h in sorted(held.items()):
+        rec = recs.get(t) or {}
+        if t not in scen and (rec.get("er12") or {}).get("central_local") is not None:
+            try:
+                emp = empirical_worst_52w(store, t)
+                scen[t], _n = name_scenarios(rec["er12"], emp)
+                costs_by[t] = costs_for(t, rec["er12"].get("currency"), ctx["costs"])
+            except Exception:                                       # noqa: BLE001
+                scen.pop(t, None)
+        adm = _switch_admissibility(t, rec, scen.get(t), mh, ctx["as_of"])
+        lv = donor_levels(h, nav, ladder_pcts, ctx["min_trade"]) if adm["evaluated"] else []
+        if adm["evaluated"] and not lv:
+            adm = dict(adm, evaluated=False, authority_eligible=False, code="DONOR_BELOW_MIN_TRADE",
+                       why="no legal sale: holding %.2f below MIN_ECONOMIC_TRADE %.2f" % (h, ctx["min_trade"]))
+        dinfo[t] = {"held_gbp": round(h, 2), "levels_gbp": lv, "central_er12_local_pct":
+                    _r(((rec.get("er12") or {}).get("central_local") or 0) * 100, 2)
+                    if (rec.get("er12") or {}).get("central_local") is not None else None, **adm}
+        if adm["evaluated"]:
+            donors[t] = lv
+    # ISA-0621 COST: an execution-time re-run (scope AUTHORITY_ONLY) needs only what can be ADOPTED - the plans whose
+    #   donors are authority-eligible - never the diagnostic. The adoptable selection is identical either way (it is
+    #   compared over exactly these rows in a FULL build too).
+    out["scope"] = ctx.get("scope") or "FULL"
+    if out["scope"] == "AUTHORITY_ONLY":
+        donors = {t: lv for t, lv in donors.items() if dinfo[t]["authority_eligible"]}
+        if not donors:
+            out["donors"] = dinfo
+            out["state"] = "NO_AUTHORITY_ELIGIBLE_DONOR"
+            out["parity"] = {"state": "NOT_RUN", "why": "execution re-run with no adoptable donor: the contest is the LIVE one"}
+            return out
+    proceeds = {t: {s: round(sale_proceeds(s, costs_by[t]), 2) for s in lv} for t, lv in donors.items()}
+    # ── 2. receivers: LIVE eligible + switch-only names from the same census in switch mode ─────────
+    receivers = [dict(e, switch_only=False) for e in ctx["eligible"]]
+    sw_only = {}
+    try:
+        cen2 = _build_census(ctx["inp"], ctx["pipeline"], store, ctx["hurdle"], ctx["as_of"], ctx["amendments"],
+                             ctx["price_overrides"], switch_mode=True)
+        r2 = cen2["records"]
+        live_elig = {e["ticker"] for e in ctx["eligible"]}
+        for t, rec in sorted(r2.items()):
+            if rec["disposition"] != "ELIGIBLE" or t in live_elig or not rec.get("switch_only"):
+                continue
+            cur_val = held.get(t, 0.0)
+            cap = round(rec["permission"]["target_pct"] / 100.0 * nav - cur_val, 2)
+            mn = EPS_GBP if cur_val > 0 else ctx["min_entry"]
+            if cap < mn - EPS_GBP or cap <= EPS_GBP:
+                continue
+            levels = sorted({round(pct / 100.0 * nav - cur_val, 2) for pct in ladder_pcts
+                             if pct <= rec["permission"]["target_pct"] + 1e-9 and pct / 100.0 * nav - cur_val > EPS_GBP})
+            emp = empirical_worst_52w(store, t)
+            s_t, _n = name_scenarios(rec["er12"], emp)
+            if any(s_t[k] is None for k in S_B):
+                continue
+            scen[t] = s_t
+            costs_by[t] = costs_for(t, rec["er12"].get("currency"), ctx["costs"])
+            receivers.append({"ticker": t, "cap_gbp": cap, "levels": levels, "min_gbp": mn, "held": cur_val > 0,
+                              "switch_only": True})
+            sw_only[t] = {"why": rec.get("switch_only"), "central_er12_local_pct": _r(rec["er12"]["central_local"] * 100, 2),
+                          "case_complete": t in ctx["complete"]}
+    except Exception as exc:                                        # noqa: BLE001
+        out["switch_only_error"] = "%s: %s" % (type(exc).__name__, exc)
+    so_set = set(sw_only)
+    out["donors"] = dinfo
+    out["switch_only_receivers"] = sw_only
+    # ── 3. enumerate + independent oracle ───────────────────────────────────────────────────────
+    _elig = {t for t in donors if dinfo[t]["authority_eligible"]}
+    plans, cert = switch_plans(donors, receivers, ctx["capital"], ctx["min_entry"], proceeds, eligible=_elig)
+    out["search"] = cert
+    if cert["state"] != "COMPLETE":
+        out["state"] = "SEARCH_INCOMPLETE"
+        return out
+    if len(donors) <= 3 and len(receivers) <= 9:
+        bf = bruteforce_switch_plans(donors, receivers, ctx["capital"], ctx["min_entry"], proceeds, eligible=_elig)
+        prod = set(plans)
+        out["oracle"] = {"independent_bruteforce": len(bf), "production": len(prod), "identical_sets": bf == prod}
+        if bf != prod:
+            out["state"] = "ORACLE_DISAGREES"
+            return out
+    else:
+        out["oracle"] = {"state": "NOT_RUN_SIZE", "n_donors": len(donors), "n_receivers": len(receivers)}
+    # ── 4. evaluate every plan on the same worlds, costs, risk and constraints ──────────────────
+    cash_rate, cash_cap = ctx["cash_rate"], ctx["cash_capital"]
+    memo, rows = {}, []
+    conc, fctx = ctx["conc"], ctx["fctx"]
+    import sleeve_risk as _sr621
+    _fz = _sr621.frozen_store(store)          # COST ONLY: scoped risk memo; the store is not mutated in this loop
+    _fz.__enter__()                           # exited below, and unconditionally by build()'s finally
+    for sold_t, b in plans:
+        sold = dict(sold_t)
+        pr = round(sum(proceeds[t][s] for t, s in sold.items()), 2)
+        cap2 = round(ctx["capital"] + pr, 2)
+        stock_amt = sum(a for _, a in b)
+        w = {}
+        for s_ in S_E + S_B:
+            tot = (cap2 - stock_amt) * (1.0 + cash_rate)
+            for t, a in b:
+                tot += position_wealth(a, scen[t][s_], costs_by[t])
+            for t, s in sold.items():
+                tot += hold_wealth(held[t] - s, scen[t][s_], costs_by[t]) - hold_wealth(held[t], scen[t][s_], costs_by[t])
+            w[s_] = tot
+        legs = tuple(sorted(list(b) + [(t, -s) for t, s in sold.items()]))
+        rk = plan_risk(store, portfolio, legs, so_set, memo)
+        br = constraints_for(b, rk, ctx["pre_shares"], ctx["ceiling"], ctx["max_pos"]) if rk.get("state") == "MEASURED" \
+            else [{"constraint": "post_trade_risk_measured", "observed": rk.get("why")}]
+        sds = rk.get("switch_delta_sigma")
+        if sds is not None and not (sds.get("state") == "MEASURED" and sds.get("risk_improving")):
+            br.append({"constraint": "ISA-0600 switch judged on net delta-sigma (switch-only receiver)",
+                       "observed": sds.get("delta_sigma"), "limit": 0.0, "state": sds.get("state")})
+        row = {"bundle": b, "sold": sold, "legs": legs, "tickers": [t for t, _ in b], "stock_gbp": round(stock_amt, 2),
+               "residual_gbp": round(cap2 - stock_amt, 2), "proceeds_gbp": pr, "wealth": w,
+               "entry_costs_gbp": round(sum(a - (a - costs_by[t]["commission_gbp"]) / (1 + costs_by[t]["fx_fraction"] +
+                                                                                    costs_by[t]["levy_fraction"]) for t, a in b)
+                                        + sum(s - proceeds[t][s] for t, s in sold.items()), 2),
+               "risk": rk, "gbp_vol": rk.get("gbp_vol")}
+        if not b and not sold:
+            row["gbp_vol"] = ctx["pre_risk"].get("gbp_vol")
+            br = [] if row["gbp_vol"] is not None else br
+        if conc.get("tax") is not None and conc.get("mode") in ("SHADOW", "LIVE"):
+            row["concentration"] = concentration_eval(legs, conc["held"], nav, conc["tax"])
+            if conc["mode"] == "LIVE" and row["concentration"]["state"] != "PASS":
+                br.append({"constraint": "ISA-0465 concentration caps (net post-trade book)",
+                           "violations": row["concentration"]["violations"]})
+        if fctx.get("pre") is not None and conc.get("mode") in ("SHADOW", "LIVE"):
+            row["factor"] = factor_eval(legs, portfolio, nav, fctx)
+            if conc["mode"] == "LIVE" and (row["factor"]["state"] == "FAIL" or
+                                           (row["factor"]["state"] != "PASS" and (fctx["pre"].get("breach")))):
+                br.append({"constraint": "B3/D15 AI-complex factor cap (net post-trade lower bound)", "factor": row["factor"]})
+        _trim_r = round(max(stock_amt - cash_cap - pr, 0.0), 2)
+        if 0.005 < _trim_r < ctx["min_trade"] - EPS_GBP:
+            br.append({"constraint": "ISA-0858 D4 fund-trim leg below MIN_ECONOMIC_TRADE", "observed_gbp": _trim_r})
+        row["breaches"] = br
+        row["feasible"] = not br
+        row["authority_eligible_donors"] = all(dinfo[t]["authority_eligible"] for t in sold)
+        rows.append(row)
+    _fz.__exit__(None, None, None)
+    # ── 5. parity: the zero-donor restriction must reproduce the LIVE rows exactly ───────────────
+    zl = {r["bundle"]: r for r in rows if not r["sold"] and not (set(r["tickers"]) & so_set)}
+    lv_rows = {tuple(r["bundle"]): r for r in ctx["live_rows"]}
+    mism = []
+    if set(zl) != set(lv_rows):
+        mism.append({"kind": "bundle_set", "only_live": len(set(lv_rows) - set(zl)), "only_switch": len(set(zl) - set(lv_rows))})
+    else:
+        for k, r in zl.items():
+            L = lv_rows[k]
+            if any(abs(r["wealth"][s] - L["wealth"][s]) > 1e-6 for s in S_E + S_B) or bool(r["feasible"]) != bool(L["feasible"]) \
+                    or ((r.get("gbp_vol") is None) != (L.get("gbp_vol") is None)) \
+                    or (r.get("gbp_vol") is not None and abs(r["gbp_vol"] - L["gbp_vol"]) > 1e-6):
+                mism.append({"kind": "row", "bundle": [list(x) for x in k]})
+                if len(mism) > 5:
+                    break
+    out["parity"] = {"state": "MATCH" if not mism else "MISMATCH", "n_live_rows": len(lv_rows), "n_zero_donor_rows": len(zl),
+                     "mismatches": mism,
+                     "rule": "the switch contest restricted to no donor legs reproduces the LIVE contest's plans, wealth in every "
+                             "world, feasibility and risk exactly (falsifier of the extension)"}
+    if mism:
+        out["state"] = "PARITY_FAILED"
+        return out
+    # ── 6. compare: SHADOW selection (authority-eligible donors only) and the full DIAGNOSTIC ───────
+    elig_rows = [copy.copy(r) for r in rows if r["authority_eligible_donors"]]
+    diag_rows = [copy.copy(r) for r in rows]
+    c_sh = compare(elig_rows)
+    c_dg = compare(diag_rows)
+    live_b = tuple(sorted(tuple(x) for x in (ctx.get("live_selected") or {}).get("bundle", ())))
+
+    def brief(r):
+        if r is None:
+            return None
+        return {"sell": [{"ticker": t, "gbp": s, "exit": abs(s - held[t]) <= EPS_GBP} for t, s in sorted(r["sold"].items())],
+                "buy": [{"ticker": t, "gbp": a} for t, a in r["bundle"]], "proceeds_gbp": r["proceeds_gbp"],
+                "stock_gbp": r["stock_gbp"], "residual_gbp": r["residual_gbp"], "regret_gbp": _r(r.get("regret")),
+                "wealth_gbp": {s: _r(v) for s, v in r["wealth"].items()}, "gbp_vol": _r(r.get("gbp_vol")),
+                "entry_and_exit_costs_gbp": r["entry_costs_gbp"],
+                "concentration": (r.get("concentration") or {}).get("state"), "factor": (r.get("factor") or {}).get("state"),
+                "authority_eligible_donors": r["authority_eligible_donors"]}
+    sh_sel, dg_sel = c_sh.get("selected"), c_dg.get("selected")
+    out["shadow_selection"] = {"comparator_state": c_sh.get("state"), "rule": c_sh.get("rule"), "selected": brief(sh_sel),
+                               "differs_from_live": (sh_sel is not None and (bool(sh_sel["sold"]) or
+                                                                             tuple(sh_sel["bundle"]) != live_b))}
+    out["diagnostic_selection"] = {"comparator_state": c_dg.get("state"), "rule": c_dg.get("rule"), "selected": brief(dg_sel),
+                                   "differs_from_live": (dg_sel is not None and (bool(dg_sel["sold"]) or
+                                                                                 tuple(dg_sel["bundle"]) != live_b)),
+                                   "note": "includes plans selling donors whose case is unresolved or inside the min-hold - "
+                                           "a DIAGNOSTIC of what the contest would say once those clear, never authority"}
+    # ── 7. per-donor: best plan with vs without the sale, and the central-world breakeven ───────────
+    feas = [r for r in diag_rows if r.get("feasible") and r.get("regret") is not None]
+    for t in sorted(donors):
+        wi = [r for r in feas if t in r["sold"]]
+        wo = [r for r in feas if t not in r["sold"]]
+        bw = min(wi, key=lambda r: r["regret"]) if wi else None
+        bo = min(wo, key=lambda r: r["regret"]) if wo else None
+        d = dinfo[t]
+        d["best_plan_selling"] = brief(bw)
+        d["regret_cost_of_selling_gbp"] = None if (bw is None or bo is None) else _r(bw["regret"] - bo["regret"])
+        if bw is not None and bo is not None:
+            s = bw["sold"][t]
+            slope = s * (1.0 - costs_by[t]["fx_fraction"])
+            diff = bw["wealth"]["CENTRAL"] - bo["wealth"]["CENTRAL"]
+            d["central_breakeven_er12_pct"] = _r((scen[t]["CENTRAL"] + diff / slope) * 100, 1) if slope > 0 else None
+            d["central_breakeven_basis"] = ("selling %s (GBP %.2f) for the best plan that sells it beats the best plan that "
+                                            "keeps it in the CENTRAL world only if its 12m GBP return is below this figure; "
+                                            "every other name at its central case. Diagnostic - the comparator is minimax "
+                                            "regret over all estimation worlds." % (t, s))
+            d["bear_wealth_effect_of_selling_gbp"] = _r(bw["wealth"]["BUSINESS_BEAR"] - bo["wealth"]["BUSINESS_BEAR"])
+    # ── 8. net-book vs gross concentration (what Raj's 19-Oct rule changes) ─────────────────────────
+    ev = [r for r in rows if r.get("concentration")]
+    gross_fail = 0
+    if conc.get("tax") is not None:
+        for r in ev:
+            if r["sold"]:
+                g = concentration_eval(r["bundle"], conc["held"], nav, conc["tax"])
+                gross_fail += g["state"] != "PASS"
+            else:
+                gross_fail += r["concentration"]["state"] != "PASS"
+    out["concentration_net_book"] = {"mode": conc.get("mode"), "n_plans": len(ev),
+                                     "n_failing_net": sum(1 for r in ev if r["concentration"]["state"] != "PASS"),
+                                     "n_failing_if_donor_legs_ignored": gross_fail,
+                                     "basis": "Raj 19-Oct-2026: the caps judge the NET post-trade book (donor reductions count); "
+                                              "a same-theme switch that does not raise the theme's GBP never breaches"}
+    fv = [r["factor"] for r in rows if r.get("factor")]
+    out["factor_net_book"] = {"n_plans": len(fv), "n_failing": sum(1 for f in fv if f.get("state") == "FAIL"),
+                              "post_lower_pct_range": ([min(f["post_lower_pct"] for f in fv if f.get("post_lower_pct") is not None),
+                                                        max(f["post_lower_pct"] for f in fv if f.get("post_lower_pct") is not None)]
+                                                       if any(f.get("post_lower_pct") is not None for f in fv) else None)}
+    out["counts"] = {"plans": len(rows), "feasible": sum(1 for r in rows if r["feasible"]),
+                     "with_donor_sale": sum(1 for r in rows if r["sold"]),
+                     "authority_eligible": len(elig_rows)}
+    out["plans_sha256"] = _sha([[list(r["legs"])] for r in rows])
+    n_ev = sum(1 for d in dinfo.values() if d.get("evaluated"))
+    n_el = sum(1 for d in dinfo.values() if d.get("authority_eligible"))
+    out["state"] = ("NO_DONOR_EVALUATED" if n_ev == 0 else "NO_AUTHORITY_ELIGIBLE_DONOR" if n_el == 0 else "OK")
+    out["case_scope_donors"] = sorted(t for t, d in dinfo.items() if d.get("evaluated") and any(
+        x["code"].startswith("DONOR_CASE_") for x in d.get("reasons") or []))
+    # internals for build()'s LIVE adoption (popped before the receipt is written)
+    out["_selected_row"] = sh_sel if (c_sh.get("state") == "OK" and sh_sel is not None and sh_sel.get("sold")) else None
+    out["_elig_rows"] = elig_rows
+    out["_scen"] = {t: scen[t] for t in so_set if t in scen}
+    out["_costs_by"] = {t: costs_by[t] for t in set(so_set) | set(donors) if t in costs_by}
+    return out
+
+
+def _switch_ledger_append(receipt: dict, month: str, root: str) -> dict:
+    """ISA-0621 learning capture: ONE append-only row per distinct receipt (idempotent on receipt_id) freezing the
+    SHADOW switch contest's contemporaneous state, so the 3/6/12-month outcome join can measure the switch trade
+    itself - the measurement ISA-0167 requires before any LIVE switching."""
+    sc = receipt.get("switch_contest")
+    if not isinstance(sc, dict):
+        return {"state": "NO_SECTION"}
+    p = os.path.join(root, SWITCH_LEDGER)
+    try:
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as fh:
+                for ln in fh:
+                    if ln.strip() and json.loads(ln).get("receipt_id") == receipt["receipt_id"]:
+                        return {"state": "ALREADY_RECORDED", "path": p}
+        row = {"receipt_id": receipt["receipt_id"], "month": month, "recorded_at": _now().isoformat(),
+               "as_of": receipt.get("as_of"), "method_version": METHOD_VERSION, "authority": sc.get("authority"),
+               "state": sc.get("state"), "parity": (sc.get("parity") or {}).get("state"),
+               "live_selected": [(a.get("ticker"), a.get("gbp")) for a in receipt.get("selected_actions") or []],
+               "shadow_selection": (sc.get("shadow_selection") or {}).get("selected"),
+               "diagnostic_selection": (sc.get("diagnostic_selection") or {}).get("selected"),
+               "donors": {t: {k: d.get(k) for k in ("held_gbp", "code", "authority_eligible", "central_er12_local_pct",
+                                                     "central_breakeven_er12_pct", "regret_cost_of_selling_gbp",
+                                                     "bear_wealth_effect_of_selling_gbp")}
+                          for t, d in (sc.get("donors") or {}).items()},
+               "er12_central_local": {t: ((receipt.get("dossiers") or {}).get(t) or {}).get("er12", {}).get("central_local")
+                                      for t in (sc.get("donors") or {})},
+               "plans_sha256": sc.get("plans_sha256"), "input_hashes": receipt.get("input_hashes"),
+               "outcome_horizons_months": [3, 6, 12],
+               "label_to_join": "realised net GBP return of each donor vs the alternative it would have funded"}
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+        return {"state": "APPENDED", "path": p}
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "FAILED", "why": "%s: %s" % (type(exc).__name__, exc)}
 
 
 def evaluate_bundles(bundles: List[Tuple], scen: Dict[str, Dict[str, float]], costs_by: Dict[str, dict],
@@ -1233,6 +1950,7 @@ def _brief(r: Optional[dict]) -> Optional[dict]:
     if r is None:
         return None
     return {"bundle": [{"ticker": t, "gbp": a} for t, a in r["bundle"]], "stock_gbp": r["stock_gbp"],
+            **({"sell": [{"ticker": t, "gbp": s} for t, s in sorted(r["sold"].items())]} if r.get("sold") else {}),
             "residual_gbp": r["residual_gbp"], "regret_gbp": _r(r.get("regret")),
             "wealth_gbp": {s: _r(v) for s, v in r["wealth"].items()},
             "worst_estimation_wealth_gbp": _r(r.get("worst_estimation_wealth")),
@@ -1389,7 +2107,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
           out_path: Optional[str] = None, baseline_plan_path: Optional[str] = None,
           store: Optional[dict] = None, pipeline: Optional[dict] = None, write: bool = True,
           inputs: Optional[dict] = None, fresh_after: Optional[float] = None,
-          price_overrides: Optional[dict] = None) -> dict:
+          price_overrides: Optional[dict] = None, switch_scope: str = "FULL") -> dict:
     """-> the Capital Decision Receipt for `month` (e.g. 'oct_2026'). Pure with respect to capital:
     it never trades, never edits an input (R14.3); its only side effects are the receipt itself and
     one idempotent row in the append-only decision ledger (learning capture, s13).
@@ -1548,6 +2266,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                "scenario_definitions": {k: SCENARIO_DEFINITIONS[k] for k in S_E + S_B},
                "census": {"n_universe": census["n_universe"], "counts": census["counts"],
                           "conservation": census["conservation"],
+                          "corporate_events": census.get("corporate_events"),
                           "old_funnel_for_comparison": census["old_funnel_for_comparison"]},
                "dossiers": recs, "amendments": {k: am[k] for k in ("path", "present", "sha256", "rejected")} |
                {"n_accepted": len(am["accepted"]), "accepted_ids": [a["amendment_id"] for a in am["accepted"]]},
@@ -1574,6 +2293,31 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         pre_shares, pre_risk = {}, {"state": "UNMEASURED", "why": str(exc)}
     ceiling = float(getattr(_sc, "SLEEVE_RISK_CEILING_PCT"))
     max_pos = float(tw["thresholds"]["max_stock_position_pct"]) * nav
+    # ⚑ ISA-0465 / B08-R04 (19-Oct-2026): the adopted sector/theme caps are evaluated WHERE CAPITAL IS DECIDED.
+    #   They were wired only into the legacy allocate() path, which has been SHADOW since the engine took the
+    #   stock decision (ISA-0804), so the 03-Oct pre-run produced NO concentration record and the control could
+    #   never accumulate the real SHADOW evidence its LIVE readiness requires. SHADOW: every bundle is evaluated
+    #   and recorded, nothing binds. LIVE (V2_FLAGS concentration_gate): a FAIL is a hard breach.
+    try:
+        import concentration_control as _ccm465
+        _conc = {"mode": _ccm465.mode(), "tax": _ccm465.load_taxonomy(),
+                 "held": {x.get("ticker"): float(x.get("value_gbp") or 0.0) for x in portfolio.get("stocks") or []
+                          if x.get("ticker")}, "error": None}
+    except Exception as _ce465:                                     # noqa: BLE001
+        _conc = {"mode": "UNKNOWN", "tax": None, "held": {}, "error": "%s: %s" % (type(_ce465).__name__, _ce465)}
+    # ⚑ ISA-0621 / ISA-0465 P-B6 finding (19-Oct-2026): the B3/D15 AI-complex factor cap, evaluated per plan on the NET
+    #   post-trade book (factor_eval), binding with the SAME concentration_gate flag as the theme caps (Raj: one LIVE
+    #   decision after 1-Nov). Before P-B9 nothing evaluated it: Checkpoint-D tick 5 accepted a factor_state the CLI
+    #   never passed.
+    try:
+        import factor_lookthrough as _flt621
+        _fm621 = _flt621.load_map()
+        _dc621 = _flt621._declared_coverage()
+        _tm621 = _flt621._theme_layer(None)
+        _fctx = {"fmap": _fm621, "declared": _dc621, "themes": _tm621,
+                 "pre": _flt621.compute(portfolio, _fm621, declared=_dc621, themes=_tm621), "error": None}
+    except Exception as _fe621:                                     # noqa: BLE001
+        _fctx = {"pre": None, "error": "%s: %s" % (type(_fe621).__name__, _fe621)}
     for r in rows:
         if not r["bundle"]:
             r["risk"] = {"state": "MEASURED", **pre_risk, "note": "no-action: current sleeve"}
@@ -1593,6 +2337,17 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         r["risk"] = rk
         r["gbp_vol"] = rk.get("gbp_vol")
         r["breaches"] = constraints_for(r["bundle"], rk, pre_shares, ceiling, max_pos)
+        if _conc["tax"] is not None and _conc["mode"] in ("SHADOW", "LIVE"):
+            r["concentration"] = concentration_eval(r["bundle"], _conc["held"], nav, _conc["tax"])
+            if _conc["mode"] == "LIVE" and r["concentration"]["state"] != "PASS":
+                r["breaches"].append({"constraint": "ISA-0465 concentration caps (sector 12% NAV / theme 50% post-trade sleeve)",
+                                      "violations": r["concentration"]["violations"]})
+        if _fctx.get("pre") is not None and _conc["mode"] in ("SHADOW", "LIVE"):
+            r["factor"] = factor_eval(r["bundle"], portfolio, nav, _fctx)
+            if _conc["mode"] == "LIVE" and (r["factor"]["state"] == "FAIL" or
+                                            (r["factor"]["state"] != "PASS" and _fctx["pre"].get("breach"))):
+                r["breaches"].append({"constraint": "B3/D15 AI-complex factor cap (net post-trade lower bound)",
+                                      "factor": r["factor"]})
         _trim_r = round(max(float(r["stock_gbp"]) - float(_wf["cash_capital_gbp"]), 0.0), 2)
         if 0.005 < _trim_r < _min_trade - EPS_GBP:
             r["breaches"].append({"constraint": "ISA-0858 D4 fund-trim leg below MIN_ECONOMIC_TRADE",
@@ -1605,12 +2360,38 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                     "D27 SLEEVE_RISK_CEILING_PCT = %.1f%%: no bundle creates or deepens a risk-share breach" % ceiling,
                     "max_stock_position_pct = %.4f of NAV" % (max_pos / nav),
                     "cash: stock spend <= deployable - D23 reserve"],
-        "reported_not_binding": ["concentration_control sector/theme caps (V2_FLAGS concentration_gate SHADOW)",
-                                 "AI-complex factor cap (Checkpoint-D tick 5 consumes it at the review)"],
+        "reported_not_binding": ["concentration_control sector/theme caps (V2_FLAGS concentration_gate %s)" % _conc["mode"],
+                                 "AI-complex factor cap - net post-trade lower bound per plan (receipt.factor; binds with "
+                                 "concentration_gate LIVE; Checkpoint-D tick 5 reads receipt.factor.selected) - %s" % _conc["mode"]]
+                                if _conc["mode"] != "LIVE" else [],
         "pre_trade": pre_risk, "pre_trade_risk_shares": {k: _r(v, 5) for k, v in pre_shares.items()},
         "sleeve_bands": ("ISA-0858 D1: hard ceiling %.0f%% (room GBP %.2f), priority band %.0f%%; band now %s"
                          % (_wf["inputs"]["bands"]["hard_ceiling_pct"], _wf["hard_room_gbp"],
                             _wf["inputs"]["bands"]["priority_ceiling_pct"], _wf["band"]))}
+    _ev465 = [r for r in rows if r.get("concentration")]
+    receipt["concentration"] = {
+        "mode": _conc["mode"], "error": _conc["error"],
+        "sector_cap_pct_nav": 12.0, "theme_cap_pct_sleeve": 50.0,
+        "taxonomy": {k: ((_conc["tax"] or {}).get(k)) for k in ("theme_taxonomy", "declared_file")} if _conc["tax"] else None,
+        "n_bundles_evaluated": len(_ev465),
+        "n_bundles_failing": sum(1 for r in _ev465 if r["concentration"]["state"] != "PASS"),
+        "failing_examples": [{"bundle": [list(x) for x in r["bundle"]], "violations": r["concentration"]["violations"]}
+                             for r in _ev465 if r["concentration"]["state"] != "PASS"][:6],
+        "binding": _conc["mode"] == "LIVE",
+        # ISA-0700 (19-Oct-2026): universe names with no theme membership - refused UNKNOWN if LIVE; the email names them
+        "unmapped_universe": (sorted(t for t in (receipt.get("dossiers") or {})
+                                     if _ccm465._themes(_conc["tax"], t) is None) if _conc["tax"] else None),
+        # ⚑ found on the P-B3 shadow: with research pending the contest held ONLY the no-action bundle, so 0
+        #   bundles were evaluated and an 'OK' impact would have counted as SHADOW evidence. Nothing checked is
+        #   not evidence (R2.10): 0 evaluated is NO_BUNDLES_EVALUATED, never OK.
+        "impact": ({"state": "UNAVAILABLE", "reason": _conc["error"] or ("mode %s" % _conc["mode"])}
+                   if _conc["error"] or _conc["mode"] not in ("SHADOW", "LIVE") else
+                   {"state": "NO_BUNDLES_EVALUATED", "reason": "the contest held no non-empty bundle this run "
+                                                              "(e.g. research pending) - nothing was checked"}
+                   if not _ev465 else
+                   {"state": "OK", "basis": "every non-empty bundle evaluated on its post-trade book"}),
+        "basis": ("ISA-0465 / B08-R04: Raj 16-Sep-2026 caps through concentration_control.book_invariant + UNKNOWN additions "
+                  "refused; SHADOW records what LIVE would refuse and binds nothing")}
     receipt["frontier"] = {"n_bundles": len(rows), "n_feasible": sum(1 for r in rows if r["feasible"]),
                            "n_undominated": len(cmp.get("undominated") or []),
                            "robustly_superior": [_brief(r) for r in cmp.get("robustly_superior") or []],
@@ -1627,6 +2408,50 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                              "not_claimed": "not a calibrated expected-utility optimum; exact search removes search error, not forecast error"}
     receipt["ambition"] = amb
     sel = cmp.get("selected")
+    complete = {t for t, v in am["by_security"].items() if v.get("case.complete") is True}
+    # ── ISA-0621: the switch contest (held stocks as donors), LIVE by Raj 19-Oct-2026 ─────────────────────
+    _sw_rows, _sw_adopted = None, False
+    try:
+        receipt["switch_contest"] = switch_contest({
+            "inp": inp, "pipeline": pipeline, "store": store, "hurdle": hurdle, "as_of": as_of,
+            "amendments": am["by_security"], "price_overrides": price_overrides, "recs": recs, "eligible": eligible,
+            "scen": scen, "costs_by": costs_by, "costs": costs, "capital": capital,
+            "cash_capital": float(_wf["cash_capital_gbp"]), "cash_rate": cash_rate, "portfolio": portfolio, "nav": nav,
+            "min_entry": min_entry, "tw": tw, "min_trade": _min_trade if _min_trade > 0 else 500.0, "conc": _conc,
+            "fctx": _fctx, "pre_shares": pre_shares, "pre_risk": pre_risk, "ceiling": ceiling, "max_pos": max_pos,
+            "live_rows": rows, "live_selected": sel, "complete": complete, "root": root,
+            "scope": switch_scope})
+    except Exception as _sce:                                       # noqa: BLE001
+        receipt["switch_contest"] = {"authority": switch_authority(), "state": "ERROR",
+                                     "why": "%s: %s" % (type(_sce).__name__, _sce),
+                                     "effect": "the switch contest failed; the new-money decision stands unchanged"}
+    finally:
+        try:                                             # the scoped risk memo can never outlive the contest
+            import sleeve_risk as _srz
+            if _srz._FROZEN.get("store") is not None:
+                _srz.frozen_store(None).__exit__(None, None, None)
+        except Exception:                                           # noqa: BLE001
+            pass
+    _scx = receipt["switch_contest"]
+    _sw_row = _scx.pop("_selected_row", None)
+    _sw_rows = _scx.pop("_elig_rows", None)
+    _sw_scen, _sw_costs = _scx.pop("_scen", {}) or {}, _scx.pop("_costs_by", {}) or {}
+    if (_scx.get("authority") == "LIVE" and _scx.get("state") == "OK" and (_scx.get("parity") or {}).get("state") == "MATCH"
+            and _sw_row is not None and cmp.get("state") == "OK"):
+        scen.update(_sw_scen)
+        costs_by.update(_sw_costs)
+        sel = _sw_row
+        _e621 = incremental_er(sel, scen, costs_by)
+        sel["incremental_net_er12"] = _e621
+        sel["ambition_band"] = ("NO_STOCK (ER N/A)" if _e621 is None else "STRETCH_>=25" if _e621 * 100 >= STRETCH_PCT
+                                else "AMBITION_>=20" if _e621 * 100 >= AMBITION_PCT else "BELOW_20")
+        _sw_adopted = True
+    _scx["adopted"] = {"state": ("ADOPTED" if _sw_adopted else "NOT_ADOPTED"),
+                       "why": ("the authority-eligible switch plan sells %s and beats every new-money plan - it IS this "
+                               "month's selection" % sorted((sel or {}).get("sold", {}))) if _sw_adopted else
+                              ("authority %s; state %s; parity %s; %s" % (_scx.get("authority"), _scx.get("state"),
+                               (_scx.get("parity") or {}).get("state"),
+                               "no authority-eligible sale wins" if _sw_row is None else "comparator %s" % cmp.get("state")))}
     receipt["selected"] = _brief(sel)
     # ── decision-relevant research (fixed point, s9.1) ───────────────────────────────────────
     sel_names = [t for t, _ in (sel or {}).get("bundle", ())]
@@ -1648,7 +2473,21 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                             "either beats the weakest selected name's central or capital >= MIN_ENTRY is unused")}
         if relevant:
             pending.append(t)
-    scope = sorted(set(sel_names) | {t for r in (cmp.get("tied") or []) for t, _ in r["bundle"]} |
+    # ISA-0621: a held donor whose sale WINS the diagnostic contest but whose case is unresolved is decision-relevant
+    #   research - the same rule as a case-pending buy: without its case the switch can never be judged (chicken and
+    #   egg). A donor inside the 182-day min-hold is not (no case can make it sellable before the clock expires).
+    _dg621 = (((receipt.get("switch_contest") or {}).get("diagnostic_selection") or {}).get("selected") or {})
+    for _x in _dg621.get("sell") or []:
+        _d621 = ((receipt.get("switch_contest") or {}).get("donors") or {}).get(_x.get("ticker")) or {}
+        _codes = [y.get("code") for y in _d621.get("reasons") or []]
+        if any(str(cd).startswith("DONOR_CASE_") for cd in _codes) and "DONOR_IN_MIN_HOLD" not in _codes \
+                and _x.get("ticker") not in pending:
+            pending.append(_x.get("ticker"))
+            if _x.get("ticker") in recs:
+                recs[_x["ticker"]].setdefault("decision_relevance", {})["switch_donor"] = (
+                    "its sale wins the diagnostic switch contest; the case must be resolved for the switch to be judged")
+    scope = sorted(set(sel_names) | set((sel or {}).get("sold") or {}) |
+                   {t for r in (cmp.get("tied") or []) for t, _ in r["bundle"]} |
                    {t for r in (cmp.get("undominated") or []) for t, _ in r["bundle"]} | set(pending))
     complete = {t for t, v in am["by_security"].items() if v.get("case.complete") is True}
     receipt["case_scope"] = {
@@ -1679,6 +2518,12 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                               if with_t else "every bundle containing it breaches a hard risk constraint"))
         elif t in sel_names:
             recs[t]["disposition"] = "SELECTED"
+    for t in sel_names:                                   # ISA-0621: a switch-only receiver chosen by an adopted switch
+        if t in recs and recs[t]["disposition"] != "SELECTED":
+            recs[t]["disposition"] = "SELECTED"
+            recs[t]["reasons"].append(_reason("construction", "SWITCH_RECEIVER", recs[t].get("disposition"), "donor-funded",
+                                              "capital_decision_engine.switch_contest (ISA-0621)",
+                                              "admissible only as a donor-funded replacement (ISA-0600: judged on net delta-sigma)"))
     receipt["alternatives"] = alts
     _cnt = {}
     for _r0 in recs.values():
@@ -1698,18 +2543,39 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                 "bear_gbp_pct": _r((scen[t]["BUSINESS_BEAR"] or 0) * 100, 2),
                 "costs": costs_by[t]}
 
-    def _fund(actions):
-        _sp = _fw.split_funding(round(sum(float(x["gbp"]) for x in actions), 2), _wf)
-        _cl = float(_sp["cash_gbp"])
+    def _fund(actions, sale_proceeds=0.0):
+        # ISA-0621: a switch's own sale proceeds fund its buys first; the rest follows the D4 waterfall (cash, then trims)
+        _tot = round(sum(float(x["gbp"]) for x in actions), 2)
+        _fs = round(min(float(sale_proceeds or 0.0), _tot), 2)
+        _sp = dict(_fw.split_funding(round(_tot - _fs, 2), _wf), sale_proceeds_gbp=_fs, spend_gbp=_tot)
+        _cl, _sl = float(_sp["cash_gbp"]), _fs
         for x in actions:
-            _c = min(float(x["gbp"]), _cl)
+            _g = float(x["gbp"])
+            _c = min(_g, _cl)
             _cl = round(_cl - _c, 2)
-            x["funding"] = {"cash_gbp": round(_c, 2), "fund_trims_gbp": round(float(x["gbp"]) - _c, 2),
-                            "sequencing": ("AWAIT_FUND_SETTLEMENT (D8)" if float(x["gbp"]) - _c > EPS_GBP else "CASH")}
+            _s = min(_g - _c, _sl)
+            _sl = round(_sl - _s, 2)
+            _t = round(_g - _c - _s, 2)
+            x["funding"] = {"cash_gbp": round(_c, 2), "sale_proceeds_gbp": round(_s, 2), "fund_trims_gbp": max(_t, 0.0),
+                            "sequencing": ("AWAIT_FUND_SETTLEMENT (D8)" if _t > EPS_GBP else
+                                           "AWAIT_SALE_SETTLEMENT (ISA-0621: sell the donor first)" if _s > EPS_GBP else "CASH")}
         return _sp
+
+    def _sale(t, s):
+        h = float(((receipt.get("book") or {}).get("held_stocks") or {}).get(t) or 0.0)
+        _q = next((x.get("quantity") for x in portfolio.get("stocks") or [] if x.get("ticker") == t), None)
+        return {"ticker": t, "side": "SELL", "action": ("EXIT" if abs(s - h) <= EPS_GBP else "TRIM"), "gbp": round(s, 2),
+                "held_gbp": round(h, 2), "residual_gbp": round(max(h - s, 0.0), 2), "held_quantity": _q,
+                "proceeds_gbp": round(sale_proceeds(s, costs_by[t]), 2), "currency": (recs.get(t, {}).get("er12") or {}).get("currency"),
+                "central_er12_local_pct": _r(((recs.get(t, {}).get("er12") or {}).get("central_local") or 0) * 100, 2),
+                "economic_max_price_major": None, "costs": costs_by[t],
+                "basis": "ISA-0621 switch contest (LIVE, Raj 19-Oct-2026): sold to fund the selected buys"}
+    receipt["selected_sales"] = [_sale(t, s) for t, s in sorted(((sel or {}).get("sold") or {}).items())]
     receipt["selected_actions"] = [_act(t, a) for t, a in (sel or {}).get("bundle", ())]
+    if isinstance(receipt.get("concentration"), dict):
+        receipt["concentration"]["selected_bundle"] = (sel or {}).get("concentration")   # ISA-0465: the chosen book's verdict
     # ── ISA-0858: how the selection is funded (cash first, then fund trims), the donor plan, sequencing ──
-    _split = _fund(receipt["selected_actions"])
+    _split = _fund(receipt["selected_actions"], sum(x["proceeds_gbp"] for x in receipt["selected_sales"]))
     _plan = None
     if _split["fund_trims_gbp"] > EPS_GBP:
         import waiting_room as _wr
@@ -1785,11 +2651,12 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         from itertools import combinations as _comb
         for _k in range(1, len(_confn) + 1):
             for _S in _comb(_confn, _k):
-                _sub = [r for r in rows if not (set(r["tickers"]) & set(_S))]
-                _c2 = compare(_sub)
+                _sub = [r for r in (_sw_rows if _sw_adopted and _sw_rows else rows) if not (set(r["tickers"]) & set(_S))]
+                _c2 = compare([copy.copy(r) for r in _sub])
                 _s2 = _c2.get("selected")
                 _acts = [_act(t, a) for t, a in (_s2 or {}).get("bundle", ())]
-                _sp2 = _fund(_acts) if _acts else _fw.split_funding(0.0, _wf)
+                _sales2 = [_sale(t, s) for t, s in sorted(((_s2 or {}).get("sold") or {}).items())]
+                _sp2 = _fund(_acts, sum(x["proceeds_gbp"] for x in _sales2)) if _acts else _fw.split_funding(0.0, _wf)
                 _pl2 = None
                 if _acts and _sp2["fund_trims_gbp"] > EPS_GBP:
                     import waiting_room as _wr2
@@ -1805,7 +2672,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                 _ok2 = (_c2.get("state") == "OK" and not _miss
                         and (_pl2 is None or _pl2.get("state") == "RECALL_PLANNED"))
                 _fbs.append({"id": "FB-" + "+".join(_S), "if_refused": list(_S), "comparator_state": _c2.get("state"),
-                             "selected": _brief(_s2), "actions": _acts, "split": _sp2, "donor_plan": _pl2,
+                             "selected": _brief(_s2), "actions": _acts, "sales": _sales2, "split": _sp2, "donor_plan": _pl2,
                              "cases_outstanding": _miss,
                              "authorised": bool(receipt["capital_authorised"] and _ok2),
                              "authorised_basis": ("primary authorised; comparator OK; every case complete; trim plan planned"
@@ -1841,6 +2708,18 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                               "constraint-compliant policy choice under estimation uncertainty, NOT dominance on downside")}
     if baseline_plan_path:
         receipt["old_v_new"] = old_v_new(baseline_plan_path, rows, recs, scen, costs_by, capital, cash_rate, sel)
+    _fv621 = [r["factor"] for r in rows if r.get("factor")]
+    receipt["factor"] = {
+        "mode": _conc["mode"], "binding": _conc["mode"] == "LIVE", "error": _fctx.get("error"),
+        "cap_pct": (_fctx.get("pre") or {}).get("cap_pct"),
+        "pre_trade": ({k: (_fctx["pre"] or {}).get(k) for k in ("lower_bound_pct", "upper_bound_pct", "lower_bound_gbp",
+                                                               "verdict", "breach", "unclassified")}
+                      if _fctx.get("pre") else None),
+        "n_plans_evaluated": len(_fv621), "n_plans_failing": sum(1 for f in _fv621 if f.get("state") == "FAIL"),
+        "selected": (sel or {}).get("factor"), "selected_tickers": sorted(sel_names),
+        "rule": ("B3/D15 on the NET post-trade book (Raj 19-Oct-2026): a plan fails only if its post-trade AI-complex LOWER "
+                 "bound exceeds the cap AND it raised the factor's GBP; binds only when concentration_gate is LIVE"),
+        "consumer": "checkpoint_d tick 5 (production CLI reads this section)"}
     receipt["learning_capture"] = {
         "frozen": ["full census + dispositions", "ER12 central/variants/bear per name", "scenario set", "all feasible bundles (hash)",
                    "frontier", "selection and alternatives", "cases/amendments", "method versions"],
@@ -2023,6 +2902,7 @@ def _finish(receipt: dict, month: str, root: str, out_path: Optional[str], write
         os.replace(tmp, p)                                          # atomic artefact (s12.2)
         receipt["_written_to"] = p
         receipt["_ledger"] = _ledger_append(receipt, month, root)
+        receipt["_switch_ledger"] = _switch_ledger_append(receipt, month, root)      # ISA-0621 learning capture
     return receipt
 
 
@@ -2043,6 +2923,7 @@ def _ledger_append(receipt: dict, month: str, root: str) -> dict:
                "as_of": receipt.get("as_of"), "method_version": METHOD_VERSION, "state": receipt.get("state"),
                "engine_authority": receipt.get("engine_authority"), "capital_authorised": receipt.get("capital_authorised"),
                "selected": [(a.get("ticker"), a.get("gbp")) for a in receipt.get("selected_actions") or []],
+               "selected_sales": [(a.get("ticker"), a.get("action"), a.get("gbp")) for a in receipt.get("selected_sales") or []],
                "frontier_top": [{"bundle": f.get("bundle"), "regret_gbp": f.get("regret_gbp"),
                                  "wealth_gbp": f.get("wealth_gbp")}
                                 for f in ((receipt.get("frontier") or {}).get("undominated_top") or [])[:10]],
@@ -2118,6 +2999,51 @@ def order_pricing(act: dict, ticker: str, price_major: float, quote_currency: st
     return out
 
 
+def sale_pricing(act: dict, price_major: float, quote_currency: str, fx_quote_per_gbp, costs: dict) -> dict:
+    """ISA-0621: whole units and net GBP proceeds of a switch SALE at an executable quote (commission + dealing FX on
+    non-GBP proceeds, charged once; no levy on a sale). EXIT sells every held unit; TRIM sells the whole units nearest
+    the decided GBP without exceeding the holding."""
+    ccy = str(quote_currency or "").strip().upper()
+    out = {"state": "OK", "quote_currency": ccy, "side": "SELL"}
+    if ccy in GBP_QUOTE_CURRENCIES:
+        fx = 1.0
+    else:
+        try:
+            fx = float(fx_quote_per_gbp)
+        except (TypeError, ValueError):
+            fx = float("nan")
+        if not math.isfinite(fx) or fx <= 0:
+            out.update(state="REFUSED_FX_UNKNOWN", why="a %s quote needs a positive finite fx_quote_per_gbp to price the sale" % ccy)
+            return out
+    try:
+        comm = float(costs["commission_gbp"])
+        fx_frac = 0.0 if ccy in GBP_QUOTE_CURRENCIES else float(costs["fx_dealing_fraction"])
+    except (KeyError, TypeError, ValueError):
+        out.update(state="REFUSED_COST_UNKNOWN", why="the receipt carries no commission/dealing-FX cost for the sale")
+        return out
+    try:
+        held_q = float(act.get("held_quantity"))
+    except (TypeError, ValueError):
+        held_q = float("nan")
+    if not math.isfinite(held_q) or held_q <= 0:
+        out.update(state="REFUSED_HOLDING_UNKNOWN", why="the receipt carries no held quantity for %s - a sale cannot be sized "
+                   "in whole units" % act.get("ticker"))
+        return out
+    px_gbp = float(price_major) / fx
+    if act.get("action") == "EXIT":
+        units = held_q
+    else:
+        units = min(held_q, float(int(round(float(act.get("gbp") or 0) / px_gbp))))
+    if units < 1 and act.get("action") != "EXIT":
+        out.update(state="REFUSED_UNIT_UNAFFORDABLE", why="the decided trim is less than one whole unit at this price")
+        return out
+    consid = units * px_gbp
+    out.update(fx_quote_per_gbp=fx, price_gbp=round(px_gbp, 6), units=units, held_quantity=held_q,
+               consideration_gbp=round(consid, 2), est_proceeds_gbp=round(consid * (1.0 - fx_frac) - comm, 2),
+               why="%s units at GBP %.4f less dealing FX %.2f%% and GBP %.2f commission" % (units, px_gbp, 100 * fx_frac, comm))
+    return out
+
+
 def fills_for(receipt_id: str, root: str = HERE) -> dict:
     """ISA-0855: cumulative recorded fills per ticker for one receipt (execution identities, partials retained)."""
     p = os.path.join(root, EXECUTION_LEDGER)
@@ -2131,7 +3057,9 @@ def fills_for(receipt_id: str, root: str = HERE) -> dict:
             r = json.loads(ln)
             if r.get("receipt_id") != receipt_id:
                 continue
-            t = out.setdefault(r.get("ticker"), {"n_fills": 0, "quantity": 0.0, "gbp_cost": 0.0, "orders": []})
+            t = out.setdefault(r.get("ticker"), {"n_fills": 0, "quantity": 0.0, "gbp_cost": 0.0, "orders": [], "prices": []})
+            t.setdefault("prices", []).append({"price_major": r.get("price_major"), "quote_currency": r.get("quote_currency"),
+                                               "price_gbp": r.get("price_gbp")})
             t["n_fills"] += 1
             t["quantity"] = round(t["quantity"] + float(r.get("quantity") or 0), 6)
             t["gbp_cost"] = round(t["gbp_cost"] + float(r.get("gbp_cost") or 0), 2)
@@ -2154,7 +3082,8 @@ def active_plan(rc: dict, root: str = HERE, outcomes: Optional[dict] = None) -> 
             outcomes = {}
     refused = sorted(t for t in req if ((outcomes or {}).get(t) or {}).get("outcome") == "REFUSED")
     if not refused:
-        return {"plan_id": "PRIMARY", "refused": [], "actions": list((rc or {}).get("selected_actions") or []),
+        return {"plan_id": "PRIMARY", "refused": [], "actions": list((rc or {}).get("selected_sales") or []) +
+                list((rc or {}).get("selected_actions") or []),
                 "authorised": bool((rc or {}).get("capital_authorised"))}
     fb = next((f for f in dc.get("fallbacks") or [] if sorted(f.get("if_refused") or []) == refused), None)
     if fb is None or not fb.get("authorised"):
@@ -2163,7 +3092,8 @@ def active_plan(rc: dict, root: str = HERE, outcomes: Optional[dict] = None) -> 
                 "why": ("Raj recorded a refusal of %s but the receipt carries %s - re-run the engine"
                         % (refused, "no fallback for that set" if fb is None else "fallback %s NOT authorised (%s)"
                            % (fb.get("id"), fb.get("authorised_basis"))))}
-    return {"plan_id": fb["id"], "refused": refused, "actions": list(fb.get("actions") or []), "authorised": True}
+    return {"plan_id": fb["id"], "refused": refused, "actions": list(fb.get("sales") or []) + list(fb.get("actions") or []),
+            "authorised": True}
 
 
 def record_dealability(month: str, ticker: str, outcome: str, recorded_by: str, root: str = HERE, *,
@@ -2188,6 +3118,270 @@ def record_dealability(month: str, ticker: str, outcome: str, recorded_by: str, 
     except _bdr.DealabilityRefused as exc:
         raise EngineRefused("record_dealability: %s" % exc)
     return {"state": "RECORDED", "row": w["row"], "active_plan": active_plan(rc, root)}
+
+
+AS_PLANNED_GBP_TOLERANCE = 0.05     # Raj Q4 (13-Oct-2026): a fill within +/-5% of the approved GBP is 'as planned'
+
+
+def as_planned_fill(fill: dict, act: Optional[dict]) -> dict:
+    """ISA-0727 Q4 (Raj 13-Oct-2026 'allow as planned'): a recorded fill is AS PLANNED when it is an action of the
+    active plan, its cumulative GBP is within +/-5% of the approved GBP, and EVERY fill price is a MAJOR-unit price in
+    the action's currency at or below the action's economic maximum. Anything unprovable is a deviation."""
+    if not act:
+        return {"as_planned": False, "why": "the filled name is not an action of the active plan"}
+    try:
+        g_app, g_fill = float(act.get("gbp") or 0.0), float((fill or {}).get("gbp_cost") or 0.0)
+    except (TypeError, ValueError):
+        return {"as_planned": False, "why": "fill or approved GBP unreadable"}
+    if g_app <= 0:
+        return {"as_planned": False, "why": "the approved GBP is not positive"}
+    dev = g_fill / g_app - 1.0
+    if abs(dev) > AS_PLANNED_GBP_TOLERANCE + 1e-9:
+        return {"as_planned": False, "deviation_pct": round(dev * 100, 2),
+                "why": "filled GBP %.2f is %.2f%% from the approved GBP %.2f (tolerance +/-%.0f%%)"
+                       % (g_fill, dev * 100, g_app, AS_PLANNED_GBP_TOLERANCE * 100)}
+    emax = act.get("economic_max_price_major")
+    for px in (fill or {}).get("prices") or []:
+        if px.get("price_major") is None or not px.get("quote_currency"):
+            return {"as_planned": False, "deviation_pct": round(dev * 100, 2),
+                    "why": "a fill carries no MAJOR-unit price in its quote currency - the economic-max check cannot be shown"}
+        if act.get("currency") and str(px["quote_currency"]).upper() != str(act["currency"]).upper():
+            return {"as_planned": False, "deviation_pct": round(dev * 100, 2),
+                    "why": "fill currency %s != action currency %s" % (px["quote_currency"], act["currency"])}
+        if emax is not None and float(px["price_major"]) > float(emax) + 1e-9:
+            return {"as_planned": False, "deviation_pct": round(dev * 100, 2),
+                    "why": "fill price %.4f above the economic max %.4f" % (float(px["price_major"]), float(emax))}
+    if not (fill or {}).get("prices"):
+        return {"as_planned": False, "why": "no fill price recorded"}
+    return {"as_planned": True, "deviation_pct": round(dev * 100, 2),
+            "why": "within +/-%.0f%% of the approved GBP at prices <= the economic max" % (AS_PLANNED_GBP_TOLERANCE * 100)}
+
+
+def dealing_invalidation(month: str, ticker: str, rc: dict, root: str = HERE, now=None) -> dict:
+    """ISA-0727 Q2 (Raj 13-Oct-2026): an approval is invalidated before the next pre-run by a corporate event or an
+    earnings release for the selected name SINCE the approval. Corporate events: the ISA-0817 store's verdict now vs the
+    flags the receipt's dossier carried at formation - a NEW offeree (HARD) or corporate-action (REVIEW) flag
+    invalidates; a source that cannot be read now is 'confirm at dealing', never a pass and never an invalidation.
+    Earnings: the next earnings date known at formation (the bound step9_pre record's binary_event_within_90d, else
+    watchlist_scored next_earnings); a date in (formation, today] invalidates; no date held is EARNINGS_DATE_UNKNOWN
+    (confirm at dealing)."""
+    now = now or _now()
+    today = (now.date() if hasattr(now, "date") else now)
+    formed = str(rc.get("as_of") or "")[:10]
+    out = {"state": "VALID", "confirm": [], "checks": {}}
+    doss = ((rc.get("dossiers") or {}).get(ticker) or {}).get("flags") or {}
+    at_formation = set((doss.get("hard") or []) + list(doss.get("review_unresolved") or []) +
+                       [r.get("code") for r in (doss.get("rows") or []) if r.get("code")])
+    try:
+        import corporate_events as _ce727
+        doc = None
+        _p = os.path.join(root, "corporate_events.json")
+        if os.path.exists(_p):
+            with open(_p, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        v = _ce727.verdict(ticker, doc, as_of=today.isoformat())
+        out["checks"]["corporate_event"] = {"state": v.get("state"), "flags": v.get("flags"), "store_as_of": v.get("store_as_of")}
+        new = [f for f in (v.get("flags") or []) if f in ("offer_period_offeree", "corporate_action_pending")
+               and f not in at_formation]
+        if new:
+            out.update(state="INVALIDATED_CORPORATE_EVENT",
+                       why="%s carries %s now that it did not carry at formation (%s): %s" % (
+                           ticker, new, formed, "; ".join(str(x) for x in (v.get("why") or [])[:2])))
+            return out
+        if v.get("state") in ("SOURCE_FAILED", "OFFER_STATE_UNSOURCED"):
+            out["confirm"].append("corporate events: %s (%s) - confirm there is no offer or corporate action before dealing"
+                                  % (v.get("state"), "; ".join(str(x) for x in (v.get("why") or [])[:1])))
+    except Exception as exc:                                            # noqa: BLE001
+        out["confirm"].append("corporate events unreadable (%s) - confirm before dealing" % type(exc).__name__)
+    ne, ne_src = None, None
+    # the BOUND step9_pre input first (archived copy after the purge, ISA-0832): risk_flags.binary_event_within_90d
+    try:
+        with open(input_path(month, "step9_pre", root), encoding="utf-8") as fh:
+            _s9 = json.load(fh)
+        for _lst in ("deployment_priority_rank", "main_watchlist", "vci_watchlist", "candidate_pool", "deployable_stack"):
+            for _r in _s9.get(_lst) or []:
+                if isinstance(_r, dict) and str(_r.get("ticker") or "").upper() == ticker.upper():
+                    _be = (_r.get("risk_flags") or {}).get("binary_event_within_90d")
+                    if _be:
+                        ne, ne_src = _be, "step9_pre %s risk_flags.binary_event_within_90d" % _lst
+                        break
+            if ne:
+                break
+    except Exception:                                                   # noqa: BLE001
+        pass
+    if ne is None:
+        try:
+            _ws = os.path.join(root, "watchlist_scored_%s.json" % month)
+            if os.path.exists(_ws):
+                with open(_ws, encoding="utf-8") as fh:
+                    _tk = (json.load(fh).get("tickers") or {})
+                _r = _tk.get(ticker) or _tk.get(ticker.upper()) or {}
+                if _r.get("next_earnings") and _r.get("next_earnings") != "Unknown":
+                    ne, ne_src = _r["next_earnings"], "watchlist_scored_%s tickers.next_earnings" % month
+        except Exception:                                               # noqa: BLE001
+            pass
+    out["checks"]["earnings"] = {"next_earnings_at_formation": ne, "source": ne_src, "formed": formed}
+    try:
+        ned = datetime.date.fromisoformat(str(ne)[:10]) if ne and str(ne) != "Unknown" else None
+    except ValueError:
+        ned = None
+    if ned is None:
+        out["confirm"].append("earnings: no confirmed date held at formation (EARNINGS_DATE_UNKNOWN) - confirm none has "
+                              "been reported since %s before dealing" % formed)
+    elif formed and formed < ned.isoformat() <= today.isoformat():
+        out.update(state="INVALIDATED_EARNINGS",
+                   why="%s reported earnings on %s, after the approval was formed (%s): the case must be refreshed at "
+                       "the next pre-run (Raj Q2)" % (ticker, ned.isoformat(), formed))
+    return out
+
+
+VALIDITY_LOG = "capital_receipt_validity_log.jsonl"
+WATCH_REVIEW_STAGES = ("Rolling over", "Flat/Down")     # the forward gate's excluded revision stages (t1_gates A3)
+
+
+def _month_order(path: str):
+    import re as _re
+    _mon = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+    m = _re.search(r"_([a-z]{3})_(\d{4})\.json$", os.path.basename(path))
+    return (int(m.group(2)), _mon.get(m.group(1), 0)) if m else (0, 0)
+
+
+def active_authorised_receipt(root: str = HERE):
+    """-> (month, receipt, why_not). The NEWEST monthly receipt is the only one in force (Raj Q2: a plan is valid until
+    the next pre-run); it is watchable only when it verifies VALID and is DECISION_COMPLETE + capital_authorised."""
+    import month_artefacts as _ma
+    ps = sorted(_ma.month_glob(root, "capital_decision_receipt_*_20[0-9][0-9].json"), key=_month_order)
+    if not ps:
+        return None, None, "no capital decision receipt on disk"
+    import re as _re
+    month = _re.search(r"capital_decision_receipt_([a-z]{3}_\d{4})\.json$", os.path.basename(ps[-1])).group(1)
+    v = verify_receipt(month, root)
+    rc = v.get("receipt")
+    if v.get("state") != "VALID":
+        return month, rc, "receipt %s is %s against the current inputs" % (month, v.get("state"))
+    if rc.get("state") != "DECISION_COMPLETE" or not rc.get("capital_authorised"):
+        return month, rc, "receipt %s state %s, capital_authorised %s - no approved plan to watch" % (
+            month, rc.get("state"), rc.get("capital_authorised"))
+    return month, rc, None
+
+
+def _frame_rows(frame_path: Optional[str]) -> dict:
+    if not frame_path or not os.path.exists(frame_path):
+        return {}
+    import csv as _csv
+    with open(frame_path, newline="", encoding="utf-8") as fh:
+        return {str(r.get("ticker") or "").strip().upper(): r for r in _csv.DictReader(fh)}
+
+
+def watch_receipt(as_of, root: str = HERE, *, frame_path: Optional[str] = None, source: str = "weekly_screener",
+                  now=None, write: bool = True, dealability=None) -> dict:
+    """ISA-0727 B - the APPROVED-PENDING WATCH (Raj 13-Oct-2026 design, Q2 confirmed). Between pre-runs each weekly
+    screener occurrence re-checks ONLY the active receipt's not-yet-executed actions. AUTHORITY IS ONE-WAY: it can
+    INVALIDATE or flag REVIEW, never add a name, raise an amount or re-rank. Per action:
+      INVALIDATED - a corporate event or earnings since formation (dealing_invalidation), the screen's close above the
+                    economic max, the broker/ISA verdict NOT_DEALABLE_*;
+      REVIEW      - this screen's revision stage in the forward gate's excluded set, or its E[r] below the receipt's
+                    hurdle, or a currency the action does not carry;
+      VALID       - none of those (names outside this week's screen are checked on events and eligibility only).
+    Appends ONE row to capital_receipt_validity_log.jsonl (this function is its one writer); execution_check reads the
+    newest row for the receipt at dealing (INVALIDATED refuses; REVIEW is confirm-at-dealing)."""
+    now = now or _now()
+    _aod = as_of if isinstance(as_of, datetime.date) else datetime.date.fromisoformat(str(as_of)[:10])
+    _nowd = datetime.datetime(_aod.year, _aod.month, _aod.day, 12, 0)
+    month, rc, why = active_authorised_receipt(root)
+    row = {"checked_at": now.isoformat(timespec="seconds"), "as_of": _aod.isoformat(), "source": source,
+           "month": month, "receipt_id": (rc or {}).get("receipt_id"), "frame": os.path.basename(frame_path) if frame_path else None,
+           "authority": "ONE-WAY: invalidates or flags REVIEW only (Raj 13-Oct-2026)", "names": {}}
+    if why:
+        row.update(state="NO_AUTHORISED_PLAN", why=why)
+    else:
+        frame = _frame_rows(frame_path)
+        hurdle = (rc.get("objective") or {}).get("hurdle_pct")
+        formed = str(rc.get("as_of") or "")[:10]
+        fl = fills_for(rc.get("receipt_id"), root)
+        if dealability is None:
+            try:
+                import broker_dealability as _bdw
+                dealability = lambda t: _bdw.verdict(t, root=root)          # noqa: E731
+            except Exception:                                           # noqa: BLE001
+                dealability = None
+        for act in active_plan(rc, root).get("actions") or []:
+            t = act["ticker"]
+            if t in fl:
+                row["names"][t] = {"state": "FILLED", "why": "recorded fill(s) on this receipt"}
+                continue
+            inv, rev, conf, chk = [], [], [], {}
+            di = dealing_invalidation(month, t, rc, root, _nowd)
+            chk["events"] = di.get("checks")
+            if di["state"] != "VALID":
+                inv.append(di["why"])
+            conf += di.get("confirm") or []
+            fr = frame.get(t.upper())
+            if fr:
+                try:
+                    cp, cur = float(fr.get("current_price")), (fr.get("currency") or "").strip()
+                    if cur == "GBp":
+                        cp, cur = cp / 100.0, "GBP"
+                except (TypeError, ValueError):
+                    cp, cur = None, ""
+                emax = act.get("economic_max_price_major")
+                chk["screen"] = {"close": cp, "currency": cur, "economic_max": emax, "revision_stage": fr.get("revision_stage"),
+                                 "est_rev_direction": fr.get("est_rev_direction"), "er_12_24m_pct": fr.get("expected_return_12_24m"),
+                                 "next_earnings": fr.get("next_earnings")}
+                if cp is not None and act.get("currency") and cur.upper() != str(act["currency"]).upper():
+                    rev.append("screen close is in %s, the action in %s" % (cur, act["currency"]))
+                elif cp is not None and emax is not None and cp > float(emax) + 1e-9:
+                    inv.append("screen close %.4f %s on %s is above the economic max %.4f" % (cp, cur, _aod.isoformat(), float(emax)))
+                _ne = str(fr.get("next_earnings") or "")[:10]
+                if _ne and _ne != "Unknown" and formed and formed < _ne <= _aod.isoformat():
+                    inv.append("%s reported earnings on %s, after formation %s (screen calendar)" % (t, _ne, formed))
+                if (fr.get("revision_stage") or "") in WATCH_REVIEW_STAGES:
+                    rev.append("revision stage on this screen is %r (the forward gate's excluded set)" % fr.get("revision_stage"))
+                try:
+                    _er = float(fr.get("expected_return_12_24m"))
+                    if hurdle is not None and _er < float(hurdle):
+                        rev.append("screen E[r] %.1f%% is below the receipt's hurdle %.1f%%" % (_er, float(hurdle)))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                chk["screen"] = "not in this screen - events and eligibility checked only"
+            if dealability is not None:
+                try:
+                    _dv = dealability(t) or {}
+                    chk["dealability"] = _dv.get("state")
+                    if str(_dv.get("state") or "").startswith("NOT_"):
+                        inv.append("broker/ISA verdict %s" % _dv.get("state"))
+                    elif _dv.get("state") not in (None, "DEALABLE_ONLINE"):
+                        conf.append("dealability %s - confirm at AJ Bell" % _dv.get("state"))
+                except Exception as _dx:                                # noqa: BLE001
+                    conf.append("dealability unreadable (%s)" % type(_dx).__name__)
+            row["names"][t] = {"state": "INVALIDATED" if inv else ("REVIEW" if rev else "VALID"),
+                               "invalidated_by": inv, "review": rev, "confirm_at_dealing": conf, "checks": chk}
+        _cn = [v["state"] for v in row["names"].values()]
+        row.update(state="WATCHED", counts={k: _cn.count(k) for k in ("VALID", "REVIEW", "INVALIDATED", "FILLED")})
+    if write:
+        with open(os.path.join(root, VALIDITY_LOG), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+    return row
+
+
+def latest_watch(root: str = HERE, receipt_id: Optional[str] = None) -> Optional[dict]:
+    """The newest validity-log row (for one receipt when given) - the consumer view for execution_check and the email."""
+    p = os.path.join(root, VALIDITY_LOG)
+    if not os.path.exists(p):
+        return None
+    last = None
+    with open(p, encoding="utf-8") as fh:
+        for ln in fh:
+            if not ln.strip():
+                continue
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if receipt_id is None or r.get("receipt_id") == receipt_id:
+                last = r
+    return last
 
 
 def execution_check(month: str, ticker: str, price_major: float, quote_currency: str, quote_ts: str,
@@ -2251,9 +3445,35 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
                     "order is a new decision on the post-fill book - re-run the engine" % (rc.get("receipt_id"), _fl[ticker]["n_fills"],
                     ticker, _fl[ticker]["quantity"], _fl[ticker]["gbp_cost"], float(act.get("gbp") or 0)))
     if _fl:
-        return done("REFUSED_RERUN_REQUIRED_AFTER_FILL", "receipt %s has recorded fill(s) for %s: the book, cash and risk it was "
-                    "formed on have changed - re-run the engine on the post-fill book (successor receipt) before any further "
-                    "order (B02-R07)" % (rc.get("receipt_id"), sorted(_fl)))
+        # ⚑ ISA-0727 Q4 (Raj 13-Oct-2026 'allow as planned', amends ISA-0855 B02-R07): AS-PLANNED fills leave the
+        #   receipt's other actions executable (every live check below still applies, on the post-fill cash Raj
+        #   passes); any DEVIATING fill still needs a successor receipt formed on the post-fill book.
+        _apf = {t: as_planned_fill(v, sel.get(t)) for t, v in _fl.items()}
+        out["fills_as_planned"] = _apf
+        _dev = sorted(t for t, d in _apf.items() if not d["as_planned"])
+        if _dev:
+            return done("REFUSED_RERUN_REQUIRED_AFTER_FILL", "receipt %s has DEVIATING fill(s) for %s (%s): the book, cash and "
+                        "risk it was formed on changed beyond the approved actions - re-run the engine on the post-fill book "
+                        "(successor receipt) before any further order (B02-R07; Raj Q4 tolerance +/-%.0f%%)"
+                        % (rc.get("receipt_id"), _dev, "; ".join("%s: %s" % (t, _apf[t]["why"]) for t in _dev),
+                           AS_PLANNED_GBP_TOLERANCE * 100))
+    # ⚑ ISA-0727 B: the approved-pending WEEKLY watch - the newest validity-log row for this receipt
+    _lw = latest_watch(root, rc.get("receipt_id"))
+    _lwn = ((_lw or {}).get("names") or {}).get(ticker)
+    out["watch"] = {"as_of": (_lw or {}).get("as_of"), "source": (_lw or {}).get("source"), "name": _lwn}
+    if _lwn and _lwn.get("state") == "INVALIDATED":
+        return done("REFUSED_INVALIDATED_WATCH", "the approved-pending watch of %s (%s) INVALIDATED %s: %s - re-run the "
+                    "decision at the next pre-run" % (_lw.get("as_of"), _lw.get("source"), ticker, "; ".join(_lwn.get("invalidated_by") or [])))
+    if _lwn and _lwn.get("state") == "REVIEW":
+        out.setdefault("confirm_at_dealing", {}).setdefault("checks", []).extend(
+            ["watch %s REVIEW: %s" % (_lw.get("as_of"), r) for r in _lwn.get("review") or []])
+    # ⚑ ISA-0727 Q2 (Raj 13-Oct-2026): an event since the approval invalidates it before the next pre-run
+    _inv = dealing_invalidation(month, ticker, rc, root, now)
+    out["invalidation"] = _inv
+    if _inv["state"] != "VALID":
+        return done("REFUSED_" + _inv["state"], _inv["why"])
+    if _inv["confirm"]:
+        out.setdefault("confirm_at_dealing", {}).setdefault("checks", []).extend(_inv["confirm"])
     # ISA-0862 (B05-R07): current executable authority - read NOW, every failure refuses
     _auth = authority if authority is not None else execution_authority(root)
     out["authority"] = _auth
@@ -2296,6 +3516,30 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
         return done("REFUSED_CURRENCY", "quote currency is EMPTY - the unit of the price is unknown (MAJOR units required)")
     if act.get("currency") and str(quote_currency).upper() != str(act["currency"]).upper():
         return done("REFUSED_CURRENCY", "quote currency %s != dossier currency %s (quote in MAJOR units)" % (quote_currency, act["currency"]))
+    if act.get("side") == "SELL":
+        # ⚑ ISA-0621: a switch SALE. No cash test (it raises cash); the order sells whole held units, never more than
+        #   held; the whole construction is re-run at this price and must still select the same plan (a much lower
+        #   price raises the donor's own forward return and can make the switch lose - T56 applies to sales too).
+        _o = sale_pricing(act, float(price_major), quote_currency, fx_quote_per_gbp, rc.get("costs") or {})
+        out["order"] = _o
+        if _o["state"] != "OK":
+            return done(_o["state"], _o["why"])
+        rr = build(month, root=root, write=False, price_overrides={ticker: float(price_major)},
+                   switch_scope="AUTHORITY_ONLY")       # ISA-0621: the selection, not the diagnostic
+        new_sel = [(a["ticker"], a["gbp"]) for a in active_plan(rr, root).get("actions") or []]
+        old_sel = [(a["ticker"], a["gbp"]) for a in _ap0["actions"]]
+        out["rerun_selection"] = new_sel
+        if new_sel != old_sel:
+            return done("REPRICE_REQUIRED", "at this sale price the construction selects %s instead of %s - re-run the decision "
+                        "(T56)" % (new_sel, old_sel))
+        _ap = (out.get("approval") or {}).get("state")
+        if _ap == "APPROVED":
+            _lim = out["approval"].get("limit_price_major")
+            if _lim is not None and float(price_major) < float(_lim) - 1e-9:
+                return done("REFUSED_BELOW_APPROVED_LIMIT", "sale price %.4f < the approved minimum %.4f" % (float(price_major), float(_lim)))
+        return done("EXECUTABLE", "SALE: receipt VALID/COMPLETE/authorised; authority CURRENT; session quote; whole held units; "
+                    "construction unchanged at this price. Sell FIRST; the buys it funds wait for settlement. PERMISSION, NOT "
+                    "AN INSTRUCTION - approval: %s" % (_ap or "UNKNOWN"))
     try:
         _cash = float(cash_available_gbp) if cash_available_gbp is not None else float("nan")
     except (TypeError, ValueError):
@@ -2324,7 +3568,19 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
     _cash_net = _cash - _res_now - float(_dds["reserved_gbp"])
     out["cash_for_this_order_gbp"] = round(_cash_net, 2)
     _trims = float(((act.get("funding") or {}).get("fund_trims_gbp")) or 0.0)
+    # ⚑ ISA-0727 Q3 (Raj 13-Oct-2026): cash that arrived after the approval re-runs the FUNDING split only (it
+    #   displaces planned fund trims under D4) - never the selection.
+    _need = max(0.0, float(act.get("gbp") or 0) - max(0.0, _cash_net))
+    out["funding_now"] = {"planned_fund_trims_gbp": round(_trims, 2),
+                          "fund_trims_still_needed_gbp": round(min(_trims, _need), 2),
+                          "fund_trims_displaced_by_cash_gbp": round(max(0.0, _trims - min(_trims, _need)), 2),
+                          "rule": "cash first, fund trims only for the shortfall (D4); the selection is not re-run (Raj Q3)"}
+    _salef = float(((act.get("funding") or {}).get("sale_proceeds_gbp")) or 0.0)
     if _cash_net + EPS_GBP < float(act.get("gbp") or 0):
+        if _salef > EPS_GBP:
+            return done("AWAITING_SALE_SETTLEMENT", "this buy is funded by the switch sale(s) (GBP %.2f of proceeds, ISA-0621): "
+                        "execute and settle the sale first, then re-check - cash for this order GBP %.2f < action GBP %.2f"
+                        % (_salef, _cash_net, float(act.get("gbp") or 0)))
         if _trims > EPS_GBP:
             return done("AWAITING_FUND_SETTLEMENT", "this action is fund-funded (GBP %.2f of fund trims, ISA-0858 D8): place the "
                         "fund sells and re-check once the proceeds have SETTLED - cash for this order GBP %.2f < action GBP %.2f"
@@ -2340,7 +3596,8 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
     if _o["est_total_gbp"] > _cash_net + EPS_GBP:
         return done("REPRICE_REQUIRED", "the %d whole units cost GBP %.2f all-in > cash for this order GBP %.2f (current cash "
                     "less D23 reserve and fired drawdown tranches, ISA-0858)" % (_o["units"], _o["est_total_gbp"], _cash_net))
-    rr = build(month, root=root, write=False, price_overrides={ticker: float(price_major)})
+    rr = build(month, root=root, write=False, price_overrides={ticker: float(price_major)},
+               switch_scope="AUTHORITY_ONLY")           # ISA-0621: the selection, not the diagnostic
     # ISA-0860: the re-run must select the SAME active plan (primary, or the same fallback for the same refusals)
     new_sel = [(a["ticker"], a["gbp"]) for a in active_plan(rr, root).get("actions") or []]
     old_sel = [(a["ticker"], a["gbp"]) for a in _ap0["actions"]]
@@ -2582,6 +3839,8 @@ def summary(receipt: dict) -> dict:
             "selected_actions": [{k: a.get(k) for k in ("ticker", "action", "gbp", "net_er12_central_pct",
                                                          "bear_gbp_pct", "economic_max_price_major", "currency")}
                                  for a in receipt.get("selected_actions") or []],
+            "selected_sales": [{k: a.get(k) for k in ("ticker", "action", "gbp", "proceeds_gbp", "residual_gbp", "currency")}
+                               for a in receipt.get("selected_sales") or []],          # ISA-0621 (LIVE switch)
             "ambition_band": (receipt.get("ambition") or {}).get("selected_band"),
             "ambition_state": (receipt.get("ambition") or {}).get("state"),
             "case_scope_required": (receipt.get("case_scope") or {}).get("required_full_cases"),
@@ -2597,6 +3856,22 @@ def summary(receipt: dict) -> dict:
                               for f in (receipt.get("dealability_confirmation") or {}).get("fallbacks") or []],
                 "sequencing": (receipt.get("dealability_confirmation") or {}).get("sequencing")},
             "search_state": (receipt.get("search") or {}).get("state"),
+            # ISA-0465 (19-Oct-2026): the concentration SHADOW/LIVE record (concentration_control.real_shadow_evidence reads it)
+            "concentration": {k: (receipt.get("concentration") or {}).get(k) for k in
+                              ("mode", "binding", "impact", "n_bundles_evaluated", "n_bundles_failing", "selected_bundle",
+                               "failing_examples", "unmapped_universe")}
+                             if receipt.get("concentration") else None,
+            # ISA-0621 (19-Oct-2026): the SHADOW switch contest and the net-book factor verdict (rendered, never recomputed)
+            "switch_contest": ({k: (receipt.get("switch_contest") or {}).get(k) for k in
+                                ("authority", "state", "why", "parity", "shadow_selection", "diagnostic_selection", "counts",
+                                 "concentration_net_book", "factor_net_book", "case_scope_donors", "switch_only_receivers")}
+                               | {"donors": {t: {k: d.get(k) for k in ("held_gbp", "code", "evaluated", "authority_eligible",
+                                                                       "central_er12_local_pct", "central_breakeven_er12_pct",
+                                                                       "regret_cost_of_selling_gbp",
+                                                                       "bear_wealth_effect_of_selling_gbp", "why")}
+                                             for t, d in ((receipt.get("switch_contest") or {}).get("donors") or {}).items()}})
+                              if receipt.get("switch_contest") else None,
+            "factor": receipt.get("factor"),
             "new_capital_control": receipt.get("new_capital_control")}
 
 
@@ -2607,6 +3882,13 @@ def main(argv=None) -> int:
         return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else default
     if "--selftest" in argv:
         return 1 if _selftest() else 0
+    if "--watch-receipt" in argv:
+        # ISA-0727 B: the approved-pending watch CLI - screen_completion runs it as a SUBPROCESS so the Composio
+        # fallback's import closure (sync_repo_to_github.FALLBACK_ENTRYPOINTS) never contains the capital engine.
+        r = watch_receipt(opt("--watch-receipt"), opt("--root", HERE), frame_path=opt("--frame"),
+                          source=opt("--source") or "cli")
+        print(json.dumps(r, default=str))
+        return 0
     month = opt("--month")
     if month and "--input-hash" in argv:
         # the base a case author writes an amendment against (s9.3): printed, never guessed
@@ -2805,6 +4087,19 @@ def _selftest(verbose: bool = True) -> int:
     ok("T06 unknown flag -> REVIEW_REQUIRED/UNRESOLVED, never deleted", f2["review_unresolved"] == ["brand_new_flag"])
     f3 = classify_flags({"review_flags": ["recent_reversal_vs_12_1m"]}, {"recent_reversal_vs_12_1m": "RESOLVED_BENIGN"})
     ok("NEGATIVE CONTROL T06: a sourced benign adjudication resolves a REVIEW flag", not f3["review_unresolved"] and not f3["hard"])
+    # ── T06b ISA-0817 corporate-event flags (Raj D1-D3, 18-Oct-2026) ──────────────────────────
+    f4 = classify_flags({}, None, ["offer_period_offeree"])
+    ok("T06b MUST-FIRE ISA-0817: offer_period_offeree from corporate_events is HARD", f4["hard"] == ["offer_period_offeree"])
+    f5 = classify_flags({}, {"offer_period_offeree": "RESOLVED_BENIGN"}, ["offer_period_offeree"])
+    ok("T06b ISA-0817: a typed stale-source adjudication clears the offeree block (row kept, state shown)",
+       not f5["hard"] and f5["rows"][0]["state"] == "RESOLVED_BENIGN")
+    f6 = classify_flags({"disqualifier_flags": ["revision_direction_down"]},
+                        {"revision_direction_down": "RESOLVED_BENIGN"}, ["corporate_action_pending"])
+    ok("T06b NEGATIVE CONTROL: adjudication cannot clear an adopted HARD flag; corporate action is REVIEW",
+       f6["hard"] == ["revision_direction_down"] and f6["review_unresolved"] == ["corporate_action_pending"])
+    f7 = classify_flags({}, None, ["corporate_action_pending"])
+    ok("T06b ISA-0817 D3: corporate_action_pending is REVIEW_REQUIRED, never HARD", f7["review_unresolved"] == ["corporate_action_pending"]
+       and not f7["hard"])
     # ── T21/T29 exact search vs independent brute force, 100 random books ─────────────────
     rnd = random.Random(20261003)
     agree = 0
@@ -3072,6 +4367,111 @@ def _selftest(verbose: bool = True) -> int:
                 shutil.rmtree(tmp, ignore_errors=True)
         except EngineRefused as exc:
             ok("REAL build did not refuse unexpectedly", False, str(exc))
+    # ── ISA-0727 (18-Oct-2026): Raj Q4 as-planned fills, Q2 invalidation at dealing ──────────────────────────
+    _act = {"ticker": "X", "gbp": 1000.0, "currency": "USD", "economic_max_price_major": 10.0}
+    _f = lambda g, p=9.0, c="USD": {"gbp_cost": g, "prices": [{"price_major": p, "quote_currency": c}]}   # noqa: E731
+    ok("ISA-0727 Q4: a fill at the approved GBP and a price below the economic max is AS PLANNED",
+       as_planned_fill(_f(1000.0), _act)["as_planned"])
+    ok("ISA-0727 Q4 boundary: +5.00% of the approved GBP is still as planned", as_planned_fill(_f(1050.0), _act)["as_planned"])
+    ok("ISA-0727 Q4 MUST-FIRE: +5.1% of the approved GBP is a DEVIATION", not as_planned_fill(_f(1051.0), _act)["as_planned"])
+    ok("ISA-0727 Q4 MUST-FIRE: -5.1% (a short fill) is a DEVIATION", not as_planned_fill(_f(949.0), _act)["as_planned"])
+    ok("ISA-0727 Q4 MUST-FIRE: a fill price above the economic max is a DEVIATION", not as_planned_fill(_f(1000.0, 10.5), _act)["as_planned"])
+    ok("ISA-0727 Q4 MUST-FIRE: a GBP-only fill price (no MAJOR quote) cannot be shown as planned",
+       not as_planned_fill({"gbp_cost": 1000.0, "prices": [{"price_major": None, "price_gbp": 7.0}]}, _act)["as_planned"])
+    ok("ISA-0727 Q4 MUST-FIRE: a fill in another currency is a DEVIATION", not as_planned_fill(_f(1000.0, 9.0, "GBP"), _act)["as_planned"])
+    ok("ISA-0727 Q4 NEGATIVE CONTROL: a fill for a name that is not an action is never as planned", not as_planned_fill(_f(1000.0), None)["as_planned"])
+    import tempfile as _tf727, shutil as _sh727
+    _t7 = _tf727.mkdtemp(prefix="cde727_")
+    try:
+        _rc7 = {"as_of": "2026-10-03", "dossiers": {"X": {"flags": {"hard": [], "review_unresolved": [], "rows": []}},
+                                                     "Y": {"flags": {"hard": [], "review_unresolved": ["corporate_action_pending"],
+                                                                     "rows": [{"code": "corporate_action_pending"}]}}}}
+        _ced = {"as_of": "2026-10-20", "verdicts": {
+            "X": {"state": "CORPORATE_ACTION_PENDING", "flags": ["corporate_action_pending"], "venue_class": "US", "why": ["8-K 2.01"]},
+            "Y": {"state": "CORPORATE_ACTION_PENDING", "flags": ["corporate_action_pending"], "venue_class": "US", "why": ["8-K 2.01"]},
+            "Z": {"state": "NO_EVENT_FOUND", "flags": [], "venue_class": "US", "why": []}}}
+        with open(os.path.join(_t7, "corporate_events.json"), "w", encoding="utf-8") as fh:
+            json.dump(_ced, fh)
+        with open(os.path.join(_t7, "step9_pre_oct_2026.json"), "w", encoding="utf-8") as fh:
+            json.dump({"deployment_priority_rank": [{"ticker": "Z", "risk_flags": {"binary_event_within_90d": "2026-10-22"}}]}, fh)
+        _n7 = datetime.datetime(2026, 10, 21, 10, 0)
+        _iX = dealing_invalidation("oct_2026", "X", _rc7, _t7, _n7)
+        ok("ISA-0727 Q2 MUST-FIRE: a corporate action flagged SINCE formation invalidates the approval",
+           _iX["state"] == "INVALIDATED_CORPORATE_EVENT", _iX)
+        _iY = dealing_invalidation("oct_2026", "Y", _rc7, _t7, _n7)
+        ok("ISA-0727 Q2 NEGATIVE CONTROL: the same flag already carried (and adjudicated) at formation does not invalidate",
+           _iY["state"] == "VALID", _iY)
+        _iZ = dealing_invalidation("oct_2026", "Z", _rc7, _t7, _n7)
+        ok("ISA-0727 Q2 R5.14 T-1: earnings due after the dealing date leaves the approval VALID", _iZ["state"] == "VALID", _iZ)
+        _iZ2 = dealing_invalidation("oct_2026", "Z", _rc7, _t7, datetime.datetime(2026, 10, 22, 10, 0))
+        ok("ISA-0727 Q2 R5.14 T: earnings ON the dealing date invalidates (reported since approval)",
+           _iZ2["state"] == "INVALIDATED_EARNINGS", _iZ2)
+        _iZ3 = dealing_invalidation("oct_2026", "Z", _rc7, _t7, datetime.datetime(2026, 10, 28, 10, 0))
+        ok("ISA-0727 Q2 R5.14 T+1: earnings after approval and before dealing invalidates", _iZ3["state"] == "INVALIDATED_EARNINGS", _iZ3)
+        ok("ISA-0727 Q2 NEGATIVE CONTROL: no earnings date held is CONFIRM AT DEALING, never a pass and never a refusal",
+           _iX is not None and dealing_invalidation("oct_2026", "Y", _rc7, _t7, _n7)["confirm"]
+           and any("EARNINGS_DATE_UNKNOWN" in c for c in _iY["confirm"]))
+        os.remove(os.path.join(_t7, "corporate_events.json"))
+        _iA = dealing_invalidation("oct_2026", "X", _rc7, _t7, _n7)
+        ok("ISA-0727 Q2 MUST-FIRE: an unreadable corporate-events store is CONFIRM AT DEALING (typed), never 'no event'",
+           _iA["state"] == "VALID" and any("corporate events" in c for c in _iA["confirm"]), _iA)
+        # ISA-0727 B: the watch on a root with no receipt writes ONE typed row and never invents a plan
+        _w0 = watch_receipt(datetime.date(2026, 10, 23), _t7, now=_n7)
+        ok("ISA-0727 B NEGATIVE CONTROL: no receipt -> NO_AUTHORISED_PLAN row (typed), names empty",
+           _w0["state"] == "NO_AUTHORISED_PLAN" and _w0["names"] == {} and latest_watch(_t7)["state"] == "NO_AUTHORISED_PLAN", _w0)
+        with open(os.path.join(_t7, VALIDITY_LOG), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"receipt_id": "CDR-A", "as_of": "2026-10-23", "names": {"X": {"state": "VALID"}}}) + "\n")
+            fh.write("not json\n")
+            fh.write(json.dumps({"receipt_id": "CDR-A", "as_of": "2026-10-30", "names": {"X": {"state": "INVALIDATED"}}}) + "\n")
+            fh.write(json.dumps({"receipt_id": "CDR-B", "as_of": "2026-10-31", "names": {}}) + "\n")
+        ok("ISA-0727 B: latest_watch returns the NEWEST row for the receipt (a corrupt line is skipped, another receipt ignored)",
+           latest_watch(_t7, "CDR-A")["as_of"] == "2026-10-30" and latest_watch(_t7)["receipt_id"] == "CDR-B")
+    finally:
+        _sh727.rmtree(_t7, ignore_errors=True)
+    # ── ISA-0756 (B05-R04): new capital is refused on a STALE_INPUT risk store at the run's clock ─────
+    _st756 = {"names": {"X": {"observations": {"2026-09-25": {}, "2026-10-02": {}}},
+                        "H": {"observations": {"2026-09-25": {}, "2026-10-02": {}}}}}
+    _pf756 = {"stocks": [{"ticker": "H", "value_gbp": 1000.0}]}
+    _g756 = risk_gate(_st756, _pf756, "X", as_of="2026-10-17")
+    ok("ISA-0756 MUST-FIRE: an addition on a store two settled Fridays stale is REFUSED_STALE_INPUT (names held + candidate)",
+       _g756.get("verdict") == "REFUSED_STALE_INPUT" and _g756.get("stale_names") == ["H", "X"], _g756)
+    _g756b = risk_gate(_st756, _pf756, "X", as_of="2026-10-03")
+    ok("ISA-0756 NEGATIVE CONTROL: the same store at the run date after its refresh is not refused for freshness",
+       _g756b.get("verdict") != "REFUSED_STALE_INPUT", _g756b)
+    ok("ISA-0756 NEGATIVE CONTROL: no clock -> no freshness verdict (legacy callers unchanged)",
+       risk_gate(_st756, _pf756, "X").get("verdict") != "REFUSED_STALE_INPUT")
+    # ── ISA-0465 / B08-R04/R05: caps on the post-trade book; unknown additions get no headroom ─────────
+    _tax465 = {"sector": {"A": {"value": "Tech"}, "B": {"value": "Tech"}, "C": {"value": "Energy"}},
+               "theme": {"A": ["ai"], "B": ["ai"], "C": []}, "aliases": {}}
+    _c1 = concentration_eval((("B", 5000.0),), {"A": 6000.0}, 100000.0, _tax465)
+    ok("ISA-0465 NEGATIVE CONTROL: Tech 11% of NAV after the add (< 12%) passes the sector cap; ai theme is 100% of a 1-theme sleeve -> theme breach",
+       any(v["kind"] == "theme" for v in _c1["violations"]) and not any(v["kind"] == "sector" for v in _c1["violations"]), _c1)
+    _c2 = concentration_eval((("B", 7000.0),), {"A": 6000.0, "C": 20000.0}, 100000.0, _tax465)
+    ok("ISA-0465 MUST-FIRE: Tech 13% of NAV after the addition breaches the 12% sector cap",
+       any(v["kind"] == "sector" and v["class"] == "Tech" for v in _c2["violations"]), _c2)
+    _c3 = concentration_eval((("ZZZ", 1000.0),), {"C": 20000.0}, 100000.0, _tax465)
+    ok("ISA-0465 / B08-R05 MUST-FIRE: an UNMAPPED addition is UNKNOWN_CLASSIFICATION, never free headroom",
+       _c3["state"] == "FAIL" and _c3["unknown_additions"] == ["ZZZ"], _c3)
+    _c4 = concentration_eval((("C", 1000.0),), {"A": 9000.0, "B": 9000.0, "C": 20000.0}, 100000.0, _tax465)
+    import concentration_control as _cc465
+    import tempfile as _tf465, shutil as _sh465
+    _d465 = _tf465.mkdtemp()
+    try:
+        _rc0 = {"summary": {"capital_decision_engine": {"concentration": {"mode": "SHADOW", "impact": {"state": "NO_BUNDLES_EVALUATED"},
+                                                                           "n_bundles_evaluated": 0}}}}
+        with open(os.path.join(_d465, "run_context_oct_2026.json"), "w") as _fh:
+            json.dump(_rc0, _fh)
+        ok("ISA-0465 NEGATIVE CONTROL: an engine record that evaluated 0 bundles is NOT SHADOW evidence",
+           _cc465.real_shadow_evidence(_d465)["state"] == "ABSENT")
+        _rc0["summary"]["capital_decision_engine"]["concentration"].update(impact={"state": "OK"}, n_bundles_evaluated=7)
+        with open(os.path.join(_d465, "run_context_oct_2026.json"), "w") as _fh:
+            json.dump(_rc0, _fh)
+        ok("ISA-0465 MUST-FIRE: an engine SHADOW record over evaluated bundles IS real evidence",
+           _cc465.real_shadow_evidence(_d465)["state"] == "PRESENT")
+    finally:
+        _sh465.rmtree(_d465, ignore_errors=True)
+    ok("ISA-0465 NEGATIVE CONTROL: an existing Tech breach (18%) does not refuse an addition that does not worsen it",
+       not any(v["kind"] == "sector" and v["class"] == "Tech" for v in _c4["violations"]), _c4)
     if verbose:
         print("capital_decision_engine selftest: %d FAIL(s)" % len(fails))
     return len(fails)

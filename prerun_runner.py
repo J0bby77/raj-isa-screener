@@ -47,6 +47,20 @@ EXCLUDES = ("_bak*", "__pycache__", "_capital_engine_*", "ChatGPT Astra 6 Audit"
             "_candidate_evidence")
 TEXT_SUFFIXES = (".json", ".jsonl", ".md", ".csv", ".txt", ".html", ".log")
 COMPLETION_TOKEN = "Review task reads:"
+PHASE_A_TOKEN = "PRERUN_PHASE_A_COMPLETE"     # ISA-0845 CA(4): monthly_isa_prerun's phase-A checkpoint line
+PHASE_FILE_NAME = "prerun_phase_a.pkl"
+
+
+def phase_file_for(ws: str) -> str:
+    """The occurrence's phase-A checkpoint: in the workspace root, OUTSIDE the ISA tree (never synced/committed)."""
+    return os.path.join(ws, PHASE_FILE_NAME)
+
+
+def _drop_phase(ws: str) -> None:
+    try:
+        os.remove(phase_file_for(ws))
+    except OSError:
+        pass
 ERROR_TOKEN = "ERRORS -- review task will be blocked"
 
 
@@ -176,6 +190,7 @@ def stage_sync(live_inv: str, occurrence: str, ws_base: Optional[str] = None, ho
     live_isa = isa_root_of(live_inv)
     ws = workspace_for(occurrence, ws_base)
     os.makedirs(ws, exist_ok=True)
+    _drop_phase(ws)                                 # ISA-0845: a fresh sync is a fresh pass
     _ledger(live_inv, {"occurrence": occurrence, "stage": "sync", "status": "STARTED", "workspace": ws})
     t0 = time.time()
     cmd = ["rsync", "-a", "--delete"] + sum([["--exclude", e] for e in EXCLUDES], []) + \
@@ -202,10 +217,21 @@ def stage_run(live_inv: str, occurrence: str, ws_base: Optional[str] = None, tim
         raise RunnerRefused("NOT_SYNCED: run --stage sync first (resume begins at the earliest invalid stage, T74)")
     ws_isa = os.path.join(ws, "ISA")
     ws_inv = os.path.join(ws_isa, os.path.basename(live_inv))
-    cmd = cmd or [sys.executable, os.path.join(ws_inv, "monthly_isa_prerun.py"), "--isa-folder", ws_isa]
-    _ledger(live_inv, {"occurrence": occurrence, "stage": "run", "status": "STARTED"})
+    # ⚑ ISA-0845 CA(4) (18-Oct-2026): PHASE SPLIT. The pass may checkpoint after its provisional run_context (9c) into
+    #   the occurrence's phase file (outside the ISA tree, never committed); the NEXT `--stage run` call then executes
+    #   only the assurance phase (`--resume-phase-b`). A sync or fetch invalidates the phase file (new inputs need a
+    #   full pass); a refused phase B deletes it so the following call runs a full pass.
+    phase_file = phase_file_for(ws)
+    resume = cmd is None and os.path.exists(phase_file)
+    if cmd is None:
+        cmd = ([sys.executable, os.path.join(ws_inv, "monthly_isa_prerun.py"), "--isa-folder", ws_isa,
+                "--resume-phase-b", phase_file] if resume else
+               [sys.executable, os.path.join(ws_inv, "monthly_isa_prerun.py"), "--isa-folder", ws_isa])
+    _ledger(live_inv, {"occurrence": occurrence, "stage": "run", "status": "STARTED",
+                       "phase": "B (resume)" if resume else "full"})
     t0 = time.time()
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # ISA-0845: unbuffered so a cut-off pass still logs how far it got (a block-buffered pipe lost the tail)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", ISA_PRERUN_PHASE_FILE=phase_file)
     try:
         r = subprocess.run(cmd, cwd=ws_inv, capture_output=True, text=True, timeout=timeout_s, env=env)
         out, rc, cut = (r.stdout or "") + (r.stderr or ""), r.returncode, False
@@ -214,8 +240,18 @@ def stage_run(live_inv: str, occurrence: str, ws_base: Optional[str] = None, tim
                         else (exc.stdout or "")), None, True
     log = os.path.join(ws, "run_%s.log" % datetime.datetime.utcnow().strftime("%H%M%S"))
     open(log, "w", encoding="utf-8").write(out)
-    if cut or (COMPLETION_TOKEN not in out and ERROR_TOKEN not in out):
+    if "PRERUN_PHASE_B_REFUSED" in out and os.path.exists(phase_file):
+        os.remove(phase_file)
+    if (COMPLETION_TOKEN in out or ERROR_TOKEN in out) and os.path.exists(phase_file):
+        os.remove(phase_file)                       # the pass finished: its checkpoint is spent
+    if not cut and PHASE_A_TOKEN in out and COMPLETION_TOKEN not in out and ERROR_TOKEN not in out:
         row = {"occurrence": occurrence, "stage": "run", "status": "INCOMPLETE", "failure_scope": "RERUN_STAGE",
+               "phase": "A_COMPLETE", "secs": round(time.time() - t0, 1), "log": log,
+               "why": ("phase A complete (Steps 0a-9c, provisional run_context written) - re-run --stage run unchanged: "
+                       "the next call runs the assurance phase only (ISA-0845)")}
+    elif cut or (COMPLETION_TOKEN not in out and ERROR_TOKEN not in out):
+        row = {"occurrence": occurrence, "stage": "run", "status": "INCOMPLETE", "failure_scope": "RERUN_STAGE",
+               "phase": "B (resume)" if resume else "full",
                "secs": round(time.time() - t0, 1), "log": log,
                "why": "no completion token (cut off or crashed) - re-run --stage run unchanged (ISA-0780)"}
     elif ERROR_TOKEN in out:
@@ -236,6 +272,7 @@ def stage_fetch(live_inv: str, occurrence: str, month: str, ws_base: Optional[st
     if not os.path.exists(os.path.join(ws, "sync_manifest.json")):
         raise RunnerRefused("NOT_SYNCED: run --stage sync first")
     ws_inv = os.path.join(ws, "ISA", os.path.basename(live_inv))
+    _drop_phase(ws)                                 # ISA-0845: new metrics need a full pass, never a phase-B resume
     cmd = cmd or [sys.executable, "fetch_watchlist_metrics.py", "--watchlist", "watchlist_tickers.json",
                   "--out", "watchlist_metrics_%s.json" % month, "--month-label", month]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -487,6 +524,52 @@ def _selftest() -> int:
        ("run", "INCOMPLETE") in st and ("commit", "ROLLED_BACK") in st and st[-1] == ("commit", "COMPLETE"), st)
     stage_sync(live_inv, "prerun-other", wsb, holder="C")
     ok("NEGATIVE CONTROL T76: after release the next occurrence may run", True)
+    # ── ISA-0845 CA(4): phase split (phase A checkpoint -> phase B resume) ─────────────────────
+    base2 = tempfile.mkdtemp(prefix="prr_ph_")
+    live2 = os.path.join(base2, "LIVE", "ISA", "Investment Analysis")
+    os.makedirs(os.path.join(live2, "Dashboard", "state"))
+    json.dump({"artefacts": []}, open(os.path.join(live2, "Dashboard", "state", "artefact_contracts.json"), "w"))
+    open(os.path.join(live2, "monthly_isa_prerun.py"), "w").write(
+        "import sys,os\n"
+        "pf=os.environ.get('ISA_PRERUN_PHASE_FILE')\n"
+        "mode=os.path.join(os.path.dirname(pf),'mode.txt')\n"
+        "m=open(mode).read().strip() if os.path.exists(mode) else 'A'\n"
+        "if '--resume-phase-b' in sys.argv:\n"
+        "    assert sys.argv[sys.argv.index('--resume-phase-b')+1]==pf\n"
+        "    print('PRERUN_PHASE_B_REFUSED: identity changed' if m=='REFUSE' else 'Review task reads: x')\n"
+        "else:\n"
+        "    open(pf,'wb').write(b'ctx'); print('PRERUN_PHASE_A_COMPLETE')\n")
+    wsb2 = os.path.join(base2, "WS")
+    occ2 = "prerun-phase"
+    ws2 = workspace_for(occ2, wsb2)
+    stage_sync(live2, occ2, wsb2, holder="P")
+    r = stage_run(live2, occ2, wsb2)
+    ok("ISA-0845 MUST-FIRE: a phase-A checkpoint returns INCOMPLETE/A_COMPLETE (never a success) and keeps the phase file",
+       r["status"] == "INCOMPLETE" and r.get("phase") == "A_COMPLETE" and os.path.exists(phase_file_for(ws2)), r)
+    try:
+        stage_commit(live2, occ2, wsb2, verify=good)
+        ok("ISA-0845 MUST-FIRE: commit after phase A only is refused", False)
+    except RunnerRefused as e:
+        ok("ISA-0845 MUST-FIRE: commit after phase A only is refused", "RUN_NOT_COMPLETE" in str(e), str(e))
+    r = stage_run(live2, occ2, wsb2)
+    ok("ISA-0845 MUST-FIRE: the next run resumes phase B (--resume-phase-b), completes and spends the phase file",
+       r["status"] == "COMPLETE" and not os.path.exists(phase_file_for(ws2)), r)
+    rows2 = [x for x in ledger_rows(live2, occ2) if x["stage"] == "run" and x["status"] == "STARTED"]
+    ok("ISA-0845: the ledger records full then B (resume)", [x.get("phase") for x in rows2] == ["full", "B (resume)"], rows2)
+    stage_run(live2, occ2, wsb2)                                         # phase A again
+    open(os.path.join(ws2, "mode.txt"), "w").write("REFUSE")
+    r = stage_run(live2, occ2, wsb2)
+    ok("ISA-0845 MUST-FIRE: a refused phase B deletes the phase file so the next call runs a full pass",
+       r["status"] == "INCOMPLETE" and not os.path.exists(phase_file_for(ws2)), r)
+    os.remove(os.path.join(ws2, "mode.txt"))
+    stage_run(live2, occ2, wsb2)
+    ok("ISA-0845: a phase file exists before the re-sync", os.path.exists(phase_file_for(ws2)))
+    _drop_phase(ws2)
+    ok("ISA-0845 NEGATIVE CONTROL: _drop_phase (called by sync/fetch) removes the checkpoint",
+       not os.path.exists(phase_file_for(ws2)))
+    _drop_phase(ws2)
+    ok("ISA-0845: _drop_phase is idempotent on a missing file", True)
+    shutil.rmtree(base2, ignore_errors=True)
     shutil.rmtree(base, ignore_errors=True)
     print("prerun_runner selftest: %d FAIL(s)" % len(fails))
     return len(fails)

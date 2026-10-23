@@ -147,6 +147,100 @@ def validate_theme_doc(d: dict) -> List[str]:
     return errs
 
 
+AUTO_OVERLAY_REL = os.path.join("Dashboard", "state", "theme_auto_classifications.json")
+
+
+def _theme_extensions(doc: dict, themes: dict, prov: dict, aliases: dict, here: str):
+    """ISA-0700 P-B7 (Raj 19-Oct-2026 15:11 - 'I agree'): automatic classification with a CONSERVATIVE DEFAULT.
+    Both extensions only ever ADD theme exposure; the declared file always wins where it has a reviewed answer.
+      (1) CONSERVATIVE_INCLUSION: a declared NO_MATERIAL_THEME below HIGH confidence that Raj has NOT adjudicated
+          (no adjudication matching its exact bytes) and whose Yahoo industry is shared with MAPPED names counts IN
+          those peers' themes - doubt resolves towards membership (a false inclusion costs headroom; a false
+          exclusion lets concentration through). A reviewed NO_MATERIAL_THEME stands as reviewed.
+      (2) AUTO_*: a name absent from the declared file takes theme_autoclassify's evidence-backed overlay."""
+    mem = {_base(k): v for k, v in (doc.get("memberships") or {}).items()}
+    adj = {_base(k): v for k, v in (((doc.get("review") or {}).get("adjudications")) or {}).items()}
+    ind = {}
+    for t, m in mem.items():
+        if m.get("state") == "MAPPED":
+            i = (m.get("evidence") or {}).get("industry_at_fetch")
+            if i:
+                ind.setdefault(i, set()).update(x["theme"] for x in m.get("themes") or [])
+    cons = []
+    for t, m in sorted(mem.items()):
+        if m.get("state") != "NO_MATERIAL_THEME" or m.get("confidence") == "HIGH":
+            continue
+        a = adj.get(t) or {}
+        if a.get("decision") in ("CONFIRMED", "AMENDED") and a.get("membership_sha256") == membership_sha256(m):
+            continue
+        ix = (m.get("evidence") or {}).get("industry_at_fetch")
+        peers = sorted(ind.get(ix) or [])
+        if not peers:
+            continue
+        themes[t] = peers
+        prov[t] = {"state": "CONSERVATIVE_INCLUSION", "confidence": ["LOW"] * len(peers),
+                   "declared": {"state": "NO_MATERIAL_THEME", "confidence": m.get("confidence")}}
+        cons.append({"ticker": t, "themes": peers, "industry": ix, "declared_confidence": m.get("confidence")})
+    auto = []
+    try:
+        with open(os.path.join(here, AUTO_OVERLAY_REL), encoding="utf-8") as fh:
+            ov = json.load(fh)
+    except (OSError, ValueError):
+        ov = {}
+    declared_themes = set((doc.get("themes") or {}).keys())
+    for t, m in sorted(((ov or {}).get("entries") or {}).items()):
+        tb = _base(t)
+        if tb in themes or aliases.get(tb, tb) in themes or not isinstance(m, dict):
+            continue
+        st = m.get("state")
+        ths = [x for x in (m.get("themes") or []) if x.get("theme") in declared_themes]
+        if st not in THEME_STATES or (st == "MAPPED" and not ths) or not (m.get("evidence") or {}).get("provider"):
+            continue                                   # a malformed overlay row stays UNKNOWN (fail closed)
+        themes[tb] = [x["theme"] for x in ths] if st == "MAPPED" else []
+        prov[tb] = {"state": "AUTO_" + st, "confidence": [x.get("confidence") for x in ths] or [m.get("confidence")],
+                    "classified_on": m.get("classified_on")}
+        auto.append({"ticker": tb, "state": st, "themes": themes[tb], "classified_on": m.get("classified_on")})
+    return cons, auto
+
+
+def theme_memberships(here: str = HERE) -> dict:
+    """ONE home for theme membership (P-B7: load_taxonomy's theme half, readable without the sector CSV scan so the
+    AI factor line uses the same classification - Raj 19-Oct-2026 16:02). Declared taxonomy, then the conservative
+    inclusions and the auto-classification overlay (_theme_extensions). An invalid declared file disables all of it
+    (every name UNKNOWN - fail closed)."""
+    themes: Dict[str, list] = {}
+    theme_prov: Dict[str, dict] = {}
+    aliases: Dict[str, str] = {}
+    meta = {"file": THEME_DECLARED_FILE, "state": "ABSENT", "errors": []}
+    captures = {}
+    decl = os.path.join(here, THEME_DECLARED_FILE)
+    if os.path.exists(decl):
+        raw = open(decl, "rb").read()
+        meta["sha256"] = hashlib.sha256(raw).hexdigest()
+        try:
+            d = json.loads(raw.decode("utf-8"))
+        except ValueError as e:
+            d, meta["errors"] = None, ["unparseable: %s" % e]
+        errs = validate_theme_doc(d) if d is not None else meta["errors"]
+        meta.update(errors=errs[:50], n_errors=len(errs))
+        if d is not None and not errs:
+            meta.update(state="OK", version=d.get("version"), as_of=d.get("as_of"),
+                        status=d.get("status"), assessor=d.get("assessor"))
+            aliases = {_base(k): _base(v) for k, v in (d.get("aliases") or {}).items()}
+            for t, m in d["memberships"].items():
+                themes[_base(t)] = [x["theme"] for x in m.get("themes") or []]
+                theme_prov[_base(t)] = {"state": m["state"],
+                                        "confidence": ([x["confidence"] for x in m.get("themes")]
+                                                       or [m.get("confidence")])}
+            captures = (d.get("sector_captures") or {}).get("values") or {}
+            cons, auto = _theme_extensions(d, themes, theme_prov, aliases, here)
+            meta.update(conservative_inclusions=cons, auto_classified=auto)
+        elif d is not None:
+            meta["state"] = "INVALID"
+    return {"theme": themes, "theme_provenance": theme_prov, "aliases": aliases, "declared_file": meta,
+            "sector_captures": captures}
+
+
 def load_taxonomy(here: str = HERE) -> dict:
     """-> {sector: {TICKER: {value, source, as_of}}, theme: {TICKER: [theme ids]}, ...}.
 
@@ -167,35 +261,12 @@ def load_taxonomy(here: str = HERE) -> dict:
         except OSError:
             continue
     changed = {t: h for t, h in history.items() if len(set(h.values())) > 1}
-    themes: Dict[str, list] = {}
-    theme_prov: Dict[str, dict] = {}
-    aliases: Dict[str, str] = {}
-    meta = {"file": THEME_DECLARED_FILE, "state": "ABSENT", "errors": []}
-    decl = os.path.join(here, THEME_DECLARED_FILE)
-    if os.path.exists(decl):
-        raw = open(decl, "rb").read()
-        meta["sha256"] = hashlib.sha256(raw).hexdigest()
-        try:
-            d = json.loads(raw.decode("utf-8"))
-        except ValueError as e:
-            d, meta["errors"] = None, ["unparseable: %s" % e]
-        errs = validate_theme_doc(d) if d is not None else meta["errors"]
-        meta.update(errors=errs[:50], n_errors=len(errs))
-        if d is not None and not errs:
-            meta.update(state="OK", version=d.get("version"), as_of=d.get("as_of"),
-                        status=d.get("status"), assessor=d.get("assessor"))
-            aliases = {_base(k): _base(v) for k, v in (d.get("aliases") or {}).items()}
-            for t, m in d["memberships"].items():
-                themes[_base(t)] = [x["theme"] for x in m.get("themes") or []]
-                theme_prov[_base(t)] = {"state": m["state"],
-                                        "confidence": ([x["confidence"] for x in m.get("themes")]
-                                                       or [m.get("confidence")])}
-            for t, v in ((d.get("sector_captures") or {}).get("values") or {}).items():
-                if _base(t) not in sectors and v.get("sector"):
-                    sectors[_base(t)] = {"value": v["sector"], "source": THEME_DECLARED_FILE,
-                                         "as_of": v.get("fetched_at"), "precedence": 2}
-        elif d is not None:
-            meta["state"] = "INVALID"
+    _tm = theme_memberships(here)                       # P-B7: the ONE theme-membership home
+    themes, theme_prov, aliases, meta = _tm["theme"], _tm["theme_provenance"], _tm["aliases"], _tm["declared_file"]
+    for t, v in (_tm.get("sector_captures") or {}).items():
+        if _base(t) not in sectors and v.get("sector"):
+            sectors[_base(t)] = {"value": v["sector"], "source": THEME_DECLARED_FILE,
+                                 "as_of": v.get("fetched_at"), "precedence": 2}
     return {"sector": sectors, "theme": themes, "theme_provenance": theme_prov, "aliases": aliases,
             "sector_taxonomy": SECTOR_TAXONOMY, "sector_source_contract": SECTOR_SOURCE_CONTRACT,
             "sector_changed": changed,
@@ -482,10 +553,18 @@ def real_shadow_evidence(here: str = HERE) -> dict:
                 d = json.load(fh)
         except (OSError, ValueError):
             continue
-        c = (((d.get("summary") or {}).get("capital_destination") or {}).get("concentration") or {})
-        imp = c.get("impact") or {}
-        if c.get("mode") == "SHADOW" and imp and imp.get("state") != "UNAVAILABLE":
-            found.append(b)
+        _sm = d.get("summary") or {}
+        # ⚑ ISA-0465 (19-Oct-2026): capital is decided by the capital decision engine, so ITS record is the
+        #   real evidence; the legacy capital_destination record (SHADOW allocator) is still accepted.
+        for c in ((_sm.get("capital_decision_engine") or {}).get("concentration") or {},
+                  ((_sm.get("capital_destination") or {}).get("concentration") or {})):
+            imp = c.get("impact") or {}
+            # an engine record must have EVALUATED something (n_bundles_evaluated > 0, impact OK) - R2.10
+            _engine = "n_bundles_evaluated" in c
+            _real = (imp.get("state") == "OK" and int(c.get("n_bundles_evaluated") or 0) > 0) if _engine else \
+                    (imp and imp.get("state") != "UNAVAILABLE")
+            if c.get("mode") == "SHADOW" and _real and b not in found:
+                found.append(b)
     return {"state": "PRESENT" if found else "ABSENT", "files": found}
 
 
@@ -506,17 +585,32 @@ def live_readiness(here: str = HERE, *, review: Optional[dict] = None,
             except ValueError:
                 rv = {"state": "UNREADABLE"}
         review = rv
-    if review.get("state") != "ADJUDICATED":
-        blockers.append("TAXONOMY_EXCEPTION_REVIEW_%s (%s pending)"
-                        % (review.get("state"), review.get("n_pending", "?")))
+    # ⚑ ISA-0700 P-B7 (Raj 19-Oct-2026 15:11): the materiality review is INFORMATION, no longer a LIVE blocker.
+    #   Raj: "I do not think it is an efficient or effective process to rely on me to identify or agree a stock's
+    #   theme." Unreviewed doubtful memberships are resolved by the conservative default (theme_memberships) and new
+    #   names by theme_autoclassify; Raj's only decision is the LIVE switch on the SHADOW evidence. The review is
+    #   still published (and its staleness stated) so a reader can see what was and was not human-reviewed.
+    _stale = None
+    if review.get("taxonomy_sha256"):
+        try:
+            _cur = hashlib.sha256(open(os.path.join(here, THEME_DECLARED_FILE), "rb").read()).hexdigest()
+        except OSError:
+            _cur = None
+        _stale = _cur != review.get("taxonomy_sha256")
+    _dm = tax.get("declared_file") or {}
     ev = real_shadow_evidence(here)
     if ev["state"] != "PRESENT":
-        blockers.append("NO_REAL_PRERUN_SHADOW_EVIDENCE (first due 03-Oct-2026 pre-run)")
+        blockers.append("NO_REAL_PRERUN_SHADOW_EVIDENCE (no real pre-run yet whose engine EVALUATED a plan against the caps; next chance: the 31-Oct-2026 pre-run)")
     if coverage_state is not None and coverage_state != "COMPLETE":
         blockers.append("CLASSIFICATION_COVERAGE_%s" % coverage_state)
     return {"state": "READY" if not blockers else "NOT_READY", "blockers": blockers,
-            "shadow_evidence": ev, "review_state": review.get("state"),
-            "basis": "ISA-0465/ISA-0700 pre-LIVE requirements (16-Sep-2026); a READY state is not a LIVE decision"}
+            "shadow_evidence": ev, "review_state": review.get("state"), "review_pending": review.get("n_pending"),
+            "review_stale": _stale,
+            "conservative_inclusions": [c["ticker"] for c in _dm.get("conservative_inclusions") or []],
+            "auto_classified": [a["ticker"] for a in _dm.get("auto_classified") or []],
+            "basis": ("ISA-0465/ISA-0700 pre-LIVE requirements (16-Sep-2026) as amended by Raj 19-Oct-2026 15:11 "
+                      "(review no longer blocks; conservative default + auto-classification); a READY state is not a "
+                      "LIVE decision")}
 
 
 def _cli_population(here: str = HERE):
@@ -720,8 +814,40 @@ def _selftest(verbose: bool = True) -> int:
     with tempfile.TemporaryDirectory() as td2:
         json.dump(rd, open(os.path.join(td2, THEME_DECLARED_FILE), "w"))
         lr = live_readiness(td2)
-        ok("MUST-FIRE readiness: no review file + no real SHADOW run -> NOT_READY with both blockers",
-           lr["state"] == "NOT_READY" and len(lr["blockers"]) == 2)
+        _rv_stale = {"state": "ADJUDICATED", "taxonomy_sha256": "0" * 64, "taxonomy_version": "0.0.0"}
+        _lrs = live_readiness(td, review=_rv_stale)
+        ok("ISA-0700: an ADJUDICATED review of DIFFERENT taxonomy bytes is reported STALE (information since P-B7)",
+           _lrs["review_stale"] is True and not any("REVIEW" in b for b in _lrs["blockers"]))
+        ok("MUST-FIRE readiness: no real SHADOW run -> NOT_READY; a missing review no longer blocks (Raj 15:11)",
+           lr["state"] == "NOT_READY" and len(lr["blockers"]) == 1 and lr["blockers"][0].startswith("NO_REAL_PRERUN"))
+        # ⚑ P-B7 conservative default: an UNREVIEWED NMT below HIGH sharing an industry with MAPPED names counts IN
+        _tmx = theme_memberships(td2)
+        ok("MUST-FIRE P-B7: unreviewed MEDIUM NO_MATERIAL_THEME 'NF' (industry shared with a MAPPED name) counts IN "
+           "the peer theme(s) - doubt resolves towards membership",
+           bool(_tmx["theme"].get("NF")) and _tmx["theme_provenance"]["NF"]["state"] == "CONSERVATIVE_INCLUSION")
+        ok("NEGATIVE CONTROL P-B7: a LOW NMT with no MAPPED industry peer ('NL') stays NO_MATERIAL_THEME",
+           _tmx["theme"].get("NL") == [])
+        _rdA = json.loads(json.dumps(rd))
+        _rdA["review"] = {"adjudications": {"NF": {"decision": "CONFIRMED", "by": "Raj", "on": "2026-09-16",
+                                                   "membership_sha256": membership_sha256(rd["memberships"]["NF"])}}}
+        with tempfile.TemporaryDirectory() as td3:
+            json.dump(_rdA, open(os.path.join(td3, THEME_DECLARED_FILE), "w"))
+            ok("NEGATIVE CONTROL P-B7: a NO_MATERIAL_THEME Raj ADJUDICATED stands as reviewed (not included)",
+               theme_memberships(td3)["theme"].get("NF") == [])
+            os.makedirs(os.path.join(td3, "Dashboard", "state"))
+            json.dump({"entries": {"NEWCO": {"state": "MAPPED", "themes": [{"theme": "T1", "confidence": "LOW"}],
+                                             "evidence": {"provider": "p"}, "classified_on": "2026-10-31"},
+                                   "NF": {"state": "MAPPED", "themes": [{"theme": "T2", "confidence": "LOW"}],
+                                          "evidence": {"provider": "p"}},
+                                   "BAD": {"state": "MAPPED", "themes": [{"theme": "NOPE", "confidence": "LOW"}],
+                                           "evidence": {"provider": "p"}}}},
+                      open(os.path.join(td3, AUTO_OVERLAY_REL), "w"))
+            _t3 = theme_memberships(td3)
+            ok("MUST-FIRE P-B7: an auto-classified name is a membership (AUTO_MAPPED) for every consumer",
+               _t3["theme"].get("NEWCO") == ["T1"] and _t3["theme_provenance"]["NEWCO"]["state"] == "AUTO_MAPPED"
+               and _themes(load_taxonomy(td3), "NEWCO") == ["T1"])
+            ok("NEGATIVE CONTROL P-B7: the declared file wins over the overlay; a malformed overlay row stays UNKNOWN",
+               _t3["theme"].get("NF") == [] and "BAD" not in _t3["theme"])
         cdoc = {"summary": {"capital_destination": {"concentration": {"mode": "SHADOW", "impact": {"state": "OK"}}}}}
         json.dump(cdoc, open(os.path.join(td2, "run_context_oct_2026.DRYRUN.json"), "w"))
         ok("NEGATIVE CONTROL: a DRYRUN run_context is not real SHADOW evidence",
@@ -730,6 +856,9 @@ def _selftest(verbose: bool = True) -> int:
         lr = live_readiness(td2, review={"state": "ADJUDICATED"}, coverage_state="COMPLETE")
         ok("POSITIVE CONTROL readiness: valid taxonomy + ADJUDICATED + real SHADOW + COMPLETE coverage -> READY",
            lr["state"] == "READY")
+        ok("MUST-FIRE P-B7: a PENDING review no longer blocks - valid taxonomy + real SHADOW + COMPLETE -> READY",
+           live_readiness(td2, review={"state": "EXCEPTION_REVIEW_PENDING", "n_pending": 15},
+                          coverage_state="COMPLETE")["state"] == "READY")
         ok("NEGATIVE CONTROL readiness: PARTIAL coverage blocks",
            live_readiness(td2, review={"state": "ADJUDICATED"}, coverage_state="PARTIAL")["state"] == "NOT_READY")
     real = os.path.join(HERE, THEME_DECLARED_FILE)

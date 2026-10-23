@@ -577,7 +577,16 @@ def health(root: str = HERE, now=None, contracts: dict = None, ledger: list = No
                      # a no-op ON a date the CURRENT declaration intends is a lost occurrence (declaration
                      # corrected after the firing), not evidence that the installed schedule is still wrong
                      and "%s@%s" % (k, str(r.get("invoked_at"))[:10]) not in exp)
-        if missed and off:
+        # ⚑ ISA-0844 amendment (18-Oct-2026, fix-on-finding in P-A1): an off-schedule firing proves the installed
+        #   schedule disagrees with the declaration only against an occurrence missed AFTER the task's first real
+        #   launch - before it, no launcher could have recorded the occurrence (isa-monthly-prerun: the 03-Oct
+        #   pre-run predates the 11-Oct ISA-TL-1 launcher; its first receipt is the designed 17-Oct weekly no-op of
+        #   cron `30 9 * * 6`), so it is UNOBSERVED, not evidence of a wrong schedule.
+        _first = min((str(r.get("invoked_at"))[:10] for r in led
+                      if r.get("kind") == "LAUNCH" and r.get("task_key") == k and not r.get("dry_run")
+                      and r.get("invoked_at")), default=None)
+        missed_since_first = [o for o in missed if _first and o.split("@", 1)[-1] >= _first]
+        if missed_since_first and off:
             st = FIRING_OFF_SCHEDULE
         elif eff == ENFORCED and missed:
             st = MISSED_EXPECTED_OCCURRENCE
@@ -974,6 +983,18 @@ def _selftest(verbose: bool = True) -> int:
            "T8f NEGATIVE CONTROL: dry-run launches are not firings")
         ok(hX["tasks"]["isa-nasdaq-fri2"]["state"] != FIRING_OFF_SCHEDULE,
            "T8g NEGATIVE CONTROL: a task with no missed occurrence is never off-schedule")
+        _ledP = list(read_ledger(tmp)) + [
+            {"kind": "LAUNCH", "task_key": "isa-monthly-prerun", "verdict": NO_OP_OUTSIDE,
+             "invoked_at": "2026-10-17T09:36:25+01:00"}]
+        hP = health(tmp, now=datetime.datetime(2026, 10, 20, 12), setup_text=setup, ledger=_ledP)
+        ok(hP["tasks"]["isa-monthly-prerun"]["state"] != FIRING_OFF_SCHEDULE,
+           "T8i ISA-0844 amendment NEGATIVE CONTROL: an occurrence missed BEFORE the task's first launch (03-Oct, "
+           "pre-launcher) plus a designed weekly no-op (17-Oct) is not an installed/declared mismatch")
+        _ledP2 = _ledP + [{"kind": "LAUNCH", "task_key": "isa-monthly-prerun", "verdict": NO_OP_OUTSIDE,
+                           "invoked_at": "2026-11-14T09:30:00+00:00"}]
+        hP2 = health(tmp, now=datetime.datetime(2026, 11, 16, 12), setup_text=setup, ledger=_ledP2)
+        ok(hP2["tasks"]["isa-monthly-prerun"]["state"] == FIRING_OFF_SCHEDULE,
+           "T8j ISA-0844 MUST-FIRE: the 31-Oct occurrence missed AFTER the first launch while Saturdays no-op -> FIRING_OFF_SCHEDULE")
         _fri = setup.replace("`0 8 * * 1` | Mondays 08:00", "`30 14 * * 5` | Fridays 14:30")
         ok(_fri != setup and health(tmp, now=datetime.datetime(2026, 10, 20, 12), setup_text=_fri, ledger=_led)
            ["tasks"]["isa-weekly-eps-snapshot"]["state"] == "UNOBSERVED_OCCURRENCE",

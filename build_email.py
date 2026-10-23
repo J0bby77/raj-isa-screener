@@ -479,6 +479,51 @@ def build_drawdown_line():
             f'font-size:12px;margin-bottom:16px">{safe_entities(txt)}</p>\n')
 
 
+def build_watch_line(root=None):
+    """ISA-0727 B (18-Oct-2026): the APPROVED-PENDING WATCH top line, rendered from the newest row of
+    capital_receipt_validity_log.jsonl (written by capital_decision_engine.watch_receipt at screen_completion --write).
+    A renderer only: it never computes a verdict. Absent or unreadable -> stated, never silent."""
+    import os as _o
+    root = root or _o.path.dirname(_o.path.abspath(__file__))
+    # The renderer reads the log itself (never imports the engine): build_email is a Composio-fallback entry
+    # point (sync_repo_to_github.FALLBACK_ENTRYPOINTS) and must not pull the capital engine into that closure.
+    lw, err = None, None
+    _p = _o.path.join(root, "capital_receipt_validity_log.jsonl")
+    try:
+        if _o.path.exists(_p):
+            import json as _j
+            with open(_p, encoding="utf-8") as _fh:
+                for _ln in _fh:
+                    if _ln.strip():
+                        try:
+                            lw = _j.loads(_ln)                          # newest well-formed row wins
+                        except ValueError:
+                            continue
+    except Exception as exc:                                            # noqa: BLE001
+        lw, err = None, "%s: %s" % (type(exc).__name__, exc)
+    colour = "#1a3a6b"
+    if err:
+        txt, colour = "Approved-pending watch: UNREADABLE (%s) - check the plan at dealing (ISA-0727)" % err, "#b45309"
+    elif not lw:
+        txt = "Approved-pending watch: no watch recorded here yet - check the plan at dealing (ISA-0727)"
+    elif lw.get("state") == "NO_AUTHORISED_PLAN":
+        txt = "Approved-pending watch (%s): no approved plan in force - %s" % (lw.get("as_of"), lw.get("why"))
+    else:
+        c = lw.get("counts") or {}
+        bad = ["%s %s (%s)" % (t, v.get("state"), "; ".join((v.get("invalidated_by") or v.get("review") or [])[:1]))
+               for t, v in sorted((lw.get("names") or {}).items()) if v.get("state") in ("INVALIDATED", "REVIEW")]
+        txt = ("Approved-pending watch (%s, receipt %s): %d VALID / %d REVIEW / %d INVALIDATED / %d FILLED"
+               % (lw.get("as_of"), lw.get("receipt_id"), c.get("VALID", 0), c.get("REVIEW", 0), c.get("INVALIDATED", 0),
+                  c.get("FILLED", 0)) + (" - " + "; ".join(bad) if bad else "")
+               + ". One-way: the watch can only invalidate or flag REVIEW (Raj 13-Oct-2026).")
+        if c.get("INVALIDATED"):
+            colour = "#b91c1c"
+        elif c.get("REVIEW"):
+            colour = "#b45309"
+    return (f'<p style="background:#eef2f8;padding:8px 14px;border-left:4px solid {colour};'
+            f'font-size:12px;margin-bottom:12px"><strong>{safe_entities(txt)}</strong></p>\n')
+
+
 _HELD_CACHE = None
 
 
@@ -1219,6 +1264,8 @@ def build_email_body(
         'max-width:980px;margin:0 auto;padding:20px">\n',
         f'<h2 style="color:#1a3a6b;border-bottom:2px solid #1a3a6b;padding-bottom:8px;margin-bottom:16px">'
         f'ISA Growth Screen &mdash; {safe_entities(group)} | {safe_entities(run_date)}</h2>\n',
+        # ISA-0727 B: the approved-pending watch is the TOP line (Raj 13-Oct-2026 design)
+        build_watch_line(),
         # Section 1 — Executive Screen Result (completion state, waterfall, escalation)
         build_executive_section(receipt, group, run_date, summary_rows, eligible, dq_counts, hurdle),
         # B1 standing line (review item 9, 18-Jul-26 — mechanical, all groups)
@@ -1309,6 +1356,19 @@ def main():
 def _selftest() -> int:
     """ISA-0582 (26-Sep-2026): the email renders currency only from evidence."""
     n = 0
+    # ISA-0727 B: the approved-pending watch top line (renderer of the validity log)
+    import tempfile as _tfw, os as _ow, json as _jw, shutil as _shw
+    _tw = _tfw.mkdtemp(prefix="be_w_")
+    try:
+        assert "no watch recorded" in build_watch_line(_tw), "negative control: no log -> stated, never silent"; n += 1
+        with open(_ow.path.join(_tw, "capital_receipt_validity_log.jsonl"), "w") as _fw:
+            _fw.write(_jw.dumps({"state": "WATCHED", "as_of": "2026-11-06", "receipt_id": "CDR-X", "counts": {"VALID": 1, "INVALIDATED": 1},
+                                 "names": {"AAA": {"state": "VALID"}, "BBB": {"state": "INVALIDATED", "invalidated_by": ["close above max"]}}}) + "\n")
+        _wl = build_watch_line(_tw)
+        assert "1 INVALIDATED" in _wl and "BBB INVALIDATED (close above max)" in _wl and "#b91c1c" in _wl, \
+            "MUST-FIRE: an INVALIDATED action is named in red on the top line"; n += 1
+    finally:
+        _shw.rmtree(_tw, ignore_errors=True)
     assert _currency_sym({"ticker": "MU", "currency": "USD"}) == "$", "positive control"; n += 1
     assert _currency_sym({"ticker": "ISS.CO", "currency": "DKK"}) == "DKK ", \
         "negative control: ISS.CO DKK must not render $ (reproduced on demand from the 26-Sep STOXX600 email)"; n += 1

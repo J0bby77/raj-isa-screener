@@ -394,6 +394,16 @@ def _selftest(verbose: bool = True) -> int:
         except Exception:                                               # noqa: BLE001
             pass
         shutil.rmtree(td, ignore_errors=True)
+    # ISA-0727 B: --write runs the approved-pending watch on this screen's frame (structural, one writer)
+    _scsrc = open(os.path.abspath(__file__), encoding="utf-8").read()
+    ck("ISA-0727 B WIRING: --write runs capital_decision_engine --watch-receipt on screen_history/<date>_<GROUP>_full_data.csv",
+       '"--watch-receipt", _iso_w' in _scsrc and '"screen_history", "%s_%s_full_data.csv" % (_iso_w, a.group)' in _scsrc)
+    ck("ISA-0727 B / ISA-0498 NEGATIVE CONTROL: the engine is never IMPORTED here (the fallback closure must not contain it)",
+       "import capital_decision_engine" not in _scsrc.replace('"import capital_decision_engine" not in', ""))
+    ck("ISA-0727 B NEGATIVE CONTROL: without the local receipt store the watch is NOT_RUN (never a 'no plan' row from an empty workspace)",
+       'APPROVED_PENDING_WATCH NOT_RUN' in _scsrc)
+    ck("ISA-0727 B NEGATIVE CONTROL: the watch is guarded - a failure is printed and never blocks the completion receipt",
+       'print("APPROVED_PENDING_WATCH FAILED %s: %s"' in _scsrc)
     if verbose:
         print("screen_completion selftest: %d failure(s)" % len(fails))
     return 1 if fails else 0
@@ -419,6 +429,31 @@ def main(argv=None):
     r = evaluate(a.group, a.run_date, route=a.route, workbook=a.workbook)
     if a.write:
         write(r)
+        # ⚑ ISA-0727 B (18-Oct-2026): every screener occurrence runs the APPROVED-PENDING WATCH on this screen's frame
+        #   (one-way: invalidate / REVIEW only; capital_decision_engine.watch_receipt is the validity log's one writer).
+        #   Never blocks the completion receipt; a failure is printed and the email states the watch UNREADABLE.
+        #   Run as a SUBPROCESS (never imported): screen_completion is in the Composio fallback's import closure, which
+        #   must not pull the capital engine and its stores (ISA-0498). Without the local receipt store (the fallback
+        #   environment) the watch is NOT RUN and says so - it never writes a "no plan" row from an empty workspace.
+        try:
+            import subprocess as _sp
+            _iso_w = _iso(a.run_date)
+            _fp = os.path.join(HERE, "screen_history", "%s_%s_full_data.csv" % (_iso_w, a.group))
+            if not (os.path.exists(os.path.join(HERE, "capital_decision_engine.py"))
+                    and os.path.exists(os.path.join(HERE, "capital_decision_ledger.jsonl"))):
+                print("APPROVED_PENDING_WATCH NOT_RUN: no capital receipt store here (fallback workspace) - "
+                      "the plan is checked at dealing (ISA-0727)")
+            else:
+                _cmd = [sys.executable, os.path.join(HERE, "capital_decision_engine.py"), "--watch-receipt", _iso_w,
+                        "--root", HERE, "--source", "screen:%s" % a.group] + (["--frame", _fp] if os.path.exists(_fp) else [])
+                _pr = _sp.run(_cmd, capture_output=True, text=True, timeout=120, cwd=HERE)
+                if _pr.returncode != 0:
+                    raise RuntimeError("watch exited %s: %s" % (_pr.returncode, (_pr.stderr or _pr.stdout)[-300:]))
+                _w = json.loads(_pr.stdout.strip().splitlines()[-1])
+                print("APPROVED_PENDING_WATCH state=%s receipt=%s counts=%s" % (_w.get("state"), _w.get("receipt_id"),
+                                                                              _w.get("counts") or _w.get("why")))
+        except Exception as _we:                                        # noqa: BLE001
+            print("APPROVED_PENDING_WATCH FAILED %s: %s" % (type(_we).__name__, _we))
     print("COMPLETION_RECEIPT state=%s run=%s route=%s email=%s missing=%s ancillary_short=%s population=%s"
           % (r["state"], r["run_key"], r["route"], r["email_permission"],
              ",".join(r["missing_mandatory"]) or "-", ",".join(r["ancillary_short"]) or "-",

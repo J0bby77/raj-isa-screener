@@ -125,6 +125,7 @@ def parse_text(text: str, filename: str = "<unknown>") -> ast.Module:
     got = _TREE_BY_TEXT.get(text)
     if got is None:
         got = _TREE_BY_TEXT[text] = _ORIGINAL_PARSE(text, filename=filename)
+        _SHARED_ROOTS[id(got)] = got
     return got
 
 
@@ -146,24 +147,50 @@ def _routed_parse(source, filename="<unknown>", mode="exec", *, type_comments=Fa
             return got
         _PARSE_STATS["misses"] += 1
         got = _TREE_BY_TEXT[source] = _ORIGINAL_PARSE(source, filename=filename)
+        _SHARED_ROOTS[id(got)] = got
         return got
     _PARSE_STATS["bypass"] += 1
     return _ORIGINAL_PARSE(source, filename, mode, type_comments=type_comments, feature_version=feature_version)
 
 
+_ORIGINAL_WALK = ast.walk
+_SHARED_ROOTS: Dict[int, ast.Module] = {}     # id -> the memoised (shared, never-mutated) module tree
+
+
+def _routed_walk(node):
+    """ISA-0845 (18-Oct-2026): `ast.walk` of a SHARED memoised module tree is served from a per-tree node list.
+    Only trees the text memo handed out are eligible (the module CONTRACT: shared trees are never mutated); a
+    private tree (score_definition parses its own copies because it mutates them) or any subtree walks
+    normally. Returns an iterator, exactly like ast.walk."""
+    k = id(node)
+    if _SHARED_ROOTS.get(k) is node:
+        got = _WALK.get(k)
+        if got is None:
+            got = (node, list(_ORIGINAL_WALK(node)))
+            _WALK[k] = got
+        _PARSE_STATS["walk_hits"] = _PARSE_STATS.get("walk_hits", 0) + 1
+        return iter(got[1])
+    return _ORIGINAL_WALK(node)
+
+
 def route_ast_parse() -> dict:
-    """Route `ast.parse` through the text memo for THIS process (idempotent). Returns the routing stats."""
+    """Route `ast.parse` through the text memo for THIS process (idempotent), and `ast.walk` of the shared trees
+    it hands out through a per-tree node list. Returns the routing stats."""
     if os.environ.get("ISA_AST_CACHE", "1").strip() == "0":
         _PARSE_STATS.update(routed=False, why_not="ISA_AST_CACHE=0 (rollback)")
         return dict(_PARSE_STATS)
     ast.parse = _routed_parse
+    if os.environ.get("ISA_AST_WALK_CACHE", "1").strip() != "0":
+        ast.walk = _routed_walk
+        _PARSE_STATS.update(walk_routed=True)
     _PARSE_STATS.update(routed=True, why_not=None)
     return dict(_PARSE_STATS)
 
 
 def unroute_ast_parse() -> None:
     ast.parse = _ORIGINAL_PARSE
-    _PARSE_STATS.update(routed=False)
+    ast.walk = _ORIGINAL_WALK
+    _PARSE_STATS.update(routed=False, walk_routed=False)
 
 
 def parse_path(path: str) -> ast.Module:
@@ -181,7 +208,7 @@ def walk(node: ast.AST) -> List[ast.AST]:
     k = id(node)
     got = _WALK.get(k)
     if got is None:
-        got = (node, list(ast.walk(node)))
+        got = (node, list(_ORIGINAL_WALK(node)))
         _WALK[k] = got
     return got[1]
 
@@ -194,6 +221,7 @@ def clear() -> None:
     _TEXT.clear()
     _TREE_BY_TEXT.clear()
     _WALK.clear()
+    _SHARED_ROOTS.clear()
 
 
 def _selftest(verbose: bool = True) -> int:
@@ -248,8 +276,18 @@ def _selftest(verbose: bool = True) -> int:
             ok("ISA-0845 NEGATIVE CONTROL: a syntax error still raises through the routing", False)
         except SyntaxError:
             ok("ISA-0845 NEGATIVE CONTROL: a syntax error still raises through the routing", True)
+        # ISA-0845 (18-Oct-2026): ast.walk of a SHARED memoised tree is served from one node list; a private tree is not
+        _w1, _w2 = list(ast.walk(t1)), list(ast.walk(t1))
+        ok("ISA-0845: routed ast.walk of a shared tree = the real walk, same nodes in the same order",
+           _w1 == _w2 == list(_ORIGINAL_WALK(t1)) and stats()["parse_routing"].get("walk_hits", 0) >= 2)
+        _priv = _ORIGINAL_PARSE(_a)
+        _n0 = len(list(ast.walk(_priv)))
+        _priv.body.append(_ORIGINAL_PARSE("y = 3\n").body[0])
+        ok("ISA-0845 NEGATIVE CONTROL: a PRIVATE (mutable) tree is never memoised - its mutation is seen",
+           len(list(ast.walk(_priv))) > _n0)
         unroute_ast_parse()
         ok("ISA-0845: unroute restores the real parser", ast.parse is _ORIGINAL_PARSE)
+        ok("ISA-0845: unroute restores the real walk", ast.walk is _ORIGINAL_WALK)
         os.environ["ISA_AST_CACHE"] = "0"
         ok("ISA-0845 NEGATIVE CONTROL (rollback): ISA_AST_CACHE=0 leaves ast.parse untouched",
            route_ast_parse()["routed"] is False and ast.parse is _ORIGINAL_PARSE)

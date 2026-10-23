@@ -506,11 +506,55 @@ def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None,
             store = _srs.load()
             auth = auth or _sr.risk_share_authority(store, pf)
             weights = weights or auth["weights"]
-            mx = mx or _spf.matrix(store, sorted(weights))
+            # ⚑ ISA-0756: CLOCK-PINNED window equivalence - evaluated at the store's OWN latest observation
+            #   (+1 day), so the same store gives the same verdict on every date (R5.14).
+            import datetime as _dt756
+            _lasts = [max((_srs.record_of(store, t).get("observations") or {"0000-00-00": 0}))
+                      for t in sorted(weights) if weights.get(t)]
+            _pin = (_dt756.date.fromisoformat(max(_lasts)) + _dt756.timedelta(days=1)) if _lasts and max(_lasts) > "0000" else None
+            mx = mx or _spf.matrix(store, sorted(weights), as_of=_pin)
+            # production freshness: typed, separate, ERROR only when a run CONSUMED a stale store
+            _fr756 = _srs.freshness(store, sorted(t for t in weights if weights.get(t)), as_of=_dt756.date.today())
+            if _fr756["stale_input"]:
+                _rc756 = sorted(_MA.month_glob(root, "run_context_*.json"), key=os.path.getmtime)
+                _wsf = {}
+                try:
+                    _wsf = ((json.load(open(_rc756[-1], encoding="utf-8")).get("summary") or {})
+                            .get("weekly_store_freshness") or {}) if _rc756 else {}
+                except Exception:                                       # noqa: BLE001
+                    _wsf = {}
+                if _wsf.get("state") == "STALE_INPUT":
+                    errs.append("pair_risk_window_single_basis/ISA-0756: the newest run consumed a STALE_INPUT weekly "
+                                "store (held %s at %s) - capital was formed without a fresh risk input"
+                                % (", ".join(_wsf.get("held_stale_input") or []), _wsf.get("as_of")))
+                else:
+                    errs.append(warn("pair_risk_window_single_basis/ISA-0756: weekly store STALE_INPUT for held %s "
+                                     "(expected %s) - between runs, expected; the next pre-run's Step 5y refresh "
+                                     "restores it (production freshness, not a window defect)"
+                                     % (", ".join(_fr756["stale_input"]), _fr756["expected_latest_observation"])))
         except Exception as exc:                                        # noqa: BLE001
             return errs + [warn("pair_risk_window_single_basis/ISA-0680: the sleeve could not be measured "
                                 "(%s: %s) - nothing was compared" % (type(exc).__name__, exc))]
     aw = (auth.get("window") or {})
+    # ⚑ ISA-0756 (19-Oct-2026): this branch is now reached only when a caller passes its OWN matrix; the
+    #   default path (below the injected-input block) evaluates the matrix CLOCK-PINNED at the store's own
+    #   latest observation, so window equivalence is deterministic across dates, and freshness is a
+    #   separate typed STALE_INPUT finding (production freshness), never a window ERROR.
+    # ⚑ 18-Oct-2026 (fix-on-finding, P-A1): stock_price_fetch.matrix drops names the store marks STALE (no refresh
+    #   since the last pre-run) while sleeve_risk measures the joint window it has - so between pre-runs the pair
+    #   read "0 weeks vs 156" as a WINDOW defect, an R5.14 clock false-red (green on pre-run day, red ~2 weeks later).
+    #   A STALE sleeve name makes the two derivations NOT COMPARABLE: that is a named WARN until the next store
+    #   refresh, never agreement and never the window ERROR (which still fires when both see the same names).
+    try:
+        _cov680 = _srs.coverage(store if "store" in dir() else _srs.load(), sorted(weights))
+        _stale680 = sorted(t for t, v in (_cov680.get("names") or {}).items()
+                           if weights.get(t) and v.get("status") == "STALE")
+    except Exception:                                                   # noqa: BLE001
+        _stale680 = []
+    if _stale680 and int(mx.get("weeks_used_max") or 0) != int(aw.get("n_weeks") or 0):
+        return errs + [warn("pair_risk_window_single_basis/ISA-0680: weekly store STALE for held %s (last observation %s) "
+                            "- the matrix excludes stale names, so the two windows are NOT COMPARABLE until the next "
+                            "pre-run refresh (Step 5y); nothing was agreed" % (", ".join(_stale680), aw.get("last")))]
     if (aw.get("weeks_declared") not in (None, W)) or int(aw.get("n_weeks") or 0) != int(mx.get("weeks_used_max") or -1):
         errs.append("pair_risk_window_single_basis/ISA-0680: sleeve_risk window %s weeks (%s..%s, declared %s) vs "
                     "stock_price_fetch.matrix %s weeks - two covariance windows on one sleeve"
@@ -537,6 +581,154 @@ def pair_risk_window_single_basis(root=None, auth=None, mx=None, ce_window=None,
                          "is %.4f (sleeve_risk, sample cov) vs %.4f (matrix rho x sigma, n/(n-1)); a gap "
                          "above 1%% is published, never blended (R6.2)" % (n, s_sr, s_mx)))
     return errs
+
+
+@empty_semantics("C-A", corpus=("receipt",), population="capital decision receipt")
+def pair_offeree_never_selected(root=None, receipt=None):
+    """ISA-0817 (18-Oct-2026) — no Capital Decision Receipt SELECTS positive new capital for a name whose
+    `offer_period_offeree` HARD flag is active (Raj D1). A receipt that PRE-DATES the control (no
+    census.corporate_events) is a WARN naming that it was never checked - absence is not agreement (R2.10)."""
+    root = root or HERE
+    if receipt is None:
+        try:
+            import month_artefacts as _ma817
+            import re as _re817
+            _mon = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+                                                "oct", "nov", "dec"), 1)}
+
+            def _k(pth):
+                m = _re817.search(r"_([a-z]{3})_(\d{4})\.json$", os.path.basename(pth))
+                return (int(m.group(2)), _mon.get(m.group(1), 0)) if m else (0, 0)
+            ps = sorted(_ma817.month_glob(root, "capital_decision_receipt_*_20[0-9][0-9].json"), key=_k)
+            if not ps:
+                return [warn("pair_offeree_never_selected/ISA-0817: no capital decision receipt - nothing checked")]
+            receipt = json.load(open(ps[-1], encoding="utf-8"))
+        except Exception as exc:                                        # noqa: BLE001
+            return [warn("pair_offeree_never_selected/ISA-0817: receipt unreadable (%s) - UNKNOWN, never PASS" % exc)]
+    ce = ((receipt or {}).get("census") or {}).get("corporate_events")
+    if not ce or not ce.get("section_present"):
+        return [warn("pair_offeree_never_selected/ISA-0817: receipt %s pre-dates the offer-period control (no "
+                     "corporate_events section) - its selections were never checked for offer periods"
+                     % (receipt or {}).get("month"))]
+    doss = (receipt or {}).get("dossiers") or {}
+    bad = []
+    for a_ in (receipt or {}).get("selected_actions") or []:
+        t_ = a_.get("ticker")
+        if float(a_.get("gbp") or 0.0) <= 0:
+            continue
+        if "offer_period_offeree" in (((doss.get(t_) or {}).get("flags") or {}).get("hard") or []):
+            bad.append("%s GBP %.2f" % (t_, float(a_.get("gbp") or 0.0)))
+    if bad:
+        return ["pair_offeree_never_selected/ISA-0817: the receipt SELECTS new capital for offeree(s) in an offer "
+                "period with an ACTIVE hard flag: %s - the HARD_BLOCK failed" % ", ".join(bad)]
+    return []
+
+
+def pair_switch_sales_lawful(root=None, receipt=None):
+    """ISA-0621 (19-Oct-2026, LIVE by Raj) - a Capital Decision Receipt may SELL a held stock only through an ADOPTED
+    switch: authority LIVE, parity MATCH, every sold donor authority-eligible (resolved case, outside the 182-day
+    min-hold), and the sale-funded buys never exceeding the sales' net proceeds. A receipt that pre-dates the switch
+    contest is a WARN naming that its held capital was never contested (absence is not agreement, R2.10)."""
+    root = root or HERE
+    if receipt is None:
+        try:
+            import month_artefacts as _ma621
+            import re as _re621
+            _mon = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+                                                "oct", "nov", "dec"), 1)}
+
+            def _k(pth):
+                m = _re621.search(r"_([a-z]{3})_(\d{4})\.json$", os.path.basename(pth))
+                return (int(m.group(2)), _mon.get(m.group(1), 0)) if m else (0, 0)
+            ps = sorted(_ma621.month_glob(root, "capital_decision_receipt_*_20[0-9][0-9].json"), key=_k)
+            if not ps:
+                return [warn("pair_switch_sales_lawful/ISA-0621: no capital decision receipt - nothing checked")]
+            receipt = json.load(open(ps[-1], encoding="utf-8"))
+        except Exception as exc:                                        # noqa: BLE001
+            return [warn("pair_switch_sales_lawful/ISA-0621: receipt unreadable (%s) - UNKNOWN, never PASS" % exc)]
+    sc = (receipt or {}).get("switch_contest")
+    sales = (receipt or {}).get("selected_sales") or []
+    if not isinstance(sc, dict):
+        if sales:
+            return ["pair_switch_sales_lawful/ISA-0621: receipt %s SELLS %s with no switch_contest record"
+                    % ((receipt or {}).get("month"), [x.get("ticker") for x in sales])]
+        return [warn("pair_switch_sales_lawful/ISA-0621: receipt %s pre-dates the switch contest - its held capital was "
+                     "never contested" % (receipt or {}).get("month"))]
+    if not sales:
+        return []
+    errs = []
+    if sc.get("authority") != "LIVE" or (sc.get("adopted") or {}).get("state") != "ADOPTED":
+        errs.append("sales present but the switch was not ADOPTED under LIVE authority (%s / %s)"
+                    % (sc.get("authority"), (sc.get("adopted") or {}).get("state")))
+    if (sc.get("parity") or {}).get("state") != "MATCH":
+        errs.append("sales present but parity is %s" % (sc.get("parity") or {}).get("state"))
+    dn = sc.get("donors") or {}
+    bad = [x.get("ticker") for x in sales if not (dn.get(x.get("ticker")) or {}).get("authority_eligible")]
+    if bad:
+        errs.append("sold donor(s) %s are not authority-eligible (case unresolved or inside the min-hold)" % bad)
+    _pr = sum(float(x.get("proceeds_gbp") or 0.0) for x in sales)
+    _sf = sum(float(((a.get("funding") or {}).get("sale_proceeds_gbp")) or 0.0) for a in (receipt or {}).get("selected_actions") or [])
+    if _sf > _pr + 0.01:
+        errs.append("buys draw GBP %.2f of sale proceeds > the sales' net proceeds GBP %.2f" % (_sf, _pr))
+    return ["pair_switch_sales_lawful/ISA-0621: " + e for e in errs]
+
+
+@empty_semantics("C-A", corpus=("fas",), population="fund action stack artefact")
+def pair_fund_nav_fresh(root=None, fas=None):
+    """ISA-0869 (18-Oct-2026) - every fund the Fund Action Stack scores carries a TYPED NAV freshness, and
+    a fund typed FRESH really is: its newest NAV within fund_performance.NAV_FRESH_MAX_DAYS of the stack's
+    as_of. ERROR on a scored fund with no freshness record, an unknown state, or FRESH that is not fresh
+    (the 04-Aug frozen-cache class). A typed STALE_CACHE / SOURCE_FAILED is a WARN naming the fund and its
+    as_of. A stack that PRE-DATES the control (no nav_freshness) is a WARN: never checked is not fresh."""
+    root = root or HERE
+    if fas is None:
+        try:
+            import month_artefacts as _ma869
+            import re as _re869
+            _mon = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+                                                "oct", "nov", "dec"), 1)}
+
+            def _k(pth):
+                m = _re869.search(r"_([a-z]{3})_(\d{4})\.json$", os.path.basename(pth))
+                return (int(m.group(2)), _mon.get(m.group(1), 0)) if m else (0, 0)
+            ps = sorted(_ma869.month_glob(root, "fund_action_stack_*_20[0-9][0-9].json"), key=_k)
+            if not ps:
+                return [warn("pair_fund_nav_fresh/ISA-0869: no fund action stack - nothing checked")]
+            fas = json.load(open(ps[-1], encoding="utf-8"))
+        except Exception as exc:                                        # noqa: BLE001
+            return [warn("pair_fund_nav_fresh/ISA-0869: fund action stack unreadable (%s) - UNKNOWN, never PASS" % exc)]
+    nf = (fas or {}).get("nav_freshness")
+    if not nf:
+        return [warn("pair_fund_nav_fresh/ISA-0869: the fund action stack (as_of %s) pre-dates the NAV freshness "
+                     "control - its funds' NAV dates were never checked" % (fas or {}).get("as_of"))]
+    try:
+        import fund_performance as _fp869
+        states, max_days = set(_fp869.NAV_STATES), _fp869.NAV_FRESH_MAX_DAYS
+    except Exception:                                                   # noqa: BLE001
+        states, max_days = {"FRESH", "STALE_CACHE", "SOURCE_FAILED", "SOURCE_DISAGREES", "MANUAL_SERIES", "NO_SERIES"}, 10
+    funds = nf.get("funds") or {}
+    errs, stale = [], []
+    for r in (fas or {}).get("fund_retention_score") or []:
+        sd = r.get("sedol")
+        if sd and sd not in funds:
+            errs.append("pair_fund_nav_fresh/ISA-0869: fund %s (%s) is scored with NO NAV freshness record - "
+                        "a silent NAV date" % (sd, r.get("name")))
+    for sd, v in sorted(funds.items()):
+        st = (v or {}).get("state")
+        if st not in states:
+            errs.append("pair_fund_nav_fresh/ISA-0869: fund %s NAV state %r is not a declared state %s"
+                        % (sd, st, sorted(states)))
+        elif st == "FRESH" and ((v.get("age_days") is None) or v["age_days"] > max_days):
+            errs.append("pair_fund_nav_fresh/ISA-0869: fund %s (%s) is typed FRESH but its newest NAV %s is %s days "
+                        "before the stack's as_of (bar %d) - the frozen-cache class" % (sd, v.get("name"), v.get("newest"),
+                                                                                       v.get("age_days"), max_days))
+        elif st != "FRESH":
+            stale.append("%s %s(%s)" % (sd, st, v.get("newest")))
+    if errs:
+        return errs
+    if stale:
+        return [warn("pair_fund_nav_fresh/ISA-0869: %d fund(s) not FRESH, typed and named: %s" % (len(stale), ", ".join(stale)))]
+    return []
 
 
 @empty_semantics("C-A", corpus=("step9_pre",), population="step9_pre artefact")
@@ -676,7 +868,16 @@ def pair_one_risk_share_authority(root=None, ctx=None):
     if doc is None:
         import glob as _glob
         import month_artefacts as _MA                  # ISA-0832; basename order as before
-        paths = sorted(_MA.month_glob(root, "run_context_*.json"), key=os.path.basename, reverse=True)
+        # ⚑ 19-Oct-2026 (P-B2 fix-on-finding): ordered by the MONTH in the name, newest first. A reverse
+        #   BASENAME sort ranks 'sep' after 'oct' alphabetically, so this read September while October existed.
+        import datetime as _dt0708
+
+        def _mkey(p):
+            try:
+                return _dt0708.datetime.strptime(os.path.basename(p)[len("run_context_"):][:8], "%b_%Y")
+            except ValueError:
+                return _dt0708.datetime.min
+        paths = sorted(_MA.month_glob(root, "run_context_*.json"), key=_mkey, reverse=True)
         paths = [p for p in paths if "DRYRUN" not in os.path.basename(p)]
         if not paths:
             return [warn("pair_one_risk_share_authority/ISA-0708: no run_context_*.json on "
@@ -688,7 +889,10 @@ def pair_one_risk_share_authority(root=None, ctx=None):
         except Exception as exc:                                        # noqa: BLE001
             return ["pair_one_risk_share_authority: %s unreadable (%s)"
                     % (os.path.basename(paths[0]), exc)]
-    v21 = ((doc.get("summary") or {}).get("v2_1") or (doc.get("v2_1") or {}))
+    # ⚑ 19-Oct-2026 (P-B2 fix-on-finding): the pre-run writes summary["v21"]; this read only "v2_1", so the
+    #   review-flag block was NEVER read and the pair WARNed permanently (a contract-key mismatch).
+    _sm0708 = (doc.get("summary") or {})
+    v21 = (_sm0708.get("v21") or _sm0708.get("v2_1") or doc.get("v21") or doc.get("v2_1") or {})
     rc = (v21.get("risk_contribution") or {})
     if not rc:
         return [warn("pair_one_risk_share_authority/ISA-0708: the run artefact carries no "
@@ -1794,6 +1998,9 @@ PRERUN_REQUIRED_PRECEDENCE = (
     ("5x", "5y", "symbol map refreshed before the price fetch resolves through it (ISA-0577/0725)"),
     ("5x", "5x-ie", "instrument eligibility types every VERIFIED symbol, including names the map just admitted (ISA-0860)"),
     ("5x-ie", "8", "the eligibility cache is current before step9_pre stamps the broker verdict (ISA-0860)"),
+    ("5x-ie", "5x-ce", "corporate events join UK offerees by the FIGI that 5x-ie records (ISA-0817)"),
+    ("5x-ce", "8", "the corporate-events store is current before step9_pre carries its section (ISA-0817)"),
+    ("6.04", "6.05", "fund NAVs refreshed and typed before the fund action stack reads them (ISA-0869)"),
     ("5y", "6.12", "weekly return store refreshed before the V2.1 risk stack (ISA-0708)"),
     ("5y", "6.10", "weekly return store refreshed before the router sizes capital (ISA-0754)"),
     ("8", "6.10", "step9_pre (current_admissibility) produced before the router consumes it (ISA-0616)"),
@@ -4440,6 +4647,20 @@ def pair_lookthrough_xray_reconciliation():
     # still errors.
     _per_fund = (fev.get("per_fund") or {})
     _stale_after = fev.get("stale_after_days")
+    # ⚑ ISA-0569 (P-B8, 19-Oct-2026): ages at the BOOK's date (they were frozen at the vectors' build - a vector
+    #   built on 24-Sep read '177 days' for ever), the life DERIVED from this very tolerance and the measured drift
+    #   (fund_exposure_vectors.freshness), and only a NEGLECTED or UNCHECKED vector is a breach - a SOURCE_LAG
+    #   vector (its source has published nothing newer) cannot be cured by re-capture and is stated, not errored.
+    _fr569 = None
+    try:
+        import fund_exposure_vectors as _F569
+        import datetime as _dt569
+        _bd569 = _dt569.datetime.strptime(str((port.get("_meta") or {}).get("data_date")), "%d-%b-%Y").date().isoformat()
+        _fr569 = _F569.freshness(fev, {sd: val.get(sd, 0.0) / eq for sd in (fev.get("vectors") or {})},
+                                 XR1_MAX_TOL_PP, _bd569)
+        _stale_after = _fr569["life"]["life_days"]
+    except Exception:                                                   # noqa: BLE001
+        _fr569 = None
 
     def _attribute(country):
         """The funds carrying this country, largest contribution first, with vector age."""
@@ -4450,14 +4671,17 @@ def pair_lookthrough_xray_reconciliation():
                 continue
             w = val.get(sd, 0.0) / eq
             meta = _per_fund.get(sd) or {}
-            out.append((round(w * f * 100.0, 3), sd, meta.get("as_of"), meta.get("age_days")))
+            _age = (((_fr569 or {}).get("per_fund") or {}).get(sd) or {}).get("age_days", meta.get("age_days"))
+            out.append((round(w * f * 100.0, 3), sd, meta.get("as_of"), _age))
         return sorted(out, reverse=True)
 
     def _beyond_declared_life(country):
         if not isinstance(_stale_after, (int, float)):
             return []
+        _pf569 = (_fr569 or {}).get("per_fund") or {}
         return [(sd, age) for _pp, sd, _as_of, age in _attribute(country)
-                if isinstance(age, (int, float)) and age > _stale_after]
+                if isinstance(age, (int, float)) and age > _stale_after
+                and (_pf569.get(sd) or {}).get("grade") != "SOURCE_LAG"]
 
     def _residual_line(country, gap):
         top = _attribute(country)[:3]
@@ -4468,9 +4692,9 @@ def pair_lookthrough_xray_reconciliation():
         return ("A18/XR1: the per-fund SPLIT does not reproduce the X-Ray's authoritative %s "
                 "level: X-Ray %.2f%% vs %.2f%% attributed, a residual of %.2fpp against a "
                 "%.1fpp tolerance. The X-Ray is the AUTHORITY for the level and is unaffected; "
-                "what is short is the ATTRIBUTION. Carried by: %s. Remedy: re-capture those "
-                "vectors (assisted step — the pre-run has no network for the aggregator pages, "
-                "ISA-0392). ⚑ While the split is short, fund_exposure_vectors' MAGNITUDE "
+                "what is short is the ATTRIBUTION. Carried by: %s. Remedy: Step 6.10v re-checks "
+                "every source each run and takes a newer table automatically; a vector whose source "
+                "has published nothing newer (SOURCE_LAG) cannot be cured by re-capture (ISA-0569). ⚑ While the split is short, fund_exposure_vectors' MAGNITUDE "
                 "admissibility is withdrawn by its own 'withdrawn_if XR1 fails' contract, so "
                 "w_k is an ORDERING input and not a magnitude until this reconciles."
                 % (country, (agg.get(country, 0.0) + gap) if False else
@@ -4494,13 +4718,13 @@ def pair_lookthrough_xray_reconciliation():
                                  % (", ".join(sd for sd, _a in _over), _stale_after,
                                     ", ".join("%s %sd" % (sd, a) for sd, a in _over))))
         else:
-            errs.append(warn(_line + (" ⚑ WARN-grade: every contributing vector is INSIDE the "
-                                      "declared %s-day life, so this is drift within the "
-                                      "framework's own freshness rule, not a breach of it. "
-                                      "⚑ Those two declarations were never reconciled with each "
-                                      "other — a %s-day life and a %.1fpp tolerance are the "
-                                      "same quantity from two ends (ISA-0559)."
-                                      % (_stale_after, _stale_after, XR1_MAX_TOL_PP))))
+            errs.append(warn(_line + (" ⚑ WARN-grade: no contributing vector is beyond its %s-day life "
+                                      "DERIVED from this %.1fpp tolerance and the measured drift, "
+                                      "except where its source has published nothing newer (SOURCE_LAG) - "
+                                      "drift within the framework's own freshness rule, not a breach "
+                                      "(ISA-0569: the life is derived from the tolerance, no longer "
+                                      "declared beside it). %s"
+                                      % (_stale_after, XR1_MAX_TOL_PP, (_fr569 or {}).get("line", "")))))
     if ma.get("granted") and not (ma.get("contract") and ma.get("withdrawn_if")):
         errs.append(
             "A18/XR1: fund_exposure_vectors.json GRANTS magnitude admissibility without naming the "
@@ -5438,6 +5662,64 @@ def _summary_decls(prefill_text):
                 return None, ("%s is not a literal — the disposition must be readable without "
                               "executing email_prefill" % n.targets[0].id)
     return found, None
+
+
+def pair_lean_carries_every_warning(root=None):
+    """ISA-0642 B10-R05 (1): the NEWEST lean email report must prove set(warnings in full) is a subset
+    of set(warnings in lean). A report from before the control (no `warnings_coverage`) is reported as
+    a WARN, never passed silently; no lean report at all is not a finding (lean not used)."""
+    import glob as _g
+    root = root or HERE
+    reps = sorted(_g.glob(os.path.join(root, "email_body_*_lean_report.json")), key=os.path.getmtime)
+    if not reps:
+        return []
+    try:
+        d = json.load(open(reps[-1], encoding="utf-8"))
+    except Exception as e:                                               # noqa: BLE001
+        return ["ISA-0642: %s unreadable (%s) - lean warning coverage UNKNOWN" % (os.path.basename(reps[-1]), e)]
+    wc = d.get("warnings_coverage")
+    if wc is None:
+        return [warn("ISA-0642: %s predates the lean warning-coverage control - coverage NOT PROVEN for that send"
+                     % os.path.basename(reps[-1]))]
+    if not wc.get("ok"):
+        return ["ISA-0642: %s - %d warning row(s) of the full report are absent from the lean copy: %s"
+                % (os.path.basename(reps[-1]), len(wc.get("missing") or []), [m[:80] for m in (wc.get("missing") or [])[:3]])]
+    return []
+
+
+def pair_exposure_verdicts_honest(summary=None):
+    """B08-R02 (P-B6, 19-Oct-2026): in the NEWEST run_context, a factor verdict of OK must hold at the
+    UPPER bound (a floor under the cap never establishes the book is under it), the email line must not
+    say OK otherwise, and every whole-ISA exposure row must conserve the book. A run_context from before
+    P-B6 (no `verdict`) is a WARN, never a pass."""
+    if summary is None:
+        import month_artefacts as _ma
+        rcs = [p for p in _ma.month_glob(HERE, "run_context_*_20[0-9][0-9].json") if "DRYRUN" not in p]
+        if not rcs:
+            return []
+        try:
+            summary = (json.load(open(max(rcs, key=os.path.getmtime), encoding="utf-8")).get("summary") or {})
+        except Exception as e:                                           # noqa: BLE001
+            return ["B08-R02: newest run_context unreadable (%s)" % e]
+    out = []
+    fl = summary.get("factor_lookthrough") or {}
+    if fl and fl.get("verdict") is None:
+        out.append(warn("B08-R02: the newest run_context predates the factor bound - its AI-complex 'OK' is a floor, NOT PROVEN"))
+    elif fl:
+        cap, hi, v = fl.get("cap_pct"), fl.get("upper_bound_pct"), fl.get("verdict")
+        if v == "OK" and (hi is None or cap is None or hi > cap):
+            out.append("B08-R02: factor verdict OK but the upper bound %s%% is not within the %s%% cap" % (hi, cap))
+        if v != "OK" and "OK even at the upper bound" in str(fl.get("email_line")):
+            out.append("B08-R02: factor email line claims OK while the verdict is %s" % v)
+        if (fl.get("unclassified") or []) and v == "OK" and hi is None:
+            out.append("B08-R02: unclassified names %s with no upper bound and verdict OK" % fl.get("unclassified"))
+    ec = summary.get("exposure_coverage")
+    if ec and not ec.get("conservation_ok", False):
+        out.append("B08-R01: an exposure-coverage row does not conserve the book: %s"
+                   % [r.get("dimension") for r in (ec.get("rows") or [])
+                      if abs((r.get("expected_gbp") or 0) - (r.get("covered_gbp") or 0) - (r.get("unclassified_gbp") or 0)
+                             - (r.get("unvalued_gbp") or 0)) >= 1.0])
+    return out
 
 
 def pair_summary_key_disposition(prerun_text=None, prefill_text=None, items=None, renderer_text=None):
@@ -7004,7 +7286,7 @@ def suite_status_state(root=None, *, now=None, status=None, census=None, live=No
 
 
 def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
-                        budget_s=None) -> dict:
+                        budget_s=None, deadline_ts=None, expected_secs=None) -> dict:
     """Run the suites and record the result, bound to the SOURCE it ran against.
 
     ⚑ ISA-0683 (16-Sep-2026). Four changes, each closing a way this record could be green while
@@ -7039,11 +7321,23 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
             prior = {}
     rows = dict(prior)
     t0 = _time.time()
+    _ran = 0
     for m in want:
         if merge and m in prior and prior[m].get("state") != "TIMEOUT":
             continue                    # a TIMEOUT is not a verdict, so a later chunk retries it
         if budget_s is not None and _time.time() - t0 > budget_s:
             break
+        # ⚑ ISA-0845 (18-Oct-2026): DEADLINE-AWARE scheduling inside one host call. A suite whose last measured
+        #   duration does not fit before the call deadline is NOT started (the next chunk starts it first) - starting it
+        #   would either be killed with the call, losing every row of the chunk, or TIMEOUT-loop for ever (measured
+        #   18-Oct: test_isa0450_integrity_capital 120-141 s vs the old 120 s per-suite timeout).
+        _to = timeout_s
+        if deadline_ts is not None:
+            _left = deadline_ts - _time.time()
+            _exp = float((expected_secs or {}).get(m) or 0.0)
+            if _ran and _exp * 1.1 + 2.0 > _left:
+                break
+            _to = int(max(10, min(timeout_s, _left - 4)))
         r = by_mod.get(m)
         if r is None:
             rows[m] = {"module": m, "rc": None, "state": "ABSENT",
@@ -7058,7 +7352,8 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
         if r.get("kind") != "script" and not r.get("fn"):
             rows[m] = {"module": m, "rc": None, "state": "RAISED", "why": r.get("parse_error")}
             continue
-        rows[m] = _run_one_suite(r, root, timeout_s)
+        rows[m] = _run_one_suite(r, root, _to)
+        _ran += 1
     for core in BATTERY_SELFTEST_MODULES:
         if core not in by_mod and core not in rows:
             rows[core] = {"module": core, "rc": None, "state": "ABSENT",
@@ -7326,6 +7621,9 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_binary_fields_have_separate_consumers", pair_binary_fields_have_separate_consumers())  # ISA-0688
     errs += _tally("pair_membership_gates_first_claims", pair_membership_gates_first_claims())  # ISA-0685
     errs += _tally("pair_broker_dealable_destinations", pair_broker_dealable_destinations())  # ISA-0607
+    errs += _tally("pair_offeree_never_selected", pair_offeree_never_selected())  # ISA-0817
+    errs += _tally("pair_switch_sales_lawful", pair_switch_sales_lawful())  # ISA-0621
+    errs += _tally("pair_fund_nav_fresh", pair_fund_nav_fresh())  # ISA-0869
     errs += _tally("pair_risk_window_single_basis", pair_risk_window_single_basis())      # ISA-0680
     errs += _tally("pair_stock_sleeve_policy_single_home", pair_stock_sleeve_policy_single_home())  # ISA-0805/0807
     errs += _tally("pair_checkpoint_d_population", pair_checkpoint_d_population())  # ISA-0608
@@ -7382,6 +7680,8 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
         errs += _tally("pair_v21_modules_executed", pair_v21_modules_executed())                # A11 / ISA-0354
         errs += _tally("pair_v21_summary_has_renderer", pair_v21_summary_has_renderer())            # ISA-0439
         errs += _tally("pair_summary_key_disposition", pair_summary_key_disposition())             # ISA-0447 (26-Aug-2026)
+        errs += _tally("pair_lean_carries_every_warning", pair_lean_carries_every_warning())       # ISA-0642 (19-Oct-2026)
+        errs += _tally("pair_exposure_verdicts_honest", pair_exposure_verdicts_honest())           # B08-R02 P-B6 (19-Oct-2026)
         errs += _tally("pair_single_sizing_authority", pair_single_sizing_authority())             # ISA-0442 (26-Aug-2026)
     except Exception as _e:                                    # noqa: BLE001
         errs.append(f"ISA-0354: the V2.1-A checks could NOT run ({type(_e).__name__}: {_e}). "
@@ -8650,6 +8950,18 @@ def _suite_census_controls():
     assert cen["s_rc_green"]["convention"] == "RC_FAILURES" and \
         cen["s_count_green"]["convention"] == "RAISE_ON_FAIL", \
         "ISA-0683: the failure convention is derived from the AST (a `fails` return vs a count)"
+    # ISA-0845 (18-Oct-2026): deadline-aware scheduling - with the call deadline already near and every suite
+    #   expected to take 50 s, exactly ONE suite starts (the first is always started) and the rest wait for the
+    #   next chunk; nothing is lost and nothing is recorded TIMEOUT.
+    import time as _t845
+    _d845 = record_suite_status(root=td, timeout_s=60, deadline_ts=_t845.time() + 20,
+                                expected_secs={m: 50.0 for m in cen})
+    _ran845 = [r for r in _d845["rows"] if r.get("rc") is not None or r.get("state") not in ("ABSENT",)]
+    assert len([r for r in _d845["rows"] if r["module"] in cen]) == 1 and \
+        not any(r["state"] == "TIMEOUT" for r in _d845["rows"]), \
+        "ISA-0845 MUST-FIRE: a suite that cannot finish before the call deadline is not started - got %s" % \
+        [(r["module"], r["state"]) for r in _d845["rows"]]
+    os.remove(os.path.join(td, SUITE_STATUS_REL)) if os.path.exists(os.path.join(td, SUITE_STATUS_REL)) else None
     doc = record_suite_status(root=td, timeout_s=60)
     st = {r["module"]: r["state"] for r in doc["rows"]}
     assert st["s_rc_green"] == "GREEN" and st["s_count_green"] == "GREEN", \
@@ -8795,6 +9107,48 @@ def _suite_census_controls():
     _s9_post = {"_meta": {"month_label": "fx", "broker_dealability": {"state": "OK"}},
                 "deployable_stack": [{"ticker": "HALO"}]}
     _plan_ok = {"sleeve_split": {"allocation": {"rows": [{"ticker": "HALO", "allocated_gbp": 500.0}]}}}
+    # ISA-0817 pair: must-fire / negative control / pre-control WARN
+    _r817 = {"month": "fx", "census": {"corporate_events": {"section_present": True}},
+             "selected_actions": [{"ticker": "SPI.L", "gbp": 5613.69}],
+             "dossiers": {"SPI.L": {"flags": {"hard": ["offer_period_offeree"]}}}}
+    assert pair_offeree_never_selected(receipt=_r817) and "SPI.L" in pair_offeree_never_selected(receipt=_r817)[0], \
+        "ISA-0817 MUST-FIRE: a selected offeree with an active hard flag must ERROR"
+    _r817b = dict(_r817, dossiers={"SPI.L": {"flags": {"hard": []}}})
+    assert pair_offeree_never_selected(receipt=_r817b) == [], "ISA-0817 NEGATIVE CONTROL: no active flag -> clean"
+    _o817 = pair_offeree_never_selected(receipt={"month": "oct_2026", "census": {}, "selected_actions": []})
+    assert _o817 and isinstance(_o817[0], dict) and _o817[0].get("severity") == WARN, \
+        "ISA-0817: a pre-control receipt is a WARN, never a silent pass"
+    # ISA-0621 pair: must-fire / negative control / pre-contest WARN
+    _sw_ok = {"month": "fx", "switch_contest": {"authority": "LIVE", "adopted": {"state": "ADOPTED"}, "parity": {"state": "MATCH"},
+                                                 "donors": {"MU": {"authority_eligible": True}}},
+              "selected_sales": [{"ticker": "MU", "proceeds_gbp": 5600.0}],
+              "selected_actions": [{"ticker": "FN", "funding": {"sale_proceeds_gbp": 5600.0}}]}
+    assert pair_switch_sales_lawful(receipt=_sw_ok) == [], "ISA-0621 NEGATIVE CONTROL: a lawful adopted switch is clean"
+    _sw_bad = json.loads(json.dumps(_sw_ok)); _sw_bad["switch_contest"]["donors"]["MU"]["authority_eligible"] = False
+    assert pair_switch_sales_lawful(receipt=_sw_bad), "ISA-0621 MUST-FIRE: a sale of a not-authority-eligible donor ERRORS"
+    _sw_bad2 = json.loads(json.dumps(_sw_ok)); _sw_bad2["switch_contest"]["authority"] = "SHADOW"
+    assert pair_switch_sales_lawful(receipt=_sw_bad2), "ISA-0621 MUST-FIRE: a sale under SHADOW authority ERRORS"
+    _sw_old = pair_switch_sales_lawful(receipt={"month": "oct_2026", "selected_actions": []})
+    assert _sw_old and isinstance(_sw_old[0], dict) and _sw_old[0].get("severity") == WARN, \
+        "ISA-0621: a pre-contest receipt is a WARN, never a silent pass"
+    # ISA-0869: fund NAV freshness pair
+    _f869 = {"as_of": "2026-10-31", "fund_retention_score": [{"sedol": "A", "name": "Fund A"}, {"sedol": "B", "name": "Fund B"}],
+             "nav_freshness": {"funds": {"A": {"state": "FRESH", "newest": "2026-08-04", "age_days": 88, "name": "Fund A"},
+                                         "B": {"state": "FRESH", "newest": "2026-10-30", "age_days": 1, "name": "Fund B"}}}}
+    _r869 = pair_fund_nav_fresh(fas=_f869)
+    assert _r869 and isinstance(_r869[0], str) and "frozen-cache" in _r869[0], \
+        "ISA-0869 MUST-FIRE: a fund typed FRESH on an 88-day-old NAV is an ERROR: %r" % _r869
+    _f869["nav_freshness"]["funds"]["A"] = {"state": "STALE_CACHE", "newest": "2026-08-04", "age_days": 88, "name": "Fund A"}
+    _w869 = pair_fund_nav_fresh(fas=_f869)
+    assert len(_w869) == 1 and isinstance(_w869[0], dict) and _w869[0].get("severity") == WARN and "A STALE_CACHE(2026-08-04)" in _w869[0]["message"], \
+        "ISA-0869: a typed STALE_CACHE fund is a named WARN: %r" % _w869
+    _f869["nav_freshness"]["funds"]["A"] = {"state": "FRESH", "newest": "2026-10-29", "age_days": 2, "name": "Fund A"}
+    assert pair_fund_nav_fresh(fas=_f869) == [], "ISA-0869 NEGATIVE CONTROL: all fresh -> clean"
+    del _f869["nav_freshness"]["funds"]["B"]
+    _m869 = pair_fund_nav_fresh(fas=_f869)
+    assert _m869 and isinstance(_m869[0], str) and "NO NAV freshness record" in _m869[0], "ISA-0869 MUST-FIRE: a scored fund without a record: %r" % _m869
+    _p869 = pair_fund_nav_fresh(fas={"as_of": "2026-10-02", "fund_retention_score": []})
+    assert _p869 and isinstance(_p869[0], dict) and "pre-dates" in _p869[0]["message"], "ISA-0869 pre-control WARN: %r" % _p869
     assert pair_broker_dealable_destinations(step9_pre=_s9_post, plan=_plan_ok, resolver=_rs_t) == [], \
         "ISA-0607 NEGATIVE CONTROL: a dealable ranked stack and plan must be clean"
     _plan_bad = {"sleeve_split": {"allocation": {"rows": [{"ticker": "ZAB.WA", "allocated_gbp": 6578.53}]}}}

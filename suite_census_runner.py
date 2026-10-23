@@ -335,12 +335,31 @@ def _needs_prepare(live: str, sandbox: str) -> bool:
     return age_h > PREPARE_MAX_AGE_H
 
 
+CALL_CEILING_S = 172.0     # ISA-0845: the usable part of the 180 s host call; a chunk never starts work past it
+import time as _time_imp
+_IMPORTED_AT = _time_imp.time()   # ~ the host call's start for every caller (CLI, pre-run, scheduled step)
+
+
+def _expected_secs(live: str) -> dict:
+    """ISA-0845: each suite's last measured duration (LIVE suite_status, any roll) - a scheduling estimate only."""
+    try:
+        doc = _read(os.path.join(live, "Dashboard", "state", "suite_status.json")) or {}
+        return {r.get("module"): float(r.get("secs") or 0.0) for r in doc.get("rows") or [] if r.get("module")}
+    except Exception:                                                   # noqa: BLE001
+        return {}
+
+
 def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150.0,
-         kind: str = "manual", timeout_s: int = 120) -> dict:
-    """One budgeted chunk. Prepares when needed, runs suites, publishes when the census is complete."""
+         kind: str = "manual", timeout_s: int = 168, call_started=None) -> dict:
+    """One budgeted chunk. Prepares when needed, runs suites, publishes when the census is complete.
+    ⚑ ISA-0845 (18-Oct-2026): per-suite timeout 120 -> 168 s (two suites measure 109-157 s on the device host) and a
+    CALL DEADLINE (call start + CALL_CEILING_S): a suite whose last measured duration would not finish inside the call
+    is left for the next chunk, which starts it first."""
+    import time as _t845
     import consistency_check as cc
     import isa_write_guard as wg
     live = os.path.realpath(live)
+    _deadline = (call_started if call_started is not None else _IMPORTED_AT) + CALL_CEILING_S
     t0 = _now()
     if _needs_prepare(live, sandbox):
         p = prepare(live, sandbox)
@@ -367,7 +386,8 @@ def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150
                    [sandbox, os.path.realpath(sandbox), __import__("tempfile").gettempdir()])
     try:
         doc = cc.record_suite_status(root=tree, merge=True, budget_s=max(budget_s - spent, 1.0),
-                                     timeout_s=timeout_s)
+                                     timeout_s=timeout_s, deadline_ts=_deadline,
+                                     expected_secs=_expected_secs(live))
     finally:
         blocked = wg.manifest().get("n_blocked", 0) if wg._STATE.get("installed") else 0
         if not outer:

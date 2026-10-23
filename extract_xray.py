@@ -185,9 +185,13 @@ def parse_country_exposure(text: str) -> list:
     """
     countries = []
     # Lines like: "United States 40.03 65.85" (two side-by-side columns in PDF text)
+    # P-B6 (19-Oct-2026, B08-R01 fix-on-finding): a country row is NAME + TWO numbers. The asset-allocation
+    # row "Other 8.24 0.00 8.24" shares the PDF line with the country table and was ingested as a country
+    # called 'Other' (8.24% of equity on the 02-Oct X-Ray). A third number after the pair marks an
+    # asset row, so the match must end the number and must not be followed by another number.
     pattern = re.compile(
         r"([A-Z][A-Za-z]+(?:\s[A-Za-z][A-Za-z]+){0,3})"
-        r"\s+([\d.]+)\s+([\d.]+)"
+        r"\s+([\d.]+)\s+([\d.]+)(?![\d.])(?!\s+-?\d)"
     )
     for m in pattern.finditer(text):
         name = m.group(1).strip()
@@ -1101,6 +1105,12 @@ def _selftest() -> int:
        xray_identity_verdict({"account_ids": ["ACB8G2I"], "report_date": "unknown"}, pm)["period"] == "UNVERIFIED")
     ok("ISA-0830: header date formats parse ('2 Oct 2026', '02-Oct-2026', 'October 2 2026')",
        _parse_any_date("2 Oct 2026") == _parse_any_date("02-Oct-2026") == _parse_any_date("October 2 2026") is not None)
+    _rows = parse_country_exposure("Stocks 86.21 0.57 85.64 United States 42.68 67.58 Republic of Korea 3.27 1.06\n"
+                                   "Other 8.24 0.00 8.24 China 5.25 0.93 Germany 2.01 2.19\n")
+    ok("P-B6 MUST-FIRE: the asset row 'Other 8.24 0.00 8.24' is NOT a country row (02-Oct-2026 X-Ray layout)",
+       [r["country"] for r in _rows] == ["United States", "Republic of Korea", "China", "Germany"])
+    ok("P-B6 NEGATIVE CONTROL: a genuine two-number 'Other' country row is still read",
+       [r["country"] for r in parse_country_exposure("Other 3.10 2.05\nGermany 1.0 2.0\n")] == ["Other", "Germany"])
     print("extract_xray selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

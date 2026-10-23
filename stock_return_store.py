@@ -215,6 +215,66 @@ def week_key(d: datetime.date) -> str:
     return friday_of(d).isoformat()
 
 
+def last_settled_friday(as_of: datetime.date) -> datetime.date:
+    """The most recent Friday whose weekly close is FINAL (a Friday is not settled while it is still
+    Friday). ONE HOME (ISA-0756, 19-Oct-2026): stock_price_fetch.last_settled_friday delegates here."""
+    back = (as_of.weekday() - 4) % 7                   # 4 = Friday
+    if back == 0:
+        back = 7
+    return as_of - datetime.timedelta(days=back)
+
+
+def _as_date(v) -> datetime.date:
+    if isinstance(v, datetime.datetime):
+        return v.date()
+    if isinstance(v, datetime.date):
+        return v
+    return datetime.date.fromisoformat(str(v)[:10])
+
+
+FRESHNESS_STATES = ("FRESH", "LAGGING", "STALE_INPUT", "UNMEASURED")
+
+
+def freshness(doc: dict, tickers: Optional[List[str]] = None, *, as_of) -> dict:
+    """⚑ ISA-0756 (B05-R04), 19-Oct-2026 — THE ONE freshness contract for the weekly store.
+
+    CLOCK-INJECTED: `as_of` is REQUIRED (no bare date.today()), so the same store and the same clock
+    always give the same answer - certification cannot turn red by calendar alone. Per name:
+    latest_observation, expected_latest_observation = last_settled_friday(as_of),
+    missed_expected_observations (settled Fridays after the latest observation), last_fetched_on,
+    state FRESH (0 missed) | LAGGING (1..STALE_WEEKS-1) | STALE_INPUT (>= STALE_WEEKS) | UNMEASURED.
+
+    ⚑ NO NEW NUMBER. STALE_WEEKS (2) is the existing constant, now counted in MISSED SETTLED FRIDAYS
+    instead of calendar days/7. For a Friday-dated last observation the two agree day for day (a
+    02-Oct close: calendar STALE from Sat 17-Oct when 15 days > 14; missed-Friday STALE from Sat
+    17-Oct when the 09-Oct and 16-Oct closes are both settled and absent); they differ only for a
+    non-Friday last observation (a holiday-shortened week), where the Friday count is the correct
+    measure of what is missing."""
+    if as_of is None:
+        raise ValueError("freshness() is clock-injected: as_of is required (ISA-0756)")
+    a = _as_date(as_of)
+    exp = last_settled_friday(a)
+    tickers = tickers if tickers is not None else sorted((doc or {}).get("names") or {})
+    out, counts = {}, {k: 0 for k in FRESHNESS_STATES}
+    for t in tickers:
+        rec = record_of(doc, t)
+        obs = rec.get("observations") or {}
+        last = max(obs) if obs else None
+        if not last:
+            st, missed = "UNMEASURED", None
+        else:
+            missed = max(0, (exp - _as_date(last)).days // 7)
+            st = "FRESH" if missed == 0 else ("STALE_INPUT" if missed >= STALE_WEEKS else "LAGGING")
+        counts[st] += 1
+        out[t] = {"latest_observation": last, "missed_expected_observations": missed,
+                  "last_fetched_on": rec.get("last_fetched_on"), "state": st}
+    return {"as_of": a.isoformat(), "expected_latest_observation": exp.isoformat(),
+            "stale_after_missed": STALE_WEEKS, "names": out, "counts": counts,
+            "stale_input": sorted(t for t, v in out.items() if v["state"] == "STALE_INPUT"),
+            "basis": ("missed settled Fridays since the latest observation, at the injected clock "
+                      "(ISA-0756); STALE_INPUT at >= %d" % STALE_WEEKS)}
+
+
 # ────────────────────────────────────────────────────────────────── store I/O
 def _empty() -> dict:
     return {"_what": "Weekly Friday-to-Friday GBP total-return store for the direct-stock "
@@ -357,7 +417,7 @@ def weekly_returns(doc: dict, ticker: str) -> Tuple[Dict[str, float], dict]:
 
 
 def coverage(doc: dict, tickers: Optional[List[str]] = None,
-             refusals: Optional[dict] = None) -> dict:
+             refusals: Optional[dict] = None, as_of=None) -> dict:
     """Per-name measurement status. Published EVERY run so a name crossing 52 weeks is an
     observed event, never inferred from a position size that changed."""
     _fi_mark("stock_return_store", "coverage")
@@ -383,7 +443,10 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
     # adverse 0.70, but they are different facts with different fixes — one needs a declared
     # symbol, the other needs time — and R2.10 forbids them producing the same output.
     refusals = refusals or {}
-    today = datetime.date.today()
+    # ⚑ ISA-0756: the clock is INJECTED where a caller has one (the pre-run's run date, a pinned
+    #   consistency check); the wall clock is only the default for display callers.
+    today = _as_date(as_of) if as_of is not None else datetime.date.today()
+    _fresh = freshness(doc, tickers, as_of=today)["names"]
     out, measured = {}, 0
     for t in tickers:
         rets, meta = weekly_returns(doc, t)
@@ -403,8 +466,11 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
         weeks_since = None
         if last:
             weeks_since = (today - datetime.date.fromisoformat(last)).days / 7.0
-            if weeks_since > STALE_WEEKS and status != "UNMEASURED":
-                status = "STALE"
+        # ⚑ ISA-0756: STALE is decided by the ONE freshness contract (missed settled Fridays at the
+        #   injected clock), never by a second calendar-age rule here.
+        _fs = (_fresh.get(t) or {})
+        if _fs.get("state") == "STALE_INPUT" and status != "UNMEASURED":
+            status = "STALE"
         if status != "UNMEASURED":
             why = None
         elif t in refusals:
@@ -429,6 +495,8 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
                   "weeks_to_minimum": max(0, MIN_WEEKS - n),
                   "weeks_since_last_observation": (round(weeks_since, 2)
                                                    if weeks_since is not None else None),
+                  "freshness_state": _fs.get("state"),
+                  "missed_expected_observations": _fs.get("missed_expected_observations"),
                   "n_point_in_time": n_pit, "n_backfilled": n_bf,
                   "sigma_weekly": (round(statistics.pstdev(list(rets.values())), 6)
                                    if n >= 8 else None)}
@@ -463,7 +531,32 @@ def coverage(doc: dict, tickers: Optional[List[str]] = None,
             "store_path": STORE, "store_exists": os.path.exists(STORE)}
 
 
+def _selftest_0756():
+    """ISA-0756: the freshness contract is clock-injected and deterministic (T-1/T/T+1)."""
+    D = datetime.date
+    doc = {"names": {"X": {"observations": {"2026-09-25": {}, "2026-10-02": {}}, "last_fetched_on": "2026-10-03"},
+                     "Y": {"observations": {}}}}
+    try:
+        freshness(doc, ["X"], as_of=None)
+        raise AssertionError("MUST-FIRE ISA-0756: freshness without a clock must refuse")
+    except ValueError:
+        pass
+    st = lambda d: freshness(doc, ["X"], as_of=d)["names"]["X"]["state"]   # noqa: E731
+    assert st(D(2026, 10, 3)) == "FRESH" and st(D(2026, 10, 9)) == "FRESH", "a Friday's own close is not yet due"
+    assert st(D(2026, 10, 10)) == "LAGGING" and st(D(2026, 10, 16)) == "LAGGING", "T-1: one settled Friday missing"
+    assert st(D(2026, 10, 17)) == "STALE_INPUT", "T: the second settled Friday missing -> STALE_INPUT"
+    assert st(D(2026, 10, 18)) == "STALE_INPUT" and st(D(2026, 10, 18)) == st(D(2026, 10, 18)), "T+1 / repeat: deterministic"
+    assert freshness(doc, ["Y"], as_of=D(2026, 10, 3))["names"]["Y"]["state"] == "UNMEASURED", \
+        "NEGATIVE CONTROL: no observation is UNMEASURED, never FRESH"
+    assert freshness(doc, ["X"], as_of=D(2026, 10, 1))["names"]["X"]["state"] == "FRESH", \
+        "NEGATIVE CONTROL: data newer than the clock is never 'missed'"
+    # coverage reads the SAME contract at the SAME clock (no second age rule)
+    assert last_settled_friday(D(2026, 10, 16)) == D(2026, 10, 9) and last_settled_friday(D(2026, 10, 17)) == D(2026, 10, 16)
+    return True
+
+
 def _selftest():
+    _selftest_0756()                          # ISA-0756 freshness contract (clock-injected, T-1/T/T+1)
     import tempfile
     global STORE
     STORE = os.path.join(tempfile.mkdtemp(), "s.json")

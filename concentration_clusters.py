@@ -172,6 +172,36 @@ def gather_series(portfolio, universe=None, store=None):
     return series, excluded, basis
 
 
+def last_complete_month(run_date):
+    """The last month whose returns are complete AT run_date: run_date's own month only when run_date is its
+    last calendar day, else the month before."""
+    nxt = run_date + dt.timedelta(days=1)
+    if nxt.month != run_date.month:
+        return (run_date.year, run_date.month)
+    first = run_date.replace(day=1) - dt.timedelta(days=1)
+    return (first.year, first.month)
+
+
+def _cut_at(series, excluded, run_date, portfolio=None):
+    """⚑ POINT-IN-TIME (ISA-0869 found-on-build, 18-Oct-2026). A measurement AS OF run_date uses no month after
+    the last complete month at run_date. Before this the fund series ran to whatever the NAV cache held, so a
+    build 'as of 31-Jul' silently used Aug/Sep returns once the cache was refreshed (PC1 share 61.0 -> 42.8 on
+    the same as_of). Production is unchanged (run_date = today: the running month was already dropped)."""
+    cut = last_complete_month(run_date)
+    wts = {f.get("ticker"): f.get("weight_pct") for f in ((portfolio or {}).get("funds") or [])}
+    wts.update({st.get("ticker"): st.get("weight_pct") for st in ((portfolio or {}).get("stocks") or [])})
+    out = {}
+    for k, m in series.items():
+        mm = {ym: r for ym, r in m.items() if ym <= cut}
+        if len(mm) >= MIN_COMMON_MONTHS:
+            out[k] = mm
+        else:
+            excluded = list(excluded) + [{"sedol": k, "weight_pct": wts.get(k),
+                                          "reason": "only %d monthly observations up to %04d-%02d (point-in-time cut), %d required"
+                                                    % (len(mm), cut[0], cut[1], MIN_COMMON_MONTHS)}]
+    return out, excluded
+
+
 def common_window(series):
     """The months every measured holding shares.
 
@@ -218,6 +248,7 @@ def build(portfolio, universe=None, run_date=None, out_path=None, append_history
           store=None):
     run_date = run_date or dt.date.today()
     series, excluded, series_basis = gather_series(portfolio, universe, store)
+    series, excluded = _cut_at(series, excluded, run_date, portfolio)
     total = (portfolio.get("summary") or {}).get("total_value_gbp") or 0.0
     # ⚑ ISA-0598 — WEIGHTS MUST SPAN THE SAME SET AS THE SERIES. `wts` was built from funds
     # alone, so a direct holding admitted to `series` would have carried weight 0.0: present in
@@ -396,7 +427,33 @@ def _append_history(res, run_date):
             "ready": n >= 2}
 
 
+def _selftest():
+    """Offline selftest: the point-in-time cut and the common window (ISA-0869 found-on-build)."""
+    fails = []
+
+    def ok(name, cond, detail=None):
+        print(("PASS " if cond else "FAIL ") + name + ("" if cond else "  -> %r" % (detail,)))
+        if not cond:
+            fails.append(name)
+    ok("last complete month: a month-end run date includes its month", last_complete_month(dt.date(2026, 7, 31)) == (2026, 7))
+    ok("last complete month: a mid-month run date stops at the previous month", last_complete_month(dt.date(2026, 10, 18)) == (2026, 9))
+    ok("last complete month: 1st of the month stops at the previous month", last_complete_month(dt.date(2026, 3, 1)) == (2026, 2))
+    ser = {"F": {(2023 + (i // 12), i % 12 + 1): 0.01 for i in range(36)}}
+    ser["F"][(2026, 8)] = 0.5
+    cut, ex = _cut_at(ser, [], dt.date(2026, 7, 31))
+    ok("MUST-FIRE: a month after the as-of date is cut (no look-ahead)", (2026, 8) not in cut.get("F", {}), sorted(cut.get("F", {}))[-1:])
+    cut2, ex2 = _cut_at(ser, [], dt.date(2023, 6, 30))
+    ok("NEGATIVE CONTROL: a series too short at the cut is excluded with a reason, never measured on less",
+       "F" not in cut2 and ex2 and "point-in-time cut" in ex2[0]["reason"], ex2)
+    ok("common window of nothing is empty (never an invented window)", common_window({}) == [])
+    ok("common window is the intersection", common_window({"a": {(1, 1): 0, (1, 2): 0}, "b": {(1, 2): 0, (1, 3): 0}}) == [(1, 2)])
+    print("concentration_clusters selftest: %d FAIL(s)" % len(fails))
+    return len(fails)
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(1 if _selftest() else 0)
     ap = argparse.ArgumentParser()
     ap.add_argument("--portfolio", default=os.path.join(HERE, "portfolio_data_aug_2026.json"))
     ap.add_argument("--run-date", default=None)

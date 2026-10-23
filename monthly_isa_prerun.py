@@ -1021,6 +1021,8 @@ def main():
                              "defers work; it never loses any.")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Print commands without executing them.")
+    parser.add_argument("--resume-phase-b", default=None,
+                        help="ISA-0845: continue a checkpointed pass from its phase-A file (the runner passes it)")
     parser.add_argument("--plan-stability-only", action="store_true",
                         help="ISA-0594: run ONLY the deferred Step 6.10d plan-stability grid "
                              "and merge its verdict into the existing run_context. For use "
@@ -1049,6 +1051,8 @@ def main():
 
     if args.plan_stability_only:
         sys.exit(_plan_stability_only(args))
+    if getattr(args, "resume_phase_b", None):
+        sys.exit(_resume_phase_b(args.resume_phase_b))
 
     isa_folder = args.isa_folder or os.path.dirname(SCRIPT_DIR)
     run_date   = date.today()
@@ -1509,18 +1513,25 @@ def main():
                             for _e6 in _led.get("entries", [])
                             if _e6.get("execution_status") == "not_executed_to_date"]
                     if _ntd:
+                        # ⚑ ISA-0727 Q2 (Raj 13-Oct-2026): a plan is valid until the NEXT pre-run - this one. A
+                        #   decision with no matching trade is therefore EXPIRED_UNEXECUTED here: never 'still in
+                        #   force', no carry-over preference; the name re-enters this month's contest on its merits.
+                        #   (The ledger status stays re-derivable so a late export can still CONFIRM a trade made
+                        #   inside the window - the evidence question and the authority question are separate.)
+                        for _x727 in _ntd:
+                            _x727["plan_state"] = "EXPIRED_UNEXECUTED"
                         summary["execution_not_executed_to_date"] = _ntd
                         # the decision content reaches the review/email as a WARNING (SUMMARY_ESCALATED
                         # 'Step 1.5'); a summary key alone reached nobody (TB-08 SHADOW)
                         warnings.append(
                             "Step 1.5 A13/ISA-0791: %d recommendation(s) NOT EXECUTED TO DATE - the "
-                            "transaction export proves no matching trade, and the decision is still in "
-                            "force (not declined, not an override): %s. Execute it, or it lapses when "
-                            "the next decision on the name supersedes it."
+                            "transaction export proves no matching trade - and EXPIRED_UNEXECUTED at this pre-run "
+                            "(ISA-0727 Q2: a plan is valid until the next pre-run; not declined, not an override, "
+                            "no carry-over preference - the name re-enters this month's contest on its merits): %s."
                             % (len(_ntd), "; ".join("%s %s of %s (no trade through %s)"
                                                     % (x["ticker"], x["decision"], x["date"],
                                                        x["evidence_through"]) for x in _ntd)))
-                        print("  Not executed to date (decision still in force): %s" % "; ".join(
+                        print("  Not executed to date -> EXPIRED_UNEXECUTED (ISA-0727 Q2): %s" % "; ".join(
                             "%s %s %s (no trade through %s)" % (x["ticker"], x["decision"], x["date"],
                                                                 x["evidence_through"]) for x in _ntd))
                     if _unconf:
@@ -1592,12 +1603,20 @@ def main():
             json.dump(_cs, _f, indent=2, default=str)
         _al = _cs.get("allowance")
         if not _cs.get("source_files"):
+            # ⚑ ISA-0642: `source_files` is the CURRENT-tax-year file(s). A prior-year export alone
+            #   is evidence of past flows, never of this year's allowance - say which case it is.
+            _on_disk = _cs.get("files_on_disk") or []
             _mf_measure(status="SKIPPED",
-                        note="no 'Cash Statement*.xlsx' saved this month -- ISA allowance "
-                             "degrades to UNRECONCILED (policy, not degradation)")
-            warnings.append("Step 1b-2: no Cash Statement export found -- the ISA allowance "
-                            "cannot be reconciled. The Transaction History CANNOT substitute: "
-                            "it is a dealing record with no cash-deposit rows.")
+                        note=("no 'Cash Statement*.xlsx' saved this month -- ISA allowance "
+                              "degrades to UNRECONCILED (policy, not degradation)") if not _on_disk else
+                             ("Cash Statement(s) on disk %s cover no row of the CURRENT tax year -- "
+                              "allowance UNRECONCILED until the current-year export is saved" % _on_disk))
+            warnings.append(("Step 1b-2: no Cash Statement export found -- the ISA allowance "
+                             "cannot be reconciled. The Transaction History CANNOT substitute: "
+                             "it is a dealing record with no cash-deposit rows.") if not _on_disk else
+                            ("Step 1b-2: the Cash Statement(s) on disk %s cover no row of the CURRENT tax "
+                             "year -- save 'Cash Statement Current Tax Year <yyyy-yyyy>.xlsx'; the ISA allowance "
+                             "cannot be reconciled from a prior-year file (ISA-0642)." % _on_disk))
         else:
             _bad = [k for k, v in (_cs.get("invariants") or {}).items() if not v.get("ok")]
             _mf_measure(status="OK" if _cs.get("reconciled") else "WARN",
@@ -1615,6 +1634,17 @@ def main():
                 "ledger_unmatched": len((_cs.get("ledger_reconciliation") or {}).get("unmatched") or []),
                 "ledger_pending": len((_cs.get("ledger_reconciliation") or {}).get("pending_ledger_update") or []),
             }
+            # ⚑ ISA-0642 (6), 19-Oct-2026: the ACTUAL ACCOUNT's calendar-YTD and tax-year-to-date return
+            #   (approximate TWR + MWR, flows stripped) from broker valuations + both cash statements'
+            #   external flows. Reporting only - rendered in email s6 beside the X-Ray holdings-based YTD.
+            try:
+                import account_return as _ar0642
+                summary["account_return"] = _ar0642.compute(isa_folder, cs=_cs)
+                for _w0642 in (summary["account_return"].get("warnings") or []):
+                    warnings.append("Step 1b-2 (account return, ISA-0642): " + _w0642)
+            except Exception as _e0642:                                   # noqa: BLE001
+                summary["account_return"] = {"state": "ERROR", "why": "%s: %s" % (type(_e0642).__name__, _e0642)}
+                warnings.append("Step 1b-2 (account return, ISA-0642): %s: %s" % (type(_e0642).__name__, _e0642))
             for _b in _bad:
                 warnings.append(f"Step 1b-2: cash-statement invariant {_b} FAILED -- the "
                                 f"allowance figure is not trustworthy this month")
@@ -2059,6 +2089,41 @@ def main():
                         "dealing), never refused on missing data." % (type(_e).__name__, _e))
         print("  UNAVAILABLE — %s" % _e)
 
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # Step 5x(ce) — OFFER PERIOD / CORPORATE ACTIONS (ISA-0817, Raj D1-D3 18-Oct-2026)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # ⚑ AFTER 5x-ie (it joins UK offerees by the FIGI that stage records) and BEFORE Step 9, whose
+    #   `corporate_events` section the capital decision engine classifies (offeree -> HARD_BLOCK of new capital;
+    #   corporate action / source failure -> REVIEW; unsourced venue -> CONFIRM AT DEALING). Sources: Takeover Panel
+    #   disclosure table (XML), SEC EDGAR submissions, RNS headlines. A source failure is NAMED and its names read
+    #   SOURCE_FAILED (REVIEW) - never 'no event'; a held name is never sold on this evidence.
+    print("\n[5x-ce] Offer period / corporate actions (corporate_events.refresh: Takeover Panel + EDGAR + RNS)...")
+    _mf_begin("5x-ce", "corporate_events")
+    try:
+        import corporate_events as _ce5
+        _cer = _ce5.refresh(SCRIPT_DIR, budget_s=45)
+        summary["corporate_events"] = {k: _cer.get(k) for k in (
+            "state", "as_of", "n_symbols", "counts", "offerees", "corporate_action_pending", "source_failed",
+            "errors")}
+        for _e in (_cer.get("errors") or []):
+            warnings.append("Step 5x(ce) CORPORATE EVENTS INCOMPLETE — %s. Affected names read SOURCE_FAILED "
+                            "(REVIEW before new capital), never 'no event'." % _e)
+        if _cer.get("offerees"):
+            warnings.append("Step 5x(ce) OFFEREE(S) IN AN OFFER PERIOD — %s: NEW capital is HARD_BLOCKED (held "
+                            "names: REVIEW only)." % ", ".join(_cer["offerees"]))
+        _mf_measure(rows_in=_cer.get("n_symbols"), rows_out=len(_cer.get("verdicts") or {}),
+                    status=("OK" if not _cer.get("errors") else "DEGRADED"),
+                    note="%s: %s" % (_cer.get("state"), _cer.get("counts")))
+        print("  %s — %s symbols %s; offerees %s" % (_cer.get("state"), _cer.get("n_symbols"),
+                                                     _cer.get("counts"), _cer.get("offerees")))
+    except Exception as _e:                                    # noqa: BLE001
+        summary["corporate_events"] = {"state": "UNAVAILABLE", "reason": "%s: %s" % (type(_e).__name__, _e)}
+        _mf_measure(status="DEGRADED", note="corporate events unavailable: %s" % _e)
+        warnings.append("Step 5x(ce) CORPORATE EVENTS UNAVAILABLE — %s: %s. The store on disk is used as it stands "
+                        "and ages to SOURCE_FAILED (REVIEW) after %s days; offerees are never read as clear."
+                        % (type(_e).__name__, _e, 4))
+        print("  UNAVAILABLE — %s" % _e)
+
     print("\n[5y] Weekly GBP total-return store (stock_price_fetch, batched, stdlib only)...")
     _mf_begin("5y", "stock_price_fetch")
     try:
@@ -2072,6 +2137,9 @@ def main():
         # denominator is its own numerator's source can only ever report 100%.
         _uni5y = _spf.build_universe(strict=False)
         _uni_tickers = list(_uni5y["tickers"]) + list(_uni5y.get("unmapped") or [])
+        # ⚑ ISA-0756 (B05-R04): the ONE freshness contract at the RUN's clock, BEFORE the refresh
+        #   (the learning question: how stale is the store when a run starts, and does 5y fix it?)
+        _fr756_before = _srs.freshness(_srs.load(), _uni_tickers, as_of=run_date)
         _fr, _guard = None, 0
         # ⚑ ISA-0578. THE GUARD IS DERIVED FROM THE UNIVERSE, never a magic 12. At BATCH_SIZE 20
         # a fixed 12 capped the fetch at 240 names and the loop exited with `remaining` > 0 and
@@ -2086,8 +2154,33 @@ def main():
         # was NEVER FETCHED and a name that is simply younger than 52 weeks stop rendering
         # identically. Both read UNMEASURED and both take A2.3's adverse 0.70; they are
         # different facts with different fixes (R2.10).
-        _cov = _srs.coverage(_srs.load(), _uni_tickers, _spf.load_declared_refusals())
+        _cov = _srs.coverage(_srs.load(), _uni_tickers, _spf.load_declared_refusals(), as_of=run_date)
         summary["fetch_report"] = _fr
+        _fr756 = _srs.freshness(_srs.load(), _uni_tickers, as_of=run_date)
+        _held756 = []
+        try:
+            _held756 = [s.get("ticker") for s in (json.load(open(portfolio_path, encoding="utf-8")).get("stocks") or [])
+                        if s.get("ticker")]
+        except Exception:                                               # noqa: BLE001
+            pass
+        _held_stale756 = sorted(t for t in _held756 if (_fr756["names"].get(t) or {}).get("state") == "STALE_INPUT")
+        summary["weekly_store_freshness"] = {
+            "as_of": _fr756["as_of"], "expected_latest_observation": _fr756["expected_latest_observation"],
+            "at_step_entry": _fr756_before["counts"], "after_refresh": _fr756["counts"],
+            "at_step_entry_note": ("the store as this PASS found it at Step 5y entry; on a resumed pass (ISA-0780 re-run) "
+                                   "the previous pass may already have refreshed it, so this is not the occurrence's "
+                                   "starting state"),
+            "held_stale_input": _held_stale756, "n_stale_input": len(_fr756["stale_input"]),
+            "fetch_state": (_fr or {}).get("state"),
+            "state": "STALE_INPUT" if _held_stale756 else "FRESH",
+            "consequence": ("new-capital additions refused REFUSED_STALE_INPUT by capital_decision_engine.risk_gate "
+                            "while a held or candidate name is STALE_INPUT at the run date; reductions unaffected"),
+            "basis": _fr756["basis"]}
+        if _held_stale756:
+            warnings.append("Step 5y (ISA-0756): held sleeve name(s) %s are STALE_INPUT at %s after the refresh "
+                            "(fetch state %s) - every new stock addition is REFUSED_STALE_INPUT this run; risk "
+                            "reduction is unaffected. Re-run Step 5y." % (", ".join(_held_stale756),
+                                                                         _fr756["as_of"], (_fr or {}).get("state")))
         summary["correlation_coverage"] = _cov
         summary["fetch_universe"] = {"n": len(_uni_tickers), "basis": _uni5y.get("basis"),
                                      "origin_counts": {}}
@@ -2594,6 +2687,78 @@ def main():
     # Fund Retention Score, a binary dominance test, and the anchor rule ("every holding clears
     # its bucket minimum on REALISED evidence or is dead money"). It ranks and recommends; it
     # never trades.
+    # ── Step 6.04 — Fund NAV golden-source refresh (ISA-0869, 18-Oct-2026) ─────────────────────
+    # The NAV cache had not refreshed since 04-Aug-2026: 6.05 read the frozen cache and the October
+    # Fund Review published 11 of 12 funds UNSCORED. The producer brings every fund up to the run
+    # date (yfinance full re-fetch when > 5 business days old; Polar via FT daily closes merged onto
+    # its declared series) and TYPES every fund: FRESH / STALE_CACHE(as_of) / SOURCE_FAILED ... -
+    # a failed refresh keeps the cache and names it, never blanks it.
+    print("\n[6.04] Fund NAV refresh (fund_performance.refresh_nav_cache: yfinance + FT)...")
+    _mf_begin("6.04", "fund_nav_refresh")
+    try:
+        import fund_performance as _fp604
+        _nv = _fp604.refresh_nav_cache(run_date if isinstance(run_date, dt_date) else dt_date.today(),
+                                       budget_s=25.0)
+        _held604 = set()
+        try:
+            with open(portfolio_path, encoding="utf-8") as _pf604:
+                _held604 = {f.get("ticker") for f in (json.load(_pf604).get("funds") or [])}
+        except Exception:                                               # noqa: BLE001
+            pass
+        _nf604 = [(k, v) for k, v in (_nv.get("funds") or {}).items()
+                  if v.get("state") != "FRESH" and (not _held604 or k in _held604)]
+        summary["fund_nav_freshness"] = {"counts": _nv.get("counts"), "secs": _nv.get("secs"),
+                                         "as_of_run": _nv.get("as_of_run"),
+                                         "held_not_fresh": [{"sedol": k, "name": v.get("name"),
+                                                             "state": v.get("state"), "newest": v.get("newest"),
+                                                             "why": v.get("why")} for k, v in _nf604]}
+        for k, v in _nf604:
+            warnings.append("Step 6.04 FUND NAV %s: %s (%s) newest NAV %s - %s. Its FRS/window returns use the "
+                            "cached series as at that date (ISA-0869)." % (v.get("state"), v.get("name"), k,
+                                                                          v.get("newest"), v.get("why")))
+        _mf_measure(status="OK" if not _nf604 else "DEGRADED", rows_out=len(_nv.get("funds") or {}),
+                    note="NAV states %s in %.1fs" % (_nv.get("counts"), _nv.get("secs") or 0))
+        print("  NAV states: %s (%.1fs)" % (_nv.get("counts"), _nv.get("secs") or 0))
+    except Exception as _e604:                                          # noqa: BLE001
+        summary["fund_nav_freshness"] = {"error": "%s: %s" % (type(_e604).__name__, _e604)}
+        warnings.append("Step 6.04 fund NAV refresh FAILED (%s: %s) - 6.05 reads the existing cache; every "
+                        "fund's freshness is typed in fund_action_stack.nav_freshness (ISA-0869)"
+                        % (type(_e604).__name__, _e604))
+        _mf_measure(status="DEGRADED", note="refresh raised: %s" % type(_e604).__name__)
+    # ── ISA-0127: the closed-end trust's NAV from its own daily RNS, recorded as a MATCHED pair with the same-date
+    #    unadjusted close (trust_discount.capture_rns; content-keyed, so a re-run adds nothing). Typed; a failure
+    #    leaves capture_status's request visible in 6.05, never a silent gap.
+    try:
+        import trust_discount as _td604
+        _tc = _td604.capture_rns(run_date if isinstance(run_date, dt_date) else dt_date.today(), budget_s=12.0)
+        summary["trust_nav_capture"] = _tc
+        for _k, _v in (_tc.get("funds") or {}).items():
+            if _v.get("state") in ("SOURCE_FAILED", "UNMATCHED_PRICE"):
+                warnings.append("Step 6.04 TRUST NAV %s for %s: %s - the discount uses the newest matched observation "
+                                "on record (ISA-0127)" % (_v.get("state"), _k, _v.get("why")))
+        print("  trust NAV capture: %s" % {k: v.get("state") for k, v in (_tc.get("funds") or {}).items()})
+    except Exception as _e604t:                                         # noqa: BLE001
+        summary["trust_nav_capture"] = {"error": "%s: %s" % (type(_e604t).__name__, _e604t)}
+        warnings.append("Step 6.04 trust NAV capture FAILED (%s: %s) - capture_status requests stay visible (ISA-0127)"
+                        % (type(_e604t).__name__, _e604t))
+    # ── ISA-0869 CA(7): per-fund top-10 holdings from the FT tearsheet into fund_holdings_declared.json (H9 name-level
+    #    store), QUARTERLY (an FT entry retrieved < 100 days ago is not re-fetched); typed, a failure keeps the entry.
+    try:
+        import fund_holdings_ft as _fh604
+        _fh = _fh604.refresh(run_date if isinstance(run_date, dt_date) else dt_date.today(), budget_s=12.0)
+        summary["fund_holdings_ft"] = {"counts": _fh.get("counts"), "secs": _fh.get("secs")}
+        if "lookthrough" in sys.modules:
+            sys.modules["lookthrough"]._DECL_CACHE.clear()
+        for _k, _v in (_fh.get("funds") or {}).items():
+            if _v.get("state") == "SOURCE_FAILED":
+                warnings.append("Step 6.04 FUND HOLDINGS SOURCE_FAILED for %s: %s - the existing declared entry is kept "
+                                "(ISA-0869 CA7)" % (_k, _v.get("why")))
+    except Exception as _e604h:                                         # noqa: BLE001
+        summary["fund_holdings_ft"] = {"error": "%s: %s" % (type(_e604h).__name__, _e604h)}
+        warnings.append("Step 6.04 fund holdings refresh FAILED (%s: %s) - declaration_status names every absent fund "
+                        "(ISA-0869 CA7)" % (type(_e604h).__name__, _e604h))
+    _mf_end()
+
     print("\n[6.05] Fund action stack (FRS + dominance + anchor rule)...")
     _mf_begin("6.05", "fund_action_stack")
     try:
@@ -3759,31 +3924,11 @@ def main():
         warnings.append("Step 8u (ISA-0722): underwriting capture RAISED (%s: %s). No case was "
                         "written; ORIGINAL E[r] for this month's decisions will be NOT_CAPTURED."
                         % (type(_uwe).__name__, _uwe))
-    # ── Step 8x — EXECUTION CEILING, SHADOW (ISA-0740, 24-Sep-2026) ─────────────────────────
-    # ⚑ An approval-preserving execution ceiling per case captured this month: W_T frozen on the
-    #   case, Pmax against the CURRENT authorised hurdle, identities asserted. SHADOW: published,
-    #   consumed by nothing, necessary-only (never a BUY). Never raises into the run (R4.12).
-    try:
-        import execution_ceiling as _xc
-        import underwriting as _uw_x
-        _xcs = _xc.shadow_month(root=SCRIPT_DIR, as_of=run_date.isoformat(),
-                                cases=(getattr(_uw_x, "_LAST_CAPTURE", {}) or {}).get("cases"))
-        summary["execution_ceiling"] = _xcs
-        if _xcs.get("state") == "OK":
-            print("  [8x] execution ceiling (SHADOW): %d case(s) %s"
-                  % (_xcs["n_cases"], ", ".join("%s %d" % (k, len(v))
-                                                for k, v in sorted(_xcs["by_state"].items()))))
-            for _r in _xcs.get("rows") or []:
-                if _r.get("state") == "ERROR_IDENTITY":
-                    warnings.append("Step 8x (ISA-0740) %s: execution-ceiling IDENTITY BROKEN - "
-                                    "no ceiling published" % _r.get("ticker"))
-        else:
-            warnings.append("Step 8x (ISA-0740): execution ceiling %s - %s"
-                            % (_xcs.get("state"), _xcs.get("why")))
-    except Exception as _xce:                                           # noqa: BLE001
-        summary["execution_ceiling"] = {"state": "FAILED", "why": "%s: %s" % (type(_xce).__name__, _xce)}
-        warnings.append("Step 8x (ISA-0740): execution ceiling RAISED (%s: %s) - SHADOW only, no "
-                        "capital effect" % (type(_xce).__name__, _xce))
+    # ── Step 8x — RETIRED 18-Oct-2026 (ISA-0727 Q1, Raj 13-Oct-2026) ─────────────────────────────
+    # The SHADOW approval-preserving execution ceiling (execution_ceiling.shadow_month, ISA-0740) is superseded:
+    # the Capital Decision Engine's live economic maximum (entry.economic_max_price_major, enforced by
+    # execution_check REFUSED_ABOVE_ECONOMIC_MAX) is the ONE execution-price limit. The module is kept, relabelled
+    # RETIRED; the registry row CAP-execution_ceiling carries the retirement record. Rollback: TB rollback.
     # ── Step 8h — HORIZON-VALUE E[r], SHADOW (ISA-0744, 24-Sep-2026) ───────────────────────
     # ⚑ One 12-month horizon-value case (P/E or EV/EBITDA route, typed state, sensitivities) per
     #   name in THIS month's PIT vintage (pit_capture_[month].jsonl, Step 6), compared with the
@@ -3860,6 +4005,60 @@ def main():
     #          declares it cannot.
     #   6.10b  the destination itself: sleeve split, ranking, allocation, idle capital priced.
     #   6.10c  the waiting-room / recall position (ISA-0390).
+    # — 8t ISA-0700 P-B7 (Raj 19-Oct-2026 15:11): every stock the run can hold or fund gets a theme classification
+    #   automatically, with stored evidence, BEFORE the 6.10 capital engine evaluates the concentration caps.
+    #   Population = held direct stocks + every step9_pre ticker. Writes the runtime overlay only (never the signed
+    #   taxonomy); a name with no Yahoo profile stays UNKNOWN and is retried next run. Never raises (R4.12).
+    print("\n[8t] Theme auto-classification (ISA-0700)...")
+    _mf_begin("8t", "theme_autoclassify")
+    try:
+        import theme_autoclassify as _tac
+        _pop8t = set()
+        try:
+            with open(portfolio_path, encoding="utf-8") as f:
+                _pop8t |= {h.get("ticker") for h in (json.load(f).get("stocks") or []) if h.get("ticker")}
+        except Exception:                                               # noqa: BLE001
+            pass
+        def _walk8t(o):
+            if isinstance(o, dict):
+                if isinstance(o.get("ticker"), str):
+                    _pop8t.add(o["ticker"])
+                for _v in o.values():
+                    _walk8t(_v)
+            elif isinstance(o, list):
+                for _v in o:
+                    _walk8t(_v)
+        # every ticker the capital engine's universe can contain: step9_pre (ranked, stacks, main/VCI watchlists,
+        # candidate pool) and horizon_value cases (found on the P-B7 shadow: AEVA reached the engine via these)
+        for _p8t in (step9_pre_path, os.path.join(SCRIPT_DIR, f"horizon_value_{month_label}.json")):
+            try:
+                with open(_p8t, encoding="utf-8") as f:
+                    _walk8t(json.load(f))
+            except Exception:                                           # noqa: BLE001
+                pass
+        _tr8 = _tac.run(sorted(_pop8t), here=SCRIPT_DIR)
+        summary["theme_autoclassify"] = {k: _tr8.get(k) for k in ("state", "n_population", "new", "failed",
+                                                                  "skipped_budget", "n_overlay", "line", "why")}
+        if _tr8.get("state") in ("ERROR", "UNAVAILABLE"):
+            warnings.append("8t theme auto-classification %s: %s" % (_tr8.get("state"), _tr8.get("why")))
+        print("  8t: %s" % _tr8.get("line"))
+    except Exception as _e:
+        warnings.append(f"8t theme auto-classification skipped: {type(_e).__name__}: {_e}")
+
+    # — 6.10v ISA-0569 (P-B8): check every fund-vector source and take a newer publication where the capture is
+    #   mechanical, BEFORE 6.10a/6.11 read the vectors. Never raises (R4.12); a failure leaves the vectors unchanged.
+    print("\n[6.10v] Fund exposure-vector sources (ISA-0569)...")
+    _mf_begin("6.10v", "fund_vector_refresh")
+    try:
+        import fund_vector_refresh as _fvr
+        _vr = _fvr.run(SCRIPT_DIR)
+        summary["fund_vector_refresh"] = {k: _vr.get(k) for k in ("state", "checked_on", "applied", "lag", "named",
+                                                                  "secs", "line", "why")}
+        warnings.append("Step 6.10v (ISA-0569): %s" % _vr.get("line"))
+        print("  6.10v: %s (%ss)" % (_vr.get("line"), _vr.get("secs")))
+    except Exception as _e:
+        warnings.append(f"Step 6.10v (ISA-0569) fund_vector_refresh skipped: {type(_e).__name__}: {_e}")
+
     print("\n[6.10] Marginal-pound router: sleeve split, estimation-free ranking, recall leg...")
     _mf_begin("6.10", "capital_destination + fund_exposure_vectors + waiting_room")
     _s610 = []
@@ -3876,13 +4075,36 @@ def main():
                 "network and this run has none.")
         else:
             _sp = _fv.get("as_of_spread_days") or {}
+            # ISA-0569 (P-B8): staleness at the BOOK's date against the DERIVED life, graded NEGLECTED / SOURCE_LAG /
+            # UNCHECKED - the declared-at-build list is kept only as the fallback
+            _fr610 = None
+            try:
+                import consistency_check as _cc610
+                with open(portfolio_path, encoding="utf-8") as f:
+                    _pd610 = json.load(f)
+                _val610 = {h["ticker"]: h.get("value_gbp") or 0.0 for h in (_pd610.get("funds") or [])}
+                _eq610 = sum(_val610.values()) + sum(h.get("value_gbp") or 0.0 for h in (_pd610.get("stocks") or []))
+                _bd610 = datetime.strptime(str((_pd610.get("_meta") or {}).get("data_date")), "%d-%b-%Y").date().isoformat()
+                _fr610 = _fev.freshness(_fv, {sd: _val610.get(sd, 0.0) / _eq610 for sd in (_fv.get("vectors") or {})},
+                                        _cc610.XR1_MAX_TOL_PP, _bd610)
+            except Exception as _e610:
+                warnings.append("Step 6.10a vector freshness not derived (%s) - declared %d-day list used"
+                                % (type(_e610).__name__, _fev.STALE_AFTER_DAYS))
             summary["fund_exposure_vectors"] = {
-                "n_funds": len(_fv.get("vectors") or {}), "stale": _fv.get("stale"),
+                "n_funds": len(_fv.get("vectors") or {}),
+                "stale": (_fr610 or {}).get("stale", _fv.get("stale")),
+                "freshness": ({k: _fr610.get(k) for k in ("as_of", "life", "stale", "neglected", "source_lag",
+                                                           "unchecked", "line")} if _fr610 else None),
                 "age_days": _sp, "corroboration": _fv.get("corroboration"),
                 "share_class_substitutions": _fv.get("share_class_substitutions")}
             _s610.append("exposure vectors %d funds, %d-%d days old"
                          % (len(_fv.get("vectors") or {}), _sp.get("min", -1), _sp.get("max", -1)))
-            if _fv.get("stale"):
+            if _fr610 is not None and _fr610.get("stale"):
+                warnings.append(
+                    "Step 6.10a EXPOSURE VECTORS beyond their derived life: %s. %s. The router still ranks on them; "
+                    "a SOURCE_LAG vector cannot be cured by re-capture (its source has published nothing newer), a "
+                    "NEGLECTED one can (ISA-0569)." % (", ".join(_fr610["stale"]), _fr610["line"]))
+            elif _fr610 is None and _fv.get("stale"):
                 warnings.append(
                     "Step 6.10a EXPOSURE VECTORS STALE for %s (older than %d days). The router "
                     "still ranks on them; a stale vector is a fact about the capture, not a "
@@ -4669,6 +4891,44 @@ def main():
                         % (type(_pe).__name__, _pe))
         print("  [9c] provisional run_context FAILED: %s" % _pe)
 
+    # ── ISA-0845 CA(4) (18-Oct-2026): PHASE SPLIT AT 9c ───────────────────────────────────────────────────────
+    # ⚑ The pass measured 149-180 s on the device host against the 172 s run-stage timeout (18-Oct: 2 to 6 calls to
+    #   complete). When the runner supplies a phase file and Steps 0a-9c have used more than the split threshold, the
+    #   run checkpoints HERE (the provisional run_context above already landed, status PARTIAL / assurance PENDING)
+    #   and the assurance phase runs in the next call (`--resume-phase-b`). Otherwise it runs inline, unchanged.
+    _ctx_b = {_k: _v for _k, _v in locals().items() if _k in _PHASE_B_NAMES}
+    if _phase_split_due(_RUN_STARTED_AT):
+        return _save_phase_a(_ctx_b)
+    return _prerun_phase_b(_ctx_b)
+
+
+def _prerun_phase_b(_ctx):
+    """ISA-0845 CA(4) (18-Oct-2026): the ASSURANCE PHASE of the monthly pre-run - Step 9d, 6.99, 9e, 6.10d, the
+    manifest, the capital-authority boundary re-fingerprint and the final run_context - moved VERBATIM out of main()
+    so it can run either inline (fast pass: main() calls it directly, behaviour unchanged) or in its OWN host call
+    (`--resume-phase-b`, from the phase-A checkpoint written after the provisional run_context at 9c). `_ctx` carries
+    exactly the main() state this phase reads (_PHASE_B_NAMES); it is never a second calculation."""
+    global MANIFEST
+    args = _ctx["args"]
+    month_label = _ctx["month_label"]
+    run_month = _ctx["run_month"]
+    portfolio_path = _ctx["portfolio_path"]
+    xray_path = _ctx["xray_path"]
+    analytics_path = _ctx["analytics_path"]
+    watchlist_metrics_path = _ctx["watchlist_metrics_path"]
+    watchlist_scored_path = _ctx["watchlist_scored_path"]
+    step9_pre_path = _ctx["step9_pre_path"]
+    email_path = _ctx["email_path"]
+    manifest_path = _ctx["manifest_path"]
+    prior_port_path = _ctx["prior_port_path"]
+    summary = _ctx["summary"]
+    warnings = _ctx["warnings"]
+    errors = _ctx["errors"]
+    flags = _ctx["flags"]
+    degraded = _ctx["degraded"]
+    watchlist_promotion_log = _ctx["watchlist_promotion_log"]
+    _fr = _ctx["_fr"]
+    _RUN_STARTED_AT = _ctx["_RUN_STARTED_AT"]
     _w_before_9d = len(warnings)
     _e_before_9d = len(errors)
     print("\n[9d] Fix Pack P2 asserts (A10/A11/A18/A19/A20/A22 + P7a)...")
@@ -5247,9 +5507,12 @@ def main():
         with open(portfolio_path, encoding="utf-8") as f:
             _pd5 = json.load(f)
         _fres = _flt.compute(_pd5, _flt.load_map())
-        summary["factor_lookthrough"] = {k: _fres[k] for k in
+        summary["factor_lookthrough"] = {k: _fres.get(k) for k in
                                          ("ai_complex_effective_weight_pct", "cap_pct", "breach",
-                                          "unclassified", "email_line")}
+                                          "unclassified", "email_line",
+                                          # B08-R02 (P-B6): the bound and its verdict, never only the floor
+                                          "verdict", "lower_bound_pct", "upper_bound_pct",
+                                          "unclassified_gbp", "unpriced", "enforcement")}
         if _fres.get("semis"):
             summary["factor_lookthrough"]["semis"] = _fres["semis"]
         if os.path.exists(analytics_path):
@@ -5261,14 +5524,77 @@ def main():
         if _fres.get("breach"):
             flags.append({"type": "FACTOR_CAP_BREACH",
                           "message": (_fres["email_line"] + " — Step 8 MUST include a Category-6 "
-                                      "de-concentration option; factor-raising BUYs BLOCKED at "
-                                      "Checkpoint-D while in breach (B3)")})
+                                      "de-concentration option. Checkpoint-D tick 5 is NOT wired "
+                                      "(P-B6 finding, owner ISA-0465): no BUY is blocked mechanically - "
+                                      "state the factor effect of every AI-classified BUY (B3)")})
         if _fres.get("unclassified"):
-            warnings.append(f"B3: unclassified names need a one-line factor_map entry: "
-                            f"{_fres['unclassified']}")
+            warnings.append(f"B3: unclassified names (no factor_map entry AND no theme membership - "
+                            f"Step 8t could not profile them): {_fres['unclassified']}")
+        if _fres.get("classification_disagreements"):
+            # P-B7 (Raj 19-Oct-2026 16:02): two classifications of one held name must not disagree silently
+            warnings.append("B3/ISA-0700: factor_map and the theme taxonomy disagree on held name(s): %s"
+                            % "; ".join("%s factor_map %s vs themes %s" % (x["ticker"], x["factor_map_class"],
+                                                                         x["taxonomy_themes"])
+                                        for x in _fres["classification_disagreements"]))
         print(f"  B3: {_fres['email_line']}")
     except Exception as _e:
         warnings.append(f"B3 factor look-through skipped: {_e}")
+
+    # — B08-R01/R02 (P-B6, 19-Oct-2026): the whole-ISA exposure ledger - expected / covered / unattributed /
+    #   unvalued pounds per dimension, typed COMPLETE / PROXY / LOWER_BOUND / BOUNDED / UNAVAILABLE —
+    try:
+        import exposure_coverage as _exc
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd6 = json.load(f)
+        _xr6 = None
+        if os.path.exists(xray_path):
+            with open(xray_path, encoding="utf-8") as f:
+                _xr6 = json.load(f)
+        _exr = _exc.build(_pd6, _xr6)
+        summary["exposure_coverage"] = {k: _exr.get(k) for k in
+                                        ("schema", "state", "nav_gbp", "portfolio_as_of", "xray_as_of",
+                                         "xray_basis", "unvalued_holdings", "conservation_ok", "line", "rows")}
+        if os.path.exists(analytics_path):
+            with open(analytics_path, encoding="utf-8") as f:
+                _ana3 = json.load(f)
+            _ana3["exposure_coverage"] = _exr
+            with open(analytics_path, "w", encoding="utf-8") as f:
+                json.dump(_ana3, f, indent=2, ensure_ascii=False)
+        if _exr.get("state") != "OK":
+            warnings.append("B08-R01 exposure coverage %s: X-Ray basis %s - X-Ray rows UNAVAILABLE this run"
+                            % (_exr.get("state"), (_exr.get("xray_basis") or {}).get("state")))
+        if not _exr.get("conservation_ok", True):
+            # a REPORTING ledger: a defect here degrades the coverage line, it never gates capital (R4.18)
+            warnings.append("B08-R01 exposure coverage: a row does not conserve the book (covered + unattributed "
+                            "+ unvalued != NAV) - coverage line NOT TRUSTED this run")
+        print(f"  B08: {_exr.get('line')}")
+    except Exception as _e:
+        warnings.append(f"B08-R01 exposure coverage skipped: {type(_e).__name__}: {_e}")
+
+    # — P-B6 fix-on-finding: Step 9 email_prefill runs BEFORE this step, so it read an analytics file with no
+    #   factor_lookthrough and the s6 factor/semis lines were EMPTY (MEASURED: email_data_oct_2026 factor_line
+    #   None; September's was typed by hand at the review). Hand the computed lines to the pre-filled email now -
+    #   a transfer of the same values, never a second calculation; a line already filled is left alone —
+    try:
+        if os.path.exists(email_path):
+            with open(email_path, encoding="utf-8") as f:
+                _ed6 = json.load(f)
+            _s6 = _ed6.setdefault("s6_portfolio_snapshot", {})
+            _fl6 = summary.get("factor_lookthrough") or {}
+            _fill = {"factor_line": _fl6.get("email_line"), "factor_unclassified": _fl6.get("unclassified"),
+                     "semis_line": (_fl6.get("semis") or {}).get("line"),
+                     "exposure_line": (summary.get("exposure_coverage") or {}).get("line")}
+            _n6 = 0
+            for _k6, _v6 in _fill.items():
+                if _v6 and not _s6.get(_k6):
+                    _s6[_k6] = _v6
+                    _n6 += 1
+            if _n6:
+                with open(email_path, "w", encoding="utf-8") as f:
+                    json.dump(_ed6, f, indent=2, ensure_ascii=False)
+            print(f"  B08: s6 exposure lines handed to the email ({_n6} filled)")
+    except Exception as _e:
+        warnings.append(f"B08-R02 s6 exposure lines not handed to the email: {type(_e).__name__}: {_e}")
 
     # Write run_context
     if errors:
@@ -5472,6 +5798,108 @@ def main():
     print("  Review task reads: " + ctx_path)
 
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0845 CA(4) (18-Oct-2026) — PHASE SPLIT AT STEP 9c (resumable assurance phase)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+_PHASE_B_NAMES = ("args", "month_label", "run_month", "portfolio_path", "xray_path", "analytics_path",
+                  "watchlist_metrics_path", "watchlist_scored_path", "step9_pre_path", "email_path", "manifest_path",
+                  "prior_port_path", "summary", "warnings", "errors", "flags", "degraded", "watchlist_promotion_log",
+                  "_fr", "_RUN_STARTED_AT")
+PHASE_A_TOKEN = "PRERUN_PHASE_A_COMPLETE"
+PHASE_SPLIT_AFTER_S_DEFAULT = 95.0     # seconds of Steps 0a-9c after which the assurance phase gets its own call
+
+
+def _phase_split_due(started_at: float) -> bool:
+    """Split only when the RUNNER asked for it (ISA_PRERUN_PHASE_FILE) and Steps 0a-9c used more than the threshold.
+    Without the runner (direct run, dry runs, tests) the pass is always single-phase, exactly as before."""
+    if not os.environ.get("ISA_PRERUN_PHASE_FILE"):
+        return False
+    try:
+        thr = float(os.environ.get("ISA_PRERUN_PHASE_SPLIT_AFTER_S", PHASE_SPLIT_AFTER_S_DEFAULT))
+    except ValueError:
+        thr = PHASE_SPLIT_AFTER_S_DEFAULT
+    return (time.time() - started_at) > thr
+
+
+def _phase_identity() -> dict:
+    """What phase B must find unchanged: the delivered source/config rolls (release_gate) of this tree."""
+    try:
+        import release_gate as _rg_ph
+        return {k: v for k, v in (_rg_ph.verify_live(SCRIPT_DIR).get("live_rolls") or {}).items()
+                if k in ("source", "rules", "config", "run_surfaces")}
+    except Exception as _e:                                             # noqa: BLE001
+        return {"error": "%s: %s" % (type(_e).__name__, _e)}
+
+
+def _save_phase_a(ctx: dict) -> int:
+    """Checkpoint phase A: main()'s phase-B state + the run manifest + the integrity-ledger run binding, so the next
+    call continues the SAME pass. The phase file lives in the runner's occurrence directory (outside the ISA tree), so
+    it is never committed to LIVE."""
+    import pickle
+    path = os.environ["ISA_PRERUN_PHASE_FILE"]
+    _mf_end()
+    try:
+        import framework_integrity as _fi_ph
+        _fi_ph.flush_ledger()
+        _binding = dict(getattr(_fi_ph, "_RUN_BINDING", {}) or {})
+    except Exception:                                                   # noqa: BLE001
+        _binding = {}
+    doc = {"schema": "PRERUN_PHASE_A/1", "saved_at": datetime.now().isoformat(timespec="seconds"),
+           "elapsed_s": round(time.time() - ctx["_RUN_STARTED_AT"], 1), "month_label": ctx["month_label"],
+           "identity": _phase_identity(), "ctx": ctx, "manifest": MANIFEST,
+           "plan_stability_pending": list(_PLAN_STABILITY_PENDING), "fi_binding": _binding}
+    with open(path + ".tmp", "wb") as fh:
+        pickle.dump(doc, fh)
+    os.replace(path + ".tmp", path)
+    print("\n%s at %.0fs - Steps 0a-9c done, provisional run_context written; the assurance phase (9d, 6.99, 9e, "
+          "6.10d, manifest, final run_context) runs in the NEXT call (re-run --stage run). Phase file: %s"
+          % (PHASE_A_TOKEN, doc["elapsed_s"], path))
+    return 0
+
+
+def _resume_phase_b(path: str) -> int:
+    """`--resume-phase-b PATH`: continue the checkpointed pass. REFUSES when the tree's source/config changed since phase
+    A or the month differs - a phase B over different code is not the same pass (R18.5)."""
+    import pickle
+    global MANIFEST
+    # ⚑ ISA-0845 hardening (18-Oct-2026, found on the P-A2 shadow): an unreadable checkpoint must REFUSE (the
+    #   runner then deletes it and the next call runs a full pass) - a raised load error carried no token, so the
+    #   runner kept the file and every later call would have failed the same way.
+    try:
+        with open(path, "rb") as fh:
+            doc = pickle.load(fh)
+        if not isinstance(doc, dict):
+            raise TypeError("phase file holds %s, not a dict" % type(doc).__name__)
+    except Exception as exc:                                            # noqa: BLE001
+        print("PRERUN_PHASE_B_REFUSED: phase file unreadable (%s: %s) - re-run the full pass" % (type(exc).__name__, exc))
+        return 2
+    if doc.get("schema") != "PRERUN_PHASE_A/1":
+        print("PRERUN_PHASE_B_REFUSED: unknown phase file schema %r" % doc.get("schema"))
+        return 2
+    now_id = _phase_identity()
+    if doc.get("identity") != now_id or "error" in now_id:
+        print("PRERUN_PHASE_B_REFUSED: the tree changed since phase A (%s -> %s) - re-run the full pass"
+              % (doc.get("identity"), now_id))
+        return 2
+    try:
+        import isa_source_cache as _sc_b
+        _sc_b.enable_snapshot(True)
+        _sc_b.route_ast_parse()
+    except Exception:                                                   # noqa: BLE001
+        pass
+    MANIFEST = doc.get("manifest")
+    _PLAN_STABILITY_PENDING[:] = doc.get("plan_stability_pending") or []
+    try:
+        import framework_integrity as _fi_b
+        if doc.get("fi_binding"):
+            _fi_b._RUN_BINDING.clear()
+            _fi_b._RUN_BINDING.update(doc["fi_binding"])
+    except Exception:                                                   # noqa: BLE001
+        pass
+    print("[phase B] resuming the checkpointed pass from %s (phase A ended at %ss)" % (path, doc.get("elapsed_s")))
+    return _prerun_phase_b(doc["ctx"])
+
+
 def _selftest(verbose: bool = True) -> int:
     """ISA-0629 — Step 0a and the run_context stamp, proven able to REFUSE and able to AUTHORISE.
     Scoped to the two helpers this module owns; the orchestration itself is exercised by the real
@@ -5485,6 +5913,15 @@ def _selftest(verbose: bool = True) -> int:
         if verbose:
             print(("  ok   " if cond else "  FAIL ") + name)
 
+    # ── ISA-0845 hardening: an unreadable phase-A checkpoint REFUSES with the token (never a raised loop) ──
+    import io as _io845, contextlib as _cl845
+    _pf845 = os.path.join(tempfile.mkdtemp(prefix="ph845_"), "prerun_phase_a.pkl")
+    open(_pf845, "wb").write(b"not a pickle")
+    _buf845 = _io845.StringIO()
+    with _cl845.redirect_stdout(_buf845):
+        _rc845 = _resume_phase_b(_pf845)
+    ok("ISA-0845 MUST-FIRE: a corrupt phase file returns PRERUN_PHASE_B_REFUSED (rc 2), never raises",
+       _rc845 == 2 and "PRERUN_PHASE_B_REFUSED" in _buf845.getvalue())
     # ── ISA-0704: --dry-run rehearses in a sandbox copy; a live mutation is detected and refused ──
     global SCRIPT_DIR
     import shutil as _sh0704, types as _ty0704
@@ -5650,6 +6087,8 @@ def _selftest(verbose: bool = True) -> int:
     _src791 = open(os.path.abspath(__file__), encoding="utf-8").read()
     ok("ISA-0791 ESCALATION: a not-executed-to-date recommendation reaches the warning list",
        '"Step 1.5 A13/ISA-0791: %d recommendation(s) NOT EXECUTED TO DATE' in _src791)
+    ok("ISA-0727 Q2 MUST-FIRE: an unexecuted decision is EXPIRED_UNEXECUTED at the next pre-run, never 'still in force'",
+       '_x727["plan_state"] = "EXPIRED_UNEXECUTED"' in _src791 and "and EXPIRED_UNEXECUTED at this pre-run " in _src791)
     ok("ISA-0798 WIRING: Step 9 passes THIS run's summary snapshot to email_prefill",
        '(["--run-context", _rc_snap] if _rc_snap else [])' in _src791)
     ok("ISA-0797 WIRING: Step 9 passes THIS run's step9_pre to email_prefill",
@@ -5658,8 +6097,10 @@ def _selftest(verbose: bool = True) -> int:
        "date=run_date.isoformat(), evidence=_ev791," in _src791)
     import ast as _ast778
     _src778 = open(os.path.abspath(__file__), encoding="utf-8").read()
-    _main778 = next(n for n in _ast778.parse(_src778).body
-                    if isinstance(n, _ast778.FunctionDef) and n.name == "main")
+    # ISA-0845 CA(4): the assurance phase moved verbatim into _prerun_phase_b - the pass is main() + that function
+    _main778 = _ast778.Module(body=[n for n in _ast778.parse(_src778).body
+                                    if isinstance(n, _ast778.FunctionDef) and n.name in ("main", "_prerun_phase_b")],
+                              type_ignores=[])
     _bare778 = [n.lineno for n in _ast778.walk(_main778)
                 if isinstance(n, (_ast778.If,)) and (
                     (isinstance(n.test, _ast778.Name) and n.test.id == "errors") or
@@ -5668,7 +6109,7 @@ def _selftest(verbose: bool = True) -> int:
                     (isinstance(n.test, _ast778.BoolOp) and any(
                         (isinstance(v, _ast778.UnaryOp) and isinstance(v.operand, _ast778.Name)
                          and v.operand.id == "errors") for v in n.test.values)))]
-    ok("ISA-0778 STRUCTURE: only the two STATUS-level `if errors:` remain in main() (status word and "
+    ok("ISA-0778 STRUCTURE: only the two STATUS-level `if errors:` remain in main()+_prerun_phase_b (status word and "
        "exit code) - any data step reading bare errors[] fails here (found at lines %s)" % _bare778,
        len(_bare778) == 2)
     if verbose:

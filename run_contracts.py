@@ -404,6 +404,14 @@ def input_identity_gaps(root: str = HERE, contract: Optional[dict] = None) -> Li
 # ─────────────────────────────────────────────────────────────────────────────────────────
 
 def runtime_envelope(task_key: str, root: str = HERE, ledger_rows: Optional[list] = None) -> dict:
+    """Every row names its task (ISA-0727 B, 18-Oct-2026: the release gate keys finding ids RE-<task> on it; an
+    UNDECLARED row without one collapsed several tasks into one un-waivable id 'RE-?')."""
+    r = _runtime_envelope(task_key, root, ledger_rows)
+    r.setdefault("task", task_key)
+    return r
+
+
+def _runtime_envelope(task_key: str, root: str = HERE, ledger_rows: Optional[list] = None) -> dict:
     """WITHIN | EXCEEDS | UNMEASURED | UNDECLARED for one scheduled task. The envelope lives on the task's
     signed contract: {host_ceiling_s, headroom_pct, stages: [..], evidence_ledger, continuation}.
     WITHIN requires the MAX measured duration of every declared stage over the last `window`
@@ -652,6 +660,8 @@ def _selftest() -> int:
        runtime_envelope("t", d, [{"stage": "run", "status": "COMPLETE", "secs": 10}])["state"] == "UNMEASURED")
     ok("R5.12 MUST-FIRE: a task with no envelope is UNDECLARED",
        runtime_envelope("nope", d, rows)["state"] == "UNDECLARED")
+    ok("ISA-0727 B MUST-FIRE: an UNDECLARED row names its task (distinct release-gate ids, never RE-?)",
+       runtime_envelope("nope", d, rows).get("task") == "nope" and runtime_envelope("t", d, rows).get("task") == "t")
     # R4.15
     ok("R4.15 MUST-FIRE: a mirror-only task surface is UNKNOWN, not VERIFIED",
        executed_identity({"tasks": ["isa-monthly-prerun"]}, {"isa-monthly-prerun": "mirror"})["state"] == UNKNOWN)

@@ -33,6 +33,7 @@ This module MEASURES. It sets no policy: thresholds live in isa_policy (R4.4).
 """
 from __future__ import annotations
 
+import functools
 import math
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -55,26 +56,64 @@ class RiskRefused(RuntimeError):
 
 # ────────────────────────────────────────────────────────────────────── series
 _LEVEL_CACHE: dict = {}
+# ⚑ ISA-0621 (P-B9, 19-Oct-2026): SCOPED memo for the switch contest's ~2,500 plan evaluations. The three caches below
+#   are consulted ONLY while `frozen_store(store)` is active for that exact store object - the caller's promise that
+#   the store is not mutated inside the block - and are emptied on entry and exit. Outside the block every function
+#   computes exactly as before. Values are bitwise identical (the same functions on the same inputs).
+_FROZEN: dict = {"store": None}
+
+
+class frozen_store:                                   # noqa: N801 (context manager, used as a verb)
+    def __init__(self, store):
+        self.store = store
+        self.prev = None
+
+    def __enter__(self):
+        self.prev = _FROZEN.get("store")
+        for _c in (_RETURNS_CACHE, _WINDOW_CACHE, _PCOV_CACHE, _NRET_CACHE):
+            _c.clear()
+        _FROZEN["store"] = self.store
+        return self
+
+    def __exit__(self, *exc):
+        _FROZEN["store"] = self.prev
+        for _c in (_RETURNS_CACHE, _WINDOW_CACHE, _PCOV_CACHE, _NRET_CACHE):
+            _c.clear()
+        return False
+
+
+_NRET_CACHE: dict = {}
+_RETURNS_CACHE: dict = {}      # ISA-0621: returns_on memo - used only inside frozen_store()
+_PCOV_CACHE: dict = {}         # ISA-0621: pairwise covariance memo - used only inside frozen_store()
+_WINDOW_CACHE: dict = {}       # ISA-0621: window_dates memo - used only inside frozen_store()
 
 
 def _levels(store: dict, ticker: str) -> Dict[str, float]:
     """GBP total-return levels by date, memoised per (store, ticker).
 
     ⚑ COST ONLY. The gate asks about ~63 candidates against the same 6-name sleeve, so without
-    this the sleeve's series is rebuilt 63 times and the pre-run grew 50s. Keyed on the store
-    object's identity, so a different store cannot collide with a cached one."""
-    key = (id(store), ticker)
-    got = _LEVEL_CACHE.get(key)
-    if got is not None:
-        return got
+    this the sleeve's series is rebuilt 63 times and the pre-run grew 50s.
+
+    ⚑ B05-R02 (19-Oct-2026): THE CACHE CANNOT SERVE STALE LEVELS. The key was (id(store), ticker),
+    and an id is reusable after its object is garbage-collected, so a NEW store could be answered
+    from an OLD store's levels; and a store mutated IN PLACE (a Step 5y refresh in the same
+    process) kept its id while its content changed. The entry now HOLDS its store (so the id
+    cannot be reused while cached) and is valid only while the record's observation count and
+    latest date are unchanged - a revised or extended series is recomputed."""
     import stock_return_store as _srs549
     rec = _srs549.record_of(store, ticker)                # ISA-0549: resolve the requested label
+    obs = rec.get("observations") or {}
+    stamp = (len(obs), max(obs) if obs else None, id(obs))
+    key = (id(store), ticker)
+    got = _LEVEL_CACHE.get(key)
+    if got is not None and got[0] is store and got[1] == stamp:
+        return got[2]
     out = {}
     for d, o in (rec.get("observations") or {}).items():
         g = (o or {}).get("gbp")
         if g is not None:
             out[d] = float(g)
-    _LEVEL_CACHE[key] = out
+    _LEVEL_CACHE[key] = (store, stamp, out)
     return out
 
 
@@ -90,13 +129,27 @@ def _window_policy() -> Tuple[int, int]:
                           % (type(exc).__name__, exc))
 
 
-def _is_week(d0: str, d1: str) -> bool:
+@functools.lru_cache(maxsize=1 << 16)
+def _is_week_str(d0: str, d1: str) -> bool:
     import datetime as _dt
-    return (_dt.date.fromisoformat(str(d1)[:10]) - _dt.date.fromisoformat(str(d0)[:10])).days == 7
+    return (_dt.date.fromisoformat(d1[:10]) - _dt.date.fromisoformat(d0[:10])).days == 7
+
+
+def _is_week(d0: str, d1: str) -> bool:
+    # ISA-0621 (P-B9, 19-Oct-2026): COST ONLY - a pure function of two date strings, memoised. The switch contest
+    # evaluates ~1,000 plans and this was 14M date parses (9 s of a 25 s engine build); the answer is unchanged.
+    return _is_week_str(str(d0), str(d1))
 
 
 def n_returns(dates: Sequence[str]) -> int:
     """Consecutive-Friday returns a level-date sequence yields (a gap is never bridged)."""
+    if _FROZEN.get("store") is not None:                  # ISA-0621: pure in `dates`; memo inside frozen_store only
+        _k = tuple(dates)
+        v = _NRET_CACHE.get(_k)
+        if v is None:
+            v = sum(1 for i in range(1, len(dates)) if _is_week(dates[i - 1], dates[i]))
+            _NRET_CACHE[_k] = v
+        return v
     return sum(1 for i in range(1, len(dates)) if _is_week(dates[i - 1], dates[i]))
 
 
@@ -108,6 +161,11 @@ def window_dates(store: dict, names: Iterable[str], weeks: Optional[int] = None)
     Friday and was declared nowhere, so a GBP ceiling moved with the age of the store."""
     W, _ = _window_policy()
     W = int(weeks or W)
+    names = list(names)
+    _fz = _FROZEN.get("store") is store                   # ISA-0621: memo only inside frozen_store(store)
+    _k = (tuple(sorted(names)), W)                        # the window depends on the SET of names only
+    if _fz and _k in _WINDOW_CACHE:
+        return list(_WINDOW_CACHE[_k])
     d = common_dates(store, names)
     keep, n = [], 0
     for i in range(len(d) - 1, 0, -1):
@@ -118,6 +176,8 @@ def window_dates(store: dict, names: Iterable[str], weeks: Optional[int] = None)
                 keep.insert(0, d[i])
             keep.insert(0, d[i - 1])
             n += 1
+    if _fz:
+        _WINDOW_CACHE[_k] = list(keep)
     return keep
 
 
@@ -133,6 +193,11 @@ def returns_on(store: dict, ticker: str, dates: Sequence[str]) -> List[float]:
     """Weekly returns over `dates`, CONSECUTIVE Fridays only (ISA-0680): a pair of dates more than
     7 days apart is SKIPPED, never bridged into a one-week return - bridging deflates volatility
     and inflates apparent diversification, the direction that moves capital toward risk."""
+    _fz = _FROZEN.get("store") is store                   # ISA-0621: memo only inside frozen_store(store)
+    if _fz:
+        _k = (ticker, tuple(dates))
+        if _k in _RETURNS_CACHE:
+            return list(_RETURNS_CACHE[_k])
     lv = _levels(store, ticker)
     out = []
     for i in range(1, len(dates)):
@@ -141,6 +206,8 @@ def returns_on(store: dict, ticker: str, dates: Sequence[str]) -> List[float]:
         a, b = lv[dates[i - 1]], lv[dates[i]]
         if a:
             out.append(b / a - 1.0)
+    if _fz:
+        _RETURNS_CACHE[_k] = list(out)
     return out
 
 
@@ -162,6 +229,19 @@ def _cov(a: Sequence[float], b: Sequence[float]) -> float:
         return 0.0
     ma, mb = _mean(a[:n]), _mean(b[:n])
     return sum((a[i] - ma) * (b[i] - mb) for i in range(n)) / (n - 1)
+
+
+def _pcov(store: dict, a: str, b: str, dates: Sequence[str], R: Dict[str, List[float]]) -> float:
+    """ISA-0621 (P-B9): COST ONLY - the covariance of two names' weekly returns on `dates`, memoised inside
+    frozen_store(store) only. Bitwise the same number as _cov(R[a], R[b]) (same pair order, same summation)."""
+    if _FROZEN.get("store") is not store:
+        return _cov(R[a], R[b])
+    k = (a, b, tuple(dates))
+    v = _PCOV_CACHE.get(k)
+    if v is None:
+        v = _cov(R[a], R[b])
+        _PCOV_CACHE[k] = v
+    return v
 
 
 def staleness(store: dict, ticker: str) -> Optional[float]:
@@ -206,7 +286,7 @@ def sigma(store: dict, weights: Dict[str, float], dates: Optional[Sequence[str]]
         raise RiskRefused("only %d consecutive overlapping weeks, %d required"
                           % (n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
-    var = sum(weights[a] * weights[b] * _cov(R[a], R[b]) for a in names for b in names)
+    var = sum(weights[a] * weights[b] * _pcov(store, a, b, dates, R) for a in names for b in names)
     return math.sqrt(max(var, 0.0) * WEEKS_PER_YEAR)
 
 
@@ -429,11 +509,33 @@ def risk_shares(store: dict, portfolio: Optional[dict], dates=None, *,
                           % (n_returns(dates), _min))
     R = {t: returns_on(store, t, dates) for t in names}
     S = sigma(store, w, dates)
-    mctr = {a: sum(w[b] * _cov(R[a], R[b]) for b in names) * WEEKS_PER_YEAR / S for a in names}
+    mctr = {a: sum(w[b] * _pcov(store, a, b, dates, R) for b in names) * WEEKS_PER_YEAR / S for a in names}
     out = {a: w[a] * mctr[a] / S for a in names}
     return {"shares": out, "mctr": mctr, "sleeve_sigma_ann": S, "weights": dict(w),
             "n_names": len(names), "n_weeks": n_returns(dates), "dates": list(dates),
             "risk_window": window_of(dates), "coverage_pct": 100.0}
+
+
+RISK_SHARE_METHOD = ("euler_share/sample_covariance/weekly_gbp_total_return/consecutive_fridays/"
+                     "annualised_52 (sleeve_risk.risk_shares)")
+
+
+def observation_digest(store: dict, names, dates) -> str:
+    """B05-R01: a digest of exactly what a risk calculation consumed - per name, its instrument
+    basis and its GBP level on every window date (absent dates hashed as absent). Presentation and
+    generation metadata (as_of, stamp_basis, fetch times) are deliberately not part of it."""
+    import hashlib as _hl
+    import stock_return_store as _srs
+    h = _hl.sha256()
+    for t in sorted(names):
+        rec = _srs.record_of(store, t)
+        h.update(("%s|%s|%s|%s;" % (t, _srs.canonical_name(t), rec.get("currency"),
+                                    bool(rec.get("total_return_basis")))).encode("utf-8"))
+        lv = _levels(store, t)
+        for dd in dates:
+            v = lv.get(dd)
+            h.update(("%s=%s;" % (dd, "NA" if v is None else repr(round(float(v), 10)))).encode("utf-8"))
+    return h.hexdigest()[:16]
 
 
 def risk_share_authority(store: dict, portfolio: dict, dates=None) -> dict:
@@ -463,10 +565,19 @@ def risk_share_authority(store: dict, portfolio: dict, dates=None) -> dict:
     d = rs["dates"]
     # ISA-0680: the window is the DECLARED one (isa_policy.RISK_WINDOW_WEEKS), and it is part of the id.
     window = dict(rs["risk_window"], min_overlap_weeks=rs["risk_window"]["min_weeks"])
-    snapshot = _json.dumps({"weights": rs["weights"], "window": window}, sort_keys=True,
-                           default=str)
+    # ⚑ B05-R01 (19-Oct-2026): the id binds the EXACT calculation, not just its shape. It was a hash of
+    #   (weights, window) alone, so a revised return, a changed FX path or a different method kept the
+    #   same RSHR id while the shares moved. It now also binds the digest of the exact GBP levels used
+    #   on every window date per name, each name's instrument basis (canonical id, currency, total-
+    #   return basis) and the method. Generation timestamps / as_of stamps are EXCLUDED, so an
+    #   identical replay keeps an identical id.
+    snapshot = _json.dumps({"weights": rs["weights"], "window": window,
+                            "observations": observation_digest(store, sorted(rs["weights"]), d),
+                            "method": RISK_SHARE_METHOD}, sort_keys=True, default=str)
     calc_id = "RSHR-%s" % _hl.sha256(snapshot.encode("utf-8")).hexdigest()[:12]
     return {"risk_share_calc_id": calc_id,
+            "identity_basis": {"observations_digest": observation_digest(store, sorted(rs["weights"]), d),
+                               "method": RISK_SHARE_METHOD},
             "shares": rs["shares"], "weights": rs["weights"],
             "mctr": rs["mctr"],             # relayed: the marginal contribution, same call
             "sleeve_sigma_ann": rs["sleeve_sigma_ann"],
@@ -741,6 +852,34 @@ def _selftest(verbose: bool = True) -> int:
         abs(_auth["shares"][t] - _auth["weights"][t] * _auth["mctr"][t] / _auth["sleeve_sigma_ann"]) < 1e-12
         for t in _auth["shares"]),
        "ISA-0708 MUST-FIRE: the authority publishes the SAME mctr its shares were built from")
+    # ── B05-R01 / B05-R02 (19-Oct-2026): identity binds the calculation; the cache cannot go stale ──
+    import copy as _cp
+    _id0 = risk_share_authority(store, pf)["risk_share_calc_id"]
+    _replay = _cp.deepcopy(store)
+    for _rec in (_replay.get("names") or {}).values():
+        for _o in (_rec.get("observations") or {}).values():
+            if isinstance(_o, dict):
+                _o["as_of"] = "1999-01-01"                       # presentation/generation metadata only
+    ok(risk_share_authority(_replay, pf)["risk_share_calc_id"] == _id0,
+       "B05-R01 NEGATIVE CONTROL: an identical replay (only generation stamps differ) keeps the SAME id")
+    _mut = _cp.deepcopy(store)
+    _mu = _srs549_for_test = None
+    import stock_return_store as _srst
+    _r = _srst.record_of(_mut, "MU")
+    _k = sorted(_r["observations"])[-2]
+    _r["observations"][_k]["gbp"] = float(_r["observations"][_k]["gbp"]) * 1.05
+    _a1 = risk_share_authority(_mut, pf)
+    ok(_a1["risk_share_calc_id"] != _id0,
+       "B05-R01 MUST-FIRE: one revised return with weights and window unchanged CHANGES the id")
+    # B05-R02: an in-place revision of a cached store is recomputed, never served from the cache
+    _s_before = risk_shares(_mut, pf)["shares"]["MU"]
+    _r["observations"][_k]["gbp"] = float(_r["observations"][_k]["gbp"]) * 1.10
+    _r["observations"]["2099-01-02"] = {"gbp": float(_r["observations"][_k]["gbp"])}   # extends the series
+    _lv = _levels(_mut, "MU")
+    ok("2099-01-02" in _lv, "B05-R02 MUST-FIRE: an in-place extension of a cached store is visible (cache invalidated)")
+    del _r["observations"]["2099-01-02"]
+    ok(_levels(_mut, "MU").get(_k) == float(_r["observations"][_k]["gbp"]),
+       "B05-R02 MUST-FIRE: an in-place revision of a cached level is visible")
     if verbose:
         print("sleeve_risk._selftest: %d assertions, 0 failed" % n)
     return n

@@ -632,12 +632,55 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         "factor_line": (analytics.get("factor_lookthrough") or {}).get("email_line"),
         "factor_unclassified": (analytics.get("factor_lookthrough") or {}).get("unclassified"),
         "semis_line": ((analytics.get("factor_lookthrough") or {}).get("semis") or {}).get("line"),
+        # B08-R01/R02 (P-B6): whole-ISA exposure coverage - the pounds each exposure answer covers
+        "exposure_line": (analytics.get("exposure_coverage") or {}).get("line"),
         "kpis":               kpis,
         "holdings":           all_holdings,
         "performance_header": "Portfolio vs MSCI World (Benchmark: Global Large-Cap Blend Equity)",
         "performance":        perf,
         "notes":              notes,
     }
+
+
+def apply_account_return(s6: dict, ar) -> dict:
+    """ISA-0642 (6) RENDERER: the actual account's return beside the X-Ray's holdings-based YTD.
+
+    The X-Ray YTD row is RELABELLED (today's holdings back-cast to 1-Jan - not the account's return);
+    the account rows are added from `summary.account_return` exactly as the pre-run computed them. A
+    refused window shows its STATE word, never a number; an absent block says ABSENT."""
+    s6 = dict(s6 or {})
+    perf = [dict(r) for r in (s6.get("performance") or [])]
+    for r in perf:
+        if r.get("period") == "YTD":
+            r["period"] = "YTD (X-Ray: today's holdings back-cast to 1-Jan, NOT the account)"
+    dash = "\u2014"
+    def _row(w, name):
+        if not isinstance(w, dict):
+            return {"period": name + " (account)", "portfolio": "ABSENT", "benchmark": dash, "alpha": dash}
+        if w.get("state") != "OK":
+            return {"period": name + " (account)", "portfolio": str(w.get("state")), "benchmark": dash, "alpha": dash}
+        return {"period": "%s to %s (account TWR, flows stripped)" % (name, (w.get("end") or {}).get("date")),
+                "portfolio": "%+.2f%%" % float(w["twr_pct"]), "benchmark": dash, "alpha": dash}
+    if not isinstance(ar, dict) or not ar:
+        perf.append(_row(None, "Account YTD"))
+        line = ("Account return ABSENT from this run's context (Step 1b-2 did not write summary.account_return) - "
+                "the X-Ray YTD above is holdings-based and is NOT the account's return; do not infer one.")
+    else:
+        c, t = ar.get("calendar_ytd") or {}, ar.get("tax_year_to_date") or {}
+        perf.append(_row(c, "Calendar YTD"))
+        perf.append(_row(t, "Tax-year-to-date"))
+        def _txt(w, name):
+            if w.get("state") != "OK":
+                return "%s %s (%s)" % (name, w.get("state"), str(w.get("why") or "")[:160])
+            return ("%s TWR %+.2f%% / money-weighted %+.2f%% from GBP %s (%s, %s) to GBP %s (%s) with GBP %s of external flows"
+                    % (name, w["twr_pct"], w.get("mwr_pct") or 0.0, format(w["start"]["value_gbp"], ",.2f"), w["start"]["date"],
+                       w["start"]["source"], format(w["end"]["value_gbp"], ",.2f"), w["end"]["date"], format(w["flows_total_gbp"], ",.2f")))
+        line = ("Account return (ISA-0642): " + _txt(c, "calendar YTD") + "; " + _txt(t, "tax-year-to-date") + ". "
+                + str((c if c.get("state") == "OK" else t).get("basis") or "") + ". The X-Ray YTD row is HOLDINGS-based.")
+    s6["performance"] = perf
+    s6["account_return_line"] = line
+    s6["notes"] = ((s6.get("notes") or "") + " " + line).strip()
+    return s6
 
 
 def build_s7(portfolio: dict) -> dict:
@@ -1037,6 +1080,24 @@ def _fund_action_stack_block(path=None):
             "basis": o.get("basis"),
             "frs_role": o.get("frs_role"),
         })(d.get("donor_ordering") or {}),
+        # ⚑ ISA-0869: every fund's NAV date is TYPED; a stale one is named in the same breath as the stack
+        "nav_freshness": (lambda nf: {
+            "available": bool(nf),
+            "headline": ("Fund NAV golden source: %d of %d FRESH" % ((nf.get("counts") or {}).get("FRESH", 0),
+                                                                  len(nf.get("funds") or {}))
+                         + ("; NOT FRESH: " + "; ".join("%s %s (NAV %s)" % (x.get("name") or x.get("sedol"), x.get("state"),
+                                                                           x.get("newest"))
+                                                       for x in nf.get("not_fresh") or []) if nf.get("not_fresh") else "")
+                         ) if nf else ("Fund NAV freshness NOT RECORDED in this stack (pre-ISA-0869 artefact) - "
+                                       "NAV dates unchecked"),
+            "not_fresh": nf.get("not_fresh") or [],
+        })(d.get("nav_freshness") or {}),
+        # ⚑ ISA-0127: a closed-end holding's discount, matched-pair basis and its place in its own history
+        "trust_discounts": [{"name": y.get("name"), "discount_pct": y.get("discount_pct"), "as_of": y.get("discount_as_of"),
+                             "basis": y.get("discount_basis"), "percentile": y.get("discount_history_percentile"),
+                             "n": y.get("discount_history_n"),
+                             "crystallisation_gbp": (y.get("crystallisation") or {}).get("cost_gbp")}
+                            for y in d.get("fund_retention_score", []) if y.get("closed_end")],
         "anchor_failures": d.get("anchor_rule_failures", []),
         "window_conflicts": d.get("dominance_window_conflicts", []),
         "disputed": (d.get("xray_cross_check") or {}).get("disputed", []),
@@ -1798,6 +1859,11 @@ def decision_engine_line(cde, verification=None):
         return "Capital decision engine (ISA-0804): %s - %s" % (cde.get("state"), (cde.get("why") or cde.get("authority") or "")[:240])
     sel = cde.get("selected_actions") or []
     sel_s = ", ".join("%s %s" % (a.get("ticker"), _gbp(a.get("gbp"))) for a in sel) or "NO NEW STOCK (cash)"
+    _ss = cde.get("selected_sales") or []                       # ISA-0621: a LIVE switch sells first
+    if _ss:
+        sel_s = "SWITCH - SELL FIRST %s, then buy %s" % (
+            ", ".join("%s %s %s (proceeds %s)" % (a.get("action"), a.get("ticker"), _gbp(a.get("gbp")), _gbp(a.get("proceeds_gbp")))
+                      for a in _ss), sel_s)
     auth = cde.get("engine_authority")
     return ("Capital decision engine (ISA-0804, %s, receipt %s, %s): selection %s; comparator %s; "
             "ambition band %s; required cases outstanding: %s. Verification at email build: %s. %s"
@@ -1809,6 +1875,99 @@ def decision_engine_line(cde, verification=None):
                 "the governed plan." if auth != "LIVE" else
                 ("capital authorised by the receipt." if cde.get("capital_authorised") else
                  "capital NOT authorised by the receipt."))))
+
+
+def concentration_line(cde, readiness=None):
+    """ISA-0465/0700 (19-Oct-2026): one sentence rendering the engine's concentration record and the LIVE readiness
+    (Raj: 'how will you remember to show me what the caps would have changed?' - this line IS the reminder, every
+    run). Renderer only: the record comes from the receipt summary; readiness from concentration_control."""
+    c = (cde or {}).get("concentration") if isinstance(cde, dict) else None
+    if not c:
+        return ("Concentration caps (ISA-0465): NO RECORD in this receipt - the caps were not evaluated this run, "
+                "so nothing is known about what they would change.")
+    imp = (c.get("impact") or {})
+    mode = c.get("mode")
+    head = ("Concentration caps (ISA-0465, %s%s; sector <= 12%% of the ISA, theme <= 50%% of the post-trade stock "
+            "sleeve)" % (mode, " - binds nothing" if mode != "LIVE" else " - BINDING"))
+    if imp.get("state") != "OK":
+        body = "not evaluated this run: %s (%s)" % (imp.get("state"), (imp.get("reason") or "")[:160])
+    else:
+        sb = c.get("selected_bundle") or {}
+        ex = c.get("failing_examples") or []
+        exs = "; ".join("%s -> %s" % ("+".join(str(b[0]) for b in e.get("bundle") or []),
+                                        ", ".join("%s %s" % (v.get("kind"), v.get("class")) for v in e.get("violations") or []))
+                        for e in ex[:3])
+        body = ("%s of %s candidate plan(s) would breach%s; the chosen plan %s"
+                % (c.get("n_bundles_failing"), c.get("n_bundles_evaluated"), (" (e.g. %s)" % exs) if exs else "",
+                   ("PASSES" if sb.get("state") == "PASS" else
+                    "would BREACH: %s" % ", ".join("%s %s" % (v.get("kind"), v.get("class")) for v in sb.get("violations") or [])
+                    if sb else "is no-action")))
+    un = c.get("unmapped_universe") or []
+    uns = (" %d candidate(s) still have no theme (%s) - no Yahoo profile for auto-classification; refused UNKNOWN "
+           "if LIVE, retried next run (ISA-0700)."
+           % (len(un), ", ".join(un[:12]) + (" ..." if len(un) > 12 else ""))) if un else ""
+    rd = readiness or {}
+    # P-B7 (Raj 19-Oct-2026 15:11): classification is automatic - shown for information, never for decision
+    _au, _ci = rd.get("auto_classified") or [], rd.get("conservative_inclusions") or []
+    if _au or _ci:
+        uns += (" Classification (automatic, information only): %s%s%s."
+                % (("%d auto-classified (%s)" % (len(_au), ", ".join(_au[:8]) + (" ..." if len(_au) > 8 else "")))
+                   if _au else "", "; " if (_au and _ci) else "",
+                   ("%d doubtful membership(s) counted IN their theme (%s)"
+                    % (len(_ci), ", ".join(_ci[:8]) + (" ..." if len(_ci) > 8 else ""))) if _ci else ""))
+    if rd.get("state") == "READY" and mode != "LIVE":
+        tail = " LIVE READINESS: READY - DECISION REQUIRED (Raj): switch the caps LIVE for the next pre-run?"
+    elif rd:
+        tail = " LIVE readiness: %s (%s)." % (rd.get("state"), "; ".join(rd.get("blockers") or []) or "no blockers")
+    else:
+        tail = " LIVE readiness: UNREADABLE at email build."
+    return head + ": " + body + "." + uns + tail
+
+
+def switch_contest_line(cde):
+    """ISA-0621 (P-B9, 19-Oct-2026): one paragraph rendering the receipt's SHADOW switch contest - whether selling a held
+    stock to fund a better use would have won, each holding's central breakeven, why a donor could not carry authority,
+    and the net-book concentration/factor effect. Renderer only (R20.2): every figure comes from the receipt summary."""
+    sc = (cde or {}).get("switch_contest") if isinstance(cde, dict) else None
+    if not sc:
+        return ("Switch contest (ISA-0621): NO RECORD in this receipt - held stocks were not contested this run, so nothing "
+                "is known about whether selling one would have been better.")
+    st = sc.get("state")
+    head = "Switch contest (ISA-0621, SHADOW - moves no capital; the buy decision above is unchanged)"
+    if st in ("ERROR", "PARITY_FAILED", "ORACLE_DISAGREES", "SEARCH_INCOMPLETE"):
+        return "%s: %s - %s. Nothing from it may be read as a recommendation." % (
+            head, st, sc.get("why") or (sc.get("parity") or {}).get("mismatches") or "see receipt")
+    sh = ((sc.get("shadow_selection") or {}).get("selected") or {})
+    dg = ((sc.get("diagnostic_selection") or {}).get("selected") or {})
+    def _plan(p):
+        sells = ", ".join("%s %s%s" % ("EXIT" if x.get("exit") else "trim", x.get("ticker"), "" if x.get("exit") else
+                                      " GBP %s" % format(x.get("gbp") or 0, ",.0f")) for x in p.get("sell") or [])
+        buys = ", ".join("%s GBP %s" % (x.get("ticker"), format(x.get("gbp") or 0, ",.0f")) for x in p.get("buy") or [])
+        return ("sell %s -> buy %s" % (sells, buys or "nothing")) if sells else ("buy %s" % (buys or "nothing"))
+    if (sc.get("diagnostic_selection") or {}).get("differs_from_live") and dg.get("sell"):
+        verdict = ("a SWITCH would win once the donor cases clear: %s (regret GBP %s)"
+                   % (_plan(dg), format(dg.get("regret_gbp") or 0, ",.0f")))
+    else:
+        verdict = "no switch beats the new-money plan - holding every stock is the contest's answer"
+    if (sc.get("shadow_selection") or {}).get("differs_from_live") and sh.get("sell"):
+        verdict += "; with authority-eligible donors only it would: %s" % _plan(sh)
+    dons = []
+    for t, d in sorted((sc.get("donors") or {}).items()):
+        if not d.get("evaluated"):
+            dons.append("%s not contestable (%s)" % (t, d.get("code")))
+            continue
+        be = d.get("central_breakeven_er12_pct")
+        dons.append("%s sell only if its 12m return < %s%% (case %s%%)%s"
+                    % (t, be if be is not None else "?", d.get("central_er12_local_pct"),
+                       "" if d.get("authority_eligible") else " [%s]" % d.get("code")))
+    cn = sc.get("concentration_net_book") or {}
+    fn = sc.get("factor_net_book") or {}
+    tail = ("Net-book caps (Raj 19-Oct): %s of %s plans breach on the net book vs %s if sales were ignored; AI-factor floor "
+            "across plans %s%% (cap 30%%)." % (cn.get("n_failing_net"), cn.get("n_plans"), cn.get("n_failing_if_donor_legs_ignored"),
+                                               "-".join(str(x) for x in (fn.get("post_lower_pct_range") or ["?"]))))
+    cs = sc.get("case_scope_donors") or []
+    need = (" Donor cases needed before any switch can carry authority: %s." % ", ".join(cs)) if cs else ""
+    return "%s: %s. %s. %s%s" % (head, verdict, "; ".join(dons) if dons else "no held stock", tail, need)
 
 
 def dealability_confirmation_line(cde):
@@ -2209,8 +2368,14 @@ SUMMARY_RENDERED = {
     "v21":                        "build_v21_block",              # s7 — ISA-0439
     "plan_stability":             "build_v21_block",              # s7 — routed into summary.v21
     "fund_action_stack":          "_fund_action_stack_block",     # s8
+    "fund_nav_freshness":         "_fund_action_stack_block",     # s8 - NAV freshness line (ISA-0869)
+    "trust_nav_capture":          "_fund_action_stack_block",     # s8 - trust discount history (ISA-0127)
+    "fund_holdings_ft":           "_fund_action_stack_block",     # s8 - H9 declared holdings (ISA-0869 CA7, via 6.06 look-through)
     "donor_ordering":             "_fund_action_stack_block",     # s8 — A7 sell order
     "factor_lookthrough":         "build_s6",                     # s6
+    "theme_autoclassify":         "concentration_line",           # s2 - ISA-0700 P-B7 auto-classification (via readiness)
+    "exposure_coverage":          "build_s6",                     # s6 - B08-R01/R02 whole-ISA coverage (P-B6)
+    "account_return":             "apply_account_return",         # s6 - ISA-0642 (6) actual-account YTD
     "regime_state":               "_s2_standing_lines",           # s2 standing line
     "drawdown":                   "_s2_standing_lines",           # s2 B1 ladder line
     "return_architecture":        "_ra_load",                     # s8 Section C
@@ -2242,6 +2407,7 @@ SUMMARY_RENDERED = {
     # universe unfetched behind a coverage line reading 59 of 59 measured.
     "symbol_map_refresh":         "build_integrity_block",        # s7 — measurement/coverage
     "instrument_eligibility":     "build_integrity_block",        # s7 — ISA-0860 instrument type / ISA eligibility
+    "corporate_events":           "build_integrity_block",        # s7 — ISA-0817 offer period / corporate actions
     "fetch_universe":             "build_integrity_block",        # s7 — measurement/coverage
     "execution_ledger":           "build_integrity_block",        # s11 — framework health
     "integrity_report":           "build_integrity_block",        # s11 — framework health
@@ -2278,6 +2444,8 @@ SUMMARY_ESCALATED = {
     #   considered-and-declined in the Sep-2026 run (ISA-0617/0657/0667).
     "vci_refusals":               "Step 6.5",
     "a18_consistency":            "Step 9d",
+    "weekly_store_freshness":     "Step 5y (ISA-0756)",   # escalates only when a held name is STALE_INPUT
+    "fund_vector_refresh": "Step 6.10v (ISA-0569)",   # P-B8: escalated as the 6.10v warning line every run
     "fund_exposure_vectors":      "Step 6.10a",   # age/provenance of a capture, not a finding
     "calibration_files":          "Calibration",  # stale/unstamped file list
     "calibration_fingerprint":    "Calibration",  # live-config hash match
@@ -2351,10 +2519,7 @@ SUMMARY_OUT_OF_SCOPE = {
                                "observation date, typed gaps) consumed only by the ISA-0744 "
                                "horizon-value SHADOW; ECB reference rates are valuation rates, "
                                "not a decision figure; a failure surfaces as a Step 6f warning",
-    "execution_ceiling":       "ISA-0740 SHADOW: the approval-preserving execution ceiling is "
-                               "published for evidence only and moves no capital until Raj "
-                               "promotes it; rendering it now would present a SHADOW limit as "
-                               "an execution instruction",
+    # execution_ceiling: RETIRED 18-Oct-2026 (ISA-0727 Q1) - the pre-run no longer writes the key (ISA-0447 parity)
     "run_manifest":            "run liveness metadata — consumed by the manifest and by "
                                "consistency_check, and a stage table is not a decision figure",
     "watchlist_tickers_scored": "a COUNT of the rows Section 5 renders in full; the table is the "
@@ -2395,7 +2560,7 @@ SUMMARY_UNADJUDICATED = (
 def build_integrity_block(fetch_report=None, correlation_coverage=None,
                           integrity_report=None, execution_ledger=None,
                           symbol_map_refresh=None, fetch_universe=None,
-                          instrument_eligibility=None) -> dict:
+                          instrument_eligibility=None, corporate_events=None) -> dict:
     """P0/P1 -> the §7 (measurement) and §11 (framework health) sub-blocks.
 
     ⚑ WHY THESE FOUR KEYS ARE RENDERED AND NOT ESCALATED. `SUMMARY_ESCALATED` is admissible
@@ -2471,6 +2636,28 @@ def build_integrity_block(fetch_report=None, correlation_coverage=None,
                          (" (" + ", ".join(ie.get("not_isa_qualifying") or []) + ")") if ie.get("not_isa_qualifying") else "",
                          ie.get("fetched", 0),
                          ("; NOT COMPLETE: " + "; ".join(ie.get("errors") or [])) if ie.get("errors") else ""))
+    ce = corporate_events or {}
+    if ce:
+        # ISA-0817 (Raj D1-D3 18-Oct-2026): offer period / corporate actions, rendered from the pre-run summary only
+        if ce.get("state") in ("UNAVAILABLE", "DISABLED"):
+            s7.append("Offer period / corporate actions (Step 5x-ce, ISA-0817): %s - %s. The store on disk ages to "
+                      "SOURCE_FAILED (REVIEW before new capital); an offeree is never read as clear."
+                      % (ce.get("state"), ce.get("reason") or "rollback flag"))
+        else:
+            _cc = ce.get("counts") or {}
+            s7.append("Offer period / corporate actions (Step 5x-ce, ISA-0817): %s symbols - %d OFFEREE%s "
+                      "(NEW capital HARD-BLOCKED; held names REVIEW only, never sold on this evidence), %d CORPORATE "
+                      "ACTION PENDING%s (REVIEW + case refresh), %d unsourced venue (confirm at dealing), %d source "
+                      "failed%s. Sources: UK/Irish Takeover Panel tables, SEC EDGAR, Swiss Takeover Board, Nasdaq Nordic releases, "
+                      "RNS headlines; news search (REVIEW only) where no primary register exists (as of %s)."
+                      % (sum(_cc.values()) if _cc else 0, _cc.get("OFFEREE_IN_OFFER_PERIOD", 0),
+                         (" (" + ", ".join(ce.get("offerees") or []) + ")") if ce.get("offerees") else "",
+                         _cc.get("CORPORATE_ACTION_PENDING", 0),
+                         (" (" + ", ".join(ce.get("corporate_action_pending") or []) + ")")
+                         if ce.get("corporate_action_pending") else "",
+                         _cc.get("OFFER_STATE_UNSOURCED", 0), _cc.get("SOURCE_FAILED", 0),
+                         ("; NOT COMPLETE: " + "; ".join(ce.get("errors") or [])) if ce.get("errors") else "",
+                         ce.get("as_of")))
     if fr:
         st = fr.get("state")
         if st in ("FETCH_UNAVAILABLE", "UNAVAILABLE"):
@@ -2827,7 +3014,8 @@ def build_v21_block(v21: dict) -> dict:
     if sc:
         log = sc.get("shadow_log") or {}
         out["a20_line"] = (
-            "A20 slot competition: %s. Ceiling %s this run. %d candidate pair(s) compared; "
+            "A20 slot competition (SHADOW DIAGNOSTIC, not a control - the switch decision is the engine's switch "
+            "contest, ISA-0621): %s. Ceiling %s this run. %d candidate pair(s) compared; "
             "shadow run %d of %d recorded. %s"
             % (sc.get("mode", "SHADOW"),
                ("BINDS" if sc.get("binding_ceiling") else "does NOT bind - a qualified "
@@ -2983,7 +3171,8 @@ def build_prefilled_email(
         "s3_investment_cases":    build_s3_from_scored(scored, step9=step9) if has_scored else skeleton_s3(),
         "s4_liquidation_tracker": skeleton_s4(),
         "s5_watchlist":           _s5,
-        "s6_portfolio_snapshot":  build_s6(portfolio, analytics, xray),
+        "s6_portfolio_snapshot":  apply_account_return(build_s6(portfolio, analytics, xray),
+                                                       (_rc.get("summary") or {}).get("account_return")),   # ISA-0642 (6)
         "s7_stock_sleeve":        _s7_out,
         "s8_fund_review":         build_s8(portfolio, analytics, xray),
         "s9_macro":               skeleton_s9(),
@@ -3173,7 +3362,36 @@ def _selftest():
     assert "moves NO capital" in _el and "MTDR GBP 5,613.69" in _el and "DY" in _el, \
         "ISA-0804: SHADOW receipt line states selection, outstanding cases and that it moves no capital %r" % _el
     assert "NO RECEIPT" in decision_engine_line(None), "MUST-FIRE ISA-0804: an absent receipt renders as absent, never silence"
+    # ISA-0465/0700 - the concentration reminder line
+    _cl = concentration_line({"concentration": {"mode": "SHADOW", "impact": {"state": "OK"}, "n_bundles_evaluated": 9,
+                                                "n_bundles_failing": 3, "selected_bundle": {"state": "PASS"},
+                                                "failing_examples": [{"bundle": [["CIEN", 3000]], "violations": [{"kind": "theme", "class": "AI_DATACENTER_CAPEX"}]}],
+                                                "unmapped_universe": ["ZZZ"]}},
+                             {"state": "READY", "blockers": []})
+    assert "3 of 9" in _cl and "CIEN" in _cl and "ZZZ" in _cl and "DECISION REQUIRED" in _cl and "binds nothing" in _cl, \
+        ("MUST-FIRE ISA-0465: the SHADOW result and the READY decision prompt are rendered", _cl)
+    assert "NO RECORD" in concentration_line({}), "NEGATIVE CONTROL ISA-0465: an absent record says so, never silence"
+    _cl2 = concentration_line({"concentration": {"mode": "SHADOW", "impact": {"state": "NO_BUNDLES_EVALUATED", "reason": "r"}}},
+                              {"state": "NOT_READY", "blockers": ["X"]})
+    assert "NO_BUNDLES_EVALUATED" in _cl2 and "DECISION REQUIRED" not in _cl2, \
+        "NEGATIVE CONTROL ISA-0465: nothing evaluated -> no decision prompt"
     assert "FAILED" in decision_engine_line({"state": "FAILED", "why": "x"}), "MUST-FIRE ISA-0804: a failed engine renders FAILED"
+    # ISA-0621 - the SHADOW switch contest line
+    _sw = switch_contest_line({"switch_contest": {"state": "NO_AUTHORITY_ELIGIBLE_DONOR",
+        "shadow_selection": {"differs_from_live": False, "selected": {"buy": [{"ticker": "MTDR", "gbp": 5613.69}]}},
+        "diagnostic_selection": {"differs_from_live": True, "selected": {"sell": [{"ticker": "COCO", "gbp": 1187.78, "exit": True}],
+                                 "buy": [{"ticker": "MTDR", "gbp": 5613.69}], "regret_gbp": 12.0}},
+        "donors": {"MU": {"evaluated": True, "authority_eligible": False, "code": "DONOR_CASE_REVIEW_REQUIRED",
+                          "central_breakeven_er12_pct": -7.7, "central_er12_local_pct": 27.7},
+                   "QBTS": {"evaluated": False, "code": "DONOR_INADMISSIBLE_ROUTE"}},
+        "concentration_net_book": {"n_plans": 807, "n_failing_net": 122, "n_failing_if_donor_legs_ignored": 402},
+        "factor_net_book": {"post_lower_pct_range": [18.8, 25.8]}, "case_scope_donors": ["MU"]}})
+    assert "SHADOW" in _sw and "EXIT COCO" in _sw and "MU sell only if its 12m return < -7.7%" in _sw and "QBTS not contestable" in _sw \
+        and "122 of 807" in _sw and "402" in _sw and "Donor cases needed" in _sw, ("MUST-FIRE ISA-0621: the switch line renders", _sw)
+    assert "NO RECORD" in switch_contest_line({}), "NEGATIVE CONTROL ISA-0621: an absent switch record says so, never silence"
+    assert "PARITY_FAILED" in switch_contest_line({"switch_contest": {"state": "PARITY_FAILED", "parity": {"mismatches": [1]}}}) and \
+        "may be read as a recommendation" in switch_contest_line({"switch_contest": {"state": "PARITY_FAILED"}}), \
+        "MUST-FIRE ISA-0621: a failed parity is stated and nothing is recommended"
     # ISA-0811 - the receipt allocation and the SHADOW legacy plan are both stated
     _eb = build_capital_router_block({"state": "OK", "split_state": "STOCK_SLEEVE_ENGINE_ALLOCATED", "engine_allocated_gbp": 16841.07,
                                       "decision_receipt": {"receipt_id": "CDR-T", "state": "DECISION_COMPLETE", "verification": "VALID"},

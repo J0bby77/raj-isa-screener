@@ -249,10 +249,16 @@ def gbp_returns(ticker, **kw):
 # ⚑ THE UPPER ANCHORS ARE JUDGEMENT AND SAY SO (R14.4). No evidence sets the point at which a fund
 # has "become a different asset"; 0.50 of beta and 0.30 of R2 are declared, reversible, and carried
 # in the rationale ledger. They are NOT calibrated.
-DRIFT_FLOOR_BETA, DRIFT_FULL_BETA = 0.06, 0.50
+# ⚑ RE-MEASURED 18-Oct-2026 (ISA-0869 found-on-build): with the NAV cache refreshed to Oct-2026 (same
+# 2016-08 start) the controls read VUAG |dbeta| 0.014 |dR2| 0.015 and Vanguard Japan |dbeta| 0.063
+# |dR2| 0.028 - Japan above the 0.06 beta floor measured on data to Jul-2026. Per the floor's own
+# declared rule (the controls' readings rounded up) the beta floor is 0.07; the R2 floor 0.04 still
+# covers both. Effect on the twelve funds: points_fraction moves <= 0.02 (a 10-point FRS component).
+# A floor frozen at one date while its controls keep accruing data is fragile - follow-on registered.
+DRIFT_FLOOR_BETA, DRIFT_FULL_BETA = 0.07, 0.50
 DRIFT_FLOOR_R2,   DRIFT_FULL_R2   = 0.04, 0.30
 DRIFT_MIN_MONTHS = 48          # 24 per half - the same minimum the FRS uses for mean/stddev
-DRIFT_ANCHOR_BASIS = ("floors MEASURED from the two index-tracker controls 13-Aug-2026; upper "
+DRIFT_ANCHOR_BASIS = ("floors MEASURED from the two index-tracker controls 13-Aug-2026, beta floor re-measured 18-Oct-2026; upper "
                       "anchors DECLARED judgement, uncalibrated (R14.4)")
 
 
@@ -503,7 +509,30 @@ def check_all():
     return len(r["errors"])
 
 
+def _selftest():
+    """Offline selftest of the pure pieces this module's drift measure rests on (no network, no cache)."""
+    fails = []
+
+    def ok(name, cond, detail=None):
+        print(("PASS " if cond else "FAIL ") + name + ("" if cond else "  -> %r" % (detail,)))
+        if not cond:
+            fails.append(name)
+    x = [0.01 * i for i in range(-12, 13)]
+    b, r2 = _ols1([2.0 * v + 0.001 for v in x], x)
+    ok("OLS recovers beta 2 and R2 1 on an exact line", abs(b - 2.0) < 1e-9 and abs(r2 - 1.0) < 1e-9, (b, r2))
+    ok("NEGATIVE CONTROL: a constant regressor must not yield a beta (refused, None)", _ols1([0.1] * 5, [0.2] * 5) is None)
+    ok("floors sit below the full-drift anchors (a floor above its anchor would score every fund 0)",
+       0 < DRIFT_FLOOR_BETA < DRIFT_FULL_BETA and 0 < DRIFT_FLOOR_R2 < DRIFT_FULL_R2)
+    ok("ISA-0875: the re-measured beta floor covers the 18-Oct control reading (Vanguard Japan 0.063) and the R2 floor "
+       "its 0.028", DRIFT_FLOOR_BETA >= 0.063 and DRIFT_FLOOR_R2 >= 0.028)
+    ok("the drift minimum is two 24-month halves", DRIFT_MIN_MONTHS == 48)
+    print("benchmark_registry selftest: %d FAIL(s)" % len(fails))
+    return len(fails)
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(1 if _selftest() else 0)
     if "--json" in sys.argv:
         print(json.dumps(validate_all(), indent=1))
     else:
