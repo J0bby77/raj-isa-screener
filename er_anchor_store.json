@@ -2175,14 +2175,121 @@
       "min_rows": 30,
       "fit_for_anchoring": true,
       "built_by": "expected_return.build_anchor_table (D-24)"
+    },
+    "NASDAQ:20261023": {
+      "as_of": "20261023",
+      "group": "NASDAQ",
+      "basis": "sector_median",
+      "multiple_by_sector": {
+        "Industrials": "ev_ebitda",
+        "Technology": "fwd_pe",
+        "Consumer Cyclical": "fwd_pe",
+        "Healthcare": "fwd_pe",
+        "Utilities": "ev_ebitda",
+        "Financial Services": "fwd_pe",
+        "Communication Services": "fwd_pe",
+        "Basic Materials": "ev_ebitda",
+        "Energy": "ev_ebitda",
+        "Consumer Defensive": "fwd_pe",
+        "UNKNOWN": "fwd_pe"
+      },
+      "median_by_sector": {
+        "Basic Materials": 18.493,
+        "Communication Services": 11.8747,
+        "Consumer Cyclical": 16.6222,
+        "Consumer Defensive": 18.7063,
+        "Energy": 6.591,
+        "Financial Services": 14.4557,
+        "Healthcare": 20.5721,
+        "Industrials": 15.8935,
+        "Technology": 19.8541,
+        "Utilities": 13.632
+      },
+      "n_by_sector": {
+        "Basic Materials": 6,
+        "Communication Services": 29,
+        "Consumer Cyclical": 52,
+        "Consumer Defensive": 23,
+        "Energy": 9,
+        "Financial Services": 23,
+        "Healthcare": 68,
+        "Industrials": 40,
+        "Technology": 142,
+        "UNKNOWN": 1,
+        "Utilities": 12
+      },
+      "whole_screen_median": {
+        "ev_ebitda": 16.579,
+        "fwd_pe": 18.6508,
+        "price_fcf": 24.4964
+      },
+      "excluded": {
+        "UNKNOWN": "n=1 < ER_ANCHOR_MIN_SECTOR_N=5"
+      },
+      "rows_in": 434,
+      "sanity_filtered": {
+        "fwd_pe": 15,
+        "ev_ebitda": 5
+      },
+      "sanity_bands": {
+        "fwd_pe": [
+          0.0,
+          200.0
+        ],
+        "trailing_pe": [
+          0.0,
+          200.0
+        ],
+        "val_hist_current_pe": [
+          0.0,
+          200.0
+        ],
+        "current_pe": [
+          0.0,
+          200.0
+        ],
+        "price_fcf": [
+          0.0,
+          200.0
+        ],
+        "ev_ebitda": [
+          0.0,
+          60.0
+        ]
+      },
+      "growth_bounds": {
+        "quantile": 66.667,
+        "n_growth": 417,
+        "min_n": 30,
+        "hi_pp": 50.0,
+        "lo_pp": -25.0,
+        "shape": "tanh",
+        "enabled": true,
+        "knee_floor_pp": 15.0,
+        "knee_ceil_pp": 40.0,
+        "downside_basis": "ABSOLUTE \u2014 measured refusal: the lower tercile is positive on 5 of 6 retained frames, so no cross-sectional knee exists below zero",
+        "built_by": "expected_return.build_growth_bounds (ISA-0377)",
+        "quantile_value_pp": 23.92,
+        "knee_pp": 23.92,
+        "knee_state": "INTERIOR",
+        "basis": "CROSS_SECTIONAL",
+        "share_above_knee_pct": 33.33,
+        "share_above_hi_pct": 13.67,
+        "share_below_lo_pct": 0.96,
+        "median_pp": 16.61
+      },
+      "min_sector_n": 5,
+      "min_rows": 30,
+      "fit_for_anchoring": true,
+      "built_by": "expected_return.build_anchor_table (D-24)"
     }
   },
   "latest": {
-    "NASDAQ": "NASDAQ:20261009",
+    "NASDAQ": "NASDAQ:20261023",
     "STOXX600": "STOXX600:20260926",
     "SP500": "SP500:20261017",
     "F250-SPI": "F250-SPI:20261010",
     "MIDCAP400": "MIDCAP400:20261016"
   },
-  "latest_any": "SP500:20261017"
+  "latest_any": "NASDAQ:20261023"
 }
