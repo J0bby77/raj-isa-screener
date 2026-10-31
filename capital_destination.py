@@ -185,10 +185,25 @@ def _load_sleeve(nav_dir: Path, universe: dict, held_only=True, portfolio=None):
         if path is None:
             unmatched.append(sedol)
             continue
-        s = _stats(_monthly_series(path))
+        # ⚑ ISA-0919 (Raj 29-Oct-2026): a declared share-class history splice (fund_performance.history_splice, the
+        #   one home) is applied here too, so the regime-coverage gate sees the SAME joined history as every return
+        #   window. A fund without a declaration, or whose splice is refused, reads exactly as before.
+        _spl = {"state": "NOT_DECLARED"}
+        if (u or {}).get("history_splice"):
+            import fund_performance as _fp_s
+            _daily = _fp_s._read_csv_series(str(path)) or []
+            _joined, _spl = _fp_s.history_splice(sedol, u, _daily, base=str(HERE))
+            _by = {}
+            for _d, _v in _joined:
+                _by[_d.isoformat()[:7]] = _v
+            s = _stats([(k, _by[k]) for k in sorted(_by)])
+        else:
+            s = _stats(_monthly_series(path))
         if s is None:
             unmatched.append(sedol)
             continue
+        if _spl.get("state") != "NOT_DECLARED":
+            s["history_splice"] = {k: _spl.get(k) for k in ("state", "join", "predecessor_isin", "from", "why")}
         s["sedol"] = sedol
         s["name"] = u.get("name")
         s["bucket"] = u.get("bucket")
@@ -522,7 +537,7 @@ def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> 
     if saa is None:
         try:
             import strategic_allocation as _sa
-            saa = (_sa.build(out_path=Path(OUTPUT_DIR) / ("strategic_allocation_%s.json" % dt.date.today().strftime("%Y_%m")))
+            saa = (_sa.build(out_path=Path(OUTPUT_DIR) / ("strategic_allocation_%s.json" % __import__("run_cycle").cycle_ym(sep="_")))
                    if OUTPUT_DIR else _sa.build())
         except Exception as e:                                        # noqa: BLE001
             saa, crit_state["c1"] = None, {"state": "UNAVAILABLE",
@@ -540,7 +555,7 @@ def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> 
     if pc is None:
         try:
             import process_concentration as _pc
-            pc = (_pc.build(out_path=Path(OUTPUT_DIR) / ("process_concentration_%s.json" % dt.date.today().strftime("%Y_%m")))
+            pc = (_pc.build(out_path=Path(OUTPUT_DIR) / ("process_concentration_%s.json" % __import__("run_cycle").cycle_ym(sep="_")))
                   if OUTPUT_DIR else _pc.build())
         except Exception as e:                                        # noqa: BLE001
             pc, crit_state["c2"] = None, {"state": "UNAVAILABLE",
@@ -995,9 +1010,14 @@ def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
     dear = (ocfs[min(int(len(ocfs) * DONOR_OCF_DEAR_TERCILE), len(ocfs) - 1)] if ocfs else None)
 
     cands = []
+    unranked = []
     for sd, v in sorted(vals.items()):
         r = rows.get(sd)
         if r is None:
+            # ⚑ S3/B03-R08 (EV-0044): a HELD fund the ranking cannot see is NAMED, never silently dropped
+            #   while the result still reads MEASURED (a donor population must reconcile to the book).
+            if v > 0:
+                unranked.append({"sedol": sd, "value_gbp": round(v, 2), "reason": "NOT_IN_RANKING"})
             continue
         vote = dict((frs_by_sedol or {}).get(sd) or {})
         c = {"sedol": sd, "value_gbp": round(v, 2),
@@ -1039,7 +1059,10 @@ def donor_order(*, portfolio=None, universe=None, ranking=None, policy=None,
         c["donor_rank"] = i
         c["why"] = _donor_why(c)
     return {
-        "state": "MEASURED", "as_of": _today(), "item": "ISA-0440 / A7",
+        "state": "MEASURED" if not unranked else "PARTIAL_POPULATION", "as_of": _today(), "item": "ISA-0440 / A7",
+        "unranked": unranked,
+        "population": {"held_funds": len([1 for v in vals.values() if v > 0]), "ranked": len(cands),
+                       "unranked": len(unranked)},
         "enabled": A7_DONOR_ORDER_ENABLED,
         "nav_gbp": round(nav, 2),
         "ocf_dear_tercile_pct": dear,
@@ -1118,6 +1141,65 @@ def _fund_ceiling(policy: dict, sedol: str) -> tuple:
                                  % (cap, float(bh)))
 
 
+
+def vuag_drawdown_headroom(portfolio, policy):
+    """S3/B04 (Raj 24-Oct-2026, option a) - the drawdown opportunity's CAP: GBP room left for VUAG under its APPROVED single-fund limit (capital_destination._fund_ceiling: the
+    12.5% max_single_fund_pct, or a tighter declared band_high), counting every fund the policy declares
+    must stay COMBINED with VUAG inside that limit. -> (headroom_gbp or None, basis)."""
+    try:
+        nav = float(((portfolio or {}).get("summary") or {})["total_value_gbp"])
+        # capital_destination's policy view = {funds, max_single_fund_pct} built from target_weights (one home)
+        pol = {"funds": (policy or {}).get("funds") or {},
+               "max_single_fund_pct": ((policy or {}).get("thresholds") or {}).get("max_single_fund_pct",
+                                                                                 (policy or {}).get("max_single_fund_pct"))}
+        cap, cbasis = _fund_ceiling(pol, "VUAG")
+        funds = (portfolio or {}).get("funds") or []
+        pairs = [sd for sd, f in ((policy or {}).get("funds") or {}).items()
+                 if sd != "VUAG" and "VUAG +" in str((f or {}).get("notes") or "")]
+        held = sum(float(f.get("value_gbp") or 0.0) for f in funds
+                   if str(f.get("ticker")) == "VUAG" or str(f.get("ticker")) in pairs or str(f.get("sedol")) in pairs)
+        room = max(0.0, cap * nav - held)
+        return round(room, 2), ("%s x NAV GBP %.2f - VUAG%s GBP %.2f" % (cbasis, nav, (" + " + ",".join(pairs)) if pairs else "", held))
+    except Exception as e:                                          # noqa: BLE001
+        return None, "UNMEASURED: %s: %s" % (type(e).__name__, e)
+
+def drawdown_fund_overflow(portfolio, tw, amount_gbp, universe=None, nav_dir=None, root=None) -> dict:
+    """P-D / ISA-0886 (Raj 24-Oct-2026: 'Handle this as part of P-D ... the most robust and defendable solution').
+
+    When VUAG's APPROVED 12.5% single-fund limit binds, the drawdown review's remaining capacity is offered to the held
+    fund sleeve through THIS module's existing router: the same regime-coverage eligibility, the same estimation-free
+    ranking (rank_inputs_readonly - no side effects), the same per-fund ceilings and bucket bands (allocate_funds:
+    restore buckets to target, then within band_high). VUAG is excluded (its room is claimed first, separately).
+    WHY THIS AND NOT A NEW INSTRUMENT: it deploys broad equity across eleven already-approved holdings without a new
+    fund methodology (the ISA-0327/0333 boundary) or a changed limit; a new tracker stays a REVIEW alternative.
+    -> {state, capacity_gbp, allocation {sedol: gbp}, unallocated_gbp, eligible, basis}. Pure (reads only)."""
+    amount_gbp = float(amount_gbp or 0.0)
+    if amount_gbp <= 0.005:
+        return {"state": "NOT_NEEDED", "capacity_gbp": 0.0, "allocation": {}, "unallocated_gbp": 0.0,
+                "basis": "no capacity beyond VUAG's headroom was requested"}
+    try:
+        universe = universe or json.load(open(HERE / "fund_universe.json", encoding="utf-8"))
+        nav = Path(nav_dir or HERE / "nav_cache")
+        policy = {"bucket_totals": tw["bucket_totals"], "thresholds": tw["thresholds"], "funds": tw["funds"],
+                  "max_single_fund_pct": tw["thresholds"]["max_single_fund_pct"], "stock_sleeve": tw.get("stock_sleeve"),
+                  "scaling_freeze": tw.get("scaling_freeze"), "_source": "target_weights.json"}
+        rows, _unm = _load_sleeve(nav, universe, held_only=True, portfolio=portfolio)
+        rc = regime_coverage(rows)
+        eligible = {s for s, v in rc.get("verdicts", {}).items() if v["verdict"] == "ELIGIBLE"} - {"VUAG"}
+        ranking = rank_inputs_readonly(universe, root)
+        fa = allocate_funds(amount_gbp, portfolio, universe, eligible, policy, 0.0, ranking=ranking)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "UNMEASURED", "capacity_gbp": None, "allocation": {},
+                "why": "%s: %s" % (type(exc).__name__, exc)}
+    alloc = {k: round(v, 2) for k, v in (fa.get("allocation") or {}).items() if v > 0.005}
+    return {"state": fa.get("state"), "capacity_gbp": round(sum(alloc.values()), 2), "allocation": alloc,
+            "unallocated_gbp": fa.get("unallocated_gbp"), "eligible": sorted(eligible),
+            "phase_allocation": fa.get("phase_allocation"),
+            "basis": ("capital_destination.allocate_funds over the held, regime-eligible funds except VUAG: buckets to "
+                      "phase1_target_pct, then within phase1_band_high; per-fund ceiling = max_single_fund_pct or a "
+                      "tighter declared band; estimation-free ranking (ISA-0386)")}
+
+
 def allocate_funds(amount_gbp: float, portfolio: dict, universe: dict, eligible: set,
                    policy: dict, new_subscription_gbp: float = 0.0, ranking: dict = None) -> dict:
     """Water-fill new capital into the fund sleeve, ordered by the estimation-free ranking.
@@ -1153,6 +1235,7 @@ def allocate_funds(amount_gbp: float, portfolio: dict, universe: dict, eligible:
     step = max(round(amount_gbp / 450.0, 2), 1.0)     # ~450 slices; exact remainder settled below
     remaining = round(amount_gbp, 2)
     blocked_by_phase = {}
+    decisions = {}
     phases = (("to_target", "phase1_target_pct"), ("within_band", "phase1_band_high"))
 
     for phase_name, ceiling_key in phases:
@@ -1199,6 +1282,21 @@ def allocate_funds(amount_gbp: float, portfolio: dict, universe: dict, eligible:
                 break                                  # this ceiling is reached; try the next one
             cands.sort(key=_rank_key)
             best = cands[0]
+            # ⚑ ISA-0918: the FIRST slice a fund wins in a phase is the decision - record what it beat and why,
+            #   and what was barred at that moment, so the report can state the rule's reason per fund.
+            _dk = decisions.setdefault(phase_name, {})
+            if best["sedol"] not in _dk:
+                _bk = _rank_key(best)
+                _rv = []
+                for _c in cands[1:4]:
+                    _ck = _rank_key(_c)
+                    _i = next((i for i, (a_, b_) in enumerate(zip(_bk, _ck)) if a_ != b_), None)
+                    _rv.append({"sedol": _c["sedol"], "decided_by": _CRIT_NAMES[min(_i, 4)] if _i is not None else "tie"})
+                _dk[best["sedol"]] = {"bucket": best["bucket"],
+                                      "bucket_shortfall_pct": round(best["bucket_shortfall_pct"] * 100, 2),
+                                      "c1": ((best.get("rank") or {}).get("c1") or {}).get("c1"),
+                                      "c1_active_pp": ((best.get("rank") or {}).get("c1") or {}).get("active_pp"),
+                                      "rivals": _rv, "barred": dict(blocked_reason)}
             alloc[best["sedol"]] = round(alloc[best["sedol"]] + chunk, 6)
             by_phase[phase_name][best["sedol"]] = round(
                 by_phase[phase_name].get(best["sedol"], 0.0) + chunk, 6)
@@ -1222,9 +1320,72 @@ def allocate_funds(amount_gbp: float, portfolio: dict, universe: dict, eligible:
                            "exist to express (ISA-0388) — it is no longer the router inventing a "
                            "narrower rule than the one Raj wrote."
                            % (len(ceilings), len(bands))),
-                "blocked": blocked_by_phase}
+                "blocked": blocked_by_phase, "decisions": decisions}
     return {"state": "ALLOCATED", "allocation": {k: round(v, 2) for k, v in alloc.items()},
-            "unallocated_gbp": 0.0, "phase_allocation": by_phase, "blocked": blocked_by_phase}
+            "unallocated_gbp": 0.0, "phase_allocation": by_phase, "blocked": blocked_by_phase,
+            "decisions": decisions}
+
+
+_CRIT_NAMES = ("C1 regional imbalance", "C2 manager/process concentration", "C3 mandate integrity", "C4 cost (OCF)",
+               "C5 room in its group")
+_CRIT_PLAIN = {"C1 regional imbalance": "it does more to reduce the portfolio's largest regional imbalances",
+               "C2 manager/process concentration": "it does not add to a manager or process the portfolio already holds a lot of",
+               "C3 mandate integrity": "its 'still doing what it was bought for' check is clean, the other's is failing or not yet testable",
+               "C4 cost (OCF)": "it is cheaper to hold",
+               "C5 room in its group": "its group was further below target",
+               "tie": "they tied on every rule"}
+
+
+def _plain_block(v, refused_reason=None):
+    v = str(v or "")
+    if v == "not eligible":
+        return "not eligible: " + str(refused_reason)[:140] if refused_reason else "not eligible"
+    if "at or above its declared phase1_target_pct" in v:
+        return "its group is already at its target weight"
+    if "at or above its declared phase1_band_high" in v:
+        return "its group is already at the top of its permitted range"
+    if "per-fund ceiling" in v:
+        return "already at its maximum permitted weight"
+    if "no declared target" in v:
+        return "its group has no declared target"
+    return v
+
+
+def fund_allocation_reasons(fa: dict, universe: dict = None, refused: dict = None) -> dict:
+    """ISA-0918 - {sedol: {phase(s), gbp, line}} : the allocation rules' OWN reason for each funded fund, in plain
+    English (renderer input; never a second computation). Built from allocate_funds' recorded decisions."""
+    u = (universe or {}).get("funds", universe or {})
+    nm = lambda s: ((u.get(s) or {}).get("name") or s)
+    phase = fa.get("phase_allocation") or {}
+    dec = fa.get("decisions") or {}
+    out = {}
+    for ph, names in phase.items():
+        for sd, gbp in (names or {}).items():
+            if (gbp or 0) <= 0.005:
+                continue
+            d = (dec.get(ph) or {}).get(sd) or {}
+            if ph == "to_target":
+                why = ("its group (%s) was %.1f points below the target weight you set, and the rules top up groups below "
+                       "target first" % (d.get("bucket") or "?", d.get("bucket_shortfall_pct") or 0.0))
+            else:
+                why = ("every group was at its target, so the rules spent the rest where it best reduces the portfolio's "
+                       "regional imbalances (C1%s)" % (" - this fund narrows them" if d.get("c1") == -1 else
+                                                     " - this fund widens them" if d.get("c1") == 1 else ""))
+            beat = ["%s (%s)" % (nm(r["sedol"]), _CRIT_PLAIN.get(r.get("decided_by"), r.get("decided_by")))
+                    for r in (d.get("rivals") or [])]
+            barred = ["%s (%s)" % (nm(k), _plain_block(v, (refused or {}).get(k)))
+                      for k, v in sorted((d.get("barred") or {}).items())][:5]
+            line = "%s: GBP %s - %s." % (nm(sd), "{:,.2f}".format(gbp), why)
+            if beat:
+                line += " Chosen ahead of " + "; ".join(beat) + "."
+            if barred:
+                line += " Ruled out at that point: " + "; ".join(barred) + "."
+            prev = out.get(sd)
+            if prev:
+                prev["gbp"] = round(prev["gbp"] + gbp, 2); prev["phases"].append(ph); prev["line"] += " Then: " + line
+            else:
+                out[sd] = {"gbp": round(gbp, 2), "phases": [ph], "line": line}
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1710,7 +1871,7 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
                  sequence: Optional[dict] = None,
                  membership=None, underwriting=None, input_state=None,
                  new_capital_control=None, decision_receipt=None, receipt_month=None,
-                 _engine_authority=None) -> dict:
+                 _engine_authority=None, judgement_refused=None) -> dict:
     """Decide how much of the marginal pound may reach the stock sleeve.
 
     `new_capital_control` (ISA-0807): None in production -> the LIVE canonical control is read
@@ -1873,6 +2034,21 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             out["legacy_greedy_shadow"] = {"state": "UNAVAILABLE", "why": "%s: %s" % (type(_lge).__name__, _lge)}
         _ok = (_rv.get("state") == "VALID" and _rr.get("state") == "DECISION_COMPLETE"
                and _rr.get("capital_authorised") is True)
+        # ⚑ ISA-0913: the D21 judgement precondition is decision-effective under the engine. A selected NEW name
+        #   refused by the judgement pass (missing/invalid thesis_state) withholds the WHOLE receipt plan - the
+        #   plan is one bundle (its funding, sales and FX are formed together) - and its stock-intended capital
+        #   is HELD AS CASH, never re-routed, until the record is corrected and the pass re-run.
+        _jhit = []
+        if _ok and judgement_refused:
+            _held_j = {x.get("ticker") for x in (portfolio.get("stocks") or [])}
+            _sel_new = sorted(a.get("ticker") for a in (_rr.get("selected_actions") or [])
+                              if float(a.get("gbp") or 0) > 0 and a.get("ticker") not in _held_j
+                              and str(a.get("action") or "").upper() not in ("TOP_UP", "ADD"))
+            _jhit = (_sel_new if judgement_refused == "ALL_REQUIRED_UNKNOWN_SCOPE"
+                     else sorted(set(judgement_refused) & set(_sel_new)))
+            if _jhit:
+                _ok = False
+        out["decision_receipt"]["judgement_refused"] = _jhit
         _binding = ({"input_snapshot_id": (input_state or {}).get("input_snapshot_id"),
                      "components": (input_state or {}).get("components"),
                      "materiality": (input_state or {}).get("materiality")} if input_state else None)
@@ -1881,6 +2057,10 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             _held = round(max(float(amount_gbp) - _res, 0.0), 2)
             _why = ("receipt %s is %s / %s (capital_authorised=%s)"
                     % (_rr.get("receipt_id"), _rv.get("state"), _rr.get("state"), _rr.get("capital_authorised")))
+            if _jhit:
+                _why = ("JUDGEMENT_REFUSED (ISA-0913): receipt %s selected %s but the Step 9 record refuses new capital "
+                        "for %s (thesis_state/rationale missing or invalid) - correct the record and re-run the judgement pass"
+                        % (_rr.get("receipt_id"), [a.get("ticker") for a in (_rr.get("selected_actions") or [])], _jhit))
             out.update({
                 "state": "STOCK_SLEEVE_REFUSED", "stock_max_gbp": 0.0, "fund_max_gbp": 0.0,
                 "fund_max_basis": ("ISA-0811: no authorised Capital Decision Receipt (%s); stock-intended capital "
@@ -2241,7 +2421,7 @@ def sleeve_split(amount_gbp: float, portfolio: dict, policy: dict,
             try:
                 import underwriting as _uw_ca
                 import datetime as _dt_uw
-                _uw_month = _dt_uw.date.today().isoformat()[:7]
+                _uw_month = __import__("run_cycle").cycle_ym()   # ISA-0910: the cycle month (was wall clock)
             except Exception as _e6:                                    # noqa: BLE001
                 _uw_ca, _uw_month = None, None
                 _id_why["underwriting_case_id"] = "%s: %s" % (type(_e6).__name__, _e6)
@@ -2715,9 +2895,10 @@ def _mmm_yyyy_of(as_of) -> str:
     d = as_of
     if isinstance(d, str):
         d = _dt.date.fromisoformat(d[:10])
-    if d is None:
-        d = _dt.date.today()
-    return d.strftime("%b_%Y").lower()
+    # ⚑ ISA-0910: the RUN month is the review-Sunday cycle (run_cycle.py; None -> today's cycle), never the
+    #   wall-clock month - on Sat 31-Oct the latter read OCTOBER's action stack and receipt for the November run.
+    import run_cycle as _rcy
+    return _rcy.cycle_label(d)
 
 
 def _apply_judgement_refusals(pipe: dict, refusals, scope_doc) -> list:
@@ -3191,6 +3372,55 @@ def judgement_scope(doc: dict) -> dict:
                       "capture is non-blocking record/learning evidence.")}
 
 
+def judgement_scope_from_receipt(receipt_verification, held=()) -> dict:
+    """ISA-0913 (Raj 28-Oct-2026: 'fine with your proposal') - under capital_engine_authority LIVE the
+    capital-precondition population is the VERIFIED receipt's SELECTED NEW names: each is
+    REQUIRED_FOR_CAPITAL_DECISION; a selected held top-up is NOT_APPLICABLE (thesis_state / held review is
+    its judgement home); every other case-scope name is NON_BLOCKING_RECORD. The receipt is formed by the
+    case loop BEFORE the judgement record is applied, so judgement still cannot move a name into or out
+    of scope. A receipt that is not VALID + DECISION_COMPLETE gives UNKNOWN (R4.3) - never an empty OK.
+    evidence_state is the receipt dossier's own machine value (never re-judged)."""
+    rv = receipt_verification if isinstance(receipt_verification, dict) else {"state": "ABSENT"}
+    rr = rv.get("receipt") or {}
+    base = {"source": "capital_destination.judgement_scope_from_receipt <- verified Capital Decision Receipt "
+                      "%s selected_actions (ISA-0913)" % rr.get("receipt_id"),
+            "receipt_id": rr.get("receipt_id"), "as_of": rr.get("as_of")}
+    if rv.get("state") != "VALID" or rr.get("state") != "DECISION_COMPLETE":
+        return dict(base, state="UNKNOWN", names={},
+                    why=("ISA-0913: the Capital Decision Receipt is %s/%s - the engine-authority REQUIRED "
+                         "population cannot be derived. UNKNOWN refuses positive stock capital, never PASS (R4.3)."
+                         % (rv.get("state"), rr.get("state"))))
+    held = {str(t).upper() for t in (held or ())}
+    dos = rr.get("dossiers") or {}
+    names = {}
+    for a in rr.get("selected_actions") or []:
+        tk = str(a.get("ticker") or "").upper()
+        if not tk or float(a.get("gbp") or 0) <= 0:
+            continue
+        d = dos.get(tk) or dos.get(a.get("ticker")) or {}
+        if tk in held or d.get("held") or str(a.get("action") or "").upper() in ("TOP_UP", "ADD"):
+            names[tk] = {"scope": "NOT_APPLICABLE", "route": d.get("route") or "held_topup",
+                         "gbp_demand": a.get("gbp"),
+                         "basis": "held top-up selected by the receipt - judgement authority is thesis_state / held review"}
+        else:
+            names[tk] = {"scope": "REQUIRED_FOR_CAPITAL_DECISION", "route": d.get("route") or "main",
+                         "rung": a.get("action"), "gbp_demand": a.get("gbp"),
+                         "evidence_state": d.get("evidence_state"),
+                         "evidence_state_source": "capital_decision_receipt.dossiers.evidence_state (machine, pre-judgement)",
+                         "basis": "selected NEW name in the verified receipt (ISA-0913)"}
+    for t in ((rr.get("case_scope") or {}).get("required_full_cases") or []):
+        tk = str(t).upper()
+        if tk and tk not in names:
+            names[tk] = {"scope": "NON_BLOCKING_RECORD", "route": (dos.get(tk) or {}).get("route"),
+                         "basis": "in the receipt's case scope but not selected - record for learning"}
+    req = sorted(t for t, v in names.items() if v["scope"] == "REQUIRED_FOR_CAPITAL_DECISION")
+    return dict(base, state="OK", names=names, required=req, n_required=len(req),
+                n_non_blocking=sum(1 for v in names.values() if v["scope"] == "NON_BLOCKING_RECORD"),
+                n_not_applicable=sum(1 for v in names.values() if v["scope"] == "NOT_APPLICABLE"),
+                basis=("ISA-0913 / ISA-0698 Option B under engine authority: mandatory judgement only for the "
+                       "receipt's selected new names (the capital-precondition population)."))
+
+
 def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, universe_path=None,
           weights_path=None, nav_dir=None, out_path=None, as_of=None,
           judgement_refusals=None, judgement_scope_doc=None, new_capital_control=None):
@@ -3258,7 +3488,7 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
                          sequence=dict(pipe.get("sequence") or {},
                                        population_binding=pipe.get("population_binding")),
                          input_state=_istate, new_capital_control=new_capital_control,
-                         receipt_month=_mmm_yyyy_of(as_of))
+                         receipt_month=_mmm_yyyy_of(as_of), judgement_refused=judgement_refusals)
     split["pipeline"] = {k: pipe.get(k) for k in
                          ("state", "step9_pre_source", "notes", "detail", "correlation")}
     _ac = pipe.get("all_candidates") or {}
@@ -3289,6 +3519,7 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
     ranking = rank_inputs(universe)
     fa = allocate_funds(fund_amount, portfolio, universe, eligible, policy, new_subscription_gbp,
                         ranking=ranking)
+    fa["reasons"] = fund_allocation_reasons(fa, universe, refused={k: v.get("reason") for k, v in refused.items()})  # ISA-0918
 
     # ── R5.2 two independent derivations agree, stated tolerance ──────────────────────────────
     alloc_sum = round(sum(fa["allocation"].values()), 2)
@@ -4240,6 +4471,7 @@ def summary_for_run_context(doc: dict) -> dict:
                        if (v or 0) > 0},
     "phase_allocation": _fa.get("phase_allocation"),
     "blocked": _fa.get("blocked"),
+    "allocation_reasons": _fa.get("reasons") or {},
     "eligibility_refused": (_cdr.get("eligibility") or {}).get("refused"),
     "eligibility_unknown": (_cdr.get("eligibility") or {}).get("unknown"),
     "band_weights": {r["sedol"]: {"before": r.get("weight_before_pct"),
@@ -4283,7 +4515,7 @@ def summary_for_run_context(doc: dict) -> dict:
 #   run context, stamped with the sha256 of the record it judged. The builder only checks that
 #   stamp and renders.
 def judgement_pass(month_label: str, here=None, run_context_path=None, conviction_path=None,
-                   _build=None) -> dict:
+                   _build=None, _receipt_verification=None, _authority=None) -> dict:
     import hashlib
     here = Path(here or HERE)
     rc_path = Path(run_context_path or here / ("run_context_%s.json" % month_label))
@@ -4299,6 +4531,24 @@ def judgement_pass(month_label: str, here=None, run_context_path=None, convictio
     cds = dict(base)
     scope = base.get("judgement_scope") or {"state": "UNKNOWN", "names": {},
                                            "why": "run_context carries no judgement_scope"}
+    # ⚑ ISA-0913: under engine authority the legacy demand-pull population does not exist (ISA-0811), so the
+    #   pre-run scope is always UNKNOWN. The REQUIRED population is the verified receipt's selected new names.
+    _engine_live = (_authority or _capital_engine_authority()) == "LIVE"
+    _from_receipt = False
+    if _engine_live and scope.get("state") != "OK":
+        _from_receipt = True
+        if _receipt_verification is None:
+            try:
+                import capital_decision_engine as _cde_j
+                _receipt_verification = _cde_j.verify_receipt(month_label, str(here))
+            except Exception as _je:                                    # noqa: BLE001
+                _receipt_verification = {"state": "UNREADABLE", "why": "%s: %s" % (type(_je).__name__, _je)}
+        try:
+            _held_js = [x.get("ticker") for x in (_load_portfolio(root=here).get("stocks") or [])]
+        except Exception:                                               # noqa: BLE001
+            _held_js = []
+        scope = dict(judgement_scope_from_receipt(_receipt_verification, _held_js),
+                     legacy_scope_state=scope.get("state"))
     raw = cv_path.read_bytes() if cv_path.exists() else b""
     cdoc = json.loads(raw.decode("utf-8")) if raw else None
     import conviction_capture as _cc
@@ -4318,7 +4568,10 @@ def judgement_pass(month_label: str, here=None, run_context_path=None, convictio
              "evidence_state_resolved": res.get("evidence_state_resolved") or {},
              "rerouted": False, "plan_source": "pre_judgement",
              "basis": "ISA-0698 Option B (Raj, 16-Sep-2026)"}
-    if cdoc is not None and not res["blocking"] and refused:
+    stamp["scope_source"] = scope.get("source")
+    # ISA-0913: under engine LIVE the pass ALWAYS re-runs the router - the receipt the case loop formed after the
+    #   pre-run is what allocates, and an empty refusal set must not leave the pre-run (unauthorised) plan in place.
+    if cdoc is not None and not res["blocking"] and (refused or (_from_receipt and scope.get("state") == "OK")):
         b = _build or build
         new = b(out_path=here / ("capital_destination_%s.judgement.json" % month_label),
                 judgement_refusals=(refused if isinstance(refused, dict)
@@ -4370,9 +4623,16 @@ def _selftest(verbose=True) -> int:
     ck("signal/noise ratio < 1", d["evidence"]["signal_noise_variance_ratio"] < 1.0)
     ck("implied true dispersion is not positive",
        d["evidence"]["var_true_dispersion_implied"] <= 0)
-    ck("D-19/D-16: Ranmore refused", "BR2Q8G6" in d["eligibility"]["refused"])
-    ck("Ranmore refusal is ROBUST across the whole multiplier grid",
-       "BR2Q8G6" in d["regime_coverage"]["refused_at_every_grid_point"])
+    # ⚑ ISA-0919 (Raj 29-Oct-2026): D-19/D-16 refused Ranmore because its SHARE CLASS (launched 2023) had never been
+    #   through a drawdown. With the declared, overlap-validated Investor-class history the FUND's record is measured
+    #   (2020 trough) and the gate passes it on evidence - the gate itself is unchanged, so the refusal of a genuinely
+    #   untested record still fires (ISA-0919 must-fire above, fixture _load_sleeve without a declaration).
+    _rv19 = (d["regime_coverage"]["verdicts"].get("BR2Q8G6") or {})
+    ck("ISA-0919 (supersedes D-19/D-16 for Ranmore): Ranmore ELIGIBLE on its joined fund history, the 2020 drawdown measured",
+       "BR2Q8G6" not in d["eligibility"]["refused"] and _rv19.get("verdict") == "ELIGIBLE"
+       and (_rv19.get("max_drawdown_pct") or 0) <= d["regime_coverage"]["floor_pct"])
+    ck("ISA-0919: Ranmore is no longer refused at ANY multiplier-grid point (its trough is measured, not borderline)",
+       "BR2Q8G6" not in d["regime_coverage"]["refused_at_every_grid_point"])
     ck("no fund with a full-cycle record is refused",
        all(d["regime_coverage"]["verdicts"][s]["max_drawdown_pct"]
            > d["regime_coverage"]["floor_pct"] for s in d["eligibility"]["refused"]))
@@ -4778,6 +5038,29 @@ def _selftest(verbose=True) -> int:
                                  sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026")
         ck("MUST-FIRE ISA-0811: a BLOCK control still wins over an authorised receipt",
            _blk_live["state"] == "STOCK_SLEEVE_REFUSED" and _blk_live["stock_max_gbp"] == 0.0)
+        # ── ISA-0913: the D21 judgement precondition under engine authority ─────────────────────────
+        _lj = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                           sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026",
+                           judgement_refused={"FIX7": ["thesis_state is null"]})
+        ck("ISA-0913 MUST-FIRE: a selected NEW name refused by the judgement pass withholds the receipt plan and HOLDS "
+           "its capital as cash (no fund re-route)",
+           _lj["state"] == "STOCK_SLEEVE_REFUSED" and _lj["fund_max_gbp"] == 0.0
+           and "JUDGEMENT_REFUSED" in _lj["allocation"]["reason"] and _lj["decision_receipt"]["judgement_refused"] == ["FIX7"])
+        _lj2 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                            sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026", judgement_refused={})
+        ck("ISA-0913 NEGATIVE CONTROL: an empty refusal set allocates exactly the receipt (identical to no pass)",
+           _lj2["state"] == "STOCK_SLEEVE_ENGINE_ALLOCATED" and abs(_lj2["engine_allocated_gbp"] - 5000.0) <= TOL_GBP
+           and abs(_lj2["fund_max_gbp"] - _l10["fund_max_gbp"]) <= TOL_GBP)
+        _rch = json.loads(json.dumps(_rc)); _rch["receipt"]["selected_actions"][0]["action"] = "TOP_UP"
+        _lj3 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                            sequence=_seq8, decision_receipt=_rch, receipt_month="oct_2026",
+                            judgement_refused="ALL_REQUIRED_UNKNOWN_SCOPE")
+        ck("ISA-0913 NEGATIVE CONTROL: a held TOP_UP is NOT_APPLICABLE - an unknown-scope refusal does not withhold it",
+           _lj3["state"] == "STOCK_SLEEVE_ENGINE_ALLOCATED")
+        _lj4 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
+                            sequence=_seq8, decision_receipt=_rc, receipt_month="oct_2026",
+                            judgement_refused="ALL_REQUIRED_UNKNOWN_SCOPE")
+        ck("ISA-0913 MUST-FIRE: an UNKNOWN scope refuses every selected new name (R4.3)", _lj4["state"] == "STOCK_SLEEVE_REFUSED")
         _pol_e.V2_FLAGS["capital_engine_authority"] = "SHADOW"
         _s8 = sleeve_split(17970.94, _pf7, _pol7, 0.0, candidates=_use7, new_capital_control=_open_prod,
                            sequence={"order": ["FIX7"], "basis": "fixture_order"})
@@ -4786,6 +5069,78 @@ def _selftest(verbose=True) -> int:
            and _s8["fund_max_gbp"] == _n7["fund_max_gbp"])
     finally:
         _pol_e.V2_FLAGS["capital_engine_authority"] = _prev_e
+    # ── ISA-0918: the allocation rules' own reason per funded fund ───────────────────────────────
+    _fa18 = {"phase_allocation": {"to_target": {"F1": 2000.0}, "within_band": {"F2": 1500.0, "F1": 100.0}},
+             "decisions": {"to_target": {"F1": {"bucket": "B3", "bucket_shortfall_pct": 1.4, "c1": 1,
+                                                "rivals": [{"sedol": "F3", "decided_by": "C4 cost (OCF)"}],
+                                                "barred": {"F9": "not eligible", "F4": "bucket B1 is at or above its declared phase1_target_pct"}}},
+                           "within_band": {"F2": {"bucket": "B1", "c1": -1, "rivals": [{"sedol": "F5", "decided_by": "C2 manager/process concentration"}],
+                                                  "barred": {}}}}}
+    _r18 = fund_allocation_reasons(_fa18, {"funds": {"F1": {"name": "Fund One"}, "F2": {"name": "Fund Two"}, "F3": {"name": "Fund Three"},
+                                                      "F5": {"name": "Fund Five"}, "F9": {"name": "Fund Nine"}}},
+                                   refused={"F9": "deepest drawdown too shallow"})
+    ck("ISA-0918 MUST-FIRE: each funded fund carries the rules' own reason - phase, what it beat and why, what was ruled out",
+       set(_r18) == {"F1", "F2"} and "below the target weight" in _r18["F1"]["line"] and "Fund Three (it is cheaper to hold)" in _r18["F1"]["line"]
+       and "Fund Nine (not eligible: deepest drawdown too shallow)" in _r18["F1"]["line"]
+       and "narrows" in _r18["F2"]["line"] and "Fund Five" in _r18["F2"]["line"]
+       and _r18["F1"]["phases"] == ["to_target", "within_band"] and abs(_r18["F1"]["gbp"] - 2100.0) < 0.01)
+    ck("ISA-0918 NEGATIVE CONTROL: no allocation -> no reasons (never an invented explanation)",
+       fund_allocation_reasons({"phase_allocation": {"to_target": {}, "within_band": {}}}) == {})
+    # ── ISA-0919: the regime-coverage gate reads the declared history splice ─────────────────────
+    import tempfile as _tf19, datetime as _dt19, fund_performance as _fp19
+    _t19 = Path(_tf19.mkdtemp())
+    _D = _dt19.date
+    _pred = [(_D(2018, 1, 1) + _dt19.timedelta(days=i), 100.0 * (1.0004 ** i) * (0.70 if _D(2020, 3, 1) <= _D(2018, 1, 1) + _dt19.timedelta(days=i) <= _D(2020, 5, 1) else 1.0)) for i in range(0, 3200)]
+    _fp19._write_csv_series(str(_t19 / "pred.csv"), _pred)
+    _fp19._write_csv_series(str(_t19 / "HELD19.csv"), [(d, x * 3.0) for d, x in _pred if d >= _D(2023, 6, 1)])
+    _u19 = {"funds": {"S19": {"yf_symbol": "HELD19", "name": "Spliced", "bucket": "B1",
+                              "history_splice": {"path": str(_t19 / "pred.csv"), "isin": "XX", "share_class": "Inv"}},
+                      "N19": {"yf_symbol": "HELD19", "name": "Not spliced", "bucket": "B1"}}}
+    _fp19._SPLICE_MEMO.clear()
+    _rows19, _ = _load_sleeve(_t19, _u19, held_only=False)
+    ck("ISA-0919 MUST-FIRE: a declared splice gives the regime gate the joined history (the 2020 drawdown is seen)",
+       _rows19["S19"]["max_drawdown_pct"] < -25 and (_rows19["S19"].get("history_splice") or {}).get("state") == "APPLIED"
+       and _rows19["S19"]["n_months"] > _rows19["N19"]["n_months"])
+    ck("ISA-0919 NEGATIVE CONTROL: the same held series without a declaration reads exactly as before (no drawdown)",
+       _rows19["N19"]["max_drawdown_pct"] > -5 and "history_splice" not in _rows19["N19"])
+    # ── ISA-0913: the receipt-derived judgement scope + the judgement pass under engine LIVE ──────────
+    _rvj = {"state": "VALID", "receipt": {"receipt_id": "CDR-J", "state": "DECISION_COMPLETE", "capital_authorised": True,
+            "selected_actions": [{"ticker": "NEWX", "gbp": 5000.0, "action": "START"},
+                                 {"ticker": "HLDX", "gbp": 800.0, "action": "TOP_UP"}],
+            "case_scope": {"required_full_cases": ["NEWX", "ALTX"]},
+            "dossiers": {"NEWX": {"route": "main", "evidence_state": "THIN", "held": False}, "ALTX": {"route": "main"}}}}
+    _sj = judgement_scope_from_receipt(_rvj, held=["HLDX"])
+    ck("ISA-0913 MUST-FIRE: under the engine the REQUIRED population = the receipt's selected NEW names, with the "
+       "dossier's machine evidence_state; held top-ups NOT_APPLICABLE; unselected case names NON_BLOCKING_RECORD",
+       _sj["state"] == "OK" and _sj["required"] == ["NEWX"] and _sj["names"]["NEWX"]["evidence_state"] == "THIN"
+       and _sj["names"]["HLDX"]["scope"] == "NOT_APPLICABLE" and _sj["names"]["ALTX"]["scope"] == "NON_BLOCKING_RECORD")
+    ck("ISA-0913 NEGATIVE CONTROL: a receipt that is not VALID + DECISION_COMPLETE yields UNKNOWN, never an empty OK",
+       judgement_scope_from_receipt({"state": "STALE", "receipt": _rvj["receipt"]})["state"] == "UNKNOWN"
+       and judgement_scope_from_receipt({"state": "VALID", "receipt": dict(_rvj["receipt"], state="RESEARCH_PENDING")})["state"] == "UNKNOWN")
+    import tempfile as _tf3
+    _td3 = Path(_tf3.mkdtemp())
+    (_td3 / "run_context_y_2026.json").write_text(json.dumps({"summary": {"capital_destination": {
+        "state": "STOCK_SLEEVE_REFUSED", "judgement_scope": {"state": "UNKNOWN", "names": {}}}}}))
+    _cv3 = json.loads(json.dumps(_okdoc))
+    (_td3 / "step9_conviction_y_2026.json").write_text(json.dumps(_cv3))
+    _calls3 = []
+    def _stub3(**kw):
+        _calls3.append(kw)
+        return {"state": "OK", "_written": str(_td3 / "j.json"), "judgement_scope": kw["judgement_scope_doc"],
+                "sleeve_split": {"stock_max_gbp": 0.0}}
+    _s3 = judgement_pass("y_2026", here=_td3, _build=_stub3, _receipt_verification=_rvj, _authority="LIVE")
+    ck("ISA-0913 MUST-FIRE: engine LIVE + unjudged selected name -> the pass refuses EXACTLY that name (not 'ALL') and re-runs",
+       _s3["scope_state"] == "OK" and _s3["refused_capital"] == ["NEWX"] and _s3["rerouted"]
+       and list(_calls3[-1]["judgement_refusals"]) == ["NEWX"] and "receipt" in (_s3.get("scope_source") or ""))
+    _cv3b = json.loads(json.dumps(_okdoc2)); 
+    for _n3 in _cv3b["names"]:
+        if _n3["ticker"] == "NEW1":
+            _n3["ticker"] = "NEWX"
+    (_td3 / "step9_conviction_y_2026.json").write_text(json.dumps(_cv3b))
+    _s3b = judgement_pass("y_2026", here=_td3, _build=_stub3, _receipt_verification=_rvj, _authority="LIVE")
+    ck("ISA-0913 NEGATIVE CONTROL: a judged selected name refuses nothing, and the pass STILL re-runs the router on the "
+       "receipt (the pre-run unauthorised plan must not stand)",
+       _s3b["refused_capital"] == [] and _s3b["rerouted"] and _calls3[-1]["judgement_refusals"] == {})
     print(f"\ncapital_destination selftest: {len(fails)} failure(s)"
           + (" -> " + ", ".join(fails) if fails else " — all assertions green"))
     OUTPUT_DIR = _saved_output_dir

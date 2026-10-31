@@ -3531,6 +3531,63 @@ def pair_capital_routing_one_rule(tw=None, run_context=None, engine_src=None):
     return errs
 
 
+# ── ISA-0905 / ISA-0906 (28-Oct-2026) — RETIRED RULES MAY NOT RE-ENTER THE EXECUTED WORKFLOW ─────────
+# Raj 28-Oct-2026: "The run context file should be completely clean and unambiguous." A full read found the
+# workflow still instructing the retired /100 conviction score (D21) and restating limits that live code had
+# replaced (no sleeve hard max vs the 30% HARD_LIMIT; a GBP 150-200 buffer vs the D23 reserve; the deleted
+# 0.75/1.0/1.5% VCI size map; a stdlib-only builder; substituting the receipt's selection). Each phrase below is
+# an INSTRUCTION that is now false; the history lines that explain a retirement use different words.
+RC_RETIRED_CONVICTION = (
+    "Final conviction score", "Sum of all 10 dimensions", "Rank by final conviction score",
+    "clears a conviction score of", "The conviction score, if re-scored today", "Would the conviction score hold",
+    "conviction re-score returns below", "CONVICTION SCORE LEGEND", "INVESTMENT CATEGORY DEFINITIONS",
+    "investment category label", "Complete the 3 Session-Dependent Dimensions", "conviction scores per decided action",
+    "complete 3 session-dependent conviction dimensions", "conviction score that supports it",
+)
+RC_RETIRED_LIMITS = (
+    (r"\u00a3150\s*[\u2013-]\s*\u00a3?200", "a GBP 150-200 cash buffer (the reserve is target_weights.stock_sleeve.cash_reserve_gbp, D23)"),
+    (r"\u00a3150 minimum buffer", "a GBP 150 buffer (D23 reserve)"),
+    (r"(?:0\.75|1\.0)% at ACS", "the deleted ACS->size VCI map (position_sizing.vci_size_pct)"),
+    (r"1\.0[\u2013-]1\.5% (?:of )?ISA", "the deleted 1.0-1.5% VCI size band (position_sizing.vci_size_pct)"),
+    (r"39KB|stdlib only", "a stdlib-only builder (it imports framework modules)"),
+    (r"A lower-ranked stock may substitute a top scorer", "substituting the receipt's selection (Step 10.0b)"),
+)
+
+
+def pair_run_context_retired_rules(run_context=None, policy=None):
+    """ISA-0905 / ISA-0906. ERROR when the executed Run_Context instructs a retired rule: the /100 conviction
+    machinery (D21), a restated limit whose code home now says otherwise, or 'no sleeve hard max' while
+    new_capital_control.stock_sleeve_policy() reads HARD_LIMIT (Raj D1, ISA-0858)."""
+    import re as _re
+    rc = run_context if run_context is not None else _read("Run_Context_Monthly_ISA_Review.md")
+    if not rc:
+        return ["ISA-0905: Run_Context unreadable - retired-rule scan UNMEASURED (R4.9)"]
+    errs = []
+    for ph in RC_RETIRED_CONVICTION:
+        if ph.lower() in rc.lower():
+            errs.append("ISA-0905: Run_Context still instructs the retired /100 conviction score (%r) - D21: "
+                        "sizing is position_sizing.ladder() on evidence_state, capital is the receipt" % ph)
+    for pat, what in RC_RETIRED_LIMITS:
+        m = _re.search(pat, rc)
+        if m:
+            errs.append("ISA-0906: Run_Context restates %s (%r) - the code home says otherwise" % (what, m.group(0)))
+    try:
+        if policy is None:
+            import new_capital_control as _ncc
+            policy = _ncc.stock_sleeve_policy(root=str(HERE))
+    except Exception as exc:                                            # noqa: BLE001
+        errs.append(warn("ISA-0906: stock_sleeve_policy unreadable (%s) - hard-max wording UNMEASURED" % exc))
+        policy = {}
+    if (policy.get("hard_max") or {}).get("state") == "HARD_LIMIT":
+        for pat in (r"NOT_A_POLICY_LIMIT", r"(?i)there is NO hard sleeve maximum", r"(?i)THERE IS NO PERCENTAGE CEILING"):
+            m = _re.search(pat, rc)
+            if m:
+                errs.append("ISA-0906: Run_Context says the stock sleeve has no hard maximum (%r) while "
+                            "stock_sleeve_policy().hard_max is HARD_LIMIT %s (Raj D1, ISA-0858)"
+                            % (m.group(0), (policy.get("hard_max") or {}).get("value")))
+    return errs
+
+
 # ── ISA-0851 (11-Oct-2026) — ONE CONTRIBUTION SCHEDULE, AND AN EXPECTATION IS NEVER CASH ────────
 # target_state.contribution_schedule is read only through contribution_schedule.py. The cash-side names
 # (extract_cash_statement.STANDING_ORDER*) are DERIVED from it, extract_portfolio never infers a credit,
@@ -3697,6 +3754,25 @@ def pair_month_artefacts_archive_aware(root=None, scan=None):
     return ["pair_month_artefacts_archive_aware/ISA-0832: %s:%s globs %r beside the code only - after the "
             "post-review purge it serves a stale month; use month_artefacts.month_glob/resolve" % (b, ln, pat)
             for (b, ln, pat) in found]
+
+
+def pair_cycle_identity_one_home(root=None, scan=None):
+    """ISA-0910 (28-Oct-2026), class kill. A run's monthly CYCLE is the month of the review Sunday it feeds
+    (ISA-0795; one home run_cycle.py). Eleven sites derived it from the wall clock instead, so the first month-wrap
+    pre-run (Sat 31-Oct-2026) labelled the November cycle oct_2026, read SEPTEMBER's screens and refused on
+    October's frozen shadow cohort (measured in production parallel PPR-NOV2026-20261028-01). ERROR per wall-clock
+    cycle label found outside run_cycle; an unreadable scanner is itself an ERROR (R2.10)."""
+    root = root or HERE
+    try:
+        if scan is None:
+            import run_cycle as _rc910
+            scan = _rc910.wall_clock_cycle_derivations
+        found = scan(root)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["pair_cycle_identity_one_home/ISA-0910: scanner unavailable (%s) - R2.9" % exc]
+    return ["pair_cycle_identity_one_home/ISA-0910: %s:%s derives the monthly cycle from the wall clock (%s) - "
+            "use run_cycle.cycle_label/cycle_ym (the month-wrap pre-run belongs to the NEXT month)" % (b, ln, t[:90])
+            for (b, ln, t) in found]
 
 
 def pair_run_contracts(rc=None, root=None):
@@ -7310,6 +7386,7 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
     by_mod = {r["module"]: r for r in census}
     want = list(modules) if modules is not None else [r["module"] for r in census]
     roll = _source_roll(root)
+    _hp = host_speed_probe()                     # ISA-0896 R5 (measured once per recording call)
     _cid = _census_identity(root)                     # ISA-0746: the full signed-surface identity
     out = os.path.join(root, SUITE_STATUS_REL)
     prior = {}
@@ -7353,6 +7430,7 @@ def record_suite_status(modules=None, root=None, *, merge=False, timeout_s=150,
             rows[m] = {"module": m, "rc": None, "state": "RAISED", "why": r.get("parse_error")}
             continue
         rows[m] = _run_one_suite(r, root, _to)
+        rows[m]["host_probe_s"] = _hp            # ISA-0896 R5: the host speed this row was measured at
         _ran += 1
     for core in BATTERY_SELFTEST_MODULES:
         if core not in by_mod and core not in rows:
@@ -7593,6 +7671,108 @@ def pair_red_suite_is_an_incident(status=None, root=None, today=None, census=Non
     return errs
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0896 R5 (25-Oct-2026) — THE CENSUS RUNTIME BUDGET. A suite creeping toward the per-suite ceiling (168 s, bounded
+#   by the 180 s device call) turns the census TIMEOUT -> RED -> capital authority REFUSED with nothing wrong. Measured:
+#   the engine campaign 121.6 s (24-Oct) -> 150-167 s (25-Oct, P-D) before ISA-0895 split it. Each row's seconds are
+#   NORMALISED to a reference host speed (a fixed pure-Python probe) so a throttled laptop is not read as slower code.
+#   BUDGET (> 50% of the ceiling, normalised) is RED at certification (release_gate `suite_runtime_budget`) - a build
+#   may not ship a unit that leaves less than 2x headroom; WATCH (> 70% of budget) and TREND (> +20% vs the median of
+#   the last published censuses) are WARN everywhere. Never a capital block: it governs releases, not decisions.
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+SUITE_RUNTIME_CEILING_S = 168.0          # the per-suite timeout suite_census_runner.step() uses (ISA-0845)
+SUITE_RUNTIME_BUDGET_FRACTION = 0.5      # Raj 25-Oct-2026 (R5): every unit keeps >= 2x headroom
+SUITE_RUNTIME_WATCH_FRACTION = 0.7       # WARN when a unit passes 70% of its budget
+SUITE_RUNTIME_TREND_RATIO = 1.2          # WARN when a unit is > +20% over its recent median
+SUITE_RUNTIME_TREND_MIN_S = 10.0         # below this, run-to-run noise dominates; no trend claim
+HOST_PROBE_REF_S = 0.044                 # the probe on the reference host at normal speed (25-Oct-2026, 6 runs 0.041-0.047)
+
+
+def host_speed_probe() -> float:
+    """Best of three timings of a fixed 2M-iteration pure-Python loop (~0.13 s). Larger = slower host."""
+    import time as _t
+    best = None
+    for _ in range(3):
+        t0 = _t.perf_counter()
+        s = 0
+        for i in range(2_000_000):
+            s += i
+        dt = _t.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return round(best, 4)
+
+
+def _normalised_secs(row):
+    secs = row.get("secs")
+    if secs is None:
+        return None
+    hp = row.get("host_probe_s")
+    f = (HOST_PROBE_REF_S / float(hp)) if hp else 1.0
+    return round(float(secs) * f, 1)
+
+
+def suite_runtime_findings(status=None, root=None, history=None) -> list:
+    """-> [{"level": BUDGET|WATCH|TREND, "module", "secs", "norm_secs", "message"}] for the recorded census."""
+    root = root or HERE
+    if status is None:
+        p = os.path.join(root, SUITE_STATUS_REL)
+        if not os.path.exists(p):
+            return []
+        with open(p, encoding="utf-8") as fh:
+            status = json.load(fh)
+    if history is None:
+        history = []
+        hp = os.path.join(root, os.path.dirname(SUITE_STATUS_REL), "suite_census_history.jsonl")
+        if os.path.exists(hp):
+            with open(hp, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        history.append(json.loads(line))
+                    except ValueError:
+                        continue
+    budget = SUITE_RUNTIME_CEILING_S * SUITE_RUNTIME_BUDGET_FRACTION
+    watch = budget * SUITE_RUNTIME_WATCH_FRACTION
+    past = {}
+    for h in history[-6:]:
+        for mod, v in (h.get("unit_secs") or {}).items():
+            try:
+                past.setdefault(mod, []).append(_normalised_secs({"secs": v[0], "host_probe_s": v[1]}))
+            except (TypeError, IndexError):
+                continue
+    out = []
+    for r in status.get("rows", []):
+        n = _normalised_secs(r)
+        if n is None:
+            continue
+        m = r.get("module")
+        if n > budget:
+            out.append({"level": "BUDGET", "module": m, "secs": r.get("secs"), "norm_secs": n,
+                        "message": "ISA-0896: %s takes %.1f s (normalised to the reference host) - over the %.0f s budget "
+                                   "(%.0f%% of the %.0f s per-suite ceiling); split or speed it up before it times out"
+                                   % (m, n, budget, SUITE_RUNTIME_BUDGET_FRACTION * 100, SUITE_RUNTIME_CEILING_S)})
+        elif n > watch:
+            out.append({"level": "WATCH", "module": m, "secs": r.get("secs"), "norm_secs": n,
+                        "message": "ISA-0896: %s takes %.1f s (normalised) - past %.0f%% of its %.0f s budget"
+                                   % (m, n, SUITE_RUNTIME_WATCH_FRACTION * 100, budget)})
+        prev = sorted(x for x in past.get(m, []) if x is not None)
+        if n >= SUITE_RUNTIME_TREND_MIN_S and len(prev) >= 3:
+            med = prev[len(prev) // 2]
+            if med > 0 and n > SUITE_RUNTIME_TREND_RATIO * med:
+                out.append({"level": "TREND", "module": m, "secs": r.get("secs"), "norm_secs": n,
+                            "message": "ISA-0896: %s takes %.1f s (normalised), +%.0f%% over its median %.1f s across the "
+                                       "last %d published censuses" % (m, n, 100 * (n / med - 1), med, len(prev))})
+    return out
+
+
+def pair_suite_runtime_budget(status=None, root=None, history=None) -> list:
+    """ISA-0896 R5 - the census runtime budget as a WARN pair (never ERROR: it governs releases, not capital)."""
+    try:
+        return [{"severity": WARN, "message": f["message"]}
+                for f in suite_runtime_findings(status=status, root=root, history=history)]
+    except Exception as e:                                              # noqa: BLE001
+        return [{"severity": WARN, "message": "ISA-0896: suite runtime budget UNREADABLE (%s: %s)" % (type(e).__name__, e)}]
+
+
 def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     """`since_ts` (ISA-0590): the calling RUN's start time, so the register gate does not fire on
     the run's own outputs. Omitted outside a run, where full strictness is correct.
@@ -7638,6 +7818,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_target_weights_bucket_reconciliation", pair_target_weights_bucket_reconciliation())   # ISA-0394 root (20-Aug-2026)
     errs += _tally("pair_phase_switch_retired", pair_phase_switch_retired())              # ISA-0808 (11-Oct-2026)
     errs += _tally("pair_capital_routing_one_rule", pair_capital_routing_one_rule())      # ISA-0858 (12-Oct-2026)
+    errs += _tally("pair_run_context_retired_rules", pair_run_context_retired_rules())    # ISA-0905/0906 (28-Oct-2026)
     errs += _tally("pair_contribution_single_home", pair_contribution_single_home())      # ISA-0851 (11-Oct-2026)
     errs += _tally("pair_one_funding_figure", pair_one_funding_figure())                  # ISA-0857 (11-Oct-2026)
     errs += _tally("pair_build_readiness_declared", pair_build_readiness_declared())      # ISA-0399 (20-Aug-2026)
@@ -7650,6 +7831,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_cron_reaches_occurrences", pair_cron_reaches_occurrences())      # ISA-0843 (11-Oct-2026)
     errs += _tally("pair_task_authority", pair_task_authority())                              # ISA-0537 (27-Sep-2026)
     errs += _tally("pair_month_artefacts_archive_aware", pair_month_artefacts_archive_aware())   # ISA-0832 (04-Oct-2026)
+    errs += _tally("pair_cycle_identity_one_home", pair_cycle_identity_one_home())               # ISA-0910 (28-Oct-2026)
     errs += _tally("pair_run_contracts", pair_run_contracts())                                # ISA-0830 (04-Oct-2026)
     errs += _tally("pair_vci_fv_inputs_single_writer", pair_vci_fv_inputs_single_writer())    # ISA-0771 (27-Sep-2026)
     # ── ISA-0623 / ISA-0467 ENFORCEMENT (09-Sep-2026) ───────────────────────────────────
@@ -7666,6 +7848,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
     errs += _tally("pair_one_register", pair_one_register())                           # R7.1 - ISA-0627
     errs += _tally("pair_score_definition_declared", pair_score_definition_declared())  # ISA-0619/0616 (24-Sep-2026)
     errs += _tally("pair_red_suite_is_an_incident", pair_red_suite_is_an_incident())               # R5.7 - ISA-0627 / ISA-0625
+    errs += _tally("pair_suite_runtime_budget", pair_suite_runtime_budget())                       # ISA-0896 R5 (WARN only)
     errs += _tally("pair_email_absent_notice_contradicts_run_context", pair_email_absent_notice_contradicts_run_context())  # ISA-0618
     errs += _tally("pair_framework_integrity_preflight_reaches_run_context", pair_framework_integrity_preflight_reaches_run_context())  # ISA-0596
     # ── V2.1-A, each behind its declared rollback flag (R4.13) ─────────────────────────
@@ -7941,6 +8124,26 @@ def _selftest():
     assert any(_norm(x)["severity"] == WARN for x in pair_phase_switch_retired(tw={"thresholds": {}}, sources=_src_ok,
                                                                                run_context=_rc_ok)), \
         "ISA-0808: a missing retirement record is WARN (history), not silence"
+
+    # ISA-0905 / ISA-0906 (28-Oct-2026): retired rules may not re-enter the executed workflow
+    _pol_hl = {"hard_max": {"state": "HARD_LIMIT", "value": 0.3}}
+    _rc_ok906 = ("Step 9 records thesis_state; sizing is position_sizing.ladder(); the reserve is "
+                 "target_weights.stock_sleeve.cash_reserve_gbp; hard max 30% (Raj D1). Milestone \u00a3150,000.")
+    assert not pair_run_context_retired_rules(run_context=_rc_ok906, policy=_pol_hl), \
+        "ISA-0905/0906 NEGATIVE CONTROL: the corrected wording (incl. a \u00a3150,000 milestone) is clean"
+    assert pair_run_context_retired_rules(run_context="**Final conviction score:** Sum of all 10 dimensions",
+                                          policy=_pol_hl), "ISA-0905 MUST-FIRE: the /100 scoring instruction"
+    assert pair_run_context_retired_rules(run_context="Retain \u00a3150\u2013\u00a3200 post-trade", policy=_pol_hl), \
+        "ISA-0906 MUST-FIRE: a restated GBP 150-200 buffer"
+    assert pair_run_context_retired_rules(run_context="Size: full 1.0% at ACS >= 80", policy=_pol_hl), \
+        "ISA-0906 MUST-FIRE: the deleted VCI size map"
+    assert pair_run_context_retired_rules(run_context="hard max NOT_A_POLICY_LIMIT", policy=_pol_hl), \
+        "ISA-0906 MUST-FIRE: 'no hard max' while the policy reads HARD_LIMIT"
+    assert not pair_run_context_retired_rules(run_context="hard max NOT_A_POLICY_LIMIT",
+                                              policy={"hard_max": {"state": "NOT_A_POLICY_LIMIT"}}), \
+        "ISA-0906 NEGATIVE CONTROL: the same words are true when the policy has no hard max"
+    assert pair_run_context_retired_rules(run_context="") and "UNMEASURED" in pair_run_context_retired_rules(run_context="")[0], \
+        "ISA-0905: an unreadable Run_Context is UNMEASURED, never clean"
 
     # ISA-0851 (11-Oct-2026) one contribution schedule; an expectation is never cash.
     _src851 = {"extract_cash_statement.py": "STANDING_ORDER_ACTIVE = _SO_STATE.get('state') == 'ACTIVE'\n",
@@ -9301,6 +9504,14 @@ def _suite_census_controls():
         "ISA-0832 POSITIVE CONTROL: no raw glob, no finding"
     assert pair_month_artefacts_archive_aware(scan=lambda r: 1 / 0), \
         "ISA-0832 MUST-FIRE: a broken scanner is a finding, never a silent pass"
+    # ── ISA-0910 pair_cycle_identity_one_home: must-fire + positive control ───────────────
+    _o910 = pair_cycle_identity_one_home(scan=lambda r: [("x.py", 9, "<a wall-clock month label>")])
+    assert _o910 and _norm(_o910[0])["severity"] == ERROR and "x.py:9" in _o910[0], \
+        "ISA-0910 MUST-FIRE: a wall-clock cycle label is an ERROR"
+    assert pair_cycle_identity_one_home(scan=lambda r: []) == [], "ISA-0910 POSITIVE CONTROL: none, no finding"
+    assert pair_cycle_identity_one_home(scan=lambda r: 1 / 0), \
+        "ISA-0910 MUST-FIRE: a broken scanner is a finding, never a silent pass"
+    assert pair_cycle_identity_one_home() == [], "ISA-0910: the delivered tree derives no cycle from the wall clock"
     # ── ISA-0537 pair_task_authority: must-fire + positive control ─────────────────────────
     class _TA:
         def __init__(self, f): self._f = f

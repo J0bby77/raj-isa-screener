@@ -205,15 +205,27 @@ def door_flags_for_row(row, regime_state=None, get=None):
     else:
         omt_ok = str(_omt_raw or "").strip().lower() in ("improving", "flat", "stable")
     payout = _num(g(row, "div_payout_fcf"))
+    # ⚑ B09-R10 (P-C, 24-Oct-2026, EV-0258): the payout criterion's APPLICABILITY is typed. A missing payout
+    #   used to PASS the door unconditionally, so 'not a dividend payer' and 'payout unknown' admitted alike
+    #   - against this function's own rule that missing data FAILS a door criterion. A payout is NOT
+    #   APPLICABLE only when the row says the dividend is zero/absent; otherwise missing is UNKNOWN (fails).
+    _dy = _num(g(row, "dividend_yield")) if _num(g(row, "dividend_yield")) is not None else _num(g(row, "dividend_yield_pct"))
+    if payout is not None:
+        payout_basis, payout_ok = "MEASURED", payout < getattr(cfg, "DOOR_QUALITY_DIV_PAYOUT_FCF_MAX", 0.8)
+    elif _dy is not None and _dy == 0:
+        payout_basis, payout_ok = "NOT_APPLICABLE_NO_DIVIDEND", True
+    else:
+        payout_basis, payout_ok = "UNKNOWN_MISSING", False
     quality = bool(
         pa is not None and pa >= getattr(cfg, "DOOR_QUALITY_PART_A_MIN", 20)
         and nd is not None and nd < getattr(cfg, "DOOR_QUALITY_ND_EBITDA_MAX", 1.5)
         and fcfy is not None and fcfy >= getattr(cfg, "DOOR_QUALITY_FCF_YEARS_MIN", 4)
         and omt_ok
-        and (payout is None or payout < getattr(cfg, "DOOR_QUALITY_DIV_PAYOUT_FCF_MAX", 0.8)))
+        and payout_ok)
     price = _num(g(row, "current_price"))
     hi = _num(g(row, "high_52wk"))
-    off_high = (1.0 - price / hi) * 100.0 if (price and hi and hi > 0) else None
+    # B09-R10 (EV-0259): a non-positive price (or one above the 52w high) is not a measurement of distance
+    off_high = (1.0 - price / hi) * 100.0 if (price and price > 0 and hi and hi > 0 and price <= hi) else None
     below = off_high is not None and off_high >= getattr(cfg, "DOOR_INFLECTION_OFF_HIGH_MIN_PCT", 25.0)
     improving = str(g(row, "est_rev_direction") or "").lower() == "improving"
     inflection = bool(pa is not None and pa >= getattr(cfg, "DOOR_INFLECTION_PART_A_MIN", 16)
@@ -223,6 +235,43 @@ def door_flags_for_row(row, regime_state=None, get=None):
     regime = (str(regime_state).upper() if regime_state else None)
     open_doors = getattr(cfg, "REGIME_OPEN_DOORS", {}).get(regime, ["momentum"])
     return {"door_momentum": momentum, "door_quality": quality, "door_inflection": inflection,
+            "door_quality_payout_basis": payout_basis,
             "door": ",".join(doors),
             "door_admit_shadow": ",".join(d for d in doors if d in open_doors),
             "regime_at_screen": regime or "UNKNOWN"}
+
+
+def _selftest():
+    """R5.5 (P-C): door applicability is typed, with labelled negative controls (B09-R10, EV-0258)."""
+    fails = []
+
+    def ok(name, cond):
+        print(("PASS " if cond else "FAIL ") + name)
+        if not cond:
+            fails.append(name)
+    Q = {"part_a_score": 21, "net_debt_ebitda": 0.5, "fcf_pos_years": 5, "op_margin_trend": "improving",
+         "div_payout_fcf": 0.3, "part_b_score": 12, "final_status": "OK", "est_rev_direction": "neutral",
+         "revision_stage": "Sustained"}
+    d = door_flags_for_row(dict(Q), "RISK_OFF")
+    ok("positive control: full evidence passes the quality door (MEASURED payout)",
+       d["door_quality"] is True and d["door_quality_payout_basis"] == "MEASURED")
+    ok("negative control: a MISSING payout with no dividend evidence must not pass",
+       door_flags_for_row(dict(Q, div_payout_fcf=None), "RISK_OFF")["door_quality"] is False)
+    ok("an evidenced zero dividend makes the payout NOT_APPLICABLE (passes)",
+       door_flags_for_row(dict(Q, div_payout_fcf=None, dividend_yield=0.0), "RISK_OFF")["door_quality_payout_basis"] == "NOT_APPLICABLE_NO_DIVIDEND")
+    ok("negative control: a payout above the cap must not pass",
+       door_flags_for_row(dict(Q, div_payout_fcf=0.95), "RISK_OFF")["door_quality"] is False)
+    I = {"part_a_score": 17, "current_price": 70.0, "high_52wk": 100.0, "est_rev_direction": "improving",
+         "part_b_score": 12, "final_status": "OK", "revision_stage": "Igniting"}
+    ok("positive control: 30% off the high + improving passes the inflection door",
+       door_flags_for_row(dict(I), "RECOVERY")["door_inflection"] is True)
+    ok("negative control: a price ABOVE the 52-week high must not read as an inflection",
+       door_flags_for_row(dict(I, current_price=120.0), "RECOVERY")["door_inflection"] is False)
+    print("source_score selftest: %d FAIL(s)" % len(fails))
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--selftest" in _sys.argv:
+        _sys.exit(_selftest())

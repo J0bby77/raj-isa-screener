@@ -326,7 +326,7 @@ def donor_order(portfolio=None, universe=None, ranking=None, policy=None, frs_by
             "rank": d["rank"],
             "p2b": d.get("p2b"), "p2c": d.get("p2c"),
         })
-    return {"state": a7["state"], "as_of": _today(),
+    return {"state": a7["state"], "as_of": _today(), "unranked": a7.get("unranked") or [],
             "basis": ("capital_destination.donor_order — the A7 sell-side ordering, READ not "
                       "copied (ISA-0440). %s" % a7["basis"]),
             "a7_order": a7["order"], "a7_enabled": a7["enabled"],
@@ -345,10 +345,13 @@ def recall(amount_gbp: float, *, portfolio=None, universe=None, ranking=None, po
     fz = freeze_state(tw)
     cost = round_trip_cost(amount_gbp, stock_is_usd=stock_is_usd)
     order = donor_order(portfolio, universe, ranking, tw, incoming=incoming)
+    _unr = order.get("unranked") or []
     out = {"_meta": {"module": "waiting_room.py", "schema_version": SCHEMA_VERSION,
                      "as_of": _today(), "item": "ISA-0390", "enabled": ENABLED},
            "requested_gbp": round(amount_gbp, 2),
            "freeze": fz, "round_trip": cost, "parked": outstanding(ledger_path),
+           # S3/B03-R08: held funds the donor ranking could not see are named beside the plan
+           "donor_population": {"state": order.get("state"), "unranked": _unr},
            "min_hold": {
                "binds": "the STOCK leg only",
                "days": _min_hold_days(),

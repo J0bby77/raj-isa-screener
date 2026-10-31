@@ -183,6 +183,21 @@ def universe_for(group, refresh=False, cache=None):
     return tickers, warns
 
 
+def _atomic_to_csv(df, path):
+    """Write a price cache ATOMICALLY (tmp + os.replace). P-C fix on finding (ISA-0882, 24-Oct-2026): the
+    pre-run stage is killed at its per-call ceiling; a kill during a direct to_csv left the 11.7 MB cache
+    TRUNCATED to its header line (measured in the P-C baseline shadow), and the runner's commit would have
+    copied that onto LIVE. A killed write now leaves the previous cache intact."""
+    import os as _os
+    tmp = "%s.tmp.%d" % (path, _os.getpid())
+    try:
+        df.to_csv(tmp)
+        _os.replace(tmp, path)
+    finally:
+        if _os.path.exists(tmp):
+            _os.remove(tmp)
+
+
 def _load_cache(path=PRICE_CACHE):
     import pandas as pd
     if not os.path.exists(path):
@@ -230,7 +245,7 @@ def extend(group, chunk=150, period="1y", price_cache=PRICE_CACHE, refresh_unive
     cache = px if cache.empty else pd.concat([cache, px[[c for c in px.columns
                                                          if c not in cache.columns]]], axis=1)
     cache = cache.loc[:, ~cache.columns.duplicated()].sort_index()
-    cache.to_csv(price_cache)
+    _atomic_to_csv(cache, price_cache)
 
     remaining = len(todo) - len(batch)
     nn = px[batch].notna().sum()
@@ -322,6 +337,25 @@ def _selftest():
 
     ok("U-CU6 acceptance groups are the two the build order names",
        set(ACCEPTANCE_GROUPS) == {"STOXX600", "F250-SPI"})
+    # ISA-0882 (P-C): a cache write killed mid-way must leave the previous cache intact
+    with tempfile.TemporaryDirectory() as td2:
+        pc2 = os.path.join(td2, "px.csv")
+        good = pd.DataFrame({"AAA.L": [1.0, 2.0, 3.0]}, index=pd.date_range("2026-07-01", periods=3, freq="B"))
+        good.to_csv(pc2)
+
+        class _Killed(pd.DataFrame):
+            def to_csv(self, path, *a, **k):
+                open(path, "w").write("Date,AAA.L\n")       # partial header, then the 'kill'
+                raise KeyboardInterrupt("simulated per-call ceiling kill")
+        try:
+            _atomic_to_csv(_Killed({"AAA.L": [9.0]}), pc2)
+        except KeyboardInterrupt:
+            pass
+        _after = pd.read_csv(pc2, index_col=0)
+        ok("U-CU7 negative control: a killed cache write must not truncate the previous cache (ISA-0882)",
+           len(_after) == 3 and not any(f.startswith("px.csv.tmp") for f in os.listdir(td2)))
+        _atomic_to_csv(good.assign(BBB=1.0), pc2)
+        ok("U-CU8 positive control: a completed write replaces the cache", list(pd.read_csv(pc2, index_col=0).columns) == ["AAA.L", "BBB"])
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)}) {fails}")
     return 0 if not fails else 1
 

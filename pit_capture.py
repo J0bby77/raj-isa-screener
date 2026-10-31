@@ -55,7 +55,7 @@ SCORED_KEYS = ("expected_return_12_24m", "er_state", "er_growth", "er_rerate", "
                "er_sharecount_sensitivity_pp",
                "er_multiple_field", "er_multiple_value", "er_anchor_operative", "er_anchor_xs",
                "er_anchor_own", "er_rerate_status", "er_growth_knee_pp", "er_growth_raw",
-               "er_basis", "er_method_id", "er_horizon_months", "fwd_eps_growth",
+               "er_basis", "er_method_id", "er_config_id", "er_identity", "er_horizon_months", "fwd_eps_growth",
                "fwd_eps_growth_period", "fwd_eps_growth_source", "share_count_change",
                "net_debt_ebitda", "_net_debt", "_ebitda", "_latest_rev", "fwd_pe", "ev_ebitda",
                "price_fcf", "market_cap", "current_price", "sector")

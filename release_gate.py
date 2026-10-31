@@ -218,6 +218,9 @@ CONFIG_FILES = ("isa_policy.py", "scoring_config.py", "target_state.json", "targ
                 # ISA-0860 (12-Oct-2026): the HMRC recognised-exchange table mapped to OpenFIGI codes decides which
                 # depositary receipts are REFUSED as not ISA-qualifying - an unsigned edit would move capital.
                 "recognised_exchanges.json",
+                # ISA-0919 (29-Oct-2026): a declared predecessor share-class NAV series joins a fund's history and so
+                #   decides the router's regime-coverage eligibility - an unsigned edit would move fund capital.
+                os.path.join("nav_predecessor", "RANMORE_IE00B61ZVB30_GBP_INVESTOR_FT.csv"),
                 # ISA-0729 (23-Sep-2026): the declared release denominator of the script battery - an
                 # unsigned edit could quietly move a failing release test out of the census.
                 "script_suite_census.json",
@@ -1249,6 +1252,18 @@ def certify(root: str = HERE, *, build_id: str, items: List[str],
     except Exception as exc:                                            # noqa: BLE001
         gates.append(_gate("suite_census", ENV_UNKNOWN,
                            "suite census could not be read (%s) — R2.9/R5.12" % exc))
+    # 4c — ISA-0896 R5: no unit ships over its runtime budget (50% of the per-suite ceiling, host-normalised). WATCH and
+    #      TREND findings ride along as warnings - visible at every certification, never blocking.
+    try:
+        import consistency_check as _cc_rt
+        _rt = _cc_rt.suite_runtime_findings(root=root)
+        _br = [f for f in _rt if f.get("level") == "BUDGET"]
+        gates.append(_gate("suite_runtime_budget", GREEN if not _br else RED,
+                           "ISA-0896: %d unit(s) over budget, %d watch/trend warning(s)" % (len(_br), len(_rt) - len(_br)),
+                           warnings=[f["message"][:240] for f in _rt if f.get("level") != "BUDGET"][:12],
+                           findings=[{"id": "RT-%s" % f["module"], "text": f["message"][:300]} for f in _br]))
+    except Exception as exc:                                            # noqa: BLE001
+        gates.append(_gate("suite_runtime_budget", ENV_UNKNOWN, "suite runtime budget unreadable (%s)" % exc))
 
     # 5 — Phase 0: declaration and execution integrity.
     try:
@@ -1705,6 +1720,7 @@ def _selftest(verbose: bool = True) -> int:
     #   cannot reproduce the declared surfaces is not evidence about correctness, and that
     #   applies to a test's own candidate too.
     for _cfg in CONFIG_FILES:
+        os.makedirs(os.path.dirname(os.path.join(tmp, _cfg)), exist_ok=True)
         with open(os.path.join(tmp, _cfg), "w", encoding="utf-8") as fh:
             fh.write("{}\n" if _cfg.endswith(".json") else "# stub\n")
     # ⚑ AND A RUN SURFACE. `run_surface_fingerprint` was passing the REAL repository root while

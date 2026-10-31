@@ -54,6 +54,7 @@ Stdlib only (pandas/numpy NEVER imported here). Self-test: python3 expected_retu
 """
 from __future__ import annotations
 
+import hashlib as _hashlib
 import json as _json
 import math as _math
 import os as _os
@@ -92,6 +93,9 @@ _KNEE_MIN_N = int(_c("ER_GROWTH_KNEE_MIN_N", 30))
 
 
 # ── ISA-0722 (23-Sep-2026): what this number IS. One home; the underwriting case copies it. ────
+ER_ROLE = ("ADDITIVE_DIAGNOSTIC_E_R: the screen/ranking estimate. NOT the capital engine's ER12 "
+           "(horizon_value + capital_decision_engine), NOT a fair value (fv_composite) and NOT the required "
+           "return (target_state anchor) - B09-R09")
 ER_QUANTITY_BASIS = ("PCT_PER_ANNUM: consensus +1y EPS growth (compressed above the frame knee) "
                      "+ damped re-rate toward the anchor multiple + dividend yield (no buyback yield: ISA-0745). "
                      "Declared horizon = scoring_config.ER_HORIZON_MONTHS (Raj D26). NOT a "
@@ -109,6 +113,23 @@ def _horizon_months():
 
 
 _METHOD_ID = []
+_CONFIG_ID = []
+# B09-R09: every configuration value the additive E[r] reads. A change to any of them changes er_config_id.
+ER_CONFIG_KEYS = ("ER_RERATE_CAP", "ER_RERATE_MODE", "ER_RERATE_NEUTRAL_BAND", "ER_RERATE_REGIME_DAMPING",
+                  "ER_GROWTH_CAP_PP", "ER_GROWTH_FLOOR_PP", "ER_GROWTH_KNEE_ENABLED", "ER_GROWTH_KNEE_QUANTILE",
+                  "ER_GROWTH_KNEE_FLOOR_PP", "ER_GROWTH_KNEE_CEIL_PP", "ER_GROWTH_KNEE_MIN_N", "ER_ANCHOR_MODE",
+                  "ER_ANCHOR_AGREE_BAND", "ER_OWN_CONF_WEIGHT", "ER_XS_CONF_WEIGHT", "ER_MULTIPLE_BY_SECTOR",
+                  "ER_MULTIPLE_DEFAULT", "ER_MULTIPLE_FALLBACK", "ER_MULTIPLE_SANITY", "ER_SHARECOUNT_IN_BASE",
+                  "ER_HORIZON_MONTHS", "ER_ANCHOR_MIN_ROWS")
+
+
+def er_config_id() -> str:
+    """`erconfig@<sha12>` over ER_CONFIG_KEYS as currently loaded (B09-R09, EV-0137)."""
+    if not _CONFIG_ID:
+        vals = {k: _c(k, None) for k in ER_CONFIG_KEYS}
+        _CONFIG_ID.append("erconfig@" + _hashlib.sha256(_json.dumps(vals, sort_keys=True, default=str)
+                                                        .encode("utf-8")).hexdigest()[:12])
+    return _CONFIG_ID[0]
 
 
 def method_id() -> str:
@@ -148,19 +169,29 @@ def _num(v):
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
-        try:
-            if v != v:               # NaN
-                return None
-        except Exception:            # noqa: BLE001
-            pass
-        return float(v)
+        # ⚑ B09-R09 (P-C, 24-Oct-2026, EV-0142): a NON-FINITE input is refused exactly like NaN. An
+        #   infinite growth figure used to pass this boundary, saturate the arctan bound and publish a
+        #   VALID_MECHANICAL 47.5% whose finite value no longer revealed the infinite original input.
+        return float(v) if _math.isfinite(float(v)) else None
     try:
         s = str(v).replace("$", "").replace("£", "").replace(",", "").replace("%", "").strip()
         if s == "" or s.lower() in ("nan", "none", "null", "-", "—"):
             return None
-        return float(s)
+        f = float(s)
+        return f if _math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+
+def _nonfinite(v) -> bool:
+    """B09-R09: True when `v` is a number (or numeric string) that is +/-inf - typed separately from absent."""
+    if v is None or isinstance(v, bool):
+        return False
+    try:
+        f = float(str(v).replace(",", "").replace("%", "").strip()) if not isinstance(v, (int, float)) else float(v)
+    except (TypeError, ValueError):
+        return False
+    return (f == f) and not _math.isfinite(f)
 
 
 def _here(base_dir=None):
@@ -196,6 +227,14 @@ def _median(vals):
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 # ISA-0377 — THE GROWTH BOUND: cross-sectional basis, monotone shape
 # ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# ⚑ B09-R09 (P-C, 24-Oct-2026, EV-0145): build_growth_bounds published shape "tanh" while
+#   growth_transform has used arctan since ISA-0381 (precisely to avoid tanh's saturation). Read
+#   literally on today's inputs the label moves the growth term by up to 4.2pp. ONE home for the label;
+#   a persisted legacy table read back with "tanh" is relabelled in memory (never rewritten) and says so.
+GROWTH_SHAPE = "arctan"
+GROWTH_SHAPE_FUNCTION = "knee + span * (2/pi) * atan(pi * (g - knee) / (2 * span))"
+
 
 def growth_transform(g, knee=None, hi=None, lo=None):
     """Map raw forward growth to the growth term. Returns (value, basis).
@@ -288,7 +327,8 @@ def build_growth_bounds(rows, get=None):
     vals = sorted(v for v in (_row_growth_pct(r, get) for r in (rows or [])) if v is not None)
     n = len(vals)
     out = {"quantile": _KNEE_Q, "n_growth": n, "min_n": _KNEE_MIN_N,
-           "hi_pp": _G_HI, "lo_pp": _G_LO, "shape": "tanh", "enabled": _KNEE_ON,
+           "hi_pp": _G_HI, "lo_pp": _G_LO, "shape": GROWTH_SHAPE, "shape_function": GROWTH_SHAPE_FUNCTION,
+           "enabled": _KNEE_ON,
            "knee_floor_pp": _KNEE_FLOOR, "knee_ceil_pp": _KNEE_CEIL,
            "downside_basis": ("ABSOLUTE — measured refusal: the lower tercile is positive on 5 of "
                               "6 retained frames, so no cross-sectional knee exists below zero"),
@@ -447,20 +487,39 @@ def load_anchor_table(group=None, base_dir=None, as_of=None, required=True, fit_
                 "The pre-run may NOT recompute sector medians from a handful of rows and may NOT "
                 "fall back to no-re-rate — run the screen first (D-24 §3.3).") from e
         return None
+    # ⚑ B09-R10 (P-C, 24-Oct-2026, EV-0148/0149/0150): EXACT selection. A requested GROUP whose
+    #   pointer is absent used to fall back to `latest_any` of ANOTHER screen; a requested AS_OF alone
+    #   was ignored and could return a FUTURE table; a table with NO fit flag read as fit. Now:
+    #   group+as_of -> that key only; group -> that group's pointer only; as_of -> the newest FIT table
+    #   with as_of <= the request (the cross-group substitution recorded on the table); neither ->
+    #   latest_any (the documented, visible cross-group borrow). A missing fit flag is NOT fit.
+    tables = store.get("tables") or {}
     key = None
     if as_of and group:
         key = f"{group}:{as_of}"
     elif group:
         key = (store.get("latest") or {}).get(str(group))
-    if not key:
+    elif as_of:
+        cands = sorted((k for k, t in tables.items()
+                        if isinstance(t, dict) and str(t.get("as_of") or "") <= str(as_of)
+                        and (t.get("fit_for_anchoring") is True or not fit_only)),
+                       key=lambda k: str(tables[k].get("as_of") or ""))
+        key = cands[-1] if cands else None
+    else:
         key = store.get("latest_any")
-    tbl = (store.get("tables") or {}).get(key) if key else None
-    if tbl is not None and fit_only and not tbl.get("fit_for_anchoring", True):
-        tbl = None                       # an unfit table is a record, not an anchor
+    tbl = tables.get(key) if key else None
+    if tbl is not None and fit_only and tbl.get("fit_for_anchoring") is not True:
+        tbl = None                       # an unfit (or undeclared-fitness) table is a record, not an anchor
+    if tbl is not None:
+        gb = tbl.get("growth_bounds") or {}
+        if gb.get("shape") not in (None, GROWTH_SHAPE):
+            tbl = dict(tbl, growth_bounds=dict(gb, shape=GROWTH_SHAPE, shape_function=GROWTH_SHAPE_FUNCTION,
+                                               shape_label_corrected_from=gb.get("shape")))
     if tbl is None and required:
         raise AnchorTableMissing(
-            f"No persisted E[r] anchor table for group={group!r} in {p} "
-            f"(known: {sorted((store.get('latest') or {}).keys())}). D-24 §3.3: read, never recompute.")
+            f"No persisted FIT E[r] anchor table for group={group!r} as_of={as_of!r} in {p} "
+            f"(known: {sorted((store.get('latest') or {}).keys())}). D-24 §3.3: read, never recompute; "
+            f"B09-R10: never substitute another group or a future table.")
     return tbl
 
 
@@ -505,6 +564,8 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
     #   yields NO scalar E[r] (er_state MISSING_REQUIRED_INPUT). The internal 0 below only lets
     #   the other components be computed for display; it never reaches expected_return_12_24m.
     growth_missing = (_num(fwd_eps_growth_pct) is None and _num(rev_growth_pct) is None)
+    if growth_missing and (_nonfinite(fwd_eps_growth_pct) or _nonfinite(rev_growth_pct)):
+        basis[-1] = "growth=NONFINITE_REFUSED"          # B09-R09: inf is refused, typed apart from absent
     # ── the bound (ISA-0377) ──────────────────────────────────────────────────────────────────
     # `er_growth_clamped` KEEPS ITS ORIGINAL MEANING — raw growth outside the absolute bounds —
     # because it is a stored column with downstream readers, and quietly redefining a stored field
@@ -583,7 +644,14 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
         # regardless of which one is operative. A DIVERGENT pair earns only the weaker credit and
         # carries the published flag: disagreement is evidence of less confidence, not more.
         corroborated = (own is not None and xs is not None and not divergence)
-        if anchor_kind == "own_history" or corroborated:
+        # ⚑ B09-R09 (P-C, EV-0138): a DIVERGENT pair earns the weaker credit whichever anchor is
+        #   operative - the rule above was enforced only under cross_sectional_primary, so under
+        #   own_history_primary a -80% divergence kept full own-history confidence. No live effect under
+        #   the current ER_ANCHOR_MODE (cross_sectional_primary); the code now matches its own contract.
+        if divergence:
+            present += float(_c("ER_XS_CONF_WEIGHT", 0.20))
+            basis.append("rerate_conf=xs_weight(divergent)")
+        elif anchor_kind == "own_history" or corroborated:
             present += float(_c("ER_OWN_CONF_WEIGHT", 0.30))
             basis.append("rerate_conf=own_weight" + ("(corroborated_by_xs)" if corroborated
                                                      and anchor_kind != "own_history" else ""))
@@ -642,11 +710,25 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
         er_state = "VALID_MECHANICAL_PROXY"
     else:
         er_state = "VALID_MECHANICAL"
+    _cfg_id = er_config_id()
+    _ident = {"method_id": method_id(), "config_id": _cfg_id, "anchor_mode": mode, "anchor_kind":
+              (rerate_status if rerate_status != "UNMEASURED" else None), "anchor_operative": anchor,
+              "anchor_table": [anchor_table_group, anchor_table_as_of], "growth_form": g_shape,
+              "growth_knee_pp": growth_knee_pp, "horizon_months": _horizon_months(),
+              "regime": (str(regime).upper() if regime else None), "pit_basis": "AS_STAMPED_ON_ROW"}
     return {"expected_return_12_24m": er,
             "er_state": er_state,
             "er_horizon_months": _horizon_months(),
             "er_quantity_basis": ER_QUANTITY_BASIS,
             "er_method_id": method_id(),
+            # B09-R09 (P-C, EV-0137): er_method_id hashes THIS SOURCE only (kept: stored readers depend on
+            # it). The return-method IDENTITY also binds configuration, anchor, form, horizon and regime,
+            # so a config-only change of anchor mode can no longer move 17.5% -> 30.0% under one id.
+            "er_config_id": _cfg_id,
+            "er_identity": "ERID-" + _hashlib.sha256(_json.dumps(_ident, sort_keys=True, default=str)
+                                                     .encode("utf-8")).hexdigest()[:16],
+            "er_identity_basis": _ident,
+            "er_role": ER_ROLE,
             "er_growth": (None if growth_missing else round(g, 1)),
             "er_rerate": (round(rer, 1) if rer is not None else None),
             "er_yield": round(y, 1),
@@ -664,8 +746,10 @@ def compute_expected_return(*, fwd_eps_growth_pct=None, rev_growth_pct=None,
             "er_multiple_field": multiple_field,
             "er_multiple_value": cur,
             "er_growth_clamped": g_clamped,
-            "er_growth_raw": (None if g_raw is None else round(g_raw, 1)),
-            "er_growth_basis": g_shape,
+            # FOUND IN P-C (fix on finding, R4.1): an ABSENT growth input used to publish er_growth_raw 0.0
+            # and basis RAW - a measured-looking zero. Absent (or non-finite) growth is None / MISSING.
+            "er_growth_raw": (None if (growth_missing or g_raw is None) else round(g_raw, 1)),
+            "er_growth_basis": ("MISSING" if growth_missing else g_shape),
             "er_growth_knee_pp": growth_knee_pp,
             "er_growth_compressed": g_compressed,
             "er_rerate_clamped": bool(rer_clamped),
@@ -715,14 +799,25 @@ def current_market_regime(here=None):
     Returns None when unavailable — and None means UNDAMPED (the conservative full penalty), never
     a guessed regime.
     """
-    if "v" in _REGIME_CACHE:
-        return _REGIME_CACHE["v"]
+    # ⚑ B09-R10 (P-C, EV-0152): the cache was ONCE PER PROCESS and ignored both the file's content
+    #   change and a different root - a long-lived process kept RISK_ON after drawdown_state moved to
+    #   RISK_OFF. The cache is now keyed by (path, mtime_ns, size): same bytes -> no re-read.
+    p = _os.path.abspath(_os.path.join(_here(here), "drawdown_state.json"))
     try:
-        with open(_os.path.join(_here(here), "drawdown_state.json"), encoding="utf-8") as f:
-            _REGIME_CACHE["v"] = (_json.load(f) or {}).get("regime_state")
+        stt = _os.stat(p)
+        key = (p, stt.st_mtime_ns, stt.st_size)
+    except OSError:
+        key = (p, None, None)
+    if key in _REGIME_CACHE:
+        return _REGIME_CACHE[key]
+    try:
+        with open(p, encoding="utf-8") as f:
+            v = (_json.load(f) or {}).get("regime_state")
     except Exception:                                        # noqa: BLE001
-        _REGIME_CACHE["v"] = None
-    return _REGIME_CACHE["v"]
+        v = None
+    _REGIME_CACHE.clear()
+    _REGIME_CACHE[key] = v
+    return v
 
 
 # The PRE-D-24 candidate list, retained for one purpose only: ER_ANCHOR_MODE="own_history_only"
@@ -909,6 +1004,10 @@ def record_anchor_learning(rows, *, run_date, group, base_dir=None, get=None):
     return {"path": p, "rows": n}
 
 
+STAMP_CLEARED_FIELDS = ("expected_return_12_24m", "er_growth", "er_rerate", "er_yield", "er_confidence",
+                        "er_sharecount_sensitivity_pp", "er_identity", "fv_annualised_pct")
+
+
 def stamp_frame(rows, *, run_date, group, regime=None, get=None, base_dir=None,
                 persist=True, learn=True):
     """THE screen-side entry point: build -> persist -> stamp every row -> assert -> learn.
@@ -938,8 +1037,15 @@ def stamp_frame(rows, *, run_date, group, regime=None, get=None, base_dir=None,
                                              allow_missing_anchor_table=(table is None)))
             apply_capital_signal_conflict(r)
         except Exception as e:                               # noqa: BLE001
+            # ⚑ B09-R09 (P-C, EV-0154): a failed stamp used to leave the row's PRIOR scalar and
+            #   VALID_MECHANICAL state in place under an error basis - a stale number that still read
+            #   admissible. Every E[r] output field is cleared together and the state is typed.
+            for _k in STAMP_CLEARED_FIELDS:
+                r[_k] = None
+            r["er_state"] = "STAMP_FAILED"
             r["er_status"] = "unmeasured"
             r["er_rerate_status"] = "UNMEASURED"
+            r["capital_signal_conflict"] = None
             r["er_basis"] = f"stamp_error:{type(e).__name__}:{e}"
     verdict = unmeasured_share_verdict(rows, get=get)
     if not built.get("fit_for_anchoring") and table is None:
@@ -966,15 +1072,28 @@ def apply_capital_signal_conflict(row):
     starter, never full). Mutates + returns row; no-op when either input missing."""
     thr = float(_c("CAPITAL_SIGNAL_CONFLICT_PP", 25.0))
     cap = float(_c("CONFLICT_ER_CONF_CAP", 0.5))
+    fvh = float(_c("CAPITAL_SIGNAL_FV_HORIZON_MONTHS", 18.0))
     er = _num(row.get("expected_return_12_24m"))
     u = _num(row.get("implied_upside_fv"))
-    row.setdefault("capital_signal_conflict", False)
+    # ⚑ B09-R10 (P-C, EV-0262/0263/0264): RECOMPUTED on every call. The flag used to be setdefault-ed,
+    #   so a conflict from an earlier stamp survived a healthy recalculation, and a missing current
+    #   input left the old annotation and annualised FV in place. The FV horizon (18m midpoint of the
+    #   12-24m window) is now DISCLOSED on the row: the comparison is only like-for-like if the FV input
+    #   is an 18-month quantity, and fv_composite does not type its horizon.
+    row["capital_signal_fv_horizon_months"] = fvh
+    _b = str(row.get("er_basis") or "").replace("|conflict_capped", "")
+    row["er_basis"] = (None if _b in ("", "conflict_capped") else _b)
     if er is None or u is None or u <= -1.0:
+        row["capital_signal_conflict"] = None
+        row["capital_signal_conflict_state"] = "NOT_EVALUATED_MISSING_INPUT"
+        row["fv_annualised_pct"] = None
         return row
-    fv_ann = ((1.0 + u) ** (12.0 / 18.0) - 1.0) * 100.0
+    fv_ann = ((1.0 + u) ** (12.0 / fvh) - 1.0) * 100.0
     row["fv_annualised_pct"] = round(fv_ann, 1)
-    if abs(er - fv_ann) > thr:
-        row["capital_signal_conflict"] = True
+    conflict = bool(abs(er - fv_ann) > thr)
+    row["capital_signal_conflict"] = conflict
+    row["capital_signal_conflict_state"] = "EVALUATED"
+    if conflict:
         ec = _num(row.get("er_confidence"))
         if ec is None or ec > cap:
             row["er_confidence"] = cap

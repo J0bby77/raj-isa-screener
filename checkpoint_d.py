@@ -52,6 +52,57 @@ def _norm_set(xs):
     return {str(x).strip().upper() for x in (xs or []) if str(x).strip()}
 
 
+NO_STOCK_ADDITION = "NO_STOCK_ADDITION"   # ISA-0912: the typed Category-5 'hold cash' Step 10 decision
+NO_ADDITION_REASON_MIN_CHARS = 40         # completeness gate (same spirit as tick 6), not a quality gate
+
+
+def no_addition_basis(new_capital_control, decision_receipt, engine_authority="SHADOW", decision=None,
+                      router_summary=None) -> dict:
+    """ISA-0912 - is ANY stock addition executable this occurrence? Pure: the readings are passed in.
+    executable=True only when the control is explicitly OPEN AND (engine LIVE) the receipt is VALID,
+    DECISION_COMPLETE, capital_authorised and selected >= 1 addition. Under SHADOW the receipt has no
+    authority, so an OPEN control means additions ARE executable (no-addition is then refused: the
+    legacy contest must be decided). An UNKNOWN control blocks, so no addition is executable (R4.3)."""
+    ncc = new_capital_control if isinstance(new_capital_control, dict) else {}
+    if ncc.get("blocks_new_stock_capital") is not False:
+        return {"executable": False, "basis": "CONTROL_BLOCKS",
+                "why": "new_capital_control state %s (record %s) blocks new stock capital"
+                       % (ncc.get("state") or "UNKNOWN", ncc.get("record_id"))}
+    if engine_authority != "LIVE":
+        return {"executable": True, "basis": "SHADOW_CONTROL_OPEN",
+                "why": "the control is OPEN and the receipt has no authority (SHADOW)"}
+    rv = decision_receipt if isinstance(decision_receipt, dict) else {"state": "ABSENT"}
+    rr = rv.get("receipt") or {}
+    if rv.get("state") != "VALID" or rr.get("state") != "DECISION_COMPLETE" or not rr.get("capital_authorised"):
+        return {"executable": False, "basis": "RECEIPT_NOT_AUTHORISED",
+                "why": "receipt %s is %s/%s (capital_authorised=%s)" % (rr.get("receipt_id"), rv.get("state"),
+                                                                        rr.get("state"), rr.get("capital_authorised"))}
+    sel = sorted({str(x.get("ticker") or "").upper() for x in (rr.get("selected_actions") or [])
+                  if float(x.get("gbp") or 0) > 0})
+    if not sel:
+        return {"executable": False, "basis": "RECEIPT_SELECTED_NOTHING",
+                "why": "authorised receipt %s selected no addition" % rr.get("receipt_id")}
+    # ISA-0912 (completed 28-Oct, found in the W3 parallel): two later gates also make the authorised selection
+    #   non-executable, and a review that honours them must be able to record it - otherwise tick 14 / the
+    #   judgement pass would deadlock Checkpoint-D exactly as the control did.
+    _ag = rr.get("appetite_guard") or {}
+    _ap = (decision or {}).get("appetite_approval") or {}
+    if _ag.get("state") == "REVIEW_REQUIRED" and not (str(_ap.get("approved_by") or "").strip()
+                                                     and _ap.get("receipt_id") == rr.get("receipt_id")):
+        return {"executable": False, "basis": "APPETITE_APPROVAL_ABSENT", "selected": sel,
+                "why": ("receipt %s's selected plan needs Raj's explicit appetite approval (tick 14, ISA-0888: severe-scenario "
+                        "loss %s%% vs limit %s%%) and none is recorded - an unapproved REVIEW does not execute"
+                        % (rr.get("receipt_id"), (_ag.get("selected") or {}).get("post_loss_pct"),
+                           (_ag.get("selected") or {}).get("appetite_pct")))}
+    _jr = ((router_summary or {}).get("decision_receipt") or {}).get("judgement_refused") if isinstance(router_summary, dict) else None
+    if _jr:
+        return {"executable": False, "basis": "JUDGEMENT_REFUSED", "selected": sel,
+                "why": "the judgement pass withheld receipt %s's plan: no admissible thesis_state for %s (ISA-0913)"
+                       % (rr.get("receipt_id"), sorted(_jr))}
+    return {"executable": True, "basis": "RECEIPT_AUTHORISED_SELECTION", "selected": sel,
+            "why": "authorised receipt %s selected %s under an OPEN control" % (rr.get("receipt_id"), sel)}
+
+
 FUND_NET_TOL_GBP = 1.0   # arithmetic tolerance on net fund flows (rounding of broker amounts) - NOT an economic margin
 
 
@@ -111,7 +162,7 @@ def fund_leg_check(fund_actions, new_capital_control=None, fund_max_gbp=None) ->
 def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
                           step9_records=None, factor_state=None, opportunity_set=None,
                           new_capital_control=None, decision_receipt=None, engine_authority="SHADOW",
-                          fund_max_gbp=None):
+                          fund_max_gbp=None, router_summary=None):
     """Return {passed, blocks, chosen, top5}.
       top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
                           cases capped at 5 by the deploy-Source tiebreak — this is that list)
@@ -190,8 +241,35 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
 
     # (2) chosen action(s) in the top-5 + justify each NON-deployed top-5 name vs what WAS deployed.
     #     MULTIPLE deployments are allowed whenever they fit available funds — no single-action cap.
-    if not chosen_set:
-        blocks.append("no chosen action(s) in decision")
+    # (2a) ISA-0912 (28-Oct-2026): a TYPED "no stock addition" decision. Before this, an empty chosen set
+    #      always blocked, so a month in which no addition is executable (control blocks, receipt not
+    #      VALID/COMPLETE/authorised, or the receipt selected nothing) could never pass Checkpoint-D honestly.
+    #      NO_STOCK_ADDITION is accepted ONLY when no addition is executable, with a stated reason; it is
+    #      REFUSED when an authorised receipt selected additions under an OPEN control (Step 10.2 may not
+    #      drop the receipt's selection). Cases, pairwise reasons and the ledger log are still required.
+    _nsa = None
+    if str(decision.get("chosen_action") or "").strip().upper() == NO_STOCK_ADDITION:
+        _nsa = no_addition_basis(new_capital_control, decision_receipt, engine_authority, decision=decision,
+                                 router_summary=router_summary)
+        _nsa["reason"] = str(decision.get("no_addition_reason") or "").strip()
+        if chosen_set:
+            blocks.append("ISA-0912: chosen_action NO_STOCK_ADDITION contradicts chosen ticker(s) %s - "
+                          "record either the additions or no addition" % sorted(chosen_set))
+            _nsa["state"] = "REFUSED_CONTRADICTION"
+        elif len(_nsa["reason"]) < NO_ADDITION_REASON_MIN_CHARS:
+            blocks.append("ISA-0912: NO_STOCK_ADDITION needs decision['no_addition_reason'] (>= %d chars) "
+                          "stating why no stock is added this month" % NO_ADDITION_REASON_MIN_CHARS)
+            _nsa["state"] = "REFUSED_NO_REASON"
+        elif _nsa["executable"]:
+            blocks.append("ISA-0912: NO_STOCK_ADDITION refused - %s; Step 10.2 may not drop the receipt's "
+                          "selection (record the selected additions, or a reduction)" % _nsa["why"])
+            _nsa["state"] = "REFUSED_ADDITION_EXECUTABLE"
+        else:
+            _nsa["state"] = "ACCEPTED"
+    if not chosen_set and not (_nsa and _nsa["state"] == "ACCEPTED"):
+        blocks.append("no chosen action(s) in decision" + (
+            "" if _nsa else " (record chosen_action NO_STOCK_ADDITION with no_addition_reason when no "
+                            "stock addition is executable - ISA-0912)"))
     for c in chosen_set:
         if c not in top5:
             blocks.append(f"chosen {c} is not among the top-5 {top5}")
@@ -199,7 +277,8 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         if t in chosen_set:
             continue
         if not str(pairwise.get(t) or "").strip():
-            blocks.append(f"missing justification: why {sorted(chosen_set) or ['?']} chosen over {t}")
+            blocks.append(f"missing justification: why {t} is not added" if (_nsa and not chosen_set) else
+                          f"missing justification: why {sorted(chosen_set) or ['?']} chosen over {t}")
 
     # (2b) Optional funds check — many actions are FINE if they fit; this blocks ONLY when the total
     #      cost of the chosen actions exceeds available funds, never merely because there is >1 action.
@@ -403,8 +482,28 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
         blocks.append("tick 13 (ISA-0621): sale(s) %s are not in the receipt's switch plan - a held-position sale outside "
                       "the contest is decided in Step 5, not here" % _extra13)
 
+    # (14) P-D / ISA-0888 (Raj 24-Oct-2026 'Review + guard new risk'): when the receipt's SELECTED plan deepens a
+    #      severe-scenario loss that is at/above Raj's limit (receipt.appetite_guard.state REVIEW_REQUIRED), its buys
+    #      need Raj's EXPLICIT approval: decision['appetite_approval'] = {"approved_by": "Raj ...", "receipt_id": <id>}.
+    #      Nothing is refused or sold by this tick - an unapproved REVIEW simply does not execute.
+    _ag14 = (_rr13.get("appetite_guard") or {}) if isinstance(_rr13, dict) else {}
+    _appetite_tick = {"state": _ag14.get("state") or "NOT_EVALUATED"}
+    if _ag14.get("state") == "REVIEW_REQUIRED" and (chosen_set & _rb13):
+        _ap14 = decision.get("appetite_approval") or {}
+        if not (str(_ap14.get("approved_by") or "").strip() and _ap14.get("receipt_id") == _rr13.get("receipt_id")):
+            blocks.append("tick 14 (ISA-0888): the selected plan raises the severe-scenario loss to %s%% against Raj's "
+                          "%s%% limit - record decision['appetite_approval'] = {approved_by, receipt_id: %s} (Raj's "
+                          "explicit approval) or do not execute the buys; nothing is sold"
+                          % (((_ag14.get("selected") or {}).get("post_loss_pct")),
+                             ((_ag14.get("selected") or {}).get("appetite_pct")), _rr13.get("receipt_id")))
+            _appetite_tick["state"] = "BLOCK_PENDING_APPROVAL"
+        else:
+            _appetite_tick["state"] = "APPROVED"
+            _appetite_tick["approved_by"] = _ap14.get("approved_by")
+
     return {"passed": not blocks, "blocks": blocks, "chosen": sorted(chosen_set) or None, "top5": top5,
-            "contest_basis": contest_basis, "fund_leg": _fl, "factor_tick": _factor_tick}
+            "contest_basis": contest_basis, "fund_leg": _fl, "factor_tick": _factor_tick,
+            "appetite_tick": _appetite_tick, "no_stock_addition": _nsa}
 
 
 def factor_state_from_receipt(receipt_verification):
@@ -567,6 +666,18 @@ def _opportunity_set(spec):
         rc = json.load(fh)
     return ((((rc.get("summary") or {}).get("capital_destination") or {}).get("pipeline") or {})
             .get("opportunity_set"))
+
+
+def _router_summary(spec):
+    """ISA-0912: the run's router summary (run_context.summary.capital_destination) when the spec names the run_context."""
+    p = spec.get("run_context")
+    if not p:
+        return None
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return ((json.load(fh).get("summary") or {}).get("capital_destination")) or None
+    except Exception:                                                   # noqa: BLE001
+        return None
 
 
 def _fund_max(spec):
@@ -778,7 +889,62 @@ def _selftest() -> int:
     _fr = factor_state_from_receipt({"receipt": {"factor": {"mode": "SHADOW", "cap_pct": 30, "pre_trade": {"breach": False},
                                                              "selected": {"state": "PASS"}, "selected_tickers": ["NTAP"]}}})
     assert _fr["mode"] == "SHADOW" and _fr["net"] == {"verdict": "PASS", "tickers": ["NTAP"]}, "ISA-0621: the receipt's verdict reaches tick 5"
-    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11 + ISA-0867 tick 12 + ISA-0868 binding: must-fire, negative control, absent verdict)")
+    # ── ISA-0912: the typed NO_STOCK_ADDITION decision ────────────────────────────────────────
+    _why = "The new-capital control blocks every addition this occurrence; capital is held as cash."
+    _nd = {"chosen_action": "NO_STOCK_ADDITION", "no_addition_reason": _why, "pairwise": {t: "not added: control blocks" for t in feas}}
+    _blk2 = {"state": "BLOCK_NEW_STOCK_CAPITAL", "blocks_new_stock_capital": True, "record_id": "NCC-T"}
+    _opn2 = {"state": "OPEN", "blocks_new_stock_capital": False}
+    _ra = {"state": "VALID", "receipt": {"receipt_id": "CDR-A", "state": "DECISION_COMPLETE", "capital_authorised": True,
+                                         "case_scope": {"required_full_cases": feas}, "selected_actions": [{"ticker": "NTAP", "gbp": 5000.0}]}}
+    _rn = {"state": "VALID", "receipt": dict(_ra["receipt"], capital_authorised=False)}
+    _r0 = {"state": "VALID", "receipt": dict(_ra["receipt"], selected_actions=[])}
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_blk2, decision_receipt=_rn, engine_authority="LIVE")
+    assert _x["passed"] and _x["no_stock_addition"]["state"] == "ACCEPTED" and _x["chosen"] is None, \
+        "MUST-FIRE (ISA-0912): a control BLOCK + unauthorised receipt month passes with NO_STOCK_ADDITION %r" % _x["blocks"]
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_r0, engine_authority="LIVE")
+    assert _x["passed"] and _x["no_stock_addition"]["basis"] == "RECEIPT_SELECTED_NOTHING", \
+        "MUST-FIRE (ISA-0912): an authorised receipt that selected nothing passes with NO_STOCK_ADDITION %r" % _x["blocks"]
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_ra, engine_authority="LIVE")
+    assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_ADDITION_EXECUTABLE", \
+        "NEGATIVE CONTROL (ISA-0912): NO_STOCK_ADDITION may not drop an authorised selection under an OPEN control"
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, engine_authority="SHADOW")
+    assert not _x["passed"] and _x["no_stock_addition"]["basis"] == "SHADOW_CONTROL_OPEN", \
+        "NEGATIVE CONTROL (ISA-0912): under SHADOW an OPEN control means the legacy contest must be decided"
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control={"state": "UNKNOWN"}, decision_receipt=_ra, engine_authority="LIVE")
+    assert _x["passed"] and _x["no_stock_addition"]["basis"] == "CONTROL_BLOCKS", \
+        "MUST-FIRE (ISA-0912): an UNKNOWN control blocks additions, so no-addition is accepted (R4.3)"
+    _x = validate_checkpoint_d(feas, dict(_nd, no_addition_reason="cash"), cases, feas, new_capital_control=_blk2, engine_authority="LIVE")
+    assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_NO_REASON", \
+        "NEGATIVE CONTROL (ISA-0912): a no-addition decision without a stated reason is refused"
+    _x = validate_checkpoint_d(feas, dict(_nd, chosen_tickers=["NTAP"]), cases, feas, new_capital_control=_blk2, engine_authority="LIVE")
+    assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_CONTRADICTION", \
+        "NEGATIVE CONTROL (ISA-0912): NO_STOCK_ADDITION with chosen tickers is a contradiction"
+    _x = validate_checkpoint_d(feas, dict(_nd, pairwise={}), cases, feas, new_capital_control=_blk2, engine_authority="LIVE")
+    assert any("why NTAP is not added" in b for b in _x["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0912): every contest name still needs a reason it is not added"
+    _x = validate_checkpoint_d(feas, _nd, {}, [], new_capital_control=_blk2, engine_authority="LIVE")
+    assert any("missing comparative case" in b for b in _x["blocks"]) and any("not logged" in b for b in _x["blocks"]), \
+        "NEGATIVE CONTROL (ISA-0912): cases and the decision-ledger log are still required"
+    _x = validate_checkpoint_d(feas, {"pairwise": _nd["pairwise"]}, cases, feas, new_capital_control=_blk2, engine_authority="LIVE")
+    assert any("NO_STOCK_ADDITION" in b for b in _x["blocks"]), \
+        "ISA-0912: an untyped empty decision still blocks and names the typed decision"
+    _rag = {"state": "VALID", "receipt": dict(_ra["receipt"], appetite_guard={"state": "REVIEW_REQUIRED",
+                                                                           "selected": {"post_loss_pct": 52.8, "appetite_pct": 50}})}
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE")
+    assert _x["passed"] and _x["no_stock_addition"]["basis"] == "APPETITE_APPROVAL_ABSENT", \
+        "MUST-FIRE (ISA-0912/tick 14): an authorised plan awaiting Raj's appetite approval is not executable -> no-addition passes %r" % _x["blocks"]
+    _x = validate_checkpoint_d(feas, dict(_nd, appetite_approval={"approved_by": "Raj", "receipt_id": "CDR-A"}), cases, feas,
+                               new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE")
+    assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_ADDITION_EXECUTABLE", \
+        "NEGATIVE CONTROL (ISA-0912/tick 14): once Raj approved, NO_STOCK_ADDITION may not drop the selection"
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_ra, engine_authority="LIVE",
+                               router_summary={"decision_receipt": {"judgement_refused": ["NTAP"]}})
+    assert _x["passed"] and _x["no_stock_addition"]["basis"] == "JUDGEMENT_REFUSED", \
+        "MUST-FIRE (ISA-0912/ISA-0913): a plan the judgement pass withheld is not executable -> no-addition passes"
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_ra, engine_authority="LIVE",
+                               router_summary={"decision_receipt": {"judgement_refused": []}})
+    assert not _x["passed"], "NEGATIVE CONTROL (ISA-0912): an empty judgement refusal leaves the selection executable"
+    print("checkpoint_d selftest OK (ISA-0607 tick 7 + ISA-0608 tick 8 + ISA-0616 tick 9 + ISA-0807 tick 10 + ISA-0804 tick 11 + ISA-0867 tick 12 + ISA-0868 binding + ISA-0912 NO_STOCK_ADDITION: must-fire, negative control, absent verdict)")
     return 0
 
 
@@ -819,7 +985,7 @@ def main():
                                 factor_state=factor_state_from_receipt(_rcv),          # ISA-0621: tick 5 finally wired
                                 opportunity_set=_opportunity_set(s),
                                 new_capital_control=_ncc, decision_receipt=_rcv, engine_authority=_cea,
-                                fund_max_gbp=_fund_max(s))
+                                fund_max_gbp=_fund_max(s), router_summary=_router_summary(s))
     _rr_ = _rcv.get("receipt") or {}
     res["capital_decision_receipt"] = {"authority": _cea, "verification": _rcv.get("state"),
                                        "receipt_id": _rr_.get("receipt_id"), "state": _rr_.get("state"),

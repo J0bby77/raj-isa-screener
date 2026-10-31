@@ -607,6 +607,8 @@ KA1_POPULATION = ["ISA-%04d" % n for n in range(454, 466)]
 
 
 def _selftest() -> int:
+    import isa_source_cache as _isc
+    _isc.route_ast_parse()          # ISA-0896 R3: one parse per file per process (ISA_AST_CACHE=0 rolls back)
     fails = []
 
     def ok(name, cond, detail=""):

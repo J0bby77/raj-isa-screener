@@ -397,6 +397,9 @@ def score_ticker_growth(ticker_sym: str, data: dict) -> dict:
     try:
         _erd = _erm.expected_return_for_row(scored, anchor_table=_d24_anchor_table())
         scored.update({k: v for k, v in _erd.items()})
+        # B09-R10 (P-C, EV-0266): FV (above) and E[r] are both current on this row only now, so the
+        # capital-signal conflict is evaluated HERE - it used to be left blank on every pre-run row.
+        _erm.apply_capital_signal_conflict(scored)
     except _erm.AnchorTableMissing:
         raise
     except Exception as _e:
@@ -874,7 +877,7 @@ def main():
         log.info(f"Fetch workers set to {FETCH_WORKERS} (CLI override)")
 
     watchlist_path = args.watchlist or os.path.join(SCRIPT_DIR, "watchlist_tickers.json")
-    month_label    = args.month_label or date.today().strftime("%b_%Y").lower()
+    month_label    = args.month_label or __import__("run_cycle").cycle_label()   # ISA-0910
     out_path       = args.out or os.path.join(SCRIPT_DIR, f"watchlist_metrics_{month_label}.json")
 
     # Local-primary guardrail parity (opt-in). Fails over to Composio (exit 3) when the local

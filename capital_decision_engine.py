@@ -128,7 +128,17 @@ AMENDMENT_ALLOWLIST = {
     "flag_adjudication": ("RESOLVED_BENIGN", "CONFIRMED_ADVERSE"),
     "thesis.falsifier": "text",
     "case.complete": "bool",
+    # B09-R03 (P-C, 24-Oct-2026): an EVIDENCED answer to a required question that changes no allowlisted field.
+    "case.question_answer": ("NO_CHANGE",),
 }
+# ⚑ B09-R03 (P-C): REQUIRED-QUESTION RECEIPTS. `case.complete = true` and fluent prose are not evidence that
+#   the twelve questions were answered: a case is COMPLETE only when every CASE_QUESTION_ID carries at least one
+#   accepted typed amendment for that security - a field change, or an evidenced NO_CHANGE answer
+#   (`case.question_answer`), each with its sources, publication dates, rationale and reviewer. The receipt
+#   records the coverage and, per amended security, the mechanical BEFORE and the amended AFTER values.
+#   Rollback (R4.13): CASE_QUESTION_RECEIPTS_REQUIRED = False restores `case.complete` alone.
+CASE_QUESTION_RECEIPTS_REQUIRED = True
+CASE_QUESTION_IDS = tuple("Q%d" % i for i in range(1, 13))
 AMENDMENT_FORBIDDEN_PREFIXES = ("hurdle", "policy", "ladder", "rung", "cash", "quote", "price",
                                 "permission", "risk_limit", "execution", "buy", "select",
                                 "source_score", "confidence", "config")
@@ -450,19 +460,36 @@ def er12_case(ticker: str, hv: Optional[dict], pit: Optional[dict], as_of: str,
             central = {"AUTHORITATIVE": auth_er, "CROSS_ROUTE": cross_er,
                        "LOWER_OF_ROUTES": min(x for x in (auth_er, cross_er) if x is not None)}[resolution]
             rec["review_resolution"] = resolution
-    inputs = auth.get("inputs") or {}
-    cur = auth.get("currency") or hv.get("currency") or {}
+    # ⚑ B09-R07 (P-C, 24-Oct-2026): a resolution that CHOOSES the other route updates the route, the
+    #   bridge, the estimation variants and the bear TOGETHER, and the alternative route becomes the one
+    #   NOT chosen. It used to change only the central figure: the case kept the original P/E bridge
+    #   (identity 22% against an 18.09% central) and ALT_ROUTE duplicated the chosen central, so the
+    #   ALT_ROUTE world was not an alternative at all. The original route is preserved on the record.
+    chosen = auth
+    if resolution == "CROSS_ROUTE" or (resolution == "LOWER_OF_ROUTES" and cross_er is not None
+                                       and auth_er is not None and cross_er < auth_er):
+        chosen = cross
+    chosen_er = _num(chosen.get("er_pct"))
+    alt_er = auth_er if chosen is cross else cross_er
+    rec["route_original"] = auth.get("route") or rec.get("route")
+    rec["route"] = chosen.get("route") or rec.get("route")
+    rec["route_chosen_by"] = ("REVIEW_RESOLUTION:%s" % resolution) if resolution else "DECLARED_ROUTE"
+    inputs = chosen.get("inputs") or {}
+    cur = (chosen.get("currency") or inputs.get("currency") or auth.get("currency")
+           or (auth.get("inputs") or {}).get("currency") or hv.get("currency") or {})
     unit_div = _num(cur.get("unit_div")) or 1.0
     p0q = _num(inputs.get("P0_quote"))
+    if p0q is None:
+        p0q = _num((auth.get("inputs") or {}).get("P0_quote"))
     p0 = None if p0q is None else p0q / unit_div
-    pt = _num(auth.get("P_T"))
-    r = _num(auth.get("r") if auth.get("r") is not None else inputs.get("r"))
+    pt = _num(chosen.get("P_T"))
+    r = _num(chosen.get("r") if chosen.get("r") is not None else inputs.get("r"))
     route = rec["route"]
     c = central / 100.0
     rec["central_local"] = c
     rec["currency"] = cur.get("quote_major") or cur.get("quote")
-    # dividends implied by the HV identity (1+R)P0 = P_T + D
-    d_major = (None if (p0 is None or pt is None) else (1.0 + (auth_er or central) / 100.0) * p0 - pt)
+    # dividends implied by the HV identity (1+R)P0 = P_T + D, on the CHOSEN route
+    d_major = (None if (p0 is None or pt is None) else (1.0 + (chosen_er if chosen_er is not None else central) / 100.0) * p0 - pt)
     # ── bridge (multiplicative, s4.1) ─────────────────────────────────────────────────────
     bridge = {"route": route, "P0_major": _r(p0, 4), "P_T_major": _r(pt, 4),
               "distributions_major": _r(d_major, 4), "rerate_r": r}
@@ -476,9 +503,34 @@ def er12_case(ticker: str, hv: Optional[dict], pit: Optional[dict], as_of: str,
             if e0 <= 0 or e1 <= 0:
                 rec.update(state="UNKNOWN", why="loss-making metric: a P/E bridge on a non-positive EPS is meaningless (s4.1)")
                 return rec
+            # ⚑ B09-R05 (P-C, 24-Oct-2026): the REVERSE-IMPLIED expectation - the FY1 EPS the current price needs
+            #   to clear the hurdle at the case's own terminal multiple - so a reviewer sees what the price
+            #   discounts against what consensus assumes. Diagnostic: never an input to the decision.
+            _h = hurdle_pct / 100.0
+            _pe0 = p0 / e0
+            _eps_req = (((1.0 + _h) * p0 - (d_major or 0.0)) / (_pe0 * (1.0 + (r or 0.0)))) if _pe0 > 0 else None
+            bridge["reverse_implied"] = {
+                "fy1_eps_needed_for_hurdle": _r(_eps_req, 5), "consensus_fy1_eps": _r(e1, 5),
+                "growth_needed_pct": _r(100.0 * (_eps_req / e0 - 1.0), 2) if _eps_req else None,
+                "consensus_growth_pct": _r(100.0 * (e1 / e0 - 1.0), 2),
+                "cushion_pct": _r(100.0 * (e1 / _eps_req - 1.0), 2) if _eps_req else None,
+                "label": "REVERSE_IMPLIED_DIAGNOSTIC (B09-R05): what the price needs, at the case's own multiple"}
     else:
         bridge["identity"] = ("P_T = (NTM revenue x TTM margin x EV/EBITDA0 x (1+r) - frozen net debt) / "
                               "frozen diluted shares (+ dividends); share count enters once")
+        _sh, _nd, _m0 = _num(inputs.get("SHARES")), _num(inputs.get("ND")), _num(inputs.get("M0"))
+        _ntm, _te, _tr = _num(inputs.get("NTM_REV")), _num(inputs.get("TTM_EBITDA")), _num(inputs.get("TTM_REV"))
+        _rate = _num(cur.get("rate_quote_to_rep")) or 1.0
+        if all(x is not None for x in (_sh, _nd, _m0, _ntm, _te, _tr)) and p0 and _m0 > 0 and _tr > 0 and _sh > 0:
+            # B09-R05 (P-C): the terminal EBITDA the price needs for the hurdle at the case's own EV/EBITDA
+            _h = hurdle_pct / 100.0
+            _p_needed_rep = ((1.0 + _h) * p0 - (d_major or 0.0)) * _rate
+            _ebitda_req = (_p_needed_rep * _sh + _nd) / (_m0 * (1.0 + (r or 0.0)))
+            _ebitda_case = _ntm * (_te / _tr)
+            bridge["reverse_implied"] = {
+                "ntm_ebitda_needed_for_hurdle": _r(_ebitda_req, 2), "case_ntm_ebitda": _r(_ebitda_case, 2),
+                "cushion_pct": _r(100.0 * (_ebitda_case / _ebitda_req - 1.0), 2) if _ebitda_req > 0 else None,
+                "label": "REVERSE_IMPLIED_DIAGNOSTIC (B09-R05): what the price needs, at the case's own multiple"}
     rec["bridge"] = bridge
     # ── achievement mechanism (s4.2: FY1 must be the current year at T) ─────────────────────
     fy0_end = auth.get("fy0_end") or (inputs.get("fy0_end"))
@@ -502,9 +554,34 @@ def er12_case(ticker: str, hv: Optional[dict], pit: Optional[dict], as_of: str,
     same_ccy = (cur.get("quote_major") == cur.get("reporting")) or cur.get("reporting") is None
     if route == "EV":
         shares, nd = _num(inputs.get("SHARES")), _num(inputs.get("ND"))
+    # ⚑ B09-R06 (P-C, 24-Oct-2026): the EV route's terminal revenue is the NTM BLEND w0*FY0 + (1-w0)*FY1.
+    #   An analysts' FY1 low/high varies FY1 ONLY, FY0 held fixed - the ratio used to be applied to the
+    #   whole blended NTM (and so to FY0 too), overstating LOW by ~3pp on the audit fixture (w0 0.268).
+    #   The P/E route uses FY1 EPS once, so its FY1 ratio applies whole. Currency factors cancel in the ratio.
+    _w0 = _num(inputs.get("w0"))
+    _rv0 = _num(((pit or {}).get("revenue_estimate") or {}).get("0y", {}).get("avg")) if route == "EV" else None
+    _rv1 = _num(((pit or {}).get("revenue_estimate") or {}).get("+1y", {}).get("avg")) if route == "EV" else None
+
+    def _fy1_only(k: Optional[float]) -> Optional[float]:
+        if k is None:
+            return None
+        if route == "PE":
+            return k
+        if _w0 is None or not _rv0 or not _rv1 or _rv0 <= 0 or _rv1 <= 0:
+            return None                      # the blend cannot be decomposed - variant refused, never approximated
+        ntm = _w0 * _rv0 + (1.0 - _w0) * _rv1
+        return (_w0 * _rv0 + (1.0 - _w0) * _rv1 * k) / ntm
+    lo_f, hi_f = _fy1_only(lo), _fy1_only(hi)
+    rec["estimation_variant_basis"] = {
+        "route": route, "fy1_low_ratio": _r(lo, 6), "fy1_high_ratio": _r(hi, 6),
+        "applied_low_factor": _r(lo_f, 6), "applied_high_factor": _r(hi_f, 6), "w0": _w0,
+        "convention": ("FY1-only: the analysts' FY1 low/high varies FY1 inside the NTM blend, FY0 fixed (B09-R06)"
+                       if route == "EV" else "FY1 EPS once: the FY1 low/high ratio applies to the terminal price"),
+        "label": ("SENSITIVITY - consensus dispersion, NOT a calibrated scenario probability (B09-R07/ISA-0748)"),
+        "analysts_fy1": _num(((est_tab or {}).get("+1y") or {}).get("numberOfAnalysts"))}
 
     def _scaled(factor: float) -> Optional[float]:
-        if p0 is None or pt is None or p0 <= 0:
+        if factor is None or p0 is None or pt is None or p0 <= 0:
             return None
         if route == "PE":
             return (pt * factor + (d_major or 0.0)) / p0 - 1.0
@@ -518,16 +595,14 @@ def er12_case(ticker: str, hv: Optional[dict], pit: Optional[dict], as_of: str,
             return None
         return _scaled(base_pt_factor / (1.0 + rr))
 
-    if lo is not None:
-        var["LOW_ESTIMATES"] = _scaled(lo)
-    if hi is not None:
-        var["HIGH_ESTIMATES"] = _scaled(hi)
+    if lo_f is not None:
+        var["LOW_ESTIMATES"] = _scaled(lo_f)
+    if hi_f is not None:
+        var["HIGH_ESTIMATES"] = _scaled(hi_f)
     if r is not None and abs(r) > 1e-12:
         var["NO_RERATE"] = _derated(1.0, r)
-    if cross_er is not None:
-        var["ALT_ROUTE"] = cross_er / 100.0
-    elif auth_er is not None and resolution == "CROSS_ROUTE":
-        var["ALT_ROUTE"] = auth_er / 100.0
+    if alt_er is not None:
+        var["ALT_ROUTE"] = alt_er / 100.0            # B09-R07: the route NOT chosen - never the central itself
     ev_block = auth if route == "EV" else (cross if cross.get("route") == "EV" else {})
     sens = _sens(ev_block)
     for k in EV_ESTIMATION_SENS:
@@ -543,18 +618,20 @@ def er12_case(ticker: str, hv: Optional[dict], pit: Optional[dict], as_of: str,
     rec["variants_local"] = {k: _r(v, 6) for k, v in var.items()}
     rec["variant_notes"] = notes
     rec["variant_basis"] = {
-        "LOW_ESTIMATES": "FY1 %s at the analysts' LOW estimate (PIT capture), same multiple" % ("EPS" if route == "PE" else "revenue"),
+        "LOW_ESTIMATES": ("FY1 %s at the analysts' LOW estimate (PIT capture), same multiple%s - a consensus-dispersion "
+                          "SENSITIVITY, not a probability" % ("EPS" if route == "PE" else "revenue",
+                                                              "" if route == "PE" else "; FY1 varied inside the NTM blend, FY0 fixed")),
         "HIGH_ESTIMATES": "FY1 metric at the analysts' HIGH estimate (PIT capture)",
         "NO_RERATE": "terminal multiple = current multiple (the bounded re-rate removed)",
-        "ALT_ROUTE": "the other valuation route (P/E vs EV/EBITDA) - an economically independent anchor",
+        "ALT_ROUTE": "the route NOT chosen for the central (P/E vs EV/EBITDA) - an economically independent anchor",
         "EV_*": "horizon_value EV-route sensitivities (margin reversion, net-debt and share-count trends)"}
     # ── business bear (s4.2: a credible adverse REALISED world, kept separate) ─────────────
     bear_c = {}
     for k in EV_BEAR_SENS:
         if k in sens:
             bear_c["EV_TROUGH_MARGIN"] = sens[k]
-    if lo is not None:
-        bear_c["LOW_ESTIMATES_NO_POSITIVE_RERATE"] = (_derated(lo, r) if (r is not None and r > 0) else _scaled(lo))
+    if lo_f is not None:
+        bear_c["LOW_ESTIMATES_NO_POSITIVE_RERATE"] = (_derated(lo_f, r) if (r is not None and r > 0) else _scaled(lo_f))
     bear_c = {k: v for k, v in bear_c.items() if v is not None}
     if am.get("scenario.bear_local_pct") is not None:
         bear_c = {"AMENDED_BY_CASE": float(am["scenario.bear_local_pct"]) / 100.0}
@@ -752,6 +829,16 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
         rec["source_score"] = d.get("source_score") if d else w.get("source_score")
         rec["source_score_role"] = "SCREENING/DIAGNOSTIC ONLY - no capital ordering or tie-break authority (s0.1(3))"
         rec["er12"] = er12_case(t, hv_by.get(t), pit.get(t), as_of, hurdle_pct, am)
+        if am:
+            # B09-R03 (P-C): the receipt records what each case CHANGED - the mechanical (un-amended) values
+            # BEFORE and the amended values AFTER, recomputed in this same full engine run.
+            _mech = er12_case(t, hv_by.get(t), pit.get(t), as_of, hurdle_pct, {})
+            _kk = ("state", "route", "central_local", "bear_local", "hurdle_pass")
+            rec["er12"]["amendment_effects"] = {
+                "before": {k: _mech.get(k) for k in _kk} | {"variants_local": _mech.get("variants_local")},
+                "after": {k: rec["er12"].get(k) for k in _kk} | {"variants_local": rec["er12"].get("variants_local")},
+                "fields_amended": sorted(k for k in am.keys()),
+                "recomputed": "FULL_ENGINE_RERUN_THIS_RECEIPT"}
         if price_overrides and t in price_overrides:
             rec["er12"] = reprice_er12(rec["er12"], price_overrides[t])
         _cev = _ce_v.get(t) if _ce_sec is not None else None
@@ -1128,6 +1215,26 @@ def bruteforce_bundles(names: List[dict], capital: float, min_entry: float) -> s
                 b.append((t, c))
         res.add(tuple(b))
     return res
+
+
+def _wb_annotate(r: dict, legs, wbx: Optional[dict], portfolio: dict, nav: float, fund_trim_gbp: float = 0.0) -> None:
+    """P-D (ISA-0887/0888): attach the WHOLE-ISA view to one comparison row - post-action whole-book GBP volatility
+    (the risk metric when wbx.basis is WHOLE_BOOK_MEASURED) and Raj's appetite guard. Never a breach: the guard's
+    REVIEW_REQUIRED is enforced at Checkpoint-D tick 14 as an explicit approval, never as a refusal or a sale."""
+    if not wbx:
+        return
+    try:
+        import whole_book_risk as _wbr
+        a = _wbr.plan_annotation(wbx, portfolio, [(t, x) for t, x in legs], fund_trim_gbp=fund_trim_gbp, nav=nav)
+    except Exception as exc:                                        # noqa: BLE001
+        a = {"basis": wbx.get("basis"), "error": "%s: %s" % (type(exc).__name__, exc)}
+        if wbx.get("basis") == "WHOLE_BOOK_MEASURED":
+            a["risk_metric_gbp"] = None
+    r["whole_book"] = {k: a.get(k) for k in ("basis", "whole_book", "fund_trim_gbp", "fund_trim_model", "error")}
+    if wbx.get("basis") == "WHOLE_BOOK_MEASURED":
+        r["risk_metric_gbp"] = a.get("risk_metric_gbp")
+    if a.get("appetite_guard") is not None:
+        r["appetite_guard"] = a["appetite_guard"]
 
 
 _BUNDLE_RISK_MEMO: Dict[tuple, dict] = {}     # ISA-0858: pure-function memo, keyed on input FILE hashes
@@ -1660,6 +1767,7 @@ def switch_contest(ctx: dict) -> dict:
         if not b and not sold:
             row["gbp_vol"] = ctx["pre_risk"].get("gbp_vol")
             br = [] if row["gbp_vol"] is not None else br
+        _wb_annotate(row, legs, ctx.get("wbx"), portfolio, nav, fund_trim_gbp=max(stock_amt - cash_cap - pr, 0.0))
         if conc.get("tax") is not None and conc.get("mode") in ("SHADOW", "LIVE"):
             row["concentration"] = concentration_eval(legs, conc["held"], nav, conc["tax"])
             if conc["mode"] == "LIVE" and row["concentration"]["state"] != "PASS":
@@ -1689,7 +1797,9 @@ def switch_contest(ctx: dict) -> dict:
             L = lv_rows[k]
             if any(abs(r["wealth"][s] - L["wealth"][s]) > 1e-6 for s in S_E + S_B) or bool(r["feasible"]) != bool(L["feasible"]) \
                     or ((r.get("gbp_vol") is None) != (L.get("gbp_vol") is None)) \
-                    or (r.get("gbp_vol") is not None and abs(r["gbp_vol"] - L["gbp_vol"]) > 1e-6):
+                    or (r.get("gbp_vol") is not None and abs(r["gbp_vol"] - L["gbp_vol"]) > 1e-6) \
+                    or ((_risk_of(r) is None) != (_risk_of(L) is None)) \
+                    or (_risk_of(r) is not None and abs(_risk_of(r) - _risk_of(L)) > 1e-6):
                 mism.append({"kind": "row", "bundle": [list(x) for x in k]})
                 if len(mism) > 5:
                     break
@@ -1841,6 +1951,13 @@ def evaluate_bundles(bundles: List[Tuple], scen: Dict[str, Dict[str, float]], co
     return rows
 
 
+def _risk_of(r: dict):
+    """P-D (B08-R03, ISA-0887): THE comparator's risk dimension. `risk_metric_gbp` (whole-ISA GBP volatility, set on
+    every row when the run's basis is WHOLE_BOOK_MEASURED) wins; a row without it keeps stock-sleeve `gbp_vol`.
+    One basis per run - _wb_annotate sets the key on every row or on none (R2.6)."""
+    return r.get("risk_metric_gbp") if "risk_metric_gbp" in r else r.get("gbp_vol")
+
+
 def dominates(x: dict, y: dict, risk_tol: float = EPS_GBP, worlds_e=S_E, worlds_b=S_B) -> bool:
     """s8.3 (Rev 1.1): x is ROBUSTLY SUPERIOR to y only if it wins EVERY estimation world by more than
     the arithmetic tolerance AND is no worse in every business-bear world AND no worse on the
@@ -1850,7 +1967,7 @@ def dominates(x: dict, y: dict, risk_tol: float = EPS_GBP, worlds_e=S_E, worlds_
         return False
     if not all(x["wealth"][s] >= y["wealth"][s] - EPS_GBP for s in worlds_b):
         return False
-    rx, ry = x.get("gbp_vol"), y.get("gbp_vol")
+    rx, ry = _risk_of(x), _risk_of(y)
     if rx is None or ry is None:
         return False                                  # incomparable risk -> no dominance claim
     return rx <= ry + risk_tol
@@ -1879,7 +1996,7 @@ def compare(rows: List[dict], worlds_e=S_E, worlds_b=S_B) -> dict:
 
         def key(r):
             return (-r["worst_estimation_wealth"], -min((r["wealth"][s] for s in worlds_b), default=0.0),
-                    r.get("gbp_vol") if r.get("gbp_vol") is not None else float("inf"),
+                    _risk_of(r) if _risk_of(r) is not None else float("inf"),
                     r["entry_costs_gbp"], r["stock_gbp"])
         tied.sort(key=key)
         sel = tied[0]
@@ -1954,7 +2071,10 @@ def _brief(r: Optional[dict]) -> Optional[dict]:
             "residual_gbp": r["residual_gbp"], "regret_gbp": _r(r.get("regret")),
             "wealth_gbp": {s: _r(v) for s, v in r["wealth"].items()},
             "worst_estimation_wealth_gbp": _r(r.get("worst_estimation_wealth")),
-            "gbp_vol": _r(r.get("gbp_vol")), "incremental_net_er12_pct": _r((r.get("incremental_net_er12") or 0) * 100, 2)
+            "gbp_vol": _r(r.get("gbp_vol")),
+            **({"risk_metric_gbp": _r(r.get("risk_metric_gbp"))} if "risk_metric_gbp" in r else {}),
+            **({"appetite_guard_state": (r.get("appetite_guard") or {}).get("state")} if r.get("appetite_guard") else {}),
+            "incremental_net_er12_pct": _r((r.get("incremental_net_er12") or 0) * 100, 2)
             if r.get("incremental_net_er12") is not None else None,
             "ambition_band": r.get("ambition_band"), "feasible": r.get("feasible"),
             "breaches": r.get("breaches")}
@@ -1992,6 +2112,16 @@ def validate_amendment(a: dict, inp: dict, cutoff: str) -> Tuple[bool, str]:
         dom = AMENDMENT_ALLOWLIST[fp]
     else:
         return False, "UNKNOWN_FIELD %s - not on the allowlist %s" % (fp, sorted(AMENDMENT_ALLOWLIST))
+    _qs = a.get("question_id")
+    if isinstance(_qs, list):
+        # one evidenced NO_CHANGE answer may cover several questions (each named); a FIELD change answers one
+        if fp != "case.question_answer" or not _qs:
+            return False, "a question_id LIST is admissible only on an evidenced case.question_answer NO_CHANGE (B09-R03)"
+        bad = [q for q in _qs if str(q) not in CASE_QUESTION_IDS]
+    else:
+        bad = [] if str(_qs or "") in CASE_QUESTION_IDS else [_qs]
+    if bad:
+        return False, "question_id %r is not one of the receipt's questions %s (B09-R03)" % (bad, list(CASE_QUESTION_IDS))
     v = a["proposed_value"]
     if isinstance(dom, tuple) and v not in dom:
         return False, "value %r outside %s" % (v, dom)
@@ -2016,6 +2146,30 @@ def validate_amendment(a: dict, inp: dict, cutoff: str) -> Tuple[bool, str]:
     return True, "OK"
 
 
+def case_question_coverage(am: dict) -> dict:
+    """B09-R03: per security, which of the twelve questions carry an accepted typed answer."""
+    out = {}
+    for a in (am or {}).get("accepted") or []:
+        t = a.get("security_id")
+        row = out.setdefault(t, {"answered": {}, "missing": []})
+        _qs = a.get("question_id")
+        for q in (_qs if isinstance(_qs, list) else [_qs]):
+            row["answered"].setdefault(str(q or ""), []).append(a.get("amendment_id"))
+    for t, row in out.items():
+        row["missing"] = [q for q in CASE_QUESTION_IDS if q not in row["answered"]]
+    return out
+
+
+def complete_cases(am: dict) -> set:
+    """THE one home for 'is this case complete' (B09-R03): case.complete AND - while
+    CASE_QUESTION_RECEIPTS_REQUIRED - every required question answered by a typed receipt."""
+    flagged = {t for t, v in ((am or {}).get("by_security") or {}).items() if v.get("case.complete") is True}
+    if not CASE_QUESTION_RECEIPTS_REQUIRED:
+        return flagged
+    cov = case_question_coverage(am)
+    return {t for t in flagged if not (cov.get(t) or {}).get("missing", list(CASE_QUESTION_IDS))}
+
+
 def amend_cli(month: str, src: str, root: str = HERE) -> int:
     """Append ONE typed amendment (JSON object in `src`) to capital_case_amendments_{month}.jsonl
     after validating it against the CURRENT inputs exactly as the engine will (allowlist, PIT,
@@ -2023,24 +2177,37 @@ def amend_cli(month: str, src: str, root: str = HERE) -> int:
     written; the file is append-only (history never rewritten). The engine must then be re-run in
     full (mechanical rerun - the case never edits the decision directly, s9.3)."""
     with open(src, encoding="utf-8") as fh:
-        a = json.load(fh)
+        doc = json.load(fh)
+    # B09-R03 (P-C): a file may carry ONE amendment object or a LIST of them (the twelve typed question
+    # receipts of one case). A list is ALL-OR-NOTHING: any refusal writes nothing.
+    batch = doc if isinstance(doc, list) else [doc]
     inp = load_inputs(month, root)
     _m9 = inp["step9_pre"].get("_meta") or {}
     cutoff = str(_m9.get("as_of") or _m9.get("produced_at") or "")[:10]
-    ok_, why = validate_amendment(a, inp, cutoff)
-    if not ok_:
-        print("AMENDMENT_REFUSED %s: %s" % (a.get("amendment_id"), why))
-        return 2
     p = os.path.join(root, "capital_case_amendments_%s.jsonl" % month)
+    existing = set()
     if os.path.exists(p):
         with open(p, encoding="utf-8") as fh:
-            if any(ln.strip() and json.loads(ln).get("amendment_id") == a["amendment_id"] for ln in fh):
-                print("AMENDMENT_REFUSED %s: duplicate amendment_id (append-only; supersede with a new id)" % a["amendment_id"])
-                return 2
+            existing = {json.loads(ln).get("amendment_id") for ln in fh if ln.strip()}
+    seen = set()
+    for a in batch:
+        if not isinstance(a, dict):
+            print("AMENDMENT_REFUSED: a batch entry is not a JSON object - nothing written")
+            return 2
+        ok_, why = validate_amendment(a, inp, cutoff)
+        if not ok_:
+            print("AMENDMENT_REFUSED %s: %s - nothing written" % (a.get("amendment_id"), why))
+            return 2
+        if a["amendment_id"] in existing or a["amendment_id"] in seen:
+            print("AMENDMENT_REFUSED %s: duplicate amendment_id (append-only; supersede with a new id) - nothing written"
+                  % a["amendment_id"])
+            return 2
+        seen.add(a["amendment_id"])
     with open(p, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(a, sort_keys=True) + "\n")
+        for a in batch:
+            fh.write(json.dumps(a, sort_keys=True) + "\n")
     print("AMENDMENT_RECORDED %s -> %s; now re-run: python3 capital_decision_engine.py --month %s"
-          % (a["amendment_id"], os.path.basename(p), month))
+          % (",".join(a["amendment_id"] for a in batch), os.path.basename(p), month))
     return 0
 
 
@@ -2293,6 +2460,16 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         pre_shares, pre_risk = {}, {"state": "UNMEASURED", "why": str(exc)}
     ceiling = float(getattr(_sc, "SLEEVE_RISK_CEILING_PCT"))
     max_pos = float(tw["thresholds"]["max_stock_position_pct"]) * nav
+    # ⚑ P-D (B08-R03, ISA-0887, 24/25-Oct-2026): the WHOLE-ISA covariance (stocks + funds, one sleeve_risk basis) is
+    #   built ONCE per run; every row of both contests is judged on it when every held fund qualifies
+    #   (WHOLE_BOOK_MEASURED), else on stock-sleeve GBP volatility exactly as before (stated). Rollback:
+    #   scoring_config.WHOLE_BOOK_RISK_METRIC = False.
+    try:
+        import whole_book_risk as _wbr887
+        _wbx = _wbr887.engine_context(portfolio, store, as_of=as_of, root=root)
+    except Exception as _wbe:                                       # noqa: BLE001
+        _wbx = {"basis": "STOCK_SLEEVE_ONLY", "why": "whole_book_risk unavailable: %s: %s" % (type(_wbe).__name__, _wbe),
+                "store": None, "aug_store": None}
     # ⚑ ISA-0465 / B08-R04 (19-Oct-2026): the adopted sector/theme caps are evaluated WHERE CAPITAL IS DECIDED.
     #   They were wired only into the legacy allocate() path, which has been SHADOW since the engine took the
     #   stock decision (ISA-0804), so the 03-Oct pre-run produced NO concentration record and the control could
@@ -2322,6 +2499,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         if not r["bundle"]:
             r["risk"] = {"state": "MEASURED", **pre_risk, "note": "no-action: current sleeve"}
             r["gbp_vol"] = pre_risk.get("gbp_vol")
+            _wb_annotate(r, (), _wbx, portfolio, nav)
             r["breaches"] = []
             r["feasible"] = pre_risk.get("gbp_vol") is not None
             continue
@@ -2336,6 +2514,8 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         rk = copy.deepcopy(rk)
         r["risk"] = rk
         r["gbp_vol"] = rk.get("gbp_vol")
+        _wb_annotate(r, r["bundle"], _wbx, portfolio, nav,
+                     fund_trim_gbp=max(float(r["stock_gbp"]) - float(_wf["cash_capital_gbp"]), 0.0))
         r["breaches"] = constraints_for(r["bundle"], rk, pre_shares, ceiling, max_pos)
         if _conc["tax"] is not None and _conc["mode"] in ("SHADOW", "LIVE"):
             r["concentration"] = concentration_eval(r["bundle"], _conc["held"], nav, _conc["tax"])
@@ -2365,6 +2545,13 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                  "concentration_gate LIVE; Checkpoint-D tick 5 reads receipt.factor.selected) - %s" % _conc["mode"]]
                                 if _conc["mode"] != "LIVE" else [],
         "pre_trade": pre_risk, "pre_trade_risk_shares": {k: _r(v, 5) for k, v in pre_shares.items()},
+        "risk_metric": {"basis": _wbx.get("basis"), "why": _wbx.get("why"), "fund_states": _wbx.get("fund_states"),
+                        "definition": ("WHOLE_BOOK_MEASURED: post-action whole-ISA GBP volatility (stocks + funds + cash, "
+                                       "one sleeve_risk basis; fund-trim legs pro rata) - B08-R03 / ISA-0887"
+                                       if _wbx.get("basis") == "WHOLE_BOOK_MEASURED" else
+                                       "STOCK_SLEEVE_ONLY: stock-sleeve GBP volatility (fund sleeve held constant)"),
+                        "no_action_whole_book_gbp_vol": _r(next((x.get("risk_metric_gbp") for x in rows if not x["bundle"]
+                                                                 and "risk_metric_gbp" in x), None))},
         "sleeve_bands": ("ISA-0858 D1: hard ceiling %.0f%% (room GBP %.2f), priority band %.0f%%; band now %s"
                          % (_wf["inputs"]["bands"]["hard_ceiling_pct"], _wf["hard_room_gbp"],
                             _wf["inputs"]["bands"]["priority_ceiling_pct"], _wf["band"]))}
@@ -2402,13 +2589,15 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     receipt["comparator"] = {"state": cmp.get("state"), "rule": cmp.get("rule"), "why": cmp.get("why"),
                              "definition": ("1 hard-infeasible bundles excluded; 2 robust superiority = wins every "
                                             "estimation world by > GBP 0.01 AND no worse in the business-bear world "
-                                            "AND no higher stock-sleeve GBP volatility; 3 otherwise minimax GBP regret "
+                                            "AND no higher risk metric (risk_constraints.risk_metric: whole-ISA GBP "
+                                            "volatility when WHOLE_BOOK_MEASURED, else stock-sleeve GBP volatility); "
+                                            "3 otherwise minimax GBP regret "
                                             "over the estimation worlds among undominated bundles; 4 declared tie-breaks; "
                                             "economically distinct residual ties -> DECISION_TIE_UNRESOLVED"),
                              "not_claimed": "not a calibrated expected-utility optimum; exact search removes search error, not forecast error"}
     receipt["ambition"] = amb
     sel = cmp.get("selected")
-    complete = {t for t, v in am["by_security"].items() if v.get("case.complete") is True}
+    complete = complete_cases(am)                     # B09-R03: typed question receipts, one home
     # ── ISA-0621: the switch contest (held stocks as donors), LIVE by Raj 19-Oct-2026 ─────────────────────
     _sw_rows, _sw_adopted = None, False
     try:
@@ -2419,7 +2608,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
             "cash_capital": float(_wf["cash_capital_gbp"]), "cash_rate": cash_rate, "portfolio": portfolio, "nav": nav,
             "min_entry": min_entry, "tw": tw, "min_trade": _min_trade if _min_trade > 0 else 500.0, "conc": _conc,
             "fctx": _fctx, "pre_shares": pre_shares, "pre_risk": pre_risk, "ceiling": ceiling, "max_pos": max_pos,
-            "live_rows": rows, "live_selected": sel, "complete": complete, "root": root,
+            "live_rows": rows, "live_selected": sel, "complete": complete, "root": root, "wbx": _wbx,
             "scope": switch_scope})
     except Exception as _sce:                                       # noqa: BLE001
         receipt["switch_contest"] = {"authority": switch_authority(), "state": "ERROR",
@@ -2453,6 +2642,14 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                (_scx.get("parity") or {}).get("state"),
                                "no authority-eligible sale wins" if _sw_row is None else "comparator %s" % cmp.get("state")))}
     receipt["selected"] = _brief(sel)
+    # ⚑ P-D (B08-R09, ISA-0888, Raj 24-Oct-2026 'Review + guard new risk'): the SELECTED plan's severe-scenario guard.
+    #   REVIEW_REQUIRED never refuses or sells - Checkpoint-D tick 14 requires Raj's explicit appetite approval.
+    _ag = (sel or {}).get("appetite_guard")
+    receipt["appetite_guard"] = {"selected": _ag, "state": (_ag or {}).get("state") if _ag else "NOT_EVALUATED",
+                                 "n_rows_review_required": sum(1 for x in rows if (x.get("appetite_guard") or {}).get("state")
+                                                               == "REVIEW_REQUIRED"),
+                                 "authority": "isa_policy.RISK_APPETITE (Raj 24-Oct-2026)",
+                                 "consumer": "Checkpoint-D tick 14 (explicit approval); email s2 line"}
     # ── decision-relevant research (fixed point, s9.1) ───────────────────────────────────────
     sel_names = [t for t, _ in (sel or {}).get("bundle", ())]
     sel_min_central = min((scen[t]["CENTRAL"] for t in sel_names), default=None)
@@ -2489,10 +2686,17 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     scope = sorted(set(sel_names) | set((sel or {}).get("sold") or {}) |
                    {t for r in (cmp.get("tied") or []) for t, _ in r["bundle"]} |
                    {t for r in (cmp.get("undominated") or []) for t, _ in r["bundle"]} | set(pending))
-    complete = {t for t, v in am["by_security"].items() if v.get("case.complete") is True}
+    complete = complete_cases(am)                     # B09-R03: typed question receipts, one home
+    _cov = case_question_coverage(am)
     receipt["case_scope"] = {
         "required_full_cases": scope, "complete": sorted(set(scope) & complete),
         "outstanding": sorted(set(scope) - complete), "decision_relevant_pending": sorted(pending),
+        # B09-R03: per case-scope name, the questions still WITHOUT a typed receipt (field change or NO_CHANGE)
+        "question_receipts_required": CASE_QUESTION_RECEIPTS_REQUIRED,
+        "question_ids": list(CASE_QUESTION_IDS),
+        "question_coverage": {t: {"missing": (_cov.get(t) or {}).get("missing", list(CASE_QUESTION_IDS)),
+                                  "answered": sorted(((_cov.get(t) or {}).get("answered") or {}).keys())}
+                              for t in scope},
         "rule": ("full case for every proposed funded name, every name in the undominated/tied set, and every "
                  "case-pending name whose evidenced plausible economics could change the decision; NO fixed cap "
                  "(s9.1). Cases amend typed inputs only; the engine reruns the whole decision."),
@@ -2948,6 +3152,29 @@ EXECUTION_LEDGER = "capital_execution_ledger.jsonl"
 GBP_QUOTE_CURRENCIES = ("GBP",)          # MAJOR units only; a pence quote must be converted by the caller (MAJOR units required)
 
 
+# ⚑ B09-R08 (P-C, 24-Oct-2026): FX DIRECTION IS CONTRACTED AT THE DEALING BOUNDARY. `fx_quote_per_gbp` is
+#   quote-currency units per 1 GBP (USD 1.324 per GBP). An INVERTED rate (GBP per USD, 0.755) produces a
+#   perfectly plausible GBP price - USD 75.64 became GBP 100.15 instead of GBP 57.13 in the October audit.
+#   Wide bands catch inversion and scale, not drift (the stock_price_fetch.FX_BANDS doctrine, ISA-0429).
+EXEC_FX_QUOTE_PER_GBP_BANDS = {"USD": (1.0, 2.0), "EUR": (0.95, 1.6), "CHF": (0.85, 1.6), "SEK": (9.0, 18.0),
+                               "NOK": (9.0, 18.0), "DKK": (6.5, 12.0), "CAD": (1.3, 2.4), "JPY": (110.0, 260.0),
+                               "AUD": (1.5, 2.6), "HKD": (7.8, 15.5), "PLN": (3.8, 7.0)}
+
+
+def _fx_direction_refusal(ccy: str, fx: float) -> Optional[str]:
+    band = EXEC_FX_QUOTE_PER_GBP_BANDS.get(ccy)
+    if band is None:
+        return None
+    lo, hi = band
+    if lo <= fx <= hi:
+        return None
+    inv = (1.0 / fx) if fx else None
+    return ("fx_quote_per_gbp %s = %.6f is outside the declared %s-per-GBP band [%.2f, %.2f]%s - an inverted or "
+            "mis-scaled rate is refused, never priced (B09-R08)"
+            % (ccy, fx, ccy, lo, hi, (" (its inverse %.4f IS in band: the rate looks INVERTED)" % inv)
+                                     if inv and lo <= inv <= hi else ""))
+
+
 def order_pricing(act: dict, ticker: str, price_major: float, quote_currency: str, fx_quote_per_gbp, costs: dict) -> dict:
     """ISA-0856: whole units and all-in GBP of the order an executable quote implies (costs charged once)."""
     ccy = str(quote_currency or "").strip().upper()
@@ -2962,6 +3189,10 @@ def order_pricing(act: dict, ticker: str, price_major: float, quote_currency: st
         if not math.isfinite(fx) or fx <= 0:
             out.update(state="REFUSED_FX_UNKNOWN", why="a %s quote needs a positive finite fx_quote_per_gbp (%s per GBP) to price the "
                        "order in GBP - pass --fx (B02-R08)" % (ccy, ccy))
+            return out
+        _dir = _fx_direction_refusal(ccy, fx)
+        if _dir:
+            out.update(state="REFUSED_FX_DIRECTION", why=_dir)
             return out
     try:
         comm = float(costs["commission_gbp"])
@@ -3014,6 +3245,10 @@ def sale_pricing(act: dict, price_major: float, quote_currency: str, fx_quote_pe
             fx = float("nan")
         if not math.isfinite(fx) or fx <= 0:
             out.update(state="REFUSED_FX_UNKNOWN", why="a %s quote needs a positive finite fx_quote_per_gbp to price the sale" % ccy)
+            return out
+        _dir = _fx_direction_refusal(ccy, fx)          # B09-R08: inverted / mis-scaled rate refused
+        if _dir:
+            out.update(state="REFUSED_FX_DIRECTION", why=_dir)
             return out
     try:
         comm = float(costs["commission_gbp"])
@@ -3872,6 +4107,9 @@ def summary(receipt: dict) -> dict:
                                              for t, d in ((receipt.get("switch_contest") or {}).get("donors") or {}).items()}})
                               if receipt.get("switch_contest") else None,
             "factor": receipt.get("factor"),
+            # P-D (ISA-0887/0888): the comparator's risk basis and the selected plan's appetite guard (rendered only)
+            "risk_metric": (receipt.get("risk_constraints") or {}).get("risk_metric"),
+            "appetite_guard": receipt.get("appetite_guard"),
             "new_capital_control": receipt.get("new_capital_control")}
 
 

@@ -27,6 +27,21 @@ SIGNALS = ["forward_axis_score", "revisions_score", "source_score", "score_f_pri
            "revision_runway", "score_f_margin_traj", "part_a_score", "part_b_score", "total_score"]
 
 
+
+def _atomic_to_csv(df, path):
+    """Write a price cache ATOMICALLY (tmp + os.replace). P-C fix on finding (ISA-0882, 24-Oct-2026): the
+    pre-run stage is killed at its per-call ceiling; a kill during a direct to_csv left the 11.7 MB cache
+    TRUNCATED to its header line (measured in the P-C baseline shadow), and the runner's commit would have
+    copied that onto LIVE. A killed write now leaves the previous cache intact."""
+    import os as _os
+    tmp = "%s.tmp.%d" % (path, _os.getpid())
+    try:
+        df.to_csv(tmp)
+        _os.replace(tmp, path)
+    finally:
+        if _os.path.exists(tmp):
+            _os.remove(tmp)
+
 def definition_stratum(panel, which="current"):
     """ISA-0619: restrict the panel to ONE scoring-definition stratum. -> (panel, info)."""
     import score_definition as _sd
@@ -279,7 +294,7 @@ def main():
         cache = px if cache.empty else pd.concat([cache, px], axis=1)
         cache = cache.loc[:, ~cache.columns.duplicated()]
         if a.price_cache:
-            cache.to_csv(a.price_cache)
+            _atomic_to_csv(cache, a.price_cache)
         remaining = len(todo) - len(chunk)
         print("PRICES fetched=%d cached=%d/%d remaining=%d"
               % (len(chunk), len(cache.columns), len(need), remaining))

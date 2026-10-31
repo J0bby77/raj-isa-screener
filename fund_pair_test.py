@@ -263,8 +263,7 @@ def h7_decision_pack(as_of=None, portfolio=None, xray=None):
 
     def series(sedol):
         u = uni[sedol]
-        return fas._monthly_returns(fp.fetch_nav_history(u["yf_symbol"], use_cache=True,
-                                                         scale=fp._scale_for(u)))
+        return fas._monthly_returns(fp.nav_series_for(sedol, u))     # ISA-0919: the one NAV door
     ma, mb = series(A), series(B)
     corr_nav = fas._corr(ma, mb)
 
@@ -397,7 +396,41 @@ def h7_decision_pack(as_of=None, portfolio=None, xray=None):
     }
 
 
+
+def _selftest() -> int:
+    """ISA-0919 (29-Oct-2026): the pair test reads fund history through the ONE NAV door
+    (fund_performance.nav_series_for), so a declared, validated share-class splice reaches it;
+    evaluate_pair still refuses a short overlap."""
+    import fund_performance as fp
+    fails = []
+
+    def ok(name, cond, detail=""):
+        print(("  PASS " if cond else "  FAIL ") + name + (("  :: " + str(detail)) if not cond and detail else ""))
+        if not cond:
+            fails.append(name)
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    ok("ISA-0919 MUST-FIRE: h7 series() reads fp.nav_series_for (the one NAV door)",
+       "fp.nav_series_for(sedol, u)" in src)
+    uni = fp.load_universe()
+    if "BR2Q8G6" in uni and (uni["BR2Q8G6"] or {}).get("history_splice"):
+        held = fp._held_series(uni["BR2Q8G6"], False)
+        door = fp.nav_series_for("BR2Q8G6", uni["BR2Q8G6"])
+        ok("ISA-0919 MUST-FIRE: the door returns Ranmore's joined history (starts before the held class)",
+           bool(door) and bool(held) and door[0][0] < held[0][0], (door[:1], held[:1]))
+    plain = next((s for s, u in uni.items() if not str(s).startswith("_") and isinstance(u, dict)
+                  and not u.get("history_splice")), None)
+    if plain:
+        ok("ISA-0919 NEGATIVE CONTROL: a fund with no declared splice reads its held series unchanged",
+           fp.nav_series_for(plain, uni[plain]) == fp._held_series(uni[plain], False), plain)
+    short = [("2026-%02d" % m, 0.01) for m in range(1, 7)]
+    r = evaluate_pair(short, short, "A", "B")
+    ok("NEGATIVE CONTROL: a 6-month overlap is INSUFFICIENT, never a verdict", r.get("verdict") == "INSUFFICIENT", r.get("verdict"))
+    print("fund_pair_test selftest: %d failure(s)" % len(fails))
+    return 1 if fails else 0
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     ap = argparse.ArgumentParser()
     ap.add_argument("--portfolio", default=os.path.join(HERE, "portfolio_data_aug_2026.json"))
     ap.add_argument("--xray", default=os.path.join(HERE, "xray_data_aug_2026.json"))

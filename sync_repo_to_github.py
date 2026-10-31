@@ -211,6 +211,13 @@ FALLBACK_EXCLUDED = {
     "capital_destination_oct_2026.json": ("month-stamped monthly router artefact; the name is a "
                                           "position_sizing SELFTEST FIXTURE literal that collides with "
                                           "the real October output. Monthly path only. PERSONAL - not pushed"),
+    # ⚑ ISA-0910 (28-Oct-2026, production parallel PPR-NOV2026-20261028-01): the month-wrap pre-run now writes the
+    #   NOVEMBER cycle's artefacts on Sat 31-Oct, so capital_destination_nov_2026.json EXISTS beside the scripts and the
+    #   literal scan matches position_sizing's second SELFTEST FIXTURE month - the same collision ISA-0783 classified
+    #   for October. Monthly path only, never the weekly screen fallback. PERSONAL - never RUNTIME_JSON.
+    "capital_destination_nov_2026.json": ("month-stamped monthly router artefact; the name is a "
+                                          "position_sizing SELFTEST FIXTURE literal that collides with "
+                                          "the real November output. Monthly path only. PERSONAL - not pushed"),
     "run_context_oct_2026.json": ("month-stamped monthly pre-run staging file; the name is a "
                                   "concentration_control SELFTEST FIXTURE literal that collides with the "
                                   "real October output. Monthly path only. PERSONAL - not pushed"),

@@ -903,6 +903,8 @@ _ASSERTS = [0]
 
 
 def _selftest(verbose: bool = True) -> int:
+    import isa_source_cache as _isc
+    _isc.route_ast_parse()          # ISA-0896 R3: one parse per file per process (ISA_AST_CACHE=0 rolls back)
     fails = []
 
     def ok(name, cond, detail=""):

@@ -996,7 +996,7 @@ def main():
             tag = datetime(int(m.group(2)), int(m.group(1)), 1) \
                 .strftime("%b_%Y").lower()
         else:
-            tag = datetime.now().strftime("%b_%Y").lower()
+            tag = __import__("run_cycle").cycle_label()   # ISA-0910
         out = os.path.join(SCRIPT_DIR, "transactions_data_%s.json" % tag)
 
     data = run(xlsx, isa_folder, ledger_path, out, stamp=args.stamp,

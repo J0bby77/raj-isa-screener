@@ -163,7 +163,21 @@ def resolve(macro_regime=None, market_regime=None, corroborators=None, state_pat
     basis = {}
     if market_regime is None:
         market_regime, basis = read_market_regime(state_path)
-    corr = {k: bool(v) for k, v in (corroborators or {}).items() if k in CORROBORATORS}
+    elif market_regime not in MARKET_STATES:
+        # ⚑ B09-R10 (P-C, 24-Oct-2026, EV-0271): a DIRECT market_regime is validated exactly as the stored one
+        #   is in read_market_regime - an unknown label used to fall through to ALIGNED_CONSTRUCTIVE.
+        basis = {"error": "unknown market_regime %r - refused (B09-R10)" % (market_regime,)}
+        market_regime = None
+
+    def _b(v):
+        # ⚑ B09-R10 (EV-0270): a corroborator counts only when it is a declared True. bool('false') is True,
+        #   so a string 'false' used to count as a present corroborator and permitted a tilt.
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v == 1
+        return str(v).strip().lower() in ("true", "yes", "1")
+    corr = {k: _b(v) for k, v in (corroborators or {}).items() if k in CORROBORATORS}
     corr_true = [k for k, v in corr.items() if v]
 
     out = {
@@ -317,7 +331,7 @@ def _selftest():
     # 4. A macro opinion alone can never open the door.
     r3 = resolve(macro_regime="Contraction", market_regime="RISK_ON",
                  corroborators={"revisions_negative": False})
-    ok("U-RG10 a false corroborator is not a corroborator", r3["category8"]["eligible"] is False)
+    ok("U-RG10 negative control: a false corroborator must not count as a corroborator", r3["category8"]["eligible"] is False)
 
     # 5. Constructive macro under RISK_ON: nothing to resolve.
     r4 = resolve(macro_regime="Expansion", market_regime="RISK_ON")
@@ -344,7 +358,7 @@ def _selftest():
 
     # 8. Missing inputs never produce a permissive answer.
     r6 = resolve(macro_regime=None, market_regime="RISK_ON")
-    ok("U-RG17 a missing macro read is a reason NOT to act",
+    ok("U-RG17 negative control: a missing macro read must not permit action",
        r6["category8"]["eligible"] is False)
     # market_regime=None means "not supplied -> read from disk", so the honest test points at
     # a file that is genuinely absent.

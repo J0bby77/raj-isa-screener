@@ -470,8 +470,12 @@ def build_drawdown_line():
     except Exception:
         ds = {}
     if ds.get("last_check"):
-        txt = (f"Drawdown ladder (B1): {ds.get('drawdown_pct', 0):+.1f}% from 252d high | "
-               f"tranches fired: {ds.get('tranches_fired', 0)} | "
+        _tf = ds.get("tranches_fired") or {}
+        _ops = [o for o in (ds.get("opportunities") or []) if o.get("episode_id") == ds.get("episode_id")
+                and o.get("state") in ("OPEN", "APPROVED", "STARTED")]
+        txt = (f"Drawdown ladder (B1): {ds.get('drawdown_pct', 0):+.1f}% from episode high | "
+               f"thresholds crossed: {sum(1 for v in _tf.values() if v) if isinstance(_tf, dict) else _tf}/3 | "
+               f"open opportunities: {len(_ops)} ({sum(1 for o in _ops if o.get('actionable_now'))} actionable) | "
                f"regime: {ds.get('regime_state') or 'n/a'} | as of {ds.get('last_check')}")
     else:
         txt = "Drawdown ladder (B1): state not yet seeded — first monitor run populates"

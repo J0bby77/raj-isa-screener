@@ -241,7 +241,30 @@ def theme_memberships(here: str = HERE) -> dict:
             "sector_captures": captures}
 
 
+_TAXONOMY_MEMO: Dict[tuple, dict] = {}
+
+
 def load_taxonomy(here: str = HERE) -> dict:
+    """ISA-0896 (25-Oct-2026) - COST ONLY wrapper. The engine, the destination and capability checks call this per build
+    (17x per campaign unit), and every call re-read every screen_history CSV (~1M csv rows per unit). The result is a
+    pure function of those files and the declared theme file, so it is memoised on their stat identity (mtime_ns, size,
+    inode - the .pyc contract) and handed out as a DEEP COPY (no caller can mutate the memo). ISA_PERF_0896=0 bypasses."""
+    import isa_source_cache as _isc
+    if not _isc.perf_memo_enabled():
+        return _load_taxonomy_uncached(here)
+    import copy as _copy
+    files = sorted(glob.glob(os.path.join(here, "screen_history", "*_full_data.csv")))
+    key = (os.path.abspath(here), tuple(_isc.stat_identity(f) for f in files),
+           _isc.stat_identity(os.path.join(here, THEME_DECLARED_FILE)))
+    got = _TAXONOMY_MEMO.get(key)
+    if got is None:
+        if len(_TAXONOMY_MEMO) > 8:
+            _TAXONOMY_MEMO.clear()
+        got = _TAXONOMY_MEMO[key] = _load_taxonomy_uncached(here)
+    return _copy.deepcopy(got)
+
+
+def _load_taxonomy_uncached(here: str = HERE) -> dict:
     """-> {sector: {TICKER: {value, source, as_of}}, theme: {TICKER: [theme ids]}, ...}.
 
     `theme[T]` is a LIST (possibly empty = NO_MATERIAL_THEME); a missing key is UNKNOWN."""

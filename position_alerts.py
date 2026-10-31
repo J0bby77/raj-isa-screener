@@ -68,6 +68,11 @@ DEFAULTS = {
     # detector has fired over a few runs.
     "ALERT_PRICE_RISE_PCT": 15.0,         # >15% rise on a held name -> advise review
     "ALERT_PRICE_RISE_WINDOW_D": 30,
+    # B09-R10 (P-C, 24-Oct-2026) — POINT-IN-TIME AND ELAPSED-TIME CONTRACT (detection-only; DECLARED
+    # engineering bounds that decide what an observation IS, not how sensitive the alert is):
+    "ALERT_SNAPSHOT_MAX_AGE_D": 14,      # newest estimate older than this vs the as-of -> STALE, not an alert
+    "ALERT_WEEKLY_GAP_MAX_D": 10,        # two observations more than this apart are not 'week-on-week'
+    "ALERT_PRICE_MAX_STALE_D": 7,        # newest close older than this vs the as-of -> no price move
 }
 
 
@@ -79,10 +84,41 @@ def _cfg(name):
         return DEFAULTS[name]
 
 
-def _series(store, ticker, key, weeks):
+def _finite(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return False
+    return f == f and f not in (float("inf"), float("-inf"))
+
+
+def _d(s):
+    try:
+        return datetime.date.fromisoformat(str(s)[:10])
+    except ValueError:
+        return None
+
+
+def _series(store, ticker, key, weeks, asof=None):
+    """B09-R10 (P-C, 24-Oct-2026): observations of `key` that are FINITE and dated ON OR BEFORE `asof`,
+    collapsed to ONE per ISO week (the last), newest `weeks`. A snapshot after the as-of (EV-0224), a NaN
+    (EV-0229) or six daily points (EV-0230) used to enter the series as if they were weekly evidence."""
+    lim = _d(asof) if asof else None
     ser = [p for p in store.get("series", {}).get((ticker or "").upper(), [])
-           if p.get(key) is not None]
-    return sorted(ser, key=lambda p: p["date"])[-weeks:]
+           if _finite(p.get(key)) and _d(p.get("date")) is not None
+           and (lim is None or _d(p.get("date")) <= lim)]
+    ser = sorted(ser, key=lambda p: p["date"])
+    wk = {}
+    for p in ser:
+        wk[_d(p["date"]).isocalendar()[:2]] = p
+    return sorted(wk.values(), key=lambda p: p["date"])[-weeks:]
+
+
+def _weekly_pairs(ser):
+    """Consecutive observation pairs no more than ALERT_WEEKLY_GAP_MAX_D apart (true week-on-week)."""
+    gap = int(_cfg("ALERT_WEEKLY_GAP_MAX_D"))
+    return [(ser[i - 1], ser[i]) for i in range(1, len(ser))
+            if 0 < (_d(ser[i]["date"]) - _d(ser[i - 1]["date"])).days <= gap]
 
 
 def _pct(new, old):
@@ -110,11 +146,30 @@ def price_move_pct(ticker, days, price_csv=None, asof=None):
         else:
             import yfinance as yf
             ser = yf.Ticker(ticker).history(period="3mo", auto_adjust=False)["Close"].dropna()
+        if asof is not None and not (price_csv and os.path.exists(price_csv)):
+            # B09-R10 (P-C, EV-0236): the provider branch honours the as-of like the cache branch does
+            try:
+                _ix = ser.index.tz_localize(None) if getattr(ser.index, "tz", None) is not None else ser.index
+                ser = ser[_ix <= pd.Timestamp(asof)]
+            except Exception:                                       # noqa: BLE001
+                return None
         if len(ser) < 5:
             return None
         end = ser.index[-1]
+        # ⚑ B09-R10 (P-C, EV-0234): the newest close must be CURRENT relative to the as-of, and the window
+        #   must actually START near (end - days). A June cache read in October used to return its own
+        #   4-day move as a '30-day' alert.
+        if asof is not None:
+            try:
+                _end_d = (end.tz_localize(None) if getattr(end, "tzinfo", None) is not None else end).date()
+            except Exception:                                       # noqa: BLE001
+                _end_d = None
+            if _end_d is None or (pd.Timestamp(asof).date() - _end_d).days > int(_cfg("ALERT_PRICE_MAX_STALE_D")):
+                return None
         window = ser[ser.index >= (end - pd.Timedelta(days=days))]
         if len(window) < 2:
+            return None
+        if (window.index[0] - (end - pd.Timedelta(days=days))).days > 7:
             return None
         return round((float(window.iloc[-1]) / float(window.iloc[0]) - 1) * 100.0, 2)
     except Exception:
@@ -378,6 +433,11 @@ def _actionability(in_window, is_held, gain, *, position_first_entry_date=None, 
     #    read from a trades log that does not exist, so `gain` was always None and `in_window`
     #    always False, and the branch below has never once executed since 29-Jul-2026.
     #    Now: one home decides, this function renders.
+    try:
+        if gain is not None and not _finite(gain):
+            gain = None          # B09-R10 (P-C, EV-0240): a NaN gain is UNRESOLVED, never a winner
+    except Exception:                                                # noqa: BLE001
+        gain = None
     if position_first_entry_date and gain is None:
         # ⚑ ISA-0729 (23-Sep-2026, found by the census bringing test_wpbc under a gate): a NULL gain
         #    was passed to min_hold_ok as at_a_loss=False, so an UNRESOLVED cost basis read as a
@@ -428,10 +488,33 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
     tgt_lim = float(_cfg("ALERT_TARGET_CUT_PCT"))
     consec_lim = int(_cfg("ALERT_CONSEC_DOWN_WEEKS"))
     alerts, skipped = [], []
+    asof_eff = asof or today
+    max_age = int(_cfg("ALERT_SNAPSHOT_MAX_AGE_D"))
     for tk in tickers:
-        eps = _series(store, tk, "eps_fwd1y", weeks)
-        tgt = _series(store, tk, "target_mean", weeks)
+        eps = _series(store, tk, "eps_fwd1y", weeks, asof=asof_eff)
+        tgt = _series(store, tk, "target_mean", weeks, asof=asof_eff)
         fired = []
+        # ⚑ B09-R10 (P-C): a NaN as the NEWEST estimate is MISSING COVERAGE, typed - it used to vanish
+        _raw_pts = sorted((p for p in store.get("series", {}).get((tk or "").upper(), [])
+                           if _d(p.get("date")) is not None and _d(p.get("date")) <= _d(asof_eff)),
+                          key=lambda p: p["date"])
+        if _raw_pts and "eps_fwd1y" in _raw_pts[-1] and not _finite(_raw_pts[-1].get("eps_fwd1y")):
+            skipped.append({"ticker": tk, "reason": "missing_latest_eps", "date": _raw_pts[-1]["date"]})
+        # ⚑ B09-R10 (EV-0225): estimates older than ALERT_SNAPSHOT_MAX_AGE_D vs the as-of are STALE
+        _stale = []
+        for _nm, _ser in (("eps", eps), ("target", tgt)):
+            if _ser and (_d(asof_eff) - _d(_ser[-1]["date"])).days > max_age:
+                _stale.append(_nm)
+        if "eps" in _stale:
+            skipped.append({"ticker": tk, "reason": "stale_snapshot", "series": "eps_fwd1y",
+                            "latest": eps[-1]["date"], "max_age_days": max_age})
+            eps = []
+        if "target" in _stale:
+            skipped.append({"ticker": tk, "reason": "stale_snapshot", "series": "target_mean",
+                            "latest": tgt[-1]["date"], "max_age_days": max_age})
+            tgt = []
+        # target change over the SAME window as the price move (EV-0233): points inside the window only
+        win_tgt = [p for p in tgt if (_d(asof_eff) - _d(p["date"])).days <= int(_cfg("ALERT_PRICE_DROP_WINDOW_D")) + 7]
         # ---- PRICE rules (WP5). Evaluated FIRST and INDEPENDENTLY of estimate history, so a name
         # with too little snapshot history can still raise a drawdown alert. This is the specific
         # failure that let MU fall 31.7% unflagged.
@@ -442,11 +525,12 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
             fired.append({"rule": "price_drawdown", "value_pct": pmove,
                           "threshold_pct": drop_lim, "window_days": win_d,
                           "advice": "RUN_INTRAMONTH_STOCK_REVIEW"})
-            if len(tgt) >= 2:
-                tc = _pct(tgt[-1]["target_mean"], tgt[0]["target_mean"])
+            if len(win_tgt) >= 2:
+                tc = _pct(win_tgt[-1]["target_mean"], win_tgt[0]["target_mean"])
                 if tc is not None and (tc - pmove) >= float(_cfg("ALERT_PRICE_VS_TARGET_DIVERGENCE_PP")):
                     fired.append({"rule": "price_target_divergence", "price_pct": pmove,
                                   "target_pct": tc, "divergence_pp": round(tc - pmove, 2),
+                                  "target_window_days": (_d(win_tgt[-1]["date"]) - _d(win_tgt[0]["date"])).days,
                                   "note": "price fell while consensus target held or rose — "
                                           "consensus is lagging, do not read the target as support"})
         # ---- ISA-0417: the UPSIDE twin of the two rules above. Same shape, opposite sign.
@@ -462,8 +546,8 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
                           "advice": "RUN_INTRAMONTH_STOCK_REVIEW",
                           "note": "position has moved materially in its favour — re-underwrite "
                                   "against its entry case; this is a REVIEW, never a sell"})
-            if len(tgt) >= 2:
-                tc = _pct(tgt[-1]["target_mean"], tgt[0]["target_mean"])
+            if len(win_tgt) >= 2:
+                tc = _pct(win_tgt[-1]["target_mean"], win_tgt[0]["target_mean"])
                 if tc is not None and (rmove - tc) >= float(_cfg("ALERT_PRICE_VS_TARGET_DIVERGENCE_PP")):
                     fired.append({"rule": "price_target_convergence", "price_pct": rmove,
                                   "target_pct": tc, "divergence_pp": round(rmove - tc, 2),
@@ -471,31 +555,53 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
                                           "the implied upside has been CONSUMED rather than "
                                           "earned; re-underwrite before treating the position "
                                           "as still carrying its entry case"})
+        # ⚑ B09-R10 (EV-0226): the TARGET rule is evaluated whether or not EPS history exists - a 20% target
+        #   cut on a name with no EPS snapshots used to be skipped as 'insufficient_history'.
+        if len(tgt) >= 2:
+            tc = _pct(tgt[-1]["target_mean"], tgt[0]["target_mean"])
+            if tc is not None and tc <= tgt_lim:
+                fired.append({"rule": "target_mean_cut", "value_pct": tc, "threshold_pct": tgt_lim,
+                              "weeks": len(tgt),
+                              "elapsed_days": (_d(tgt[-1]["date"]) - _d(tgt[0]["date"])).days})
         if len(eps) < 2:
             if not fired:
                 skipped.append({"ticker": tk, "reason": "insufficient_history", "points": len(eps)})
                 continue
             eps = []
-        wow = _pct(eps[-1]["eps_fwd1y"], eps[-2]["eps_fwd1y"]) if len(eps) >= 2 else None
+        # ⚑ B09-R10 (EV-0222/0223/0230): elapsed time is MEASURED. Week-on-week needs two observations no
+        #   more than ALERT_WEEKLY_GAP_MAX_D apart (a 92-day gap is not WoW); consecutive-down counts only
+        #   weekly-spaced pairs; the trajectory publishes its real span.
+        _pairs = _weekly_pairs(eps)
+        wow = (_pct(eps[-1]["eps_fwd1y"], eps[-2]["eps_fwd1y"])
+               if len(eps) >= 2 and _pairs and _pairs[-1][1] is eps[-1] else None)
         if wow is not None and wow <= wow_lim:
-            fired.append({"rule": "eps_wow_drop", "value_pct": wow, "threshold_pct": wow_lim})
+            fired.append({"rule": "eps_wow_drop", "value_pct": wow, "threshold_pct": wow_lim,
+                          "elapsed_days": (_d(eps[-1]["date"]) - _d(eps[-2]["date"])).days})
         traj = _pct(eps[-1]["eps_fwd1y"], eps[0]["eps_fwd1y"]) if len(eps) >= 2 else None
+        _span = (_d(eps[-1]["date"]) - _d(eps[0]["date"])).days if len(eps) >= 2 else 0
         if traj is not None and traj <= traj_lim:
             fired.append({"rule": "eps_trajectory_drop", "value_pct": traj, "threshold_pct": traj_lim,
-                          "weeks": len(eps)})
-        cd = _consecutive_down(eps, "eps_fwd1y") if len(eps) >= 2 else 0
+                          "weeks": len(eps), "elapsed_days": _span,
+                          "weekly_spacing": len(_pairs) == len(eps) - 1})
+        cd = 0
+        for _a, _b in reversed(_pairs):
+            if _pairs and float(_b["eps_fwd1y"]) < float(_a["eps_fwd1y"]):
+                cd += 1
+            else:
+                break
+        if cd and _pairs[-1][1] is not eps[-1]:
+            cd = 0                     # the newest observation is not weekly-linked: no current streak
         if cd >= consec_lim:
             fired.append({"rule": "eps_consecutive_down", "weeks": cd, "threshold_weeks": consec_lim})
-        if len(tgt) >= 2:
-            tc = _pct(tgt[-1]["target_mean"], tgt[0]["target_mean"])
-            if tc is not None and tc <= tgt_lim:
-                fired.append({"rule": "target_mean_cut", "value_pct": tc, "threshold_pct": tgt_lim,
-                              "weeks": len(tgt)})
         if not fired:
             continue
         is_held = tk in held_set
         mh_until = min_hold.get(tk.upper())
-        in_window = bool(mh_until and mh_until > today)
+        if isinstance(mh_until, dict):
+            # B09-R10 (P-C, EV-0241): the dict entry shape (min_hold_until + position_first_entry_date) used
+            # to raise TypeError comparing a dict with a date string before anything rendered
+            mh_until = mh_until.get("min_hold_until")
+        in_window = bool(mh_until and str(mh_until) > str(today))
         alerts.append({
             "ticker": tk,
             "class": "HELD" if is_held else "WATCHLIST",
@@ -515,6 +621,127 @@ def evaluate(store, tickers, held_set, min_hold, today=None, price_csv=None, aso
                 today=today),
         })
     return alerts, skipped
+
+
+def newest_snapshot_date(store):
+    """The newest dated observation in an eps_trend snapshot store ('' when none)."""
+    best = ""
+    for pts in ((store or {}).get("series") or {}).values():
+        for p in pts or []:
+            d = str((p or {}).get("date") or "")[:10]
+            if d > best:
+                best = d
+    return best
+
+
+def store_needs_refresh(snapshot_newest, store_as_of):
+    """True when the snapshot store holds an observation NEWER than the alert store's as-of (or the alert
+    store has none). Equal dates -> False (the store already reflects that snapshot)."""
+    s = str(snapshot_newest or "")[:10]
+    return bool(s) and s > str(store_as_of or "")[:10]
+
+
+def prefetch_closes(tickers, *, workers=8, budget_s=45.0, period="3mo"):
+    """Fetch daily closes for `tickers` in parallel into one close matrix (DataFrame) within a time
+    budget. Returns (frame_or_None, {ticker: reason}) - a ticker that could not be fetched in time is
+    NAMED, and its price rules then read None (never a fabricated move)."""
+    import concurrent.futures as _cf
+    import time as _t
+    import pandas as pd
+    missing, cols = {}, {}
+    try:
+        import yfinance as yf
+    except Exception as e:                                          # noqa: BLE001
+        return None, {t: "YFINANCE_UNAVAILABLE:%s" % type(e).__name__ for t in tickers}
+
+    def _one(t):
+        h = yf.Ticker(t).history(period=period, auto_adjust=False)
+        s = h["Close"].dropna()
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+        return s
+
+    t0 = _t.time()
+    ex = _cf.ThreadPoolExecutor(max_workers=max(1, int(workers)))
+    futs = {ex.submit(_one, t): t for t in tickers}
+    try:
+        for f in _cf.as_completed(futs, timeout=max(1.0, budget_s)):
+            t = futs[f]
+            try:
+                s = f.result()
+                if len(s):
+                    cols[t] = s
+                else:
+                    missing[t] = "NO_PRICE_HISTORY"
+            except Exception as e:                                  # noqa: BLE001
+                missing[t] = "FETCH_FAILED:%s" % type(e).__name__
+    except _cf.TimeoutError:
+        pass
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    for t in tickers:
+        if t not in cols and t not in missing:
+            missing[t] = "FETCH_BUDGET_EXCEEDED(%.0fs)" % (_t.time() - t0)
+    if not cols:
+        return None, missing
+    return pd.DataFrame(cols).sort_index(), missing
+
+
+def build_payload(store, held, watch, *, today, price_csv=None, asof=None, producer="position_alerts CLI",
+                  price_basis=None):
+    """ONE payload builder for the CLI and the pre-run refresh (the store contract is identical)."""
+    min_hold = load_min_hold(None)          # -> transaction_ledger.json first BUY (ISA-0645)
+    alerts, skipped = evaluate(store, held + watch, set(held), min_hold, today=today,
+                               price_csv=price_csv, asof=asof, gain_pct={})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "as_of_date": today or datetime.date.today().isoformat(),
+        "producer": producer,
+        "snapshot_newest_date": newest_snapshot_date(store),
+        "price_basis": price_basis or ("cache:%s" % os.path.basename(price_csv) if price_csv else "yfinance live"),
+        "scope": {"held": held, "watchlist": watch,
+                  "n_evaluated": len(held) + len(watch), "n_insufficient_history": len(skipped)},
+        "thresholds": {k: _cfg(k) for k in DEFAULTS},
+        "alerts": alerts,
+        "insufficient_history": skipped,
+        "min_hold_source": "transaction_ledger.json (first BUY; ISA-0645/0761)",
+        "gain_basis": ("UNAVAILABLE - no cost-basis store is read by this CLI; in-window "
+                       "winners/losers degrade to NOT_ACTIONABLE (ISA-0761)"),
+        "consumed_by": ["monthly_isa_prerun (Step 5 context)", "isa-mid-month-intelligence-brief"],
+        "doctrine": ("Detection only. Never an execution trigger. Alerts are context for the next "
+                     "SCHEDULED review; the framework 182-day min-hold (C-1) is unaffected."),
+    }
+
+
+def refresh_store(out_path, snapshots_path, watchlist_path, *, today, workers=8, budget_s=45.0):
+    """⚑ P-C (24-Oct-2026, found by the P-C shadow): the weekly task kept writing EPS snapshots (16/23-Oct)
+    but position_alerts.json stopped at 25-Sep, so the pre-run surfaced 4-week-old alerts as Step 5
+    context. The pre-run now re-evaluates the store whenever the snapshots are NEWER than the alerts,
+    at the run date, with prices prefetched in parallel inside a time budget (unfetched names are named;
+    their price rules read None). Returns (payload_or_None, info)."""
+    import tempfile as _tf
+    store = json.load(open(snapshots_path, encoding="utf-8"))
+    held, watch = scope_tickers(watchlist_path)
+    frame, missing = prefetch_closes(held + watch, workers=workers, budget_s=budget_s)
+    tmp = None
+    try:
+        if frame is not None:
+            fd, tmp = _tf.mkstemp(suffix="_alert_closes.csv")
+            os.close(fd)
+            frame.to_csv(tmp)
+        payload = build_payload(store, held, watch, today=today, price_csv=tmp, asof=today,
+                                producer="monthly_isa_prerun Step 9b.5 refresh (P-C)",
+                                price_basis=("yfinance prefetch (%d of %d names)" % (
+                                    0 if frame is None else frame.shape[1], len(held) + len(watch))))
+        payload["price_unresolved"] = missing
+        tmp_out = out_path + ".tmp"
+        json.dump(payload, open(tmp_out, "w", encoding="utf-8"), indent=2)
+        os.replace(tmp_out, out_path)
+        return payload, {"refreshed": True, "price_unresolved": len(missing)}
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _parser():
@@ -544,29 +771,10 @@ def main():
         return 0
     store = json.load(open(a.snapshots, encoding="utf-8"))
     held, watch = scope_tickers(a.watchlist)
-    min_hold = load_min_hold(None)          # -> transaction_ledger.json first BUY (ISA-0645)
     # No cost-basis store is read by this CLI (the trades log never existed): gain is UNAVAILABLE
     # and the winners/losers rule degrades to NOT_ACTIONABLE — never to a permissive verdict.
-    gain = {}
-    alerts, skipped = evaluate(store, held + watch, set(held), min_hold, today=a.today,
-                               price_csv=a.price_cache, asof=a.asof, gain_pct=gain)
-
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "as_of_date": a.today or datetime.date.today().isoformat(),
-        "scope": {"held": held, "watchlist": watch,
-                  "n_evaluated": len(held) + len(watch), "n_insufficient_history": len(skipped)},
-        "thresholds": {k: _cfg(k) for k in DEFAULTS},
-        "alerts": alerts,
-        "insufficient_history": skipped,
-        "min_hold_source": "transaction_ledger.json (first BUY; ISA-0645/0761)",
-        "gain_basis": ("UNAVAILABLE - no cost-basis store is read by this CLI; in-window "
-                       "winners/losers degrade to NOT_ACTIONABLE (ISA-0761)"),
-        "consumed_by": ["monthly_isa_prerun (Step 5 context)", "isa-mid-month-intelligence-brief"],
-        "doctrine": ("Detection only. Never an execution trigger. Alerts are context for the next "
-                     "SCHEDULED review; the framework 182-day min-hold (C-1) is unaffected."),
-    }
+    payload = build_payload(store, held, watch, today=a.today, price_csv=a.price_cache, asof=a.asof)
+    alerts, skipped = payload["alerts"], payload["insufficient_history"]
     json.dump(payload, open(a.out, "w", encoding="utf-8"), indent=2)
 
     if not a.quiet:

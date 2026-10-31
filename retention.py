@@ -94,6 +94,37 @@ TRIM_TO_STARTER = "TRIM_TO_STARTER"
 NO_ACTION = "NO_ACTION"
 
 
+RF_PRECISION_DP = 9          # S3/B03-R07: declared precision of realised_fraction target comparisons
+
+
+def _finite(v) -> bool:
+    try:
+        return math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _month_index(v):
+    """'YYYY-MM' or an ISO date -> year*12 + month, else None (undated)."""
+    try:
+        s = str(v)
+        y, m = int(s[0:4]), int(s[5:7])
+        return y * 12 + m if 1 <= m <= 12 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def position_clock_state(min_hold_until, today=None) -> dict:
+    """S3/B03-R01: the canonical position-first-entry 182-day clock as a typed state.
+    INSIDE (today < until) | EXPIRED (today >= until: the last protected day has ended) | UNKNOWN."""
+    import datetime as _dt
+    today = str(today or _dt.date.today().isoformat())[:10]
+    if not min_hold_until:
+        return {"state": "UNKNOWN", "min_hold_until": None, "why": "no position clock on record (R4.3: blocks a loss exit)"}
+    u = str(min_hold_until)[:10]
+    return {"state": "INSIDE" if today < u else "EXPIRED", "min_hold_until": u, "today": today}
+
+
 class RetentionRefused(RuntimeError):
     """Refuses rather than pricing a retention decision off an input it does not have."""
 
@@ -112,12 +143,15 @@ def underwrite(lot: dict, *, er_entry, er_confidence_entry, price_entry, fv_entr
             f"{lot['underwrite'].get('underwrite_date')}). It is IMMUTABLE — if er_entry can be "
             f"edited then realised_fraction measures nothing, because a quietly re-marked thesis "
             f"never completes and the position never comes up for review. Use re_underwrite().")
-    if er_entry is None or float(er_entry) == 0:
+    if er_entry is None or not _finite(er_entry) or float(er_entry) == 0:
         raise RetentionRefused(
             f"{lot.get('ticker')}: er_entry is {er_entry!r}. realised_fraction divides by it, so "
-            f"a null or zero would make the whole instrument silently undefined (R4.1).")
-    if price_entry is None or float(price_entry) <= 0:
-        raise RetentionRefused(f"{lot.get('ticker')}: price_entry must be positive")
+            f"a null, zero or non-finite value would make the whole instrument silently undefined (R4.1).")
+    if price_entry is None or not _finite(price_entry) or float(price_entry) <= 0:
+        raise RetentionRefused(f"{lot.get('ticker')}: price_entry must be finite and positive")
+    for _nm, _v in (("er_confidence_entry", er_confidence_entry), ("fv_entry", fv_entry)):
+        if _v is not None and not _finite(_v):
+            raise RetentionRefused(f"{lot.get('ticker')}: {_nm}={_v!r} is not finite (S3/B03-R07)")
     lot = dict(lot)
     lot["underwrite"] = {
         "er_entry": float(er_entry),
@@ -230,12 +264,25 @@ def underwriting_state(held_tickers, root=None) -> dict:
     """Which held positions carry an entry record, and which do not. No back-fill (R7.5)."""
     doc = load_underwriting(root)
     lots = doc.get("lots") or {}
-    have, missing = [], []
+    have, missing, incomplete = [], [], {}
     for t in held_tickers:
         tk = str(t).upper()
-        (have if (lots.get(tk) or {}).get("underwrite") else missing).append(tk)
+        u = (lots.get(tk) or {}).get("underwrite")
+        if not u:
+            missing.append(tk)
+            continue
+        # ⚑ S3/B03-R07 (EV-0195): a truthy PARTIAL dictionary is not coverage - every required field must be
+        #   present and finite, or the name is INCOMPLETE (named with its gaps), never "underwritten".
+        gaps = [f for f in REQUIRED_ENTRY_FIELDS if u.get(f) is None
+                or (f in ("er_entry", "price_entry", "er_confidence_entry") and not _finite(u.get(f)))]
+        if gaps:
+            incomplete[tk] = gaps
+            missing.append(tk)
+        else:
+            have.append(tk)
     return {
         "underwritten": sorted(have), "not_underwritten": sorted(missing),
+        "incomplete": incomplete,
         "store": UNDERWRITE_STORE, "horizon_months": _declared_horizon(),
         "warnings": ([("Step 6.5 (ISA-0418): %d held position(s) carry NO entry underwriting "
                        "(%s), so realised_fraction and the re-underwrite outcome are "
@@ -247,17 +294,44 @@ def underwriting_state(held_tickers, root=None) -> dict:
     }
 
 
-def re_underwrite(lot: dict, *, er_entry, price_now, reason, on=None) -> dict:
-    """APPEND a new underwrite, retaining the original. Never an in-place edit."""
+_UNSET = object()
+
+
+def re_underwrite(lot: dict, *, er_entry, price_now, reason, on=None,
+                  er_confidence_entry=_UNSET, fv_entry=_UNSET) -> dict:
+    """APPEND a new underwrite, retaining the original. Never an in-place edit.
+
+    ⚑ S3/B03-R07 (EV-0197/0198): a renewal is a NEW assessment. Its confidence and fair value are stated
+    afresh (None is an explicit 'not assessed'), never carried silently from the superseded case, and the
+    history keeps EVERY superseded field. A zero / non-finite E[r] or price refuses (it would make
+    realised_fraction undefined)."""
     u = lot.get("underwrite")
     if not u:
         raise RetentionRefused(f"{lot.get('ticker')}: nothing to re-underwrite")
+    if er_entry is None or not _finite(er_entry) or float(er_entry) == 0:
+        raise RetentionRefused(f"{lot.get('ticker')}: re-underwrite er_entry={er_entry!r} refused - "
+                               f"zero or non-finite makes realised_fraction undefined (R4.1)")
+    if price_now is None or not _finite(price_now) or float(price_now) <= 0:
+        raise RetentionRefused(f"{lot.get('ticker')}: re-underwrite price_now={price_now!r} refused")
+    if not reason or not str(reason).strip():
+        raise RetentionRefused(f"{lot.get('ticker')}: a re-underwrite must state its reason")
+    for _nm, _v in (("er_confidence_entry", er_confidence_entry), ("fv_entry", fv_entry)):
+        if _v is not _UNSET and _v is not None and not _finite(_v):
+            raise RetentionRefused(f"{lot.get('ticker')}: re-underwrite {_nm}={_v!r} is not finite")
     lot = dict(lot); u = dict(u); u["history"] = list(u.get("history") or [])
     u["history"].append({"superseded_er_entry": u["er_entry"],
                          "superseded_price_entry": u["price_entry"],
+                         "superseded_er_confidence_entry": u.get("er_confidence_entry"),
+                         "superseded_fv_entry": u.get("fv_entry"),
+                         "superseded_er_horizon_months": u.get("er_horizon_months"),
                          "superseded_on": u["underwrite_date"], "reason": reason})
     u["er_entry"] = float(er_entry)
     u["price_entry"] = float(price_now)
+    u["er_confidence_entry"] = (None if er_confidence_entry is _UNSET or er_confidence_entry is None
+                                else float(er_confidence_entry))
+    u["fv_entry"] = None if fv_entry is _UNSET or fv_entry is None else float(fv_entry)
+    u["renewal_fields_stated"] = sorted(k for k, v in (("er_confidence_entry", er_confidence_entry),
+                                                       ("fv_entry", fv_entry)) if v is not _UNSET)
     u["underwrite_date"] = on or datetime.date.today().isoformat()
     lot["underwrite"] = u
     return lot
@@ -275,17 +349,24 @@ def realised_fraction(lot: dict, price_now: float) -> dict:
     if missing:
         return {"measured": False, "realised_fraction": None, "missing_fields": missing,
                 "detail": f"{lot.get('ticker')}: underwrite is incomplete — missing {missing}"}
-    if price_now is None or float(price_now) <= 0:
+    if price_now is None or not _finite(price_now) or float(price_now) <= 0:
         return {"measured": False, "realised_fraction": None,
                 "detail": f"{lot.get('ticker')}: price_now is {price_now!r}"}
+    bad = [f for f in ("er_entry", "price_entry") if not _finite(u.get(f)) or float(u.get(f)) == 0]
+    if bad:
+        # ⚑ S3/B03-R07 (EV-0199): a non-finite or zero entry field is INVALID - never a measured NaN
+        return {"measured": False, "realised_fraction": None, "invalid_fields": bad,
+                "detail": f"{lot.get('ticker')}: underwrite field(s) {bad} are zero or non-finite - INVALID, not measured"}
     ret = (float(price_now) / float(u["price_entry"])) - 1.0
-    rf = ret / (float(u["er_entry"]) / 100.0)
+    # ⚑ S3/B03-R07 (EV-0192): the target comparison uses the DECLARED precision (RF_PRECISION_DP), so an
+    #   exact +20% on a 20% underwrite is 1.0x and triggers - float noise (0.9999999999999998) cannot hide it.
+    rf = round(ret / (float(u["er_entry"]) / 100.0), RF_PRECISION_DP)
     return {"measured": True, "realised_fraction": round(rf, 4),
             "price_return_pct": round(ret * 100, 4), "er_entry_pct": u["er_entry"],
             "er_horizon_months": u["er_horizon_months"],
             "underwrite_date": u["underwrite_date"],
             "re_underwrites": len(u.get("history") or []),
-            "triggers_re_underwrite": rf >= 1.0,
+            "triggers_re_underwrite": rf >= 1.0, "precision_dp": RF_PRECISION_DP,
             "detail": (f"{ret * 100:+.1f}% realised against a {u['er_entry']:.1f}% "
                        f"{u['er_horizon_months']}-month underwrite = {rf:.2f}x"
                        + (" -> MANDATORY RE-UNDERWRITE (never an automatic sale)"
@@ -496,16 +577,28 @@ def realisation_trigger(history, k: float = None, consecutive: int = None,
     need = REALISATION_CONSECUTIVE_REQUIRED if consecutive is None else consecutive
     obs = list(history or [])
     run, best = 0, 0
+    prev_m = None
+    gaps = 0
     for o in obs:
         t = o.get("t")
-        run = run + 1 if (t is not None and t >= k) else 0
+        # ⚑ S3/B03-R09 (EV-0038): 'consecutive monthly' is measured on the observations' OWN dates. Two
+        #   readings a year apart, a duplicate month or an undated reading are NOT consecutive - they break
+        #   the run (an undated observation cannot confirm anything).
+        m = _month_index(o.get("as_of"))
+        adjacent = (m is not None and prev_m is not None and m - prev_m == 1)
+        if m is None or (prev_m is not None and not adjacent):
+            if prev_m is not None:
+                gaps += 1
+            run = 0
+        run = run + 1 if (t is not None and _finite(t) and t >= k and m is not None) else 0
         best = max(best, run)
+        prev_m = m
     fired = run >= need
     n_unmeasured = sum(1 for o in obs if o.get("t") is None)
     return {
         "fired": fired, "k": k, "consecutive_required": need,
         "current_run": run, "longest_run": best,
-        "n_observations": len(obs), "n_unmeasured": n_unmeasured,
+        "n_observations": len(obs), "n_unmeasured": n_unmeasured, "n_calendar_breaks": gaps,
         "cadence": REALISATION_OBS_CADENCE,
         "latest_t": (obs[-1].get("t") if obs else None),
         "why": ("realisation t >= %.2f at %d consecutive %s observations"
@@ -682,6 +775,16 @@ def exit_executability(out, *, in_profit, realisation=None, giveback=None, by_na
     import datetime as _dt
     today = today or _dt.date.today().isoformat()
     out.setdefault("why", "")
+    # ⚑ S3/B03-R01: the canonical position clock is evaluated FIRST. C-1's loss block exists only INSIDE the
+    #   182-day window; after expiry a decided exit at a loss is PERMITTED (never commanded - the disposition
+    #   was decided elsewhere). An UNKNOWN clock keeps the block (R4.3).
+    _clock = position_clock_state(min_hold_until, today)
+    out["position_clock"] = _clock
+    if not in_profit and _clock["state"] == "EXPIRED":
+        out["state"] = SELL
+        out["why"] += (" The 182-day position clock expired on %s, so C-1's loss block no longer applies; the "
+                       "decided exit is PERMITTED at a loss (a permission, not an instruction)." % min_hold_until)
+        return out
     if not in_profit:
         out.update(state=BLOCKED_AT_A_LOSS,
                    why=out["why"] + " ⚑ C-1 blocks a full exit at a loss inside the min-hold "
@@ -973,8 +1076,13 @@ def ratchet_eligible(positions: List[dict], *, today=None) -> dict:
             excluded.append({"ticker": tk, "reason": "position is closed"})
             continue
         q = d.get("quantity", d.get("units"))
-        if q is not None and float(q) <= 0:
-            excluded.append({"ticker": tk, "reason": "quantity <= 0"})
+        if q is not None and (not _finite(q) or float(q) <= 0):
+            excluded.append({"ticker": tk, "reason": "quantity <= 0 or non-finite"})
+            continue
+        if q is None and d.get("open") is not True:
+            # ⚑ S3/B03-R08 (EV-0036): neither an open flag nor a quantity - UNKNOWN, excluded with its reason
+            #   (the comment above promised this; nothing implemented it, so unknowns were counted IN).
+            excluded.append({"ticker": tk, "reason": "UNKNOWN: no open flag and no quantity"})
             continue
         if d.get("asset_class") in ("fund", "etf_fund", "cash"):
             excluded.append({"ticker": tk,
@@ -989,6 +1097,7 @@ def ratchet_eligible(positions: List[dict], *, today=None) -> dict:
             # ⚑ retained under its old name so no consumer silently reads 0 after this change
             "n_forward_led": None,
             "min_required": PROBATION_MIN_POSITIONS, "excluded": excluded,
+            "n_unknown": sum(1 for e in excluded if str(e.get("reason", "")).startswith("UNKNOWN")),
             "detail": (f"{len(open_pos)} open direct-stock position(s) against "
                        f"{PROBATION_MIN_POSITIONS} required ({ELIGIBLE_BASIS}, D18). THE RULE "
                        f"CANNOT FIRE on population."
@@ -1053,14 +1162,35 @@ def ratchet_inputs_from_freeze_history(history: List[dict]) -> dict:
     working, which is the direction ISA-0429 showed is the dangerous one."""
     _fi_mark("retention", "ratchet_inputs_from_freeze_history")
     hist = [h for h in (history or []) if isinstance(h, dict)]
-    measured = [h for h in hist if h.get("measured") is True]
-    recent = sorted(measured, key=lambda h: str(h.get("month") or ""))[-PROBATION_MONTHS:]
+    measured_all = [h for h in hist if h.get("measured") is True]
+    # ⚑ S3/B03-R09 (EV-0031/0032/0033): the clock counts UNIQUE, CONTIGUOUS calendar months ending at the
+    #   latest measured month. A duplicated month is one month (the LAST record for it wins, and the
+    #   duplicate is reported); a gap ends the window; an undated record cannot count.
+    by_month = {}
+    dups = []
+    for h in measured_all:
+        mi = _month_index(h.get("month"))
+        if mi is None:
+            continue
+        if mi in by_month:
+            dups.append(str(h.get("month")))
+        by_month[mi] = h
+    measured = [by_month[k] for k in sorted(by_month)]
+    recent = []
+    for k in sorted(by_month, reverse=True):
+        if recent and _month_index(recent[-1].get("month")) - k != 1:
+            break
+        recent.append(by_month[k])
+        if len(recent) >= PROBATION_MONTHS:
+            break
+    recent = list(reversed(recent))
 
     def _last(field):
-        for h in reversed(recent):
-            if h.get(field) is not None:
-                return h[field]
-        return None
+        # ⚑ EV-0033: the LATEST month must carry the field itself - a missing latest fact never borrows an
+        #   older measured value (that would describe a sleeve that no longer exists).
+        if not recent:
+            return None
+        return recent[-1].get(field)
 
     trailing = None
     if recent and all(h.get("vs_vuag_pp") is not None for h in recent):
@@ -1072,6 +1202,8 @@ def ratchet_inputs_from_freeze_history(history: List[dict]) -> dict:
     return {
         "months_measured": len(measured),
         "months_in_window": len(recent),
+        "contiguous_window": ([recent[0].get("month"), recent[-1].get("month")] if recent else None),
+        "duplicate_months": sorted(set(dups)),
         "months_trailing": trailing,
         "sleeve_vs_vuag_pp": _last("vs_vuag_pp"),
         "sleeve_vs_vuag_exlargest_pp": _last("vs_vuag_exlargest_pp"),
@@ -1536,10 +1668,27 @@ def _selftest():
 
     # re_underwrite APPENDS and keeps the original
     lot2 = re_underwrite(lot, er_entry=12.0, price_now=966.0, reason="thesis re-marked",
-                         on="2026-08-26")
+                         on="2026-08-26", er_confidence_entry=0.7, fv_entry=None)
     assert lot2["underwrite"]["er_entry"] == 12.0
     assert lot2["underwrite"]["history"][0]["superseded_er_entry"] == 25.0
     assert realised_fraction(lot2, 966.0)["realised_fraction"] == 0.0
+    # S3/B03-R07: a renewal states its confidence afresh; an unstated one is NOT carried (the case is then incomplete)
+    _l3 = re_underwrite(lot, er_entry=12.0, price_now=966.0, reason="thesis re-marked", on="2026-08-26")
+    assert _l3["underwrite"]["er_confidence_entry"] is None and realised_fraction(_l3, 966.0)["measured"] is False, \
+        "negative control: an unstated renewal confidence must not be carried from the superseded case"
+    assert {"superseded_er_confidence_entry", "superseded_fv_entry"} <= set(lot2["underwrite"]["history"][0])
+    for _bad in (0, float("nan"), float("inf")):
+        try:
+            re_underwrite(lot, er_entry=_bad, price_now=966.0, reason="x")
+            raise AssertionError("negative control: a zero/non-finite renewal E[r] must not be accepted")
+        except RetentionRefused:
+            pass
+    _x = underwrite({"ticker": "PX"}, er_entry=20.0, er_confidence_entry=0.8, price_entry=100.0, underwrite_date="2026-10-01")
+    assert realised_fraction(_x, 120.0)["triggers_re_underwrite"] is True, \
+        "S3/B03-R07: an exact +20% on a 20% underwrite is 1.0x at the declared precision and MUST trigger"
+    assert position_clock_state("2026-10-24", "2026-10-23")["state"] == "INSIDE"
+    assert position_clock_state("2026-10-24", "2026-10-24")["state"] == "EXPIRED"
+    assert position_clock_state(None, "2026-10-24")["state"] == "UNKNOWN"
 
     # the outcome table is total and never auto-sells on a clearing thesis
     for above in (True, False):
@@ -1565,9 +1714,14 @@ def _selftest():
     # ⚑ Every assertion below is paired with a control that FORCES the opposite verdict —
     # ISA-0348's question asked of each one: what correct behaviour makes this fail?
     # ══════════════════════════════════════════════════════════════════════════════════
-    live = [{"ticker": "AVGO", "route": "pre_framework"}, {"ticker": "MU", "route": "pre_framework"},
-            {"ticker": "ONT.L", "route": "pre_framework"}, {"ticker": "ABCL", "route": "override"},
-            {"ticker": "QBTS", "route": "vci"}, {"ticker": "COCO", "route": "forward_led"}]
+    # S3/B03-R08: positions carry their broker quantity (portfolio_data rows always do); a row with neither
+    #   an open flag nor a quantity is UNKNOWN and excluded with its reason (asserted below).
+    live = [{"ticker": "AVGO", "route": "pre_framework", "quantity": 10}, {"ticker": "MU", "route": "pre_framework", "quantity": 10},
+            {"ticker": "ONT.L", "route": "pre_framework", "quantity": 10}, {"ticker": "ABCL", "route": "override", "quantity": 10},
+            {"ticker": "QBTS", "route": "vci", "quantity": 10}, {"ticker": "COCO", "route": "forward_led", "quantity": 10}]
+    _unk = ratchet_eligible([{"ticker": "A"}, {"ticker": "B"}, {"ticker": "C"}])
+    assert _unk["eligible"] is False and _unk["n_unknown"] == 3, \
+        ("negative control: positions with no open flag and no quantity must not be counted IN (EV-0036)", _unk)
 
     # P5-A1 — population is OPEN DIRECT-STOCK POSITIONS; the live book is n = 6
     el = ratchet_eligible(live)

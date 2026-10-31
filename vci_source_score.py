@@ -51,10 +51,12 @@ def _clip01(x: float) -> float:
 def _num(v):
     if v is None:
         return None
+    import math as _m
     if isinstance(v, (int, float)):
-        return float(v)
+        return float(v) if _m.isfinite(float(v)) else None      # B09-R11 (P-C, EV-0365): NaN/inf is UNMEASURED
     try:
-        return float(str(v).replace("$", "").replace("£", "").replace(",", "").replace("%", "").replace("x", "").strip())
+        f = float(str(v).replace("$", "").replace("£", "").replace(",", "").replace("%", "").replace("x", "").strip())
+        return f if _m.isfinite(f) else None
     except (TypeError, ValueError):
         return None
 

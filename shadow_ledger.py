@@ -262,12 +262,22 @@ def compute_weights(recs):
     return {"A": A, "B": B, "C": C}
 
 
-def freeze(month_label, here=None, store=None, force=False, **kw):
-    """Write a cohort immutably. Refuses to change an existing one."""
+def freeze(month_label, here=None, store=None, force=False, occurrence=None, **kw):
+    """Write a cohort immutably. Refuses to change an existing one - except a cohort the SAME, still-uncommitted
+    pre-run occurrence froze on an earlier pass (ISA-0911)."""
     store = store or (os.path.join(here, "shadow_ledger.json") if here else STORE)
     doc = _load(store, {"schema_version": SCHEMA_VERSION, "cohorts": {}, "marks": {}})
     doc.setdefault("cohorts", {})
     cohort = build_cohort(month_label, here=here, **kw)
+    # ⚑ ISA-0911 (28-Oct-2026): THE MEASUREMENT IS PUBLISHED AT COMMIT, NOT AT THE FIRST PASS. The installed SKILL
+    #   runs pass 1, the Step 3 metrics fetch, then pass 2 - the decision pass - and only then commits to LIVE.
+    #   Pass 1 froze the month, so any move in a BUY's rounded source_score between the passes (measured: FTI
+    #   73.0 -> 72.9 in production parallel PPR-NOV2026-20261028-01) made pass 2 an ERROR and the SKILL refused
+    #   to commit. prerun_runner exports ISA_PRERUN_OCCURRENCE to the run stage ONLY while that occurrence has no
+    #   commit COMPLETE, so a cohort stamped with the same occurrence is an unpublished draft of this run and may
+    #   be replaced; a cohort from any other (or no) occurrence stays immutable exactly as before.
+    occurrence = occurrence if occurrence is not None else (os.environ.get("ISA_PRERUN_OCCURRENCE") or None)
+    cohort["frozen_by_occurrence"] = occurrence
     prev = doc["cohorts"].get(month_label)
     # ⚑ AN EMPTY STACK IS NOT A COHORT (ISA-0554, 02-Sep-2026). Found in the pre-Saturday
     # rehearsal. The documented operating model runs the orchestrator MORE THAN ONCE (the host
@@ -293,6 +303,13 @@ def freeze(month_label, here=None, store=None, force=False, **kw):
             % month_label)
         return cohort, False
     if prev and not force:
+        if (prev.get("stack_hash") != cohort["stack_hash"] and occurrence
+                and prev.get("frozen_by_occurrence") == occurrence):
+            cohort["refrozen_within_occurrence"] = int(prev.get("refrozen_within_occurrence") or 0) + 1
+            cohort["superseded_in_occurrence"] = {"stack_hash": prev.get("stack_hash"), "frozen_at": prev.get("frozen_at")}
+            doc["cohorts"][month_label] = cohort
+            _save(store, doc)
+            return cohort, True
         if prev.get("stack_hash") != cohort["stack_hash"]:
             raise ImmutableCohortError(
                 f"shadow_ledger: {month_label} is already frozen with stack_hash "
@@ -692,6 +709,34 @@ def _selftest():
         back = _load(st, {})
         ok("U-SL15b original cohort untouched",
            back["cohorts"]["aug_2026"]["recommendations"][0]["ticker"] == "AAA")
+        # ISA-0911: a re-freeze by the SAME uncommitted occurrence replaces its own draft; nothing else does.
+        st2 = os.path.join(td, "sl2.json")
+        freeze("nov_2026", store=st2, occurrence="occ-A", action_stack=stack, conviction=conv, watchlist=wl, ledger=led)
+        _c3, _w3 = freeze("nov_2026", store=st2, occurrence="occ-A", action_stack=changed, conviction=conv,
+                          watchlist=wl, ledger=led)
+        _b3 = _load(st2, {})["cohorts"]["nov_2026"]
+        ok("ISA-0911 MUST-FIRE: the same uncommitted occurrence's pass-2 stack replaces its pass-1 draft",
+           _w3 and _b3["recommendations"][0]["ticker"] == "ZZZ" and _b3.get("refrozen_within_occurrence") == 1
+           and _b3["superseded_in_occurrence"]["stack_hash"])
+        _r4 = False
+        try:
+            freeze("nov_2026", store=st2, occurrence="occ-B", action_stack=stack, conviction=conv, watchlist=wl, ledger=led)
+        except ImmutableCohortError:
+            _r4 = True
+        ok("ISA-0911 NEGATIVE CONTROL: a DIFFERENT occurrence still cannot rewrite the month", _r4)
+        _r5 = False
+        try:
+            freeze("nov_2026", store=st2, occurrence=None, action_stack=stack, conviction=conv, watchlist=wl, ledger=led)
+        except ImmutableCohortError:
+            _r5 = True
+        ok("ISA-0911 NEGATIVE CONTROL: no occurrence (a committed or manual run) still cannot rewrite the month", _r5)
+        _r6 = False
+        try:
+            freeze("aug_2026", store=st, occurrence="occ-A", action_stack=stack, conviction=conv, watchlist=wl, ledger=led)
+            freeze("aug_2026", store=st, occurrence="occ-A", action_stack=changed, conviction=conv, watchlist=wl, ledger=led)
+        except ImmutableCohortError:
+            _r6 = True
+        ok("ISA-0911 NEGATIVE CONTROL: a cohort frozen with NO occurrence stamp (every pre-ISA-0911 month) stays immutable", _r6)
 
     ok("U-SL16 exactly three books — no fourth policy",
        set(compute_weights(c["recommendations"]).keys()) == {"A", "B", "C"})

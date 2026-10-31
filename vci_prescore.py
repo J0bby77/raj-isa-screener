@@ -158,7 +158,7 @@ def rank_cache(cache):
 # IO
 # --------------------------------------------------------------------------
 def cache_path():
-    return os.path.join(INV_DIR, f"vci_prescore_cache_{datetime.now().strftime('%b_%Y').lower()}.json")
+    return os.path.join(INV_DIR, f"vci_prescore_cache_{__import__('run_cycle').cycle_label()}.json")
 
 
 def load_cache():

@@ -75,7 +75,28 @@ ADMIT_AS_ADDITION = "ADMIT_AS_ADDITION"
 REPLACEMENT_ONLY = "REPLACEMENT_ONLY"
 
 
+_PEARSON_MEMO: Dict[tuple, Optional[float]] = {}
+_PEARSON_MEMO_MAX = 200_000
+
+
 def _pearson(a: List[float], b: List[float]) -> Optional[float]:
+    """Pearson r of two aligned return lists. ⚑ ISA-0883 (P-C, 24-Oct-2026): MEMOISED on the exact input
+    values - a pure function, so a repeated pair returns the identical float. statistics.pstdev is exact
+    (Fraction) arithmetic and dominated the engine build (~1.5 s of ~5 s); the campaign suite builds the
+    engine ~30 times and crossed the 168 s per-call ceiling on the baseline as well as the candidate."""
+    try:
+        key = (tuple(a), tuple(b))
+    except TypeError:
+        return _pearson_raw(a, b)
+    if key in _PEARSON_MEMO:
+        return _PEARSON_MEMO[key]
+    if len(_PEARSON_MEMO) >= _PEARSON_MEMO_MAX:
+        _PEARSON_MEMO.clear()
+    v = _PEARSON_MEMO[key] = _pearson_raw(a, b)
+    return v
+
+
+def _pearson_raw(a: List[float], b: List[float]) -> Optional[float]:
     if len(a) != len(b) or len(a) < 8:
         return None
     try:

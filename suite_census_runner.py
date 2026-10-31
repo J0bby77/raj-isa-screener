@@ -445,7 +445,10 @@ def publish(live: str, sandbox: str, runner_write_escapes: int = 0) -> dict:
             "state": st.get("state"), "census_kind": doc.get("census_kind"), "build_id": doc.get("build_id"),
             "duration_s": dur, "counts": doc.get("counts"), "suite_secs_total": doc.get("suite_secs_total"),
             "non_green": [r.get("module") for r in doc.get("rows", []) if r.get("state") != "GREEN"],
-            "live_changed_during_census": n_changed}
+            "live_changed_during_census": n_changed,
+            # ISA-0896 R5: per-unit seconds and the host probe they were measured at - the trend's ONE history home
+            "unit_secs": {r.get("module"): [r.get("secs"), r.get("host_probe_s")] for r in doc.get("rows", [])
+                          if r.get("secs") is not None}}
     with open(os.path.join(live, HISTORY_REL), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(line, sort_keys=True, default=str) + "\n")
     return {"state": "PUBLISHED", "census_state": st.get("state"), "why": st.get("why"),

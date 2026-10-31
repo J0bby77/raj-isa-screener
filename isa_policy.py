@@ -325,7 +325,7 @@ DECLARED_CONSTANTS = frozenset({
     "MIN_HOLD_DAYS", "VCI_SLEEVE_BINARY_RISK_BUDGET", "ER_FRICTION_BUFFER",
     "FUND_MIN_COVERAGE", "VCI_FLOOR_MAX", "SLEEVE_PROBATION_PP",
     "SLEEVE_BETA_MAX", "SLEEVE_BETA_DIMSON_LAGS", "SLEEVE_STALE_ZERO_RETURN_MAX",
-    "RISK_WINDOW_WEEKS", "RISK_MIN_WEEKS",
+    "RISK_WINDOW_WEEKS", "RISK_MIN_WEEKS", "RISK_APPETITE",
 })
 
 
@@ -370,6 +370,30 @@ RISK_WINDOW_BASIS = (
     "pairwise-truncated to the same length for the correlation matrices; fewer than "
     "RISK_MIN_WEEKS -> refused. Sample covariance (n-1)."
 )
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# P-D (B08-R09, ISA-0888) - RAJ'S WHOLE-ISA LOSS APPETITE. ONE HOME (R4.4); whole_book_stress reads it.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Raj, 24-Oct-2026 ~17:45 BST (chat; his three choices, verbatim):
+#   "50% (Recommended)"  ·  "Review + guard new risk (Recommended)"  ·  "Fall from peak, flow-adjusted (Recommended)"
+# What it DOES: (1) the governing severe scenario (whole_book_stress.SEVERE_GFC_SCALE) and the realised flow-adjusted
+#   drawdown (wealth_record) are compared with max_drawdown_pct every run; at/above it is a Step 5 review item with a
+#   deadline; (2) an engine plan that RAISES the severe-scenario loss while the post-trade loss is at/above the limit is
+#   REVIEW_REQUIRED - Raj's explicit approval at Step 10 (Checkpoint-D tick 14).
+# What it NEVER does: sell, trim, refuse a reduction, or change any other limit. Not knowing (UNDECLARED) never blocks.
+# ROLLBACK (R4.13): "enforce_guard": False -> the guard reports NOT_ENFORCED; the comparison is still published.
+# Revisit: at least annually with Raj, or when the target / contribution schedule changes (target_state.json).
+RISK_APPETITE = {                             # Raj 24-Oct-2026 (P-D, ISA-0888): 50% / review + guard / flow-adjusted
+    "max_drawdown_pct": 50,
+    "basis": "FLOW_ADJUSTED_PEAK",            # wealth_record: index / running peak - 1, deposits stripped out
+    "response": "REVIEW_AND_GUARD_NEW_RISK",  # review item + REVIEW_REQUIRED on risk-adding plans; never a sale
+    "enforce_guard": True,
+    "declared_by": "Raj (chat, 24-Oct-2026 ~17:45 BST)",
+    "declared_on": "2026-10-24",
+    "review_by": "2027-10-24",
+    "authority": "AskUserQuestion answers 24-Oct-2026: limit '50% (Recommended)'; response 'Review + guard new risk "
+                 "(Recommended)'; basis 'Fall from peak, flow-adjusted (Recommended)'",
+}
+
 SLEEVE_BETA_MAX = 0.60          # Dimson beta to the held sleeve, self-excluded
 SLEEVE_BETA_DIMSON_LAGS = 1     # non-synchronous-trading correction
 SLEEVE_STALE_ZERO_RETURN_MAX = 0.30   # share of exactly-zero weekly returns tolerated

@@ -389,16 +389,83 @@ def get_row(stmt, *keys):
     return None
 
 
+def _col_date(col):
+    """B09-R04: a statement column's period-end DATE, or None when it is not a date."""
+    try:
+        if hasattr(col, "to_pydatetime"):
+            return col.to_pydatetime().date()
+        if hasattr(col, "year") and hasattr(col, "month"):
+            return col.date() if hasattr(col, "date") and callable(col.date) else col
+        import datetime as _dtm
+        return _dtm.date.fromisoformat(str(col)[:10])
+    except Exception:                                                 # noqa: BLE001
+        return None
+
+
+def _cols_desc(stmt_df):
+    """B09-R04 (P-C, 24-Oct-2026, EV-0189): the statement's columns NEWEST FIRST by their actual period
+    date. Every reader below assumed the provider's order; an ascending frame reversed Gate 4 (a falling
+    business read +10% CAGR). Columns whose dates cannot be read keep the provider order (refused later)."""
+    cols = list(stmt_df.columns)
+    dated = [(c, _col_date(c)) for c in cols]
+    if all(d is not None for _, d in dated):
+        return [c for c, _ in sorted(dated, key=lambda t: t[1], reverse=True)]
+    return cols
+
+
+def years_between(d_end, d_start):
+    """B09-R04: elapsed years between two period ends, in calendar months / 12 (31-Dec-2023 ->
+    31-Dec-2025 is exactly 2.0, June -> December is 0.5); None when not strictly ordered."""
+    try:
+        months = ((d_end.year - d_start.year) * 12 + (d_end.month - d_start.month)
+                  + (d_end.day - d_start.day) / 30.4375)
+    except Exception:                                                 # noqa: BLE001
+        return None
+    return (months / 12.0) if months > 0 else None
+
+
+def get_stmt_series_dated(stmt_df, row_keys, max_periods=5):
+    """B09-R04 (P-C): [(period_end_date, value)] NEWEST FIRST, sorted by date, unique periods. A CAGR is
+    computed from the ELAPSED TIME between the two dates it uses - never from how many non-null columns
+    sit between them (EV-0188: 121/100 over 2023->2025 is 10%/yr, not 21%; EV-0190: a missing year was
+    compressed into a two-year growth figure)."""
+    if stmt_df is None or stmt_df.empty:
+        return []
+    out, seen = [], set()
+    for col in _cols_desc(stmt_df)[:max_periods]:
+        d = _col_date(col)
+        if d is None or d in seen:
+            continue
+        for k in row_keys:
+            if k in stmt_df.index:
+                f = safe_float(stmt_df.at[k, col])
+                if f is not None:
+                    out.append((d, f))
+                    seen.add(d)
+                    break
+    return out
+
+
+def dated_cagr(series_dated, k):
+    """(cagr, years) from series_dated[0] back to series_dated[k] on elapsed time; (None, years) if refused."""
+    if len(series_dated) <= k:
+        return None, None
+    yrs = years_between(series_dated[0][0], series_dated[k][0])
+    if yrs is None or yrs < 0.5:
+        return None, yrs
+    return compute_cagr(series_dated[k][1], series_dated[0][1], yrs), yrs
+
+
 def get_stmt_value(stmt_df, row_keys, col_idx=0):
     """
     Extract a value from a yfinance statement DataFrame.
     stmt_df: DataFrame with dates as columns, metrics as index.
     row_keys: list of label strings to try in order.
-    col_idx: column index (0 = most recent).
+    col_idx: column index (0 = most recent BY DATE - B09-R04, never the provider's column order).
     """
     if stmt_df is None or stmt_df.empty:
         return None
-    cols = stmt_df.columns
+    cols = _cols_desc(stmt_df)
     if col_idx >= len(cols):
         return None
     col = cols[col_idx]
@@ -419,7 +486,7 @@ def get_stmt_series(stmt_df, row_keys, max_periods=5):
     if stmt_df is None or stmt_df.empty:
         return []
     results = []
-    for col_idx, col in enumerate(stmt_df.columns[:max_periods]):
+    for col_idx, col in enumerate(_cols_desc(stmt_df)[:max_periods]):   # B09-R04: newest first BY DATE
         year = col.year if hasattr(col, "year") else int(str(col)[:4])
         for k in row_keys:
             if k in stmt_df.index:
@@ -1410,11 +1477,20 @@ def gate3_pass(cashflow):
     if getattr(_cfg, "RELAX_FCF_GATE", False):
         # Redesign Part 3 §8: FCF-negative from strategic capex is acceptable IF operations
         # generate cash (most-recent OCF > 0). Genuine ops cash-burners (OCF<=0) still fail.
+        # ⚑ B09-R04 (P-C, 24-Oct-2026, EV-0184): the exception reads OCF for the LATEST FCF PERIOD. It
+        #   used to take the first non-null OCF of any year, so a missing current OCF borrowed an older
+        #   positive one and invoked the exception for a business that may now be burning cash.
         ocf_series = get_stmt_series(cashflow,
             ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities",
              "Net Cash Provided By Operating Activities", "Total Cash From Operating Activities"])
-        ocf_recent = next((v for _, v in ocf_series if v is not None), None)
-        if ocf_recent is not None and ocf_recent > 0:
+        latest_fcf_year = next((y for y, v in fcf_series if v is not None), None)
+        ocf_recent = dict(ocf_series).get(latest_fcf_year) if latest_fcf_year is not None else None
+        if ocf_recent is None:
+            return (None, f"GATE_DATA_UNRESOLVED: FCF positive {pos}/{avail}yr and operating cash flow for the "
+                          f"latest FCF period ({latest_fcf_year}) is missing - the capex exception cannot be "
+                          f"evaluated and an older year's OCF may not stand in for it (B09-R04)",
+                    "GATE_DATA_UNRESOLVED", pos, avail)
+        if ocf_recent > 0:
             return True, f"FCF positive {pos}/{avail}yr but OCF>0 (capex-driven; scored not gated)", "", pos, avail
     return False, f"FCF positive only {pos}/{avail} years", "Gate 3", pos, avail
 
@@ -1436,7 +1512,9 @@ def gate4_pass(income_stmt, sector_bucket: str = "default"):
     if income_stmt is None or income_stmt.empty:
         return None, "GATE_DATA_UNRESOLVED: income_stmt empty", "GATE_DATA_UNRESOLVED", None
 
-    rev_series = get_stmt_series(income_stmt,
+    # B09-R04 (P-C, 24-Oct-2026): DATED, date-sorted series; CAGR on ELAPSED years between the two
+    # period ends it uses (EV-0188/0189/0190), never on how many columns happen to sit between them.
+    rev_series = get_stmt_series_dated(income_stmt,
         ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], max_periods=5)
 
     if len(rev_series) < 2:
@@ -1446,30 +1524,19 @@ def gate4_pass(income_stmt, sector_bucket: str = "default"):
     if len(rev_series) < 2:
         return None, "GATE_DATA_UNRESOLVED: revenue anomaly left <2 clean periods", "GATE_DATA_UNRESOLVED", None
 
-    # Primary: 3yr CAGR window (same logic as before)
-    use = rev_series[:4]  # up to 4 periods (gives 3yr CAGR from index 0 to 3)
-    if len(use) >= 4:
-        years = 3
-        end_val, start_val = use[0][1], use[3][1]
-    elif len(use) == 3:
-        years = 2
-        end_val, start_val = use[0][1], use[2][1]
-    else:
-        years = 1
-        end_val, start_val = use[0][1], use[1][1]
-
-    cagr = compute_cagr(start_val, end_val, years)
+    # Primary window: up to 4 periods (newest back to the 4th); years = the elapsed time between them
+    use = rev_series[:4]
+    cagr, years = dated_cagr(use, len(use) - 1)
     if cagr is None:
-        return None, "GATE_DATA_UNRESOLVED: CAGR computation failed", "GATE_DATA_UNRESOLVED", None
+        return None, ("GATE_DATA_UNRESOLVED: CAGR computation failed (elapsed %s years between %s and %s)"
+                      % (None if years is None else round(years, 2), use[0][0], use[-1][0])), "GATE_DATA_UNRESOLVED", None
 
     if cagr >= 0.05:
         return True, "", "", cagr
 
     # Primary gate failed. For semiconductor_equipment only: attempt 5yr CAGR override.
     if sector_bucket == "semiconductor_equipment" and len(rev_series) >= 5:
-        end_5   = rev_series[0][1]
-        start_5 = rev_series[4][1]
-        cagr_5  = compute_cagr(start_5, end_5, 4)   # 5 data points = 4 year span
+        cagr_5, _y5 = dated_cagr(rev_series, 4)     # 5 data points; span = elapsed years (B09-R04)
         if cagr_5 is not None and cagr_5 >= 0.03:
             reason = (
                 f"GATE4_5YR_OVERRIDE: 3yr_cagr={cagr*100:.1f}% < 5% threshold; "
@@ -1953,11 +2020,11 @@ def measure_gate_variables(ticker_sym, info, income_stmt, cashflow):
     # semiconductor_equipment bucket that can use it, so the question "would the override have
     # rescued names in other buckets?" becomes answerable.
     try:
-        rev_series = get_stmt_series(income_stmt,
+        rev_series = get_stmt_series_dated(income_stmt,
             ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], max_periods=5) \
             if income_stmt is not None and not income_stmt.empty else []
         if len(rev_series) >= 5:
-            out["rev_cagr_5yr"] = compute_cagr(rev_series[4][1], rev_series[0][1], 4)
+            out["rev_cagr_5yr"] = dated_cagr(rev_series, 4)[0]       # B09-R04: elapsed-time span
     except Exception as e:
         notes.append(f"rev_cagr_5yr: {e}")
 
@@ -2408,20 +2475,18 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
             out["fcf_hardgate"]     = "HARD_GATE_FAIL"
 
     # ── Revenue series ───────────────────────────────────────────────────────
-    rev_series = get_stmt_series(income_stmt,
+    rev_series = get_stmt_series_dated(income_stmt,
         ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], 5)
     rev_series, rev_anomaly, rev_excl_yr = detect_rev_anomaly(rev_series)
     out["rev_anomaly_detected"] = rev_anomaly
-    out["excluded_revenue_year"] = rev_excl_yr
+    out["excluded_revenue_year"] = (rev_excl_yr.year if hasattr(rev_excl_yr, "year") else rev_excl_yr)
 
-    # Rev CAGR (use up to 5 periods for 3-4yr window)
+    # Rev CAGR (up to 4 periods); B09-R04: the span is the ELAPSED time between the two period ends
     rev_cagr = None
-    if len(rev_series) >= 4:
-        rev_cagr = compute_cagr(rev_series[3][1], rev_series[0][1], 3)
-        out["revenue_cagr_basis"] = "3yr"
-    elif len(rev_series) >= 3:
-        rev_cagr = compute_cagr(rev_series[2][1], rev_series[0][1], 2)
-        out["revenue_cagr_basis"] = "2yr"
+    if len(rev_series) >= 3:
+        _k = 3 if len(rev_series) >= 4 else 2
+        rev_cagr, _yrs = dated_cagr(rev_series, _k)
+        out["revenue_cagr_basis"] = (("%.1fyr_elapsed" % _yrs) if _yrs else "UNRESOLVED_PERIODS")
     out["rev_cagr"] = rev_cagr
     out["score_rev_cagr"] = _score2(rev_cagr, 0.15, 0.05)
 
@@ -2429,15 +2494,18 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
     recent_rev_growth = None
     recent_rev_basis  = None
     if quarterly_income_stmt is not None and not quarterly_income_stmt.empty:
-        q_rev = get_stmt_series(quarterly_income_stmt,
+        q_rev = get_stmt_series_dated(quarterly_income_stmt,
             ["Total Revenue", "Operating Revenue", "Revenue", "TotalRevenue"], 8)
-        if len(q_rev) >= 5:
+        # B09-R06 (P-C): the prior-year quarter is the one ~365 days earlier, not "4 non-null rows back"
+        py_idx = next((i for i in range(1, len(q_rev)) if 350 <= (q_rev[0][0] - q_rev[i][0]).days <= 380), None)
+        if py_idx is not None:
             latest_q  = q_rev[0][1]
-            py_q_same = q_rev[4][1]  # prior year same quarter
+            py_q_same = q_rev[py_idx][1]  # prior year same quarter, by date
             if latest_q and py_q_same and py_q_same > 0:
                 recent_rev_growth = (latest_q / py_q_same) - 1
                 recent_rev_basis  = "quarterly_yoy"
-    if recent_rev_growth is None and len(rev_series) >= 2:
+    if recent_rev_growth is None and len(rev_series) >= 2 and \
+            0.75 <= (years_between(rev_series[0][0], rev_series[1][0]) or 0) <= 1.25:   # B09-R04: adjacent years only
         if rev_series[0][1] and rev_series[1][1] and rev_series[1][1] > 0:
             recent_rev_growth = (rev_series[0][1] / rev_series[1][1]) - 1
             recent_rev_basis  = "annual_yoy"
@@ -2465,7 +2533,7 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
             if eps_start <= 0 or eps_end <= 0:
                 eps_cagr_math_unreliable = True
             else:
-                eps_cagr = compute_cagr(eps_start, eps_end, max(years_eps, 1))
+                eps_cagr = compute_cagr(eps_start, eps_end, years_eps) if years_eps > 0 else None   # B09-R04
     out["eps_cagr"] = eps_cagr
     out["eps_cagr_math_unreliable"] = eps_cagr_math_unreliable
     if eps_cagr_math_unreliable:
@@ -2505,7 +2573,7 @@ def score_part_a(ticker_sym, info, income_stmt, cashflow, balance_sheet,
             if fcf_start <= 0 or fcf_end <= 0:
                 fcf_cagr_math_unreliable = True
             else:
-                fcf_cagr = compute_cagr(fcf_start, fcf_end, max(yrs_fcf, 1))
+                fcf_cagr = compute_cagr(fcf_start, fcf_end, yrs_fcf) if yrs_fcf > 0 else None   # B09-R04
     out["fcf_cagr"] = fcf_cagr
     out["fcf_cagr_math_unreliable"] = fcf_cagr_math_unreliable
     if fcf_cagr_math_unreliable:
@@ -3670,6 +3738,8 @@ FIELD_MAP = [
     "er_sharecount_sensitivity_pp",   # ISA-0745: the removed buyback term, kept as a sensitivity
     # ISA-0721/0722 (23-Sep-2026): the typed E[r] state and the case identity fields.
     "er_state", "er_horizon_months", "er_quantity_basis", "er_method_id",
+    # B09-R09 (P-C, 24-Oct-2026): the return-method IDENTITY (source + config + anchor + form + horizon).
+    "er_config_id", "er_identity",
     # D-24 (09-Aug-2026) — the anchor evidence travels WITH the number it produced. Without these
     # columns the re-rate is once again a bare figure nobody can audit after the fact.
     "er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own", "er_anchor_operative",
@@ -3682,6 +3752,7 @@ FIELD_MAP = [
     "er_growth_raw", "er_growth_basis", "er_growth_knee_pp", "er_growth_compressed",
     "er_anchor_table_as_of", "er_anchor_table_group", "er_anchor_mode",
     "capital_signal_conflict", "fv_annualised_pct",
+    "capital_signal_conflict_state", "capital_signal_fv_horizon_months",   # B09-R10 (P-C)
     "door", "door_admit_shadow", "regime_at_screen",
     "door_momentum", "door_quality", "door_inflection",
     "qualitative_commentary", "gate_code", "gate_reason",

@@ -128,6 +128,11 @@ def statement_flows(cs):
     dated = [r["date"] for r in cur if r.get("date")]
     if dated:
         firsts.append(min(dated)); lasts.append(max(dated))
+    # ISA-0900: the current statement covers postings up to its EXPORT, not only to its last dated row
+    _ex = [str(v)[:10] for f, v in (cs.get("file_exports") or {}).items()
+           if v and f in (cs.get("source_files") or [])]
+    if _ex and dated:
+        lasts.append(max(_ex))
     for py in cs.get("prior_tax_years") or []:
         rows.extend(dict(x) for x in (py.get("external_flows") or []))
         if py.get("first_date"):

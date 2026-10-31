@@ -59,9 +59,11 @@ def position_risk_detail(size_pct: Optional[float], L: Optional[float],
                          p: Optional[float], label: str = "") -> dict:
     """{risk, unknown[]} — the same number, plus the controls that could not be evaluated."""
     reg = {}
-    _, _, s_ = _gated(size_pct, control_name=f"{label}size_pct", registry=reg)
-    _, _, l_ = _gated(L, control_name=f"{label}L", registry=reg)
-    _, _, p_ = _gated(p, control_name=f"{label}p_thesis", registry=reg)
+    # B09-R12 (P-C, 24-Oct-2026): declared domains - size >= 0, loss-given-failure in [0, 1], p in [0, 1].
+    #   Out-of-domain or non-finite inputs are INVALID and block (a negative or -inf risk was admitted).
+    _, _, s_ = _gated(size_pct, control_name=f"{label}size_pct", registry=reg, lo=0.0)
+    _, _, l_ = _gated(L, control_name=f"{label}L", registry=reg, lo=0.0, hi=1.0)
+    _, _, p_ = _gated(p, control_name=f"{label}p_thesis", registry=reg, lo=0.0, hi=1.0)
     s = float(s_ if s_ is not None else 0.0)
     ll = float(l_ if l_ is not None else 1.0)
     pp = float(p_ if p_ is not None else 0.0)
@@ -143,6 +145,11 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
     dom = proposed.get("catalyst_domain")
     correlated = bool(dom) and any(e.get("catalyst_domain") == dom for e in open_positions)
     p_risk_eff = round(p_risk * (rider if correlated else 1.0), 4)
+    # ⚑ B09-R12 (P-C, EV-0309; Raj D6 12-Sep-2026): a MISSING catalyst domain - on the proposal or on any
+    #   open starter - means the x1.5 rider CANNOT be evaluated. It is UNKNOWN and blocks; it used to be
+    #   read as 'not correlated' and admitted a pair that may fail on one event.
+    if open_positions and (not dom or any(not e.get("catalyst_domain") for e in open_positions)):
+        unknown.append("catalyst_domain(correlation rider)")
 
     # budget disabled -> fall back to the count cap only
     if unknown:
@@ -151,8 +158,8 @@ def admit(proposed: dict, open_positions=None, budget: Optional[float] = None,
                 "headroom": None, "correlated": correlated, "unknown_controls": unknown,
                 "committed_measured": committed_measured,
                 "committed_n_substituted": committed_substituted,
-                "reason": "DENY: UNKNOWN control(s) " + ", ".join(unknown)
-                          + " — a missing input is not a measured zero (V-1)"}
+                "reason": "DENY: UNKNOWN/INVALID control(s) " + ", ".join(unknown)
+                          + " — a missing or invalid input is not a measured zero (V-1, B09-R12)"}
 
     if not budget:
         ok = len(open_positions) < max_concurrent

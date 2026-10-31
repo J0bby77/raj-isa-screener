@@ -102,7 +102,8 @@ except Exception:                                            # noqa: BLE001
         return sorted(k for k, v in (reg or {}).items() if v == "UNKNOWN")
 
 
-def size_for(acs, signal_count, days_to_catalyst, eligible, adv_usd=None, portfolio_value=None):
+def size_for(acs, signal_count, days_to_catalyst, eligible, adv_usd=None, portfolio_value=None,
+             usd_per_gbp=None):
     """§9.2 pre-catalyst starter size, E5 liquidity-capped.
 
     Returns (size_pct, note, liq_capped, liq_status) — D-24 Stage 6 added the fourth element:
@@ -132,12 +133,17 @@ def size_for(acs, signal_count, days_to_catalyst, eligible, adv_usd=None, portfo
     # Same failure class as p_thesis=None -> p=0 and a missing re-rate -> 0. The boolean is kept
     # (callers test it directly) and the third state is carried alongside it, where it BLOCKS.
     reg = {}
-    _, _, adv = _gated(adv_usd, control_name="adv_usd", registry=reg)
-    _, _, pv = _gated(portfolio_value, control_name="portfolio_value", registry=reg)
+    # ⚑ B09-R12 (P-C, 24-Oct-2026): ADV must be FINITE and NON-NEGATIVE (an infinite or NaN ADV read as a
+    #   non-binding cap; a negative one produced a NEGATIVE size, EV-0322/0323/0324) and it is a USD figure
+    #   while the portfolio value is GBP - it is converted ONCE with the as-of USD-per-GBP rate (EV-0325:
+    #   USD ADV / GBP NAV overstated the cap by the exchange rate). No rate -> the cap is UNKNOWN, never assumed.
+    _, _, adv = _gated(adv_usd, control_name="adv_usd", registry=reg, lo=0.0)
+    _, _, pv = _gated(portfolio_value, control_name="portfolio_value_gbp", registry=reg, lo=0.0)
+    _, _, fxr = _gated(usd_per_gbp, control_name="usd_per_gbp", registry=reg, lo=0.5, hi=3.0)
     liq_capped = False
     liq_status = "NOT_BINDING"
-    if adv is not None and pv is not None and pv > 0:
-        liq_cap_pct = float(_c("VCI_MAX_PCT_ADV", 0.10)) * adv / pv * 100.0
+    if adv is not None and pv is not None and pv > 0 and fxr is not None:
+        liq_cap_pct = float(_c("VCI_MAX_PCT_ADV", 0.10)) * (adv / fxr) / pv * 100.0
         if liq_cap_pct < base:
             base = round(liq_cap_pct, 3)
             note += f" | ADV-capped to {base}%"
@@ -160,7 +166,7 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
                        floor_mode=None, scoring_venue=None,
                        # --- VCI-A (27-Sep-2026) ---
                        fv_input_id=None, declared_exchange=None, declared_exchange_source=None,
-                       venue_conflict=None):
+                       venue_conflict=None, usd_per_gbp=None):
     """Full forward-led v2 verdict for one candidate. Supply EITHER fv_inputs (§10.2 dict, enables
     the P25 CI) OR a precomputed bottleneck_fv_per_share (scalar -> manual confirm under E2)."""
     _fi_mark("vci_deploy_eval", "evaluate_candidate")   # VCI-A capabilities' producer (ISA-0699)
@@ -198,8 +204,8 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         _p, _L = _bfv.lookup_priors(asset_structure, catalyst_type)
         p_thesis = p_thesis if p_thesis is not None else _p
         L = L if L is not None else _L
-    fv.floor, fv.floor_source = _bfv.derive_floor(asset_structure, catalyst_type, p_thesis, L,
-                                                  days_to_catalyst, mode=floor_mode)
+    _fd = _bfv.derive_floor_detail(asset_structure, catalyst_type, p_thesis, L, days_to_catalyst, mode=floor_mode)
+    fv.floor, fv.floor_source = _fd["floor"], _fd["source"]          # B09-R11: one home, disclosed below
 
     if acs is not None:
         try:
@@ -257,8 +263,10 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
         _coh = _vi.catalyst_coherence({"days_to_catalyst": days_to_catalyst,
                                        "catalyst_type": catalyst_type})
     except Exception as _e:                                          # noqa: BLE001
-        _coh = {"state": f"CHECK_UNAVAILABLE: {type(_e).__name__}", "days_usable": days_to_catalyst,
-                "blocks": False}
+        # ⚑ B09-R12 (P-C, EV-0328): a coherence check that cannot RUN cannot certify the countdown. It used to
+        #   pass the days through unblocked, so an import failure let an unnamed event move the size again.
+        _coh = {"state": f"CHECK_UNAVAILABLE: {type(_e).__name__}", "days_usable": None,
+                "blocks": True}
     _days_for_sizing = _coh.get("days_usable")
     if _coh.get("blocks"):
         reasons.append(f"catalyst_incoherent:{_coh['state']}")
@@ -266,7 +274,7 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
     # 5) size (E5 liquidity-capped)
     size_pct, size_note, liq_capped, liq_status = size_for(
         acs, signal_count, _days_for_sizing, deploy_eligible,
-        adv_usd=adv_usd, portfolio_value=portfolio_value)
+        adv_usd=adv_usd, portfolio_value=portfolio_value, usd_per_gbp=usd_per_gbp)
     if liq_status == "UNKNOWN" and size_pct:
         # V-1: an unevaluable control never certifies a size. It escalates to a human instead.
         require_manual = True
@@ -281,6 +289,7 @@ def evaluate_candidate(*, ticker, acs, price, fv_inputs=None, bottleneck_fv_per_
     return {
         "ticker": ticker, "acs": acs, "acs_ex_acs8": acs_ex_acs8, "price": price,
         "asset_structure": fv.asset_structure, "fv_floor": fv.floor, "floor_source": fv.floor_source,
+        "fv_floor_detail": _fd,                       # B09-R11: uncapped requirement, cap, p/L, horizon, feasibility
         "p_thesis": p_thesis, "L": L, "catalyst_type": catalyst_type, "catalyst_domain": catalyst_domain,
         "bottleneck_fv_per_share": fv.bottleneck_fv_per_share,
         "fv_p25": fv.fv_p25, "fv_p50": fv.fv_p50, "fv_p75": fv.fv_p75,
@@ -433,7 +442,7 @@ def rank_eligible(entries):
     return eligible, ineligible
 
 
-def refresh_at_live_price(entries, price_lookup, weights=None, portfolio_value=None):
+def refresh_at_live_price(entries, price_lookup, weights=None, portfolio_value=None, usd_per_gbp=None):
     """Monthly pre-run recompute: re-price fv_asymmetry, re-derive floor, re-score + re-rank at the
     CURRENT price. Rolls fv_prev/price_prev in for E7. `price_lookup(ticker)->price`."""
     out = []
@@ -458,7 +467,7 @@ def refresh_at_live_price(entries, price_lookup, weights=None, portfolio_value=N
             catalyst_type=e.get("catalyst_type"), catalyst_domain=e.get("catalyst_domain"),
             p_thesis=e.get("p_thesis"), L=e.get("L"),
             acs_ex_acs8=e.get("acs_ex_acs8"), revision_velocity=e.get("revision_velocity"),
-            adv_usd=e.get("adv_usd"), portfolio_value=portfolio_value,
+            adv_usd=e.get("adv_usd"), portfolio_value=portfolio_value, usd_per_gbp=usd_per_gbp,
             fv_prev=e.get("bottleneck_fv_per_share_prev", e.get("fv_prev")),
             price_prev=e.get("price_prev"), weights=weights,
             scoring_venue=e.get("scoring_venue"))

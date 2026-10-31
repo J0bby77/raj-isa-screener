@@ -402,11 +402,24 @@ def vci_size_pct(*, p_thesis, L, budget_available_pct, evidence_state,
             "VCI sizing needs both p_thesis and L. A missing p_thesis silently read as p = 0 is "
             "the defect that flipped DENY to ADMIT on QBTS — a missing input is not a measured "
             "zero (V-1, R4.3).")
+    import math as _m
     p, l_, rider = float(p_thesis), float(L), float(correlation_rider or 1.0)
+    # ⚑ B09-R12 (P-C, 24-Oct-2026, EV-0346/0347): every input must be FINITE. A NaN loss or a NaN
+    #   available budget used to flow through the arithmetic and return a NaN size - not a refusal.
+    try:
+        _b = float(budget_available_pct)
+    except (TypeError, ValueError):
+        _b = float("nan")
+    if not (_m.isfinite(p) and _m.isfinite(l_) and _m.isfinite(rider) and _m.isfinite(_b)):
+        raise SizingRefused("VCI sizing inputs must be finite: p_thesis=%r L=%r rider=%r budget=%r (B09-R12)"
+                            % (p_thesis, L, correlation_rider, budget_available_pct))
+    if _b < 0 or rider <= 0:
+        raise SizingRefused("available budget must be >= 0 and the rider > 0; got %r / %r (B09-R12)"
+                            % (budget_available_pct, correlation_rider))
     if not (0.0 < p < 1.0):
         raise SizingRefused(f"p_thesis must be strictly between 0 and 1; got {p_thesis!r}")
-    if l_ <= 0:
-        raise SizingRefused(f"loss-given-failure must be positive; got {L!r}")
+    if l_ <= 0 or l_ > 1.0:
+        raise SizingRefused(f"loss-given-failure must be in (0, 1]; got {L!r}")
     denom = (1.0 - p) * l_ * rider
     budget_size = float(budget_available_pct) / denom
     lad_t = target_pct(evidence_state, policy=policy)
@@ -519,6 +532,32 @@ def binary_fields(position: dict) -> dict:
     }
 
 
+def _prob(v, name, ticker):
+    """B09-R12: a probability / loss fraction - finite and inside [0, 1] - or SizingRefused."""
+    import math as _m
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise SizingRefused("%s: %s %r is not a number (B09-R12)" % (ticker, name, v))
+    if not _m.isfinite(f) or f < 0.0 or f > 1.0:
+        raise SizingRefused("%s: %s %r outside [0, 1] or non-finite - refused, never a negative commitment "
+                            "(B09-R12)" % (ticker, name, v))
+    return f
+
+
+def _finite_nonneg(v, name, ticker, default_zero=False):
+    import math as _m
+    if v is None and default_zero:
+        return 0.0
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise SizingRefused("%s: %s %r is not a number (B09-R12)" % (ticker, name, v))
+    if not _m.isfinite(f) or f < 0.0:
+        raise SizingRefused("%s: %s %r is negative or non-finite (B09-R12)" % (ticker, name, v))
+    return f
+
+
 def binary_commitment(position: dict) -> dict:
     """`is_binary` is STATEFUL. RESOLVED releases the budget commitment ON THE SAME RUN.
 
@@ -526,17 +565,24 @@ def binary_commitment(position: dict) -> dict:
     still reserved against nothing, because `is_binary` had no expiry. That is 14% of a 1.5%
     budget held against an event that has already happened."""
     st = position.get("catalyst_status")
-    if position.get("is_binary") and st not in CATALYST_STATUSES:
+    # ⚑ B09-R12 (P-C, 24-Oct-2026, EV-0331/0332): the EXPECTED-LOSS commitment is decided by the typed
+    #   POSITION_EVENT_RISK field (ISA-0688), falling back to the legacy is_binary only when it is absent.
+    #   It used to read the legacy flag directly, so a typed `position_event_risk: false` still committed
+    #   budget and a typed `true` with a legacy `false` committed nothing. UNKNOWN commits (V-1).
+    _per = position_event_risk(position)
+    _ev = (_per is BINARY_TRUE) or (_per == BINARY_UNKNOWN)
+    if _ev and st not in CATALYST_STATUSES:
         raise SizingRefused(
-            f"{position.get('ticker')}: is_binary is true but catalyst_status is {st!r}. "
+            f"{position.get('ticker')}: position event risk is {_per!r} but catalyst_status is {st!r}. "
             f"Declared: {list(CATALYST_STATUSES)}. A binary with no catalyst state cannot have "
             f"its commitment released and would reserve budget forever (ISA-0424).")
+    w = _finite_nonneg(position.get("size_pct"), "size_pct", position.get("ticker"), default_zero=True)
     # ── ISA-0655 — a SUCCESSOR re-arms; it is never released ────────────────────────────
-    if position.get("is_binary") and st == RESOLVED_POSITIVE_SUCCESSOR_PENDING:
+    if _ev and st == RESOLVED_POSITIVE_SUCCESSOR_PENDING:
         succ = position.get("successor") or {}
-        w = float(position.get("size_pct") or 0.0)
         if succ.get("priceable") and succ.get("p_thesis") is not None and succ.get("L") is not None:
-            p_, l_ = float(succ["p_thesis"]), float(succ["L"])
+            p_, l_ = _prob(succ["p_thesis"], "successor.p_thesis", position.get("ticker")), \
+                _prob(succ["L"], "successor.L", position.get("ticker"))
             c = w * (1.0 - p_) * l_
             return {"ticker": position.get("ticker"), "commits_budget": True,
                     "commitment_pct": round(c, 6), "successor_state": SUCCESSOR_PRICED,
@@ -557,12 +603,17 @@ def binary_commitment(position: dict) -> dict:
                            f"cannot be priced is not an absence of one (V-1/R4.3, ISA-0655). "
                            f"It also counts toward VCI_BINARY_MAX_CONCURRENT and bars further "
                            f"VCI deployment into this name.")}
-    if not position.get("is_binary") or st != PENDING:
+    if not _ev or st != PENDING:
         return {"ticker": position.get("ticker"), "commits_budget": False, "commitment_pct": 0.0,
-                "reason": ("not a binary" if not position.get("is_binary") else
+                "reason": ("not a binary (position_event_risk %r)" % (_per,) if not _ev else
                            f"catalyst {st} — commitment RELEASED on this run; it now sizes as an "
                            f"ordinary platform holding")}
     p, l_ = position.get("p_thesis"), position.get("L")
+    if p is not None or l_ is not None:
+        # B09-R12 (EV-0345): an explicit p/L must be finite and inside [0, 1]; p = 1.5 used to create a
+        # NEGATIVE commitment and EXTRA headroom.
+        p = None if p is None else _prob(p, "p_thesis", position.get("ticker"))
+        l_ = None if l_ is None else _prob(l_, "L", position.get("ticker"))
     basis = "declared on the position"
     if p is None or l_ is None:
         # ISA-0687. An explicit p/L on the record still wins. Failing that, a DECLARED
@@ -577,7 +628,7 @@ def binary_commitment(position: dict) -> dict:
             raise SizingRefused(f"{position.get('ticker')}: a PENDING binary with no p_thesis/L "
                                 f"and no declared catalyst_type cannot be priced; a null is not "
                                 f"a zero (V-1)")
-    c = float(position.get("size_pct") or 0.0) * (1.0 - float(p)) * float(l_)
+    c = w * (1.0 - float(p)) * float(l_)
     return {"ticker": position.get("ticker"), "commits_budget": True,
             "commitment_pct": round(c, 6), "catalyst_date": position.get("catalyst_date"),
             "prior_basis": basis, "p_thesis": float(p), "L": float(l_),
@@ -718,6 +769,21 @@ def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
     R4.9 — a reader that cannot match a row COUNTS it and fails; it never drops it."""
     declared = declared if declared is not None else load_declared_binaries(root)
     rows, refusals, unpriceable = [], [], []
+    # ⚑ B09-R12 (P-C, 24-Oct-2026, EV-0349): one ECONOMIC position per ticker - duplicate broker rows (two
+    #   lots, a repeated line) are AGGREGATED, never counted as two commitments of one bet.
+    _agg, _order, _dups = {}, [], []
+    for h in (held or []):
+        t0 = str(h.get("ticker") or "").upper()
+        if t0 in _agg:
+            _dups.append(t0)
+            try:
+                _agg[t0]["size_pct"] = float(_agg[t0].get("size_pct") or 0.0) + float(h.get("size_pct") or 0.0)
+            except (TypeError, ValueError):
+                _agg[t0]["size_pct"] = None
+        else:
+            _agg[t0] = dict(h, ticker=t0)
+            _order.append(t0)
+    held = [_agg[t0] for t0 in _order]
     for h in (held or []):
         t = str(h.get("ticker") or "").upper()
         d = declared.get(t)
@@ -734,10 +800,20 @@ def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
                         "decided, and a null is not a zero (V-1/R4.3). Declare it."
                         % (t, BINARY_POSITIONS_FILE))})
             continue
-        if not d.get("is_binary"):
+        # ⚑ B09-R12 (EV-0341): a PRESENT declaration that classifies nothing (no is_binary, no typed field)
+        #   is as undecided as an absent one - it is REFUSED, never read as not-a-binary.
+        if not any(k in d for k in ("is_binary", "position_event_risk", "catalyst_is_binary")):
+            refusals.append({"ticker": t, "control": "is_binary",
+                             "why": ("%s is HELD and its %s record declares neither is_binary nor the typed "
+                                     "position_event_risk / catalyst_is_binary fields - an empty declaration "
+                                     "is not a decision (V-1/R4.3, B09-R12)." % (t, BINARY_POSITIONS_FILE))})
             continue
         _bf = binary_fields(dict(d, ticker=t))
-        row = {"ticker": t, "size_pct": h.get("size_pct"), "is_binary": True,
+        # ⚑ B09-R12 (EV-0340): the TYPED fields decide membership (ISA-0688); the legacy flag is their
+        #   fallback. A legacy `false` with typed `true` fields used to drop the position entirely.
+        if _bf["position_event_risk"] is BINARY_FALSE and _bf["catalyst_is_binary"] is BINARY_FALSE:
+            continue
+        row = {"ticker": t, "size_pct": h.get("size_pct"), "is_binary": bool(d.get("is_binary")),
                # ISA-0688 — both typed fields travel with the row to their own consumers
                "position_event_risk": _bf["position_event_risk"],
                "catalyst_is_binary": _bf["catalyst_is_binary"],
@@ -748,6 +824,12 @@ def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
                "catalyst_domain": (None if d.get("catalyst_domain") == UNDECLARED
                                    else d.get("catalyst_domain")),
                "asset_structure": d.get("asset_structure")}
+        # ⚑ B09-R12 (EV-0333/0334/0335): the EXPLICIT declared p/L and the SUCCESSOR travel with the row. The
+        #   join used to drop them, so a declared p 0.9 / L 0.2 was re-priced by its class (0.04% -> 0.5% of
+        #   the ISA) and a PRICED successor was re-armed at the most adverse prior.
+        for _k in ("p_thesis", "L", "successor", "aliases"):
+            if d.get(_k) is not None:
+                row[_k] = d.get(_k)
         # ⚑ D6 (Raj, 12-Sep-2026): an absent catalyst_domain REFUSES and never defaults to
         #   "not correlated". The x1.5 rider exists to stop two names failing on one event;
         #   reading absence as "no shared domain" is how a correlated pair gets admitted.
@@ -770,7 +852,7 @@ def held_binary_rows(held, declared=None, root: Optional[str] = None) -> dict:
             unpriceable.append({"ticker": t, "successor": succ})
         rows.append(row)
     return {"rows": rows, "refusals": refusals, "unpriceable_successors": unpriceable,
-            "n_held": len(held or []), "n_binary": len(rows)}
+            "n_held": len(held or []), "n_binary": len(rows), "aggregated_duplicates": sorted(set(_dups))}
 
 
 def budget_available(positions: List[dict], budget_pct: float, max_concurrent: int = 1) -> dict:
@@ -781,6 +863,21 @@ def budget_available(positions: List[dict], budget_pct: float, max_concurrent: i
     #   its slot the same run, and a name with a live successor does not. Counting NAMES plus
     #   C-1's loss block would leave only the two winners removable and mechanically sell the
     #   winner while protecting the worst risk-adjusted position — ISA-0167 inverted.
+    # ⚑ B09-R12 (P-C, EV-0349): one economic position per ticker - repeated rows of the same position are
+    #   AGGREGATED (sizes summed) before any commitment or slot is counted; they are never two bets.
+    _seen, _agg_dups = {}, []
+    for _p in (positions or []):
+        _t = str(_p.get("ticker") or "").upper()
+        if _t and _t in _seen:
+            _agg_dups.append(_t)
+            _prev = _seen[_t]
+            try:
+                _seen[_t] = dict(_prev, size_pct=float(_prev.get("size_pct") or 0.0) + float(_p.get("size_pct") or 0.0))
+            except (TypeError, ValueError):
+                _seen[_t] = dict(_prev, size_pct=None)
+        else:
+            _seen[_t or ("#%d" % len(_seen))] = dict(_p)
+    positions = list(_seen.values())
     recs = [binary_commitment(p) for p in positions]
     live = [r for r in recs if r["commits_budget"]]
     committed = round(sum(r["commitment_pct"] for r in live), 6)
@@ -810,6 +907,7 @@ def budget_available(positions: List[dict], budget_pct: float, max_concurrent: i
             "concurrent_event_population": sorted(f["ticker"] for f in slot_rows),
             "concurrent_event_unknown": sorted(slot_unknown),
             "n_concurrent_event_slots": n_slots,
+            "aggregated_duplicates": sorted(set(_agg_dups)),
             "cap_basis": ("ISA-0688: the concurrent-event cap counts positions whose CURRENT "
                           "NEXT CATALYST is a dated go/no-go event, plus those whose catalyst "
                           "character is UNKNOWN (an unclassified catalyst is not a measured "
@@ -878,10 +976,25 @@ def held_binary_budget(held, *, declared=None, budget_pct: float = 1.5,
     hb = held_binary_rows(held, declared=declared, root=root)
     bud = budget_available_reported(hb["rows"], budget_pct=budget_pct,
                                     max_concurrent=max_concurrent)
+    if hb["refusals"]:
+        # ⚑ B09-R12 (P-C, 24-Oct-2026, EV-0336/0338/0339): a held name the registry cannot classify means the
+        #   headroom is UNKNOWN - it used to leave a MEASURED available figure and blocks_capital False, so a
+        #   size could be emitted beside a registry refusal. The figure is WITHHELD and capital is blocked.
+        bud = dict(bud)
+        bud["committed_pct_measured_over"] = [r.get("ticker") for r in hb["rows"]]
+        bud["committed_pct"] = None
+        bud["available_pct"] = None
+        bud["blocks_capital"] = True
+        bud["why"] = ((bud.get("why") + "; ") if bud.get("why") else "") + (
+            "%d held name(s) are not classified in %s, so the headroom is UNKNOWN and WITHHELD: %s"
+            % (len(hb["refusals"]), BINARY_POSITIONS_FILE, ", ".join(sorted({r["ticker"] for r in hb["refusals"]}))))
     import hashlib as _hl
     import json as _json
-    basis = _json.dumps({"rows": hb["rows"], "budget_pct": budget_pct,
-                         "max_concurrent": max_concurrent}, sort_keys=True, default=str)
+    # B09-R12 (EV-0337): the identity binds the WHOLE held population - rows, refusals and the held tickers
+    # - so a book with an undeclared holding and an empty book can no longer share one calc_id.
+    basis = _json.dumps({"rows": hb["rows"], "refusals": hb["refusals"],
+                         "held": sorted(str(h.get("ticker") or "").upper() for h in (held or [])),
+                         "budget_pct": budget_pct, "max_concurrent": max_concurrent}, sort_keys=True, default=str)
     calc_id = "VCIB-%s" % _hl.sha256(basis.encode("utf-8")).hexdigest()[:12]
     return {"calc_id": calc_id,
             "rows": hb["rows"], "refusals": hb["refusals"],
@@ -1404,6 +1517,14 @@ def activate_from_executions(entries: List[dict], plan_loader, *, today=None, pa
         if existing and oid not in by_id:
             row = next((r for r in al.get("rows") or [] if r.get("ticker") == tk), {})
             ob = existing[0]
+            # ⚑ S3/B03-R05 (EV-0204): a replayed execution must not append the same fill event again - the
+            #   (decision, execution reference) pair is the event's identity, persisted with the obligation.
+            if any(ev0.get("decision_id") == did and ev0.get("execution_reference") == exec_ref
+                   for ev0 in ob.get("fill_events") or []):
+                outcomes.append(dict(rec, outcome="IDEMPOTENT_SKIP", obligation_id=ob.get("obligation_id"),
+                                     why="fill event already recorded for this execution"))
+                by_id[oid] = ob
+                continue
             ev = {"on": today, "decision_id": did, "execution_reference": exec_ref,
                   "executed_gbp": amt, "plan_state": row.get("state"), "artifact": plan.get("artifact")}
             ob.setdefault("fill_events", []).append(ev)

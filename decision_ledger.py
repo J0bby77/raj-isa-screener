@@ -468,6 +468,15 @@ def log_decision(path, ticker, route, decision, scores=None, gates=None, flags=N
                                                   "method_id")} if _c else None)
             if not _c:
                 entry["flags_at_decision"].append("NO_UNDERWRITING_CASE_AT_DECISION")
+            # ⚑ B09-R09/R13, ISA-0822 (P-C, 24-Oct-2026): er_at_decision is the ADDITIVE DIAGNOSTIC E[r] of the
+            #   underwriting case - NOT the figure that authorised the capital. The authorising engine ER12 is
+            #   bound beside it from the verified Capital Decision Receipt (ISA-0868 binding), so the learning loop
+            #   attributes a realised return to the E[r] that actually made the decision.
+            entry["er_at_decision_role"] = "ADDITIVE_DIAGNOSTIC (underwriting case); not the authorising ER12"
+            _rb = receipt_binding or {}
+            entry["authorising_er12"] = (_rb.get("er12") if _rb.get("state") == "BOUND" else None)
+            if entry["authorising_er12"] is None:
+                entry["flags_at_decision"].append("AUTHORISING_ER12_UNBOUND:%s" % (_rb.get("state") or "NO_RECEIPT_BINDING"))
         except Exception as _uwe:                                       # noqa: BLE001
             entry["underwriting_case_id"] = None
             entry["underwriting_case_error"] = "%s: %s" % (type(_uwe).__name__, _uwe)

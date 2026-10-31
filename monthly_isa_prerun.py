@@ -453,7 +453,8 @@ def _plan_stability_only(args) -> int:
     and a stage that reports on a run that did not happen is worse than one that did not run
     (R2.10, R4.9)."""
     # same derivation as main() — one shape for the label, not a second one (R4.4)
-    month_label = date.today().strftime("%b_%Y").lower()
+    import run_cycle as _rcy0   # ISA-0910: the CYCLE (review-Sunday month), never the wall-clock month
+    month_label = _rcy0.cycle_label()
     path = os.path.join(SCRIPT_DIR, "run_context_%s.json" % month_label)
     if not os.path.exists(path):
         print("REFUSED: %s does not exist — run the main pre-run first." % os.path.basename(path))
@@ -1056,8 +1057,12 @@ def main():
 
     isa_folder = args.isa_folder or os.path.dirname(SCRIPT_DIR)
     run_date   = date.today()
-    month_label = run_date.strftime("%b_%Y").lower()
-    run_month   = run_date.strftime("%b %Y")
+    # ⚑ ISA-0910 (28-Oct-2026): the run's CYCLE is the month of the review Sunday it feeds (ISA-0795; one home
+    #   run_cycle.py). Sat 31-Oct-2026 -> nov_2026 (the wall-clock rule labelled it oct_2026, read SEPTEMBER's
+    #   screens and refused on the frozen October shadow cohort). run_date stays the REAL date for every as-of stamp.
+    import run_cycle as _rcy
+    month_label = _rcy.cycle_label(run_date)
+    run_month   = _rcy.cycle_run_month(run_date)
 
     print("=" * 65)
     print(f"Monthly ISA Pre-Run  |  {run_month}  |  {datetime.now().strftime('%H:%M')}")
@@ -2534,7 +2539,24 @@ def main():
                     warnings.append("Step 6.5 (ISA-0673): could not read the portfolio value "
                                     "(%s: %s); E5's liquidity cap is UNEVALUATED, not absent."
                                     % (type(_e).__name__, _e))
-                _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv)
+                # B09-R12 (P-C, 24-Oct-2026): the ADV liquidity cap converts USD ADV to GBP ONCE with the
+                # Step 6f ECB as-of rate (fx_pit_[month].json, USD per GBP). Absent -> the cap is UNKNOWN
+                # (manual confirm), never a USD/GBP ratio read as a percentage.
+                _usd_per_gbp = None
+                try:
+                    _fxp = os.path.join(SCRIPT_DIR, "fx_pit_%s.json" % month_label)
+                    if os.path.exists(_fxp):
+                        _fxa = json.load(open(_fxp, encoding="utf-8"))
+                        if _fxa.get("state") == "OK":
+                            _usd_per_gbp = (((_fxa.get("currencies") or {}).get("USD") or {}).get("ccy_per_gbp"))
+                    if _usd_per_gbp is None:
+                        warnings.append("Step 6.5 (B09-R12): no ECB USD-per-GBP rate in fx_pit_%s.json - the VCI "
+                                        "ADV liquidity cap is UNKNOWN this run (manual confirm), never a "
+                                        "USD/GBP ratio read as a percentage" % month_label)
+                except Exception as _fxe:
+                    warnings.append("Step 6.5 (B09-R12): fx_pit unreadable (%s) - ADV cap UNKNOWN" % _fxe)
+                _ranked = _vde.refresh_at_live_price(_vci, price_lookup=_price_lookup, portfolio_value=_pv,
+                                                     usd_per_gbp=_usd_per_gbp)
                 # ═══════════════════════════════════════════════════════════════════════
                 # E4 sleeve binary risk budget — ISA-0646 / 0653 / 0654 / 0668 / 0671
                 # ═══════════════════════════════════════════════════════════════════════
@@ -3689,6 +3711,19 @@ def main():
                 print(f"  WARNING: {stderr or stdout}")
             else:
                 print(stdout.strip())
+                # ⚑ ISA-0903 (26-Oct-2026, found on the ISA-0898 build): the live re-rank DECIDES the final watchlist
+                #   but its promoted/demoted log reached no summary key, so the email's only watchlist-change line was
+                #   update_watchlist's screen-stage log - which can say the opposite (shadow 26-Oct: 'removed WDC'
+                #   while the re-rank made WDC rank 1). Keep the re-rank's own log; render both, labelled.
+                for _ln in reversed((stdout or "").strip().splitlines()):
+                    if _ln.startswith("{") and '"promoted"' in _ln:
+                        try:
+                            _rr = json.loads(_ln)
+                            summary["watchlist_rerank"] = {k: _rr.get(k) for k in (
+                                "run_date", "promoted", "demoted", "rescored", "selection_method", "no_live_score")}
+                        except ValueError:
+                            summary["watchlist_rerank"] = {"state": "UNPARSEABLE"}
+                        break
 
     # ---------------------------------------------------------------------------
     # H1 fix — RE-inject AI-disruption scores after rerank. rerank's end-of-run refresh regenerates
@@ -3973,19 +4008,48 @@ def main():
         _h = _yf.Ticker("VUAG.L").history(period="2y")
         _closes = list(_h["Close"].dropna()) if _h is not None and len(_h) else []
         if _closes:
+            # ⚑ S3/B04 (ISA-0884, Raj 10/24-Oct-2026): ONE review - reconcile confirmed VUAG fills, observe
+            #   crossings (opportunities 10%:1, 20%:+2, 30%: fresh review), size this review's capacity =
+            #   min(eligible cash, VUAG approved-limit headroom), claimed once. No reserve division, no saved reserve.
+            try:
+                with open(os.path.join(SCRIPT_DIR, "transaction_ledger.json"), encoding="utf-8") as _tlf_dd:
+                    _dd_led = json.load(_tlf_dd).get("entries") or []
+            except Exception:                                           # noqa: BLE001
+                _dd_led = []
+            _dd_ov = None
+            try:
+                import capital_destination as _cd_dd
+                with open(os.path.join(SCRIPT_DIR, "target_weights.json"), encoding="utf-8") as _twf_dd:
+                    _dd_tw = json.load(_twf_dd)
+                _dd_pf = _cd_dd._load_portfolio()
+                _dd_hr, _dd_hb = _cd_dd.vuag_drawdown_headroom(_dd_pf, _dd_tw)
+                # ⚑ P-D / ISA-0886 (Raj 24-Oct-2026): beyond VUAG's approved-limit room, the remaining eligible cash
+                #   is offered to the held funds through the EXISTING router (approved caps/bands) - not left idle.
+                if _dd_hr is not None and float(_reserve) > float(_dd_hr) + 0.005:
+                    _dd_ov = _cd_dd.drawdown_fund_overflow(_dd_pf, _dd_tw, float(_reserve) - float(_dd_hr), root=SCRIPT_DIR)
+                    if _dd_ov.get("state") == "UNMEASURED":
+                        warnings.append("B1 drawdown (ISA-0886): fund-router overflow UNMEASURED (%s) - capacity stays "
+                                        "VUAG-capped this review" % _dd_ov.get("why"))
+                        _dd_ov = None
+            except Exception as _hre:                                   # noqa: BLE001
+                _dd_hr, _dd_hb = None, "UNMEASURED: %s: %s" % (type(_hre).__name__, _hre)
             _dstate = _ddm.load_state()
-            _dstate, _fired = _ddm.update_ladder(_dstate, _closes)
-            _ddm.record_tranches(_dstate, _fired, _reserve)          # ISA-0858 B1.6b: size + key at fire time
-            _regime, _rbasis = _ddm.classify_regime(_closes, _dstate["drawdown_pct"])
+            _dstate, _fired = _ddm.review(_dstate, _closes, ledger_entries=_dd_led, eligible_cash_gbp=_reserve,
+                                          fund_headroom_gbp=_dd_hr, headroom_basis=_dd_hb, overflow=_dd_ov)
+            _regime, _rbasis = _ddm.classify_regime(_closes, _dstate["drawdown_pct"], dates=list(_h.index))
             _dstate["regime_state"], _dstate["regime_basis"] = _regime, _rbasis
-            _dstate["reserve_gbp"] = _reserve
             _ddm.save_state(_dstate)
             _dblock = _ddm.emit_block(_dstate, _fired, _reserve)
             summary["drawdown"] = _dblock
             summary["regime_state"] = _regime
-            if _fired:
+            if _dblock.get("DRAWDOWN_TRIGGER"):
                 flags.append({"type": "DRAWDOWN_TRIGGER",
-                              "message": json.dumps(_dblock.get("DRAWDOWN_TRIGGER"))})
+                              "message": json.dumps(_dblock.get("DRAWDOWN_TRIGGER"), default=str)})
+            if _dblock.get("DRAWDOWN_REVIEW"):
+                flags.append({"type": "DRAWDOWN_REVIEW", "message": json.dumps(_dblock.get("DRAWDOWN_REVIEW"))})
+            if _dd_hr is None and _ddm.actionable(_dstate):
+                warnings.append("B1 drawdown: an opportunity is actionable but the VUAG approved-limit headroom is "
+                                "UNMEASURED (%s) - no amount is proposed and the B1.6b reservation REFUSES" % _dd_hb)
             print(f"  B1: {_dblock['standing_line']}")
         else:
             warnings.append("B1 drawdown monitor: no VUAG history this run")
@@ -4583,6 +4647,33 @@ def main():
     # ---------------------------------------------------------------------------
     _alerts_path = os.path.join(SCRIPT_DIR, "position_alerts.json")
     _alerts_block = {"status": "NONE"}
+    _alerts_refresh = None
+    # ⚑ P-C (24-Oct-2026, found by the P-C shadow): the weekly task's EPS snapshots ran on (16/23-Oct) while
+    #   position_alerts.json stopped at 25-Sep, so this step surfaced 4-week-old alerts. When the snapshot
+    #   store is NEWER than the alert store (or the store is absent), re-evaluate it here at the run date
+    #   (prices prefetched in parallel inside a 45 s budget; unfetched names are named). Detection only.
+    try:
+        import position_alerts as _pa95
+        _snap95 = os.path.join(SCRIPT_DIR, "eps_trend_snapshots.json")
+        if os.path.exists(_snap95):
+            with open(_snap95, encoding="utf-8") as _sf95:
+                _newest95 = _pa95.newest_snapshot_date(json.load(_sf95))
+            _have95 = ""
+            if os.path.exists(_alerts_path):
+                with open(_alerts_path, encoding="utf-8") as _af95:
+                    _have95 = str((json.load(_af95) or {}).get("as_of_date") or "")[:10]
+            if _pa95.store_needs_refresh(_newest95, _have95) and not args.dry_run:
+                _p95, _alerts_refresh = _pa95.refresh_store(
+                    _alerts_path, _snap95, os.path.join(SCRIPT_DIR, "watchlist_tickers.json"),
+                    today=run_date.isoformat())
+                _alerts_refresh.update({"previous_as_of": _have95 or None, "snapshot_newest": _newest95})
+                print("  Step 9b.5: position alerts RE-EVALUATED at %s (store was %s, snapshots %s; %d name(s) "
+                      "without a price)" % (run_date.isoformat(), _have95 or "absent", _newest95,
+                                            _alerts_refresh.get("price_unresolved", 0)))
+    except Exception as _par95:                                            # noqa: BLE001
+        _alerts_refresh = {"refreshed": False, "error": "%s: %s" % (type(_par95).__name__, str(_par95)[:200])}
+        warnings.append("Step 9b.5: position-alert refresh FAILED (%s) - the store read below may be stale"
+                        % _alerts_refresh["error"])
     try:
         if os.path.exists(_alerts_path):
             with open(_alerts_path, encoding="utf-8") as _af:
@@ -4598,6 +4689,8 @@ def main():
                 "alerts": _al,
                 "stale": bool(_stale),
                 "doctrine": _ap.get("doctrine"),
+                "producer": _ap.get("producer"),
+                "refresh": _alerts_refresh,
             }
             if _stale:
                 warnings.append("Position alerts store is >14 days old (as_of %s) -- the weekly EPS "
@@ -5336,7 +5429,7 @@ def _prerun_phase_b(_ctx):
         import datetime as _dt4
         _st4 = refresh_counterfactual_prices(
             os.path.join(SCRIPT_DIR, "sleeve_counterfactual.json"),
-            month_str=_dt4.datetime.now().strftime("%Y-%m"), challenger_fn=_ccf,
+            month_str=__import__("run_cycle").cycle_ym(), challenger_fn=_ccf,   # ISA-0910: the cycle month
             sleeve_value_now=_slv, mu_value_now=_muv,
             largest_ticker=(_lg or {}).get("ticker"), largest_value_now=(_lg or {}).get("value_gbp"),
             largest_weight_pct=(round(float(_lg["value_gbp"]) / _nav4 * 100, 3) if _lg and _nav4 else None))
@@ -5571,6 +5664,83 @@ def _prerun_phase_b(_ctx):
     except Exception as _e:
         warnings.append(f"B08-R01 exposure coverage skipped: {type(_e).__name__}: {_e}")
 
+    # ── Step 6.10s — P-D WHOLE-ISA RISK (B08-R03/R06/R07/R09/R10, ISA-0887..0891, 25-Oct-2026) ─────────────────
+    #   whole-book covariance (stocks + funds) -> deterministic stress / reverse stress vs Raj's 50% limit (Raj
+    #   24-Oct-2026) -> flow-adjusted drawdown record -> GBP 1m / 1.5m scale study. REPORTING + Step 5 review items
+    #   (R4.18 DEGRADE_ONLY): the engine forms its own whole-book view at 6.10e; nothing here moves capital.
+    print("\n[6.10s] Whole-ISA risk, stress vs loss appetite, drawdown record, scale study (P-D)...")
+    try:
+        import whole_book_stress as _wbs
+        import stock_return_store as _srs_s
+        with open(portfolio_path, encoding="utf-8") as f:
+            _pd_s = json.load(f)
+        _wi = _wbs.prerun_step(summary, _pd_s, _srs_s.load(), month_label, root=SCRIPT_DIR,
+                               as_of=date.today(), fetch=not getattr(args, "dry_run", False),
+                               folder=(getattr(args, "isa_folder", None) or os.path.dirname(SCRIPT_DIR)))
+        summary["whole_isa"] = {k: _wi.get(k) for k in ("whole_book_risk", "whole_book_stress", "wealth_record",
+                                                       "scale_readiness", "held_stock_history", "review_items")}
+        if os.path.exists(analytics_path):
+            with open(analytics_path, encoding="utf-8") as f:
+                _ana_s = json.load(f)
+            _ana_s["whole_isa"] = summary["whole_isa"]
+            with open(analytics_path, "w", encoding="utf-8") as f:
+                json.dump(_ana_s, f, indent=2, ensure_ascii=False)
+        for _it in _wi.get("review_items") or []:
+            flags.append({"type": "RISK_APPETITE_REVIEW", "message": json.dumps(_it, default=str)})
+        for _p in ("whole_book_risk", "whole_book_stress", "wealth_record", "scale_readiness"):
+            _st = (_wi.get(_p) or {}).get("state")
+            if _st not in ("OK", "MEASURED", None):
+                warnings.append("Step 6.10s (P-D): %s %s - %s" % (_p, _st, (_wi.get(_p) or {}).get("why")))
+        for _l in _wi.get("lines") or []:
+            print("  P-D: " + _l)
+    except Exception as _e:
+        summary["whole_isa"] = {"state": "FAILED", "why": "%s: %s" % (type(_e).__name__, _e)}
+        warnings.append(f"Step 6.10s (P-D whole-ISA risk) skipped: {type(_e).__name__}: {_e}")
+
+    print("\n[6.10r] Account statement measures (ISA-0900, reporting only)...")
+    # ⚑ ISA-0900 (25/26-Oct-2026): account-level REPORTING measures (computed AFTER Step 6.10s, which refreshes
+    #   held_stock_history.json - measured 26-Oct on shadow-0642o-c2: computed at Step 9 the five stocks read NOT_AVAILABLE) - holdings statement, value bridge since
+    #   the last pre-run AND month-end to month-end, per-holding contributions, 1M..10Y return history
+    #   (golden + X-Ray second source). Reporting only (R20.2): no decision reads summary["report_measures"];
+    #   email s6 renders it. A failure is a typed state, never a silent omission.
+    try:
+        import report_measures as _rm0900
+        def _rm_load(_p):
+            try:
+                with open(_p, encoding="utf-8") as _f:
+                    return json.load(_f)
+            except (OSError, ValueError):
+                return None
+        _rm_cur = _rm_load(portfolio_path)
+        if not _rm_cur:
+            raise ValueError("portfolio_data_%s.json unreadable" % month_label)
+        summary["report_measures"] = _rm0900.compute(
+            _rm_cur, cs=_rm_load(os.path.join(SCRIPT_DIR, f"cash_statement_{month_label}.json")),
+            ledger=_rm_load(os.path.join(SCRIPT_DIR, "transaction_ledger.json")),
+            xray=_rm_load(xray_path), base=SCRIPT_DIR,
+            isa_folder=(getattr(args, "isa_folder", None) or os.path.dirname(SCRIPT_DIR)))
+        for _k0900 in ("bridge", "month_end_bridge", "returns"):
+            _st0900 = (summary["report_measures"].get(_k0900) or {}).get("state")
+            if _st0900 in ("ERROR", "UNRECONCILED"):
+                warnings.append("Step 6.10r (report measures, ISA-0900): %s %s - %s" % (
+                    _k0900, _st0900, (summary["report_measures"][_k0900].get("why") or "")[:160]))
+    except Exception as _e0900:                                      # noqa: BLE001
+        summary["report_measures"] = {"state": "ERROR", "why": "%s: %s" % (type(_e0900).__name__, _e0900)}
+        warnings.append("Step 6.10r (report measures, ISA-0900): %s: %s" % (type(_e0900).__name__, _e0900))
+    # hand the block to the pre-filled email (Step 9 ran before this step) - the same values, never a second calculation
+    try:
+        if os.path.exists(email_path):
+            import email_prefill as _ep0900
+            with open(email_path, encoding="utf-8") as f:
+                _ed0900 = json.load(f)
+            _ed0900["s6_portfolio_snapshot"] = _ep0900.apply_report_measures(
+                _ed0900.get("s6_portfolio_snapshot"), summary.get("report_measures"))
+            with open(email_path, "w", encoding="utf-8") as f:
+                json.dump(_ed0900, f, indent=2, ensure_ascii=False)
+    except Exception as _e0900h:                                         # noqa: BLE001
+        warnings.append("Step 6.10r (report measures, ISA-0900) not handed to the email: %s: %s"
+                        % (type(_e0900h).__name__, _e0900h))
+
     # — P-B6 fix-on-finding: Step 9 email_prefill runs BEFORE this step, so it read an analytics file with no
     #   factor_lookthrough and the s6 factor/semis lines were EMPTY (MEASURED: email_data_oct_2026 factor_line
     #   None; September's was typed by hand at the review). Hand the computed lines to the pre-filled email now -
@@ -5583,7 +5753,11 @@ def _prerun_phase_b(_ctx):
             _fl6 = summary.get("factor_lookthrough") or {}
             _fill = {"factor_line": _fl6.get("email_line"), "factor_unclassified": _fl6.get("unclassified"),
                      "semis_line": (_fl6.get("semis") or {}).get("line"),
-                     "exposure_line": (summary.get("exposure_coverage") or {}).get("line")}
+                     "exposure_line": (summary.get("exposure_coverage") or {}).get("line"),
+                     "whole_isa_risk_line": ((summary.get("whole_isa") or {}).get("whole_book_risk") or {}).get("line"),
+                     "stress_line": ((summary.get("whole_isa") or {}).get("whole_book_stress") or {}).get("line"),
+                     "wealth_line": ((summary.get("whole_isa") or {}).get("wealth_record") or {}).get("line"),
+                     "scale_line": ((summary.get("whole_isa") or {}).get("scale_readiness") or {}).get("line")}
             _n6 = 0
             for _k6, _v6 in _fill.items():
                 if _v6 and not _s6.get(_k6):

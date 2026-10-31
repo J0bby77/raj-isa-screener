@@ -232,6 +232,11 @@ def stage_run(live_inv: str, occurrence: str, ws_base: Optional[str] = None, tim
     t0 = time.time()
     # ISA-0845: unbuffered so a cut-off pass still logs how far it got (a block-buffered pipe lost the tail)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", ISA_PRERUN_PHASE_FILE=phase_file)
+    # ⚑ ISA-0911: the occurrence id lets shadow_ledger replace a cohort ITS OWN earlier pass froze. Exported only while
+    #   the occurrence has NOT committed - after a commit the cohort is published and immutable to every later pass.
+    env.pop("ISA_PRERUN_OCCURRENCE", None)
+    if (last_state(live_inv, occurrence, "commit") or {}).get("status") != "COMPLETE":
+        env["ISA_PRERUN_OCCURRENCE"] = occurrence
     try:
         r = subprocess.run(cmd, cwd=ws_inv, capture_output=True, text=True, timeout=timeout_s, env=env)
         out, rc, cut = (r.stdout or "") + (r.stderr or ""), r.returncode, False
@@ -569,6 +574,19 @@ def _selftest() -> int:
        not os.path.exists(phase_file_for(ws2)))
     _drop_phase(ws2)
     ok("ISA-0845: _drop_phase is idempotent on a missing file", True)
+    # ── ISA-0911: the occurrence id reaches the pass only until the occurrence commits ─────────────────────────
+    _probe = [sys.executable, "-c", "import os; print('OCC=' + str(os.environ.get('ISA_PRERUN_OCCURRENCE'))); "
+                                    "print('Review task reads: x')"]
+    occ3 = "prerun-envprobe"
+    release_lock(live2, occ2)
+    stage_sync(live2, occ3, wsb2, holder="E")
+    _r3 = stage_run(live2, occ3, wsb2, cmd=_probe)
+    ok("ISA-0911 MUST-FIRE: an uncommitted occurrence's run stage receives ISA_PRERUN_OCCURRENCE",
+       "OCC=prerun-envprobe" in open(_r3["log"], encoding="utf-8").read(), _r3)
+    _ledger(live2, {"occurrence": occ3, "stage": "commit", "status": "COMPLETE"})
+    _r4 = stage_run(live2, occ3, wsb2, cmd=_probe)
+    ok("ISA-0911 NEGATIVE CONTROL: after the occurrence commits, the run stage no longer receives it (the cohort is published)",
+       "OCC=None" in open(_r4["log"], encoding="utf-8").read(), _r4)
     shutil.rmtree(base2, ignore_errors=True)
     shutil.rmtree(base, ignore_errors=True)
     print("prerun_runner selftest: %d FAIL(s)" % len(fails))

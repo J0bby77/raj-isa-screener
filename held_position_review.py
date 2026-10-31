@@ -516,8 +516,42 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                     "realised_fraction is UNREACHABLE and it is not known for which names."
                     % (type(exc).__name__, exc))
 
+    # ── S3 / B03-R02/R03 (ISA-0885) — THE ONE PERMISSION TABLE, evaluated per held name ──────────────
+    #   What every held-position action is PERMITTED / BLOCKED / REVIEW / DEFER under the current facts.
+    #   Facts this step cannot see (eligibility, the engine's case state) are UNKNOWN, so additions DEFER to
+    #   the Capital Decision Receipt - this block decides nothing the engine owns.
+    perms, review_queue = {}, []
+    try:
+        import held_action_permissions as _hap
+        import retention as _rt3
+        for r in rows:
+            tk = r["ticker"]
+            _mh = (mh.get("positions") or {}).get(tk) or {}
+            _g = r.get("gain_pct")
+            _facts = {"identity_resolved": True, "capital_authority": capital_authority,
+                      "thesis_state": (r.get("thesis") or {}).get("state") or (th.get(tk) or {}).get("state")
+                      if isinstance(th, dict) else (r.get("thesis") or {}).get("state"),
+                      "position_clock": _rt3.position_clock_state(_mh.get("min_hold_until"), today)["state"],
+                      "in_profit": (None if _g is None else float(_g) > 0),
+                      "exposure_gbp": r.get("value_gbp"),
+                      "data_state": "COMPLETE" if tk in (uw.get("underwritten") or []) else "MISSING"}
+            perms[tk] = {a: {k: v.get(k) for k in ("verdict", "layer", "why", "missingness", "deadline")}
+                         for a, v in _hap.evaluate_all(_facts, today=today).items()}
+            for a, v in _hap.evaluate_all(_facts, today=today, actions=("HOLD", "EXIT")).items():
+                if v["verdict"] in (_hap.REVIEW, _hap.CONFLICT):
+                    review_queue.append({"ticker": tk, "action": a, "verdict": v["verdict"],
+                                         "missingness": v.get("missingness"), "exposure_gbp": v.get("exposure_gbp"),
+                                         "deadline": v.get("deadline"), "escalation": v.get("escalation"),
+                                         "why": v["why"]})
+    except Exception as _hpe:                                        # noqa: BLE001
+        perms = {"state": "UNEVALUATED", "why": "%s: %s" % (type(_hpe).__name__, _hpe)}
+        warn.append("Step 6.5 (ISA-0885): the held-action permission table RAISED (%s) - UNEVALUATED, which "
+                    "is not a permission." % perms["why"])
     summary = {
         "as_of": today, "n_held": len(rows),
+        "permissions": perms,
+        "permission_review_queue": review_queue,
+        "underwriting_incomplete": uw.get("incomplete") or {},
         # ISA-0866 rev c: why each declared-but-not-held name is absent (dealing record)
         "declared_not_held": {"stale_sleeve": _decl_cls["stale"],
                               "closed_per_dealing_record": _decl_cls["closed"],

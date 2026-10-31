@@ -523,7 +523,10 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     Execute the 7-phase watchlist update. Returns the watchlist_promotion_log dict.
     """
     run_date = date.today().strftime("%Y-%m-%d")
-    month_label = date.today().strftime("%b-%Y")
+    # ⚑ ISA-0910 (28-Oct-2026): the CYCLE (review-Sunday month, run_cycle.py) names the month - the cycles_seen
+    #   month, the screen-cycle filter and the archive month. run_date stays the REAL date for every stamp.
+    import run_cycle as _rcy
+    month_label = _rcy.cycle_date().strftime("%b-%Y")
 
     # Load watchlist_tickers.json
     with open(watchlist_path, encoding="utf-8") as f:
@@ -666,7 +669,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
     # run — even after a prior run already archived the source files.
     # Look in the working dir + BOTH the run-month and previous-month archive folders,
     # so previous-month screens are found whether or not this run already archived them.
-    _run_ym = run_date[:7]
+    _run_ym = _rcy.cycle_ym()   # ISA-0910: was the wall-clock month - on Sat 31-Oct it selected SEPTEMBER screens
     _ry, _rm = int(_run_ym[:4]), int(_run_ym[5:7])
     _py, _pm = (_ry - 1, 12) if _rm == 1 else (_ry, _rm - 1)   # previous calendar month
     _prev_ym = f"{_py:04d}-{_pm:02d}"
@@ -1291,7 +1294,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
 
         # Archive working-dir xlsx files (move to archive/<month>/). Files already in
         # the archive are left in place; re-runs re-read them via the archive glob.
-        archive_dir = os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, run_date[:7])  # e.g. archive/2026-06/
+        archive_dir = os.path.join(inv_dir, XLSX_ARCHIVE_SUBDIR, _run_ym)  # ISA-0910 cycle month, e.g. archive/2026-11/
         if working_xlsx_files:
             os.makedirs(archive_dir, exist_ok=True)
 
@@ -1322,7 +1325,7 @@ def run(portfolio_path: str, watchlist_path: str, inv_dir: str, out_path: str,
                     print(f"  [update_watchlist] Could not delete either: {e2}")
     else:
         print(f"  [update_watchlist] [DRY RUN] Would write {len(new_wl)} watchlist + {len(pool_entries)} pool entries")
-        print(f"  [update_watchlist] [DRY RUN] Would archive {len(xlsx_files)} xlsx file(s) to archive/{run_date[:7]}/")
+        print(f"  [update_watchlist] [DRY RUN] Would archive {len(xlsx_files)} xlsx file(s) to archive/{_run_ym}/")
 
     # Print summary
     print(f"  [update_watchlist] Additions: {[e['ticker'] for e in promotion_log['additions']]}")

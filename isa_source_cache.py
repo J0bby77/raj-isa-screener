@@ -173,6 +173,24 @@ def _routed_walk(node):
     return _ORIGINAL_WALK(node)
 
 
+# ── ISA-0896 (25-Oct-2026) — ONE rollback switch for the Slice-1 cost-only memos (R4.13) ─────────────────────────
+#   ISA_PERF_0896=0 restores every pre-ISA-0896 path (FI data regex scan, full traceback in _mark, taxonomy re-read,
+#   import-closure re-parse, rule_audit full scan). Parse routing keeps its own switch (ISA_AST_CACHE=0, ISA-0845).
+def perf_memo_enabled() -> bool:
+    return os.environ.get("ISA_PERF_0896", "1").strip() != "0"
+
+
+def stat_identity(path: str):
+    """(path, mtime_ns, size, inode) - the validity key of a stat-keyed memo, or None when the file is unreadable.
+    The same contract CPython uses to validate a cached .pyc against its source (mtime + size); the inode is added so a
+    replace-by-rename with an identical mtime and size still invalidates."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (path, st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def route_ast_parse() -> dict:
     """Route `ast.parse` through the text memo for THIS process (idempotent), and `ast.walk` of the shared trees
     it hands out through a per-tree node list. Returns the routing stats."""

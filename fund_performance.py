@@ -507,16 +507,86 @@ def _assert_local_reconciliation(series, ls):
         raise LocalSeriesError(f"local_series has {len(L)} months, below the 30-month minimum")
 
 
-def nav_series_for(sedol, u, refresh=False):
-    """THE one way to get a NAV series for a fund. Local series first where declared, then the
-    feed. One home (R4.4) — every caller that had its own `yf_symbol or isin` line was a place a
-    fund with no feed could go quietly missing."""
+def _held_series(u, refresh=False):
     if (u or {}).get("local_series"):
         s = load_local_series(u)
         if s:
             return s
     sym = (u or {}).get("yf_symbol") or (u or {}).get("isin")
     return fetch_nav_history(sym, use_cache=True, refresh=refresh, scale=_scale_for(u))
+
+
+# ⚑ ISA-0919 (Raj 29-Oct-2026) - DECLARED SHARE-CLASS HISTORY SPLICE. A share class younger than the fund
+#   reads 'insufficient history' on every window and 'never tested by a drawdown' at the router's regime gate,
+#   although the KID itself simulates the class's history with an older class of the SAME portfolio. A fund
+#   may declare `history_splice` = {path, ...}: that predecessor series is prepended BEFORE the held class's
+#   first NAV, rescaled to it at the join, and ONLY while the two classes still validate on their overlap
+#   (fund_learning.validate_proxy: correlation >= PROXY_CORR_MIN AND |annualised difference| <= PROXY_ANN_DIFF_MAX_PP,
+#   >= SPLICE_MIN_OVERLAP_MONTHS). A refused validation returns the held class alone - never a silent splice.
+SPLICE_MIN_OVERLAP_MONTHS = 24
+_SPLICE_MEMO = {}
+
+
+def _month_end_returns(series):
+    by = {}
+    for d, v in series or []:
+        by[(d.year, d.month)] = v
+    ks = sorted(by)
+    return {ks[i]: by[ks[i]] / by[ks[i - 1]] - 1.0 for i in range(1, len(ks)) if by[ks[i - 1]] > 0}
+
+
+def history_splice(sedol, u, held, base=None):
+    """-> (series, state). state = {state: NOT_DECLARED | APPLIED | REFUSED | UNREADABLE, ...}. Pure on its inputs
+    (the predecessor file is read from `base`, default this folder); memoised on (file stat, held span)."""
+    hs = (u or {}).get("history_splice")
+    if not hs:
+        return held, {"state": "NOT_DECLARED"}
+    path = os.path.join(base or SCRIPT_DIR, hs.get("path") or "")
+    try:
+        st_ = os.stat(path)
+        key = (path, st_.st_mtime_ns, st_.st_size, len(held or []), (held or [(None,)])[0][0], (held or [(None,)])[-1][0])
+    except OSError as exc:
+        return held, {"state": "UNREADABLE", "why": "predecessor file %s: %s" % (hs.get("path"), exc)}
+    if key in _SPLICE_MEMO:
+        return _SPLICE_MEMO[key]
+    pred = _read_csv_series(path)
+    if not pred or not held:
+        res = (held, {"state": "UNREADABLE", "why": "empty predecessor or held series"})
+        _SPLICE_MEMO[key] = res
+        return res
+    import fund_learning as _fl
+    v = _fl.validate_proxy(_month_end_returns(held), _month_end_returns(pred), label="%s<-%s" % (sedol, hs.get("isin")))
+    if not v.get("admissible") or (v.get("n_overlap") or 0) < SPLICE_MIN_OVERLAP_MONTHS:
+        res = (held, {"state": "REFUSED", "validation": v,
+                      "why": "the classes no longer validate on their overlap (or < %d months) - held class only"
+                             % SPLICE_MIN_OVERLAP_MONTHS})
+        _SPLICE_MEMO[key] = res
+        return res
+    join_d, join_v = held[0]
+    anchor = _nav_on_or_before(pred, join_d, max_back_days=10)
+    if not anchor or anchor[1] <= 0:
+        res = (held, {"state": "REFUSED", "why": "no predecessor NAV within 10d of the join %s" % join_d})
+        _SPLICE_MEMO[key] = res
+        return res
+    k = join_v / anchor[1]
+    pre = [(d, x * k) for d, x in pred if d < join_d]
+    res = (pre + list(held), {"state": "APPLIED", "join": join_d.isoformat(), "predecessor_isin": hs.get("isin"),
+                              "predecessor_share_class": hs.get("share_class"), "n_prepended": len(pre),
+                              "from": pre[0][0].isoformat() if pre else None, "scale": round(k, 8),
+                              "validation": {kk: v.get(kk) for kk in ("n_overlap", "overlap", "monthly_corr", "ann_diff_pp",
+                                                                      "admissible")},
+                              "source": hs.get("source"), "authority": hs.get("authority")})
+    _SPLICE_MEMO[key] = res
+    return res
+
+
+def nav_series_for(sedol, u, refresh=False):
+    """THE one way to get a NAV series for a fund. Local series first where declared, then the
+    feed. One home (R4.4) — every caller that had its own `yf_symbol or isin` line was a place a
+    fund with no feed could go quietly missing. ISA-0919: a declared history_splice is applied HERE, so
+    every consumer of the door sees the same joined history (or the same refusal)."""
+    held = _held_series(u, refresh=refresh)
+    return history_splice(sedol, u, held)[0]
 
 
 # ---------------------------------------------------------------- maths
@@ -574,7 +644,11 @@ def trailing_return(series, as_of, years, source, label):
                         f"({cand[0]}) covers only "
                         f"{(end[0] - cand[0]).days / 365.25:.2f}y of {years:g}y")
     covered = (end[0] - start[0]).days / 365.25
-    if covered < years * MIN_COVERAGE:
+    # ⚑ ISA-0920 (29-Oct-2026): coverage is about where the HISTORY BEGINS. The END is already bounded by the
+    #   10-day rule above, so measuring the span to the latest NAV double-counted ordinary publication lag as
+    #   missing history: a 1y window whose NAV was 8 days old read 0.97y and was blanked, and 1m/3m/6m windows
+    #   were empty for every fund. The test is now: the window's start is covered to within MIN_COVERAGE.
+    if (as_of - start[0]).days / 365.25 < years * MIN_COVERAGE:
         return miss(f"window_undercovered: {covered:.2f}y of {years:g}y")
     if start[1] <= 0:
         return miss("non-positive start NAV")
@@ -693,8 +767,21 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
             else f"local_series:{u['local_series']['path']}") if u.get("local_series")
            else f"yfinance:{sym}")
     scale = _scale_for(u)
-    series = (load_local_series(u) if u.get("local_series")
-              else fetch_nav_history(sym, refresh=refresh, scale=scale))
+    _held = (load_local_series(u) if u.get("local_series")
+             else fetch_nav_history(sym, refresh=refresh, scale=scale))
+    series, _spl = history_splice(sedol, u, _held)                 # ISA-0919: the declared splice, via the one home
+    if _spl.get("state") != "NOT_DECLARED":
+        out["history_splice"] = _spl
+        if _spl.get("state") == "APPLIED":
+            src = src + "+splice:%s[%s before %s]" % (_spl.get("predecessor_isin"), _spl.get("predecessor_share_class"),
+                                                     _spl.get("join"))
+            out["notes"].append("History before %s is the %s class (%s), joined at its first NAV and validated on the "
+                                "overlap (corr %s, diff %spp/yr) - KID-simulated history, Raj 29-Oct-2026 (ISA-0919)."
+                                % (_spl.get("join"), _spl.get("predecessor_share_class"), _spl.get("predecessor_isin"),
+                                   (_spl.get("validation") or {}).get("monthly_corr"),
+                                   (_spl.get("validation") or {}).get("ann_diff_pp")))
+        else:
+            out["notes"].append("Declared history splice NOT applied (%s): %s" % (_spl.get("state"), _spl.get("why")))
     out["nav_points"] = len(series)
     out["nav_freshness"] = nav_freshness(sedol, u, as_of, series=series)     # ISA-0869: typed, never blank
     if series:
@@ -997,6 +1084,50 @@ def _selftest():
            nav_freshness("Z", {}, D(2026, 10, 31), series=[], state=st0)["state"] == "NO_SERIES")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # ── ISA-0920: publication lag is not missing history ──────────────────────────────────────
+    daily = [(D(2024, 1, 1) + dt.timedelta(days=i), 100.0 * (1.0005 ** i)) for i in range(0, 1020)]
+    lagged = [p for p in daily if p[0] <= D(2026, 10, 15)]
+    c1, a1 = trailing_return(lagged, D(2026, 10, 24), 1.0, "t", "1y")
+    ok("ISA-0920 MUST-FIRE: a 1y window whose latest NAV is 9 days old is PRESENT (was 'window_undercovered 0.97y')",
+       a1.__class__.__name__ == "Metric", getattr(a1, "reason", None))
+    c6, a6 = trailing_return(lagged, D(2026, 10, 24), 0.5, "t", "6m")
+    ok("ISA-0920 MUST-FIRE: the 6m window with the same lag is PRESENT", c6.__class__.__name__ == "Metric", getattr(c6, "reason", None))
+    short = [p for p in daily if p[0] >= D(2025, 11, 10) and p[0] <= D(2026, 10, 20)]
+    cs, as_ = trailing_return(short, D(2026, 10, 24), 1.0, "t", "1y")
+    ok("ISA-0920 NEGATIVE CONTROL: a history that STARTS 0.95y back still refuses the 1y window",
+       cs.__class__.__name__ != "Metric")
+    cx, ax = trailing_return(lagged, D(2026, 10, 31), 1.0, "t", "1y")
+    ok("ISA-0920 NEGATIVE CONTROL: an end NAV 16 days old still refuses (10-day rule unchanged)", cx.__class__.__name__ != "Metric")
+    # ── ISA-0919: the declared history splice ───────────────────────────────────────────────────
+    td = tempfile.mkdtemp(prefix="fp_splice_")
+    try:
+        pred = [(D(2018, 1, 1) + dt.timedelta(days=i), 50.0 * (1.0004 ** i) * (0.80 if D(2020, 3, 1) <= D(2018, 1, 1) + dt.timedelta(days=i) <= D(2020, 6, 1) else 1.0))
+                for i in range(0, 3200)]
+        _write_csv_series(os.path.join(td, "pred.csv"), pred)
+        held = [(d, x * 2.0) for d, x in pred if d >= D(2023, 6, 1)]
+        u = {"history_splice": {"path": "pred.csv", "isin": "XX0000000000", "share_class": "Investor"}}
+        _SPLICE_MEMO.clear()
+        sp, st = history_splice("T", u, held, base=td)
+        ok("ISA-0919 MUST-FIRE: a validated predecessor is prepended before the held class's first NAV, rescaled at the join",
+           st["state"] == "APPLIED" and sp[0][0] == D(2018, 1, 1) and abs(sp[0][1] - 100.0) < 1e-6
+           and [p for p in sp if p[0] >= D(2023, 6, 1)] == held, st)
+        ok("ISA-0919: the joined series makes the 5y window and the 2020 drawdown measurable",
+           trailing_return(sp, D(2026, 9, 30), 5.0, "t", "5y")[1].__class__.__name__ == "Metric"
+           and trailing_return(held, D(2026, 9, 30), 5.0, "t", "5y")[1].__class__.__name__ != "Metric")
+        bad = [(d, x * (1.03 if d.month % 2 else 0.97)) for d, x in held]
+        _SPLICE_MEMO.clear()
+        sp2, st2 = history_splice("T", u, bad, base=td)
+        ok("ISA-0919 NEGATIVE CONTROL: classes that no longer track each other are REFUSED and the held class is returned alone",
+           st2["state"] == "REFUSED" and sp2 == bad, st2.get("why"))
+        _SPLICE_MEMO.clear()
+        ok("ISA-0919 NEGATIVE CONTROL: no declaration -> NOT_DECLARED, series untouched",
+           history_splice("T", {}, held, base=td) == (held, {"state": "NOT_DECLARED"}))
+        sp3, st3 = history_splice("T", {"history_splice": {"path": "missing.csv"}}, held, base=td)
+        ok("ISA-0919 NEGATIVE CONTROL: an unreadable predecessor is UNREADABLE (typed), never a silent splice",
+           st3["state"] == "UNREADABLE" and sp3 == held)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+        _SPLICE_MEMO.clear()
     print("fund_performance selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

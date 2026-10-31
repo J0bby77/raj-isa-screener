@@ -56,6 +56,8 @@ import os
 import re
 import sys
 import traceback
+
+import isa_source_cache as _isc   # ISA-0896: rollback switch + parse routing (one home)
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -246,7 +248,7 @@ def reset_caches() -> dict:
     an index added later cannot be forgotten here without failing the control below.
     """
     named = ("_SRC_CACHE", "_WALK_CACHE", "_SPANS_CACHE", "_LOWER_CACHE", "_DATA_BLOB_CACHE",
-             "_PRODUCER_INDEX", "_COMPUTER_INDEX", "_EXPOSURE_CACHE")
+             "_PRODUCER_INDEX", "_COMPUTER_INDEX", "_EXPOSURE_CACHE", "_DATA_PAIR_INDEX")
     g = globals()
     dropped = {}
     for n in named:
@@ -534,7 +536,13 @@ def _mark(module: str, fn: str, caller: Optional[str] = None) -> None:
     if not _flag("execution_ledger"):
         return
     try:
-        stack = traceback.extract_stack()[:-1]
+        if _isc.perf_memo_enabled():
+            # ISA-0896 - COST ONLY: the same frames (caller first, oldest last after reverse), without the per-frame
+            # linecache.checkcache stat that extract_stack() pays; _classify_caller reads filename and name only.
+            stack = traceback.StackSummary.extract(traceback.walk_stack(sys._getframe(1)), lookup_lines=False)
+            stack.reverse()
+        else:
+            stack = traceback.extract_stack()[:-1]
         kind, label = _classify_caller(stack)
         if caller:
             label = caller
@@ -1161,11 +1169,45 @@ def _producers_of(field: str, literal: str, root: str = HERE) -> List[str]:
             if key == field:
                 hits.append("%s:%d kwarg" % (m, lineno))
     # data files: a live artefact that carries the value IS a producer
+    # ⚑ ISA-0896 (25-Oct-2026) - COST ONLY. 495 queries each regex-scanned all 337 data files (33.7 MB, ~15 s, run
+    #   twice per pre-run). One pass now builds a (field, value) -> files index; a query whose field or value contains
+    #   a quote or backslash (where the token rule below is not provably the regex) keeps the regex scan. Proven equal
+    #   on all 495 live queries; `producer_equivalence` keeps comparing it with the uncached `_slow` reference.
+    if _isc.perf_memo_enabled() and field and literal and not any(c in field + literal for c in '"\\'):
+        hits.extend(_data_pair_index(root).get((field, literal), ()))
+        return sorted(set(hits))
     pat = re.compile(r'"%s"\s*:\s*"%s"' % (re.escape(field), re.escape(literal)))
     for label, blob in _data_blobs(root):
         if pat.search(blob):
             hits.append(label)
     return sorted(set(hits))
+
+
+_DATA_PAIR_INDEX: dict = {}
+_PAIR_SEGMENT = re.compile(r'"\s*:\s*"')
+
+
+def _data_pair_index(root: str = HERE) -> dict:
+    """ISA-0896: {(field, value): {data label}} for every `"field" : "value"` in the data blobs, built ONCE per root.
+
+    The regex (quote F quote, optional whitespace, colon, optional whitespace, quote L quote - F and L free of quotes
+    and backslashes) matches exactly where a quote-colon-quote segment has F as the text
+    between it and the PREVIOUS quote and L as the text up to the NEXT quote - so recording, for every segment, those
+    two tokens answers every such query with the regex's own result. Cleared by reset_caches() with the blobs."""
+    idx = _DATA_PAIR_INDEX.get(root)
+    if idx is not None:
+        return idx
+    idx = {}
+    for label, blob in _data_blobs(root):
+        for m in _PAIR_SEGMENT.finditer(blob):
+            s, e = m.start(), m.end()
+            q = blob.rfind('"', 0, s)
+            r = blob.find('"', e)
+            if q < 0 or r < 0:
+                continue
+            idx.setdefault((blob[q + 1:s], blob[e:r]), set()).add(label)
+    _DATA_PAIR_INDEX[root] = idx
+    return idx
 
 
 def _build_computer_index(root: str) -> dict:
@@ -2501,6 +2543,7 @@ def self_exclusion_control(root: str = HERE) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 def _selftest() -> int:
     import tempfile
+    _isc.route_ast_parse()          # ISA-0896 R3: one parse per file per process (ISA-0845 mechanism; ISA_AST_CACHE=0)
     fails = []
 
     def ok(name, cond, detail=""):

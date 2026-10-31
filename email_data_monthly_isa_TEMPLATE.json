@@ -1,6 +1,9 @@
 {
   "_template_marker": "NON-CURRENT EXAMPLE - illustrative June-2026 values; delete this key only after every value is replaced (ISA-0642)",
-  "_instructions": "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci) that controls rendering. The 'energy' pipeline was RETIRED 26-Jul-2026 — energy names use growth_stock. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
+  "_instructions": [
+    "Copy this file to email_data_mmm_yyyy.json and populate during the run. Delete after successful email send. All string values must be plain text (no Unicode above U+007F). HTML sub-tags allowed in 'paragraphs' arrays: <strong>, <em>, <a href>, <code>, <span style>. Do not include <head>, <style>, or block-level tags in strings. PIPELINE-AWARE SECTIONS: s3_investment_cases and s5_watchlist items carry a 'pipeline' field (growth_stock | vci) that controls rendering. The 'energy' pipeline was RETIRED 26-Jul-2026 — energy names use growth_stock. The template includes example schemas for all three paths — use the matching schema for each action. Items prefixed '_schema_note' are documentation only and are ignored by build_monthly_isa_email.py.",
+    "ISA-0898 (26-Oct-2026): every narrative has three layers - verdict, plain_english, evidence (Run_Context Writing Standard). A dealing action needs price_low/price_max/price_ccy. The builder's narrative gate (exit 4) refuses a missing layer, a missing price range or jargon in plain text."
+  ],
   "meta": {
     "run_date_display": "Saturday 1 June 2026",
     "data_date": "1 June 2026",
@@ -16,31 +19,64 @@
         "action": "BUY",
         "name": "Adobe Inc (ADBE)",
         "size": "~£3,250 (~21 shares)",
-        "conviction": "82/100 High",
-        "conviction_level": "high",
+        "conviction": "n/a - /100 retired (D21)",
         "timing": "This week — obtain Citi preclearance first",
-        "note": "Limit order ~$207 USD. Preclearance valid 2 trading days. 30-day hold applies."
+        "note": "Limit order ~$207 USD. Preclearance valid 2 trading days. 30-day hold applies.",
+        "instrument": "Adobe Inc",
+        "ticker": "ADBE",
+        "verdict": "Buy about 21 shares (about £3,250).",
+        "plain_english": "Adobe sells the software designers and marketers use every day (Photoshop, Acrobat). Customers pay every month, profits are high and the shares are cheap for what it earns. The risk is that rival AI tools take customers; then the shares could fall about 25%.",
+        "quantity_line": "About 21 shares, about £3,250",
+        "price_low": "190.00",
+        "price_max": "207.00",
+        "price_ccy": "$",
+        "prices": "$195.40 at the last close",
+        "size_tier": "Normal (4.5% of the ISA).",
+        "size_why": "Strong evidence and a high score.",
+        "all_in_cost": "£5 dealing charge plus 0.5% currency conversion.",
+        "readiness": "This week, limit order no higher than $207.",
+        "amount_gbp": 3250.0
       },
       {
         "action": "SELL",
         "name": "Marks & Spencer (MKS)",
         "size": "620 shares (~£2,088)",
         "conviction": "Thesis broken",
-        "conviction_level": "broken",
         "timing": "Day 31 from April purchase — verify date",
-        "note": "Proceeds to cash."
+        "note": "Proceeds to cash.",
+        "instrument": "Marks & Spencer Group",
+        "ticker": "MKS",
+        "verdict": "Sell all 620 shares (about £2,088).",
+        "plain_english": "The reason we bought it no longer holds, so the money is better kept ready for a stronger idea.",
+        "quantity_line": "620 shares, about £2,088",
+        "price_low": "330p",
+        "price_max": "345p",
+        "price_ccy": "",
+        "prices": "337p at the last close",
+        "funding": "Proceeds go to cash",
+        "all_in_cost": "£5 dealing charge.",
+        "readiness": "Day 31 after purchase.",
+        "amount_gbp": 2088.0
       },
       {
         "action": "HOLD",
         "name": "Broadcom (AVGO)",
         "size": "17 shares £5,259",
-        "conviction": "High",
-        "conviction_level": "high",
+        "conviction": "n/a - /100 retired (D21)",
         "timing": "—",
-        "note": "Earnings 4 Jun 2026."
+        "note": "Earnings 4 Jun 2026.",
+        "instrument": "Broadcom Inc",
+        "ticker": "AVGO",
+        "verdict": "Hold.",
+        "plain_english": "Results on 4 June; nothing has changed."
       }
     ],
-    "net_effect": "Stock sleeve rises from £X (X%) to ~£Y (~Y%) post-trade."
+    "net_effect": "Stock sleeve rises from £X (X%) to ~£Y (~Y%) post-trade.",
+    "verdict": "Buy about 21 Adobe shares (about £3,250); sell Marks & Spencer; hold the rest.",
+    "plain_english": "Adobe makes the software designers use every day and is priced cheaply for how much it earns; we start a position. The reason for owning Marks & Spencer no longer holds, so we sell and keep the cash.",
+    "attention_plain": [
+      "Adobe is a new position - if rival AI tools take its customers the shares could fall about 25%."
+    ]
   },
   "s2_capital_allocation": {
     "kpis": [
@@ -69,7 +105,7 @@
         "allocation": "BUY ADBE",
         "allocation_type": "buy",
         "amount": "~£3,250",
-        "rationale": "Highest conviction watchlist name."
+        "rationale": "Highest Source Score name with a complete case."
       },
       {
         "priority": "2 — Reserve",
@@ -79,14 +115,15 @@
         "rationale": "Retain for June deployment."
       }
     ],
-    "notes": ""
+    "notes": "",
+    "plain_english": "One short paragraph, in everyday words, saying what this chapter shows and why it matters to you."
   },
   "s3_investment_cases": [
     {
       "action": "BUY",
       "ticker": "ADBE",
       "name": "Adobe Inc",
-      "conviction": "82/100",
+      "conviction": "n/a - /100 retired (D21)",
       "separator_after": true,
       "metrics_table": [
         {
@@ -105,12 +142,6 @@
           "label": "Combined Score",
           "value": "63/54",
           "assessment": "Strong Buy threshold exceeded",
-          "signal": "green"
-        },
-        {
-          "label": "Conviction Score",
-          "value": "82/100",
-          "assessment": "High Conviction",
           "signal": "green"
         },
         {
@@ -147,7 +178,47 @@
       "part_a_score": 30,
       "part_b_score": 33,
       "total_score": 63,
-      "scorecard_max": 54
+      "scorecard_max": 54,
+      "verdict": "Buy a normal-sized stake; pay no more than $207.",
+      "plain_english": "A software company with loyal subscribers, priced as if its growth has ended.",
+      "what_it_does": "Sells design and document software on monthly subscriptions.",
+      "why_now": "The shares fell on fears about AI while profits kept rising.",
+      "what_could_break": "Rival AI tools take customers - about 25% downside.",
+      "why_this_size": "High score and strong evidence.",
+      "next_check": "Results in June.",
+      "analyst_view": [
+        [
+          "Consensus rating",
+          "Buy"
+        ],
+        [
+          "Average target",
+          "$260"
+        ]
+      ],
+      "scenarios": [
+        [
+          "Good case",
+          "+45%",
+          "its AI features win customers"
+        ],
+        [
+          "Central",
+          "+25%",
+          "steady growth"
+        ],
+        [
+          "Bad case",
+          "-25%",
+          "customers lost to rivals"
+        ]
+      ],
+      "sources": [
+        {
+          "title": "Adobe investor relations",
+          "url": "https://www.adobe.com/investor-relations.html"
+        }
+      ]
     },
     {
       "action": "SELL",
@@ -161,7 +232,9 @@
         "<strong>Thesis break:</strong> April 2026 cyberattack -- ~£300M FY2026 profit impact.",
         "<strong>Decision:</strong> Sell all 620 shares. Unrealised loss ~£122 (-5.5%). Proceeds to cash for June deployment."
       ],
-      "pipeline": "growth_stock"
+      "pipeline": "growth_stock",
+      "verdict": "One-line verdict.",
+      "plain_english": "Why this company, in plain English."
     },
     {
       "_schema_note": "PATH B (VCI ASYMMETRIC) — use this structure when action is a VCI candidate. No Part A/B tables. ACS summary + NVIDIA signals + T1-T7 status.",
@@ -237,7 +310,9 @@
         "<strong>Thesis monitoring:</strong> [Claude fills — T1-T7 conditions, NVIDIA signal count to watch, next catalyst date]",
         "<strong>Portfolio fit:</strong> [Claude fills — asymmetric sleeve budget remaining, Citigroup overlap, correlation to fund sleeve]",
         "<strong>Execution:</strong> [Claude fills — shares, limit price, dealing cost, FX, preclearance reminder, 30-day hold]"
-      ]
+      ],
+      "verdict": "One-line verdict.",
+      "plain_english": "Why this company, in plain English."
     },
     {
       "_schema_note": "RETIRED 26-Jul-2026 — Path C no longer exists. Energy, renewables and clean-tech stocks now use the PATH A (growth_stock) schema above: same /28 + /22 = /50 scorecard, same gates, same Source Score. This block is kept only so an older email JSON still parses; do NOT populate it.",
@@ -249,7 +324,7 @@
       "part_b_score": 11,
       "total_score": 25,
       "scorecard_max": 36,
-      "conviction": "[X]/100",
+      "conviction": "n/a - /100 retired (D21)",
       "separator_after": false,
       "metrics_table": [
         {
@@ -274,12 +349,6 @@
           "label": "Combined Score",
           "value": "25/36",
           "assessment": "Strong Buy threshold exceeded",
-          "signal": "green"
-        },
-        {
-          "label": "Conviction Score",
-          "value": "[X]/100",
-          "assessment": "[High/Medium] Conviction",
           "signal": "green"
         },
         {
@@ -318,7 +387,9 @@
         "<strong>Valuation framing:</strong> [Claude fills — EV/EBITDA vs sector peers, commodity price deck assumptions, capex cycle stage, base/bull/bear cases]",
         "<strong>Portfolio fit:</strong> [Claude fills — energy sleeve allocation, currency, sector diversification vs existing holdings, Citigroup overlap]",
         "<strong>Execution:</strong> [Claude fills — shares, limit price, dealing cost, FX, preclearance reminder, 30-day hold]"
-      ]
+      ],
+      "verdict": "One-line verdict.",
+      "plain_english": "Why this company, in plain English."
     }
   ],
   "s4_liquidation_tracker": {
@@ -344,7 +415,7 @@
         "rank": 1,
         "ticker": "ADBE",
         "name": "Adobe Inc",
-        "score": "63 (82 conviction)",
+        "score": "63",
         "score_level": "high",
         "sector": "Tech/Software",
         "entry_level": "<$200 exceptional; <$220 good",
@@ -384,7 +455,7 @@
         "ticker": "[TICKER]",
         "name": "[Energy Company]",
         "pipeline": "energy",
-        "score": "[X]/36 ([Y] conviction)",
+        "score": "[X]/50",
         "score_level": "medium",
         "sector": "Energy / Clean-Tech",
         "entry_level": "$[Y] ([Z]% below target)",
@@ -431,12 +502,6 @@
         "value": "£133,480",
         "sub": "As at 1 Jun 2026",
         "style": "normal"
-      },
-      {
-        "label": "MoM Change",
-        "value": "+£X,XXX",
-        "sub": "+X.X% (incl. £1,250 contribution)",
-        "style": "positive"
       },
       {
         "label": "vs Benchmark",
@@ -491,7 +556,8 @@
         "alpha": "+21.74pp"
       }
     ],
-    "risk_metrics": "Sharpe ratio X.XX | Beta X.XX | Alpha XX.XX | R2 X.XX."
+    "risk_metrics": "Sharpe ratio X.XX | Beta X.XX | Alpha XX.XX | R2 X.XX.",
+    "plain_english": "One short paragraph, in everyday words, saying what this chapter shows and why it matters to you."
   },
   "s7_stock_sleeve": {
     "kpis": [
@@ -529,7 +595,8 @@
         "status_note": "Earnings 4 Jun"
       }
     ],
-    "notes": "<strong>Note on Scottish Mortgage (SMT):</strong> Classified as a fund for sleeve purposes -- not counted in stock sleeve %."
+    "notes": "<strong>Note on Scottish Mortgage (SMT):</strong> Classified as a fund for sleeve purposes -- not counted in stock sleeve %.",
+    "plain_english": "One short paragraph, in everyday words, saying what this chapter shows and why it matters to you."
   },
   "s8_fund_review": {
     "funds": [
@@ -571,7 +638,8 @@
       "alt_research": "Not triggered this month."
     },
     "xray_summary": "Technology 28.21% vs 27.27% bmark (within band). Healthcare 7.36% vs 10.84% -- underweight -3.48pp (flagged).",
-    "_step8a_summary_note": "Key is named 'step8a_summary' for backward compatibility with build_monthly_isa_email.py. This section corresponds to Step 6 outputs in the current run context. Do not rename this key without also updating build_monthly_isa_email.py."
+    "_step8a_summary_note": "Key is named 'step8a_summary' for backward compatibility with build_monthly_isa_email.py. This section corresponds to Step 6 outputs in the current run context. Do not rename this key without also updating build_monthly_isa_email.py.",
+    "plain_english": "One short paragraph, in everyday words, saying what this chapter shows and why it matters to you."
   },
   "s9_macro": {
     "items": [
@@ -579,13 +647,17 @@
         "title": "AI infrastructure capex",
         "paragraphs": [
           "<strong>Hyperscaler capex:</strong> MSFT, GOOGL, META, AMZN guidance remains robust for H1 2026. Directly drives AVGO custom silicon (XPUs) and networking revenue."
-        ]
+        ],
+        "so_what": "What this development means for your portfolio, in plain English.",
+        "trigger": "What would make us act."
       },
       {
         "title": "US Federal Reserve",
         "paragraphs": [
           "No rate cuts expected near-term (Jun 2026 consensus). USD/GBP ~1.36. US stock sleeve denominated in USD -- FX exposure ~12% rising to ~15% post-ADBE. Accepted risk over 10--12yr horizon."
-        ]
+        ],
+        "so_what": "What this development means for your portfolio, in plain English.",
+        "trigger": "What would make us act."
       }
     ]
   },
@@ -652,21 +724,24 @@
         "problem": "Six positions were sold and four new positions opened between the April 4 baseline and the May 1 run date. None of this was logged in advance -- all changes had to be reverse-engineered from the xlsx file comparison.",
         "action": "Create a running project_isa_trades_log.md memory file and log each trade (date, ticker, shares, price, rationale) at the point of execution.",
         "category": "completeness",
-        "impact": "L"
+        "impact": "L",
+        "plain_english": "The lesson, in plain English."
       },
       {
         "title": "MKS thesis not formally documented at purchase",
         "problem": "The original thesis for MKS was reconstructed from context, not from a written record. Thesis-break conditions could not be checked at point of event.",
         "action": "Use the trades log to record thesis, expected holding period, and thesis-break conditions at point of purchase for every stock added.",
         "category": "completeness",
-        "impact": "L"
+        "impact": "L",
+        "plain_english": "The lesson, in plain English."
       },
       {
         "title": "Retrospective missing impact category and magnitude",
         "problem": "Prior retrospective items did not include impact category (accuracy/completeness/efficiency/effectiveness) or impact rating (XL/L/M/S/XS) as specified in the Run_Context.",
         "action": "All retrospective items now include category badge and impact rating badge via the pre-built email script.",
         "category": "accuracy",
-        "impact": "S"
+        "impact": "S",
+        "plain_english": "The lesson, in plain English."
       }
     ]
   }

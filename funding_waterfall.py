@@ -134,6 +134,8 @@ def drawdown_reservation(state: Optional[dict], ledger_entries: Optional[List[di
     for >= TRANCHE_EXECUTED_FRACTION of the tranche. A fired tranche with no size recorded is UNMEASURED and
     REFUSES (a reservation nobody can size must not be read as zero)."""
     st = state or {}
+    if st.get("schema_version") == "2.0" or "opportunities" in st:
+        return _opportunity_reservation(st, ledger_entries)
     log = list(st.get("tranche_log") or [])
     fired = {k for k, v in (st.get("tranches_fired") or {}).items() if v}
     ep = st.get("episode_id")
@@ -158,6 +160,52 @@ def drawdown_reservation(state: Optional[dict], ledger_entries: Optional[List[di
             total += g
     return {"state": "MEASURED", "reserved_gbp": round(total, 2), "rows": rows,
             "basis": "B1.6b: fired, unexecuted drawdown tranches take their pounds BEFORE any stock deployment"}
+
+
+def _opportunity_reservation(st: dict, ledger_entries: Optional[List[dict]] = None) -> dict:
+    """S3/B04 (ISA-0884): the B1.6b reservation over the drawdown OPPORTUNITIES (drawdown_state v2).
+    Reserved = this review's proposed ceiling for actionable OPEN opportunities + approved amounts not yet
+    filled + the unfilled remainder of STARTED ones, less confirmed VUAG fills the state has not yet
+    reconciled (dealing record newer than the review). Protocol OFF -> nothing is reserved (B04-R07).
+    An actionable opportunity whose amount could not be sized is UNMEASURED and REFUSES (R4.3)."""
+    if st.get("protocol_active") is False:
+        return {"state": "PROTOCOL_OFF", "reserved_gbp": 0.0, "rows": [],
+                "basis": "drawdown protocol OFF - no capital opportunity is reserved (B04-R07)"}
+    ep = st.get("episode_id")
+    opps = [o for o in st.get("opportunities") or [] if o.get("episode_id") == ep]
+    known = {f.get("reference") for o in st.get("opportunities") or [] for f in o.get("fills") or []}
+    new_fills = sorted((e for e in (ledger_entries or []) if e.get("type") == "buy"
+                        and str(e.get("ticker") or "").upper().split(".")[0] == "VUAG"
+                        and e.get("reference") not in known), key=lambda e: str(e.get("date")))
+    rows, total = [], 0.0
+    for o in sorted(opps, key=lambda x: ({"STARTED": 0, "APPROVED": 1, "OPEN": 2}.get(x.get("state"), 9),
+                                          x.get("threshold_pct", 0), x.get("seq", 0))):
+        s = o.get("state")
+        if s == "OPEN" and o.get("actionable_now"):
+            if o.get("proposed_gbp") is None:
+                return {"state": "UNMEASURED", "reserved_gbp": None, "rows": [],
+                        "why": "actionable opportunity %s has no sized amount (%s) - the B1.6b reservation cannot be "
+                               "sized and REFUSES (R4.3)" % (o.get("opportunity_id"), o.get("sizing_basis"))}
+            g = float(o["proposed_gbp"])
+        elif s == "APPROVED":
+            g = float(o.get("approved_gbp") or 0.0)
+        elif s == "STARTED":
+            tgt = o.get("approved_gbp") if o.get("approved_gbp") is not None else o.get("proposed_gbp_at_start")
+            g = max(0.0, float(tgt or 0.0) - sum(float(f.get("gbp") or 0) for f in o.get("fills") or []))
+        else:
+            continue
+        for f in list(new_fills):
+            if g <= 0:
+                break
+            if str(f.get("date")) >= str(o.get("observed_on") or "9999"):
+                g = max(0.0, g - abs(float(f.get("amount_gbp") or 0.0)))
+                new_fills.remove(f)
+        rows.append({"opportunity_id": o.get("opportunity_id"), "state": s, "reserved_gbp": round(g, 2),
+                     "sizing_basis": o.get("sizing_basis")})
+        total += g
+    return {"state": "MEASURED", "reserved_gbp": round(total, 2), "rows": rows,
+            "basis": "B1.6b over drawdown opportunities (S3/B04): actionable/approved/started amounts take their "
+                     "pounds BEFORE any stock deployment; paused, fulfilled, closed and expired reserve nothing"}
 
 
 # ── D5 brake ────────────────────────────────────────────────────────────────────────────────────────
@@ -420,6 +468,22 @@ def _selftest(verbose: bool = True) -> int:
        "ISA-0858 (B1.6b): an executed tranche (VUAG buy on/after the fire date) releases its reservation")
     ok(drawdown_reservation({"episode_id": 2, "tranches_fired": {"t10": True}}, [])["state"] == "UNMEASURED",
        "ISA-0858 NEGATIVE CONTROL (R4.3): a fired tranche with no recorded size is UNMEASURED, never zero")
+    # S3/B04 (v2 opportunities): actionable proposal reserved once; paused reserves nothing; OFF reserves nothing
+    _v2 = {"schema_version": "2.0", "episode_id": 1, "protocol_active": True, "opportunities": [
+        {"opportunity_id": "OPP-E1-T10-1", "episode_id": 1, "threshold_pct": 10, "seq": 1, "state": "OPEN",
+         "actionable_now": True, "proposed_gbp": 2671.53, "observed_on": "2026-10-20", "fills": []},
+        {"opportunity_id": "OPP-E1-T20-1", "episode_id": 1, "threshold_pct": 20, "seq": 1, "state": "OPEN",
+         "actionable_now": False, "proposed_gbp": None, "observed_on": "2026-10-20", "fills": []}]}
+    ok(drawdown_reservation(_v2, [])["reserved_gbp"] == 2671.53,
+       "S3/B04: the actionable opportunity's proposed ceiling is reserved; a PAUSED one reserves nothing")
+    ok(drawdown_reservation(dict(_v2, protocol_active=False), [])["reserved_gbp"] == 0.0,
+       "S3/B04 NEGATIVE CONTROL (B04-R07): protocol OFF must reserve nothing")
+    ok(drawdown_reservation(_v2, [{"type": "buy", "ticker": "VUAG", "date": "2026-10-21", "amount_gbp": 2671.53,
+                                    "reference": "X1"}])["reserved_gbp"] == 0.0,
+       "S3/B04: a confirmed VUAG fill newer than the review releases the reservation")
+    _u = json.loads(json.dumps(_v2)); _u["opportunities"][0]["proposed_gbp"] = None
+    ok(drawdown_reservation(_u, [])["state"] == "UNMEASURED",
+       "S3/B04 NEGATIVE CONTROL (R4.3): an actionable opportunity with no sized amount must not reserve zero")
     try:
         waterfall(cash_deployable_gbp=9000.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(1.0)),
                   drawdown={"reserved_gbp": None, "why": "x"}, brake_state=unm, donor_headroom_gbp=0.0)

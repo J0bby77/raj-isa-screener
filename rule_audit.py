@@ -489,6 +489,14 @@ def asserted_evidence_gaps(cls: dict | None = None, evidence: dict | None = None
     return gaps
 
 
+def _perf_prefilter() -> bool:
+    try:
+        import isa_source_cache as _isc
+        return _isc.perf_memo_enabled()
+    except Exception:                                                   # noqa: BLE001
+        return False
+
+
 def traceability(cls: dict | None = None, corpus: dict | None = None) -> dict:
     """For every rule claimed ASSERTED, which check surfaces ENFORCE it (and, separately,
     which merely mention it). Returns {rid: {"enforced_in": [...], "mentioned_in": [...]}}."""
@@ -499,8 +507,10 @@ def traceability(cls: dict | None = None, corpus: dict | None = None) -> dict:
         pat = re.compile(r"(?<![\w.])" + re.escape(rid) + r"(?![\w.])")
         failing = sorted(l for l, t in corpus.items() if _named_by_failing_check(t, rid))
         enforced = sorted(l for l, t in corpus.items() if _named_by_enforcement(t, rid))
+        # ISA-0896 - COST ONLY: the regex needs the literal rule id, so a file without it cannot match (exact).
+        _pf = _perf_prefilter()
         mentioned = sorted(l for l, t in corpus.items()
-                           if pat.search(t) and l not in enforced)
+                           if (not _pf or rid in t) and pat.search(t) and l not in enforced)
         out[rid] = {"fails_on_break_in": failing,
                     "enforced_in": enforced, "mentioned_in": mentioned}
     return out
@@ -594,6 +604,8 @@ def audit(standard_text: str | None = None, corpus: dict | None = None) -> dict:
 
 
 def _selftest() -> int:
+    import isa_source_cache as _isc
+    _isc.route_ast_parse()          # ISA-0896 R3: one parse per file per process (ISA_AST_CACHE=0 rolls back)
     fails = []
 
     def ok(name, cond, detail=""):

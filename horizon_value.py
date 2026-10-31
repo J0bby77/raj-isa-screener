@@ -56,6 +56,9 @@ PFCF_FIELDS = {"price_fcf"}
 SUBUNIT_MAJOR = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0), "ILA": ("ILS", 100.0), "ZAc": ("ZAR", 100.0)}
 BASE_CCY = "GBP"                                # the ISA portfolio/base currency
 
+HV_AUTHORITY_ROLE = ("ER12_INPUT: consumed by capital_decision_engine.er12_case (LIVE, capital_engine_authority) "
+                     "as the central case, route bridge, estimation sensitivities and FX inputs of ER12; the "
+                     "Capital Decision Receipt is the authority - a horizon-value case alone authorises nothing")
 VALID = "VALID_MECHANICAL"
 REVIEW = "REVIEW_REQUIRED"
 MISSING = "MISSING_REQUIRED_INPUT"
@@ -281,7 +284,16 @@ def _d(x):
         return None
 
 
-def flow_ttm(rec, rows=("Total Revenue", "EBITDA")):
+def _not_after(tbl, as_of):
+    """B09-R06 (P-C, 24-Oct-2026): drop statement columns dated AFTER the case's as_of (a future period
+    end is not point-in-time evidence; the 08-Oct audit fed a 2027-06-30 provider TTM and a 2027 share
+    count straight into a case). Undated / unparseable columns are dropped too - they cannot be placed."""
+    if as_of is None or not tbl:
+        return tbl or {}
+    return {dd: c for dd, c in tbl.items() if _d(dd) is not None and _d(dd) <= as_of}
+
+
+def flow_ttm(rec, rows=("Total Revenue", "EBITDA"), as_of=None):
     """ONE trailing-12-month observation of the flow `rows`, all on the SAME period and source.
     Order: (1) the provider's DIRECT TTM, validated - its end date must not precede the latest
     completed FY (else STALE / PROVIDER_LAG, typed separately from cadence) and, when four
@@ -289,9 +301,10 @@ def flow_ttm(rec, rows=("Total Revenue", "EBITDA")):
     a quarterly table FRESHER than the provider TTM wins (provider lag); (2) the sum of four
     consecutive same-definition quarters; (3) FY + current YTD - prior-year YTD where an interim
     table with matching period lengths exists; else MISSING. Never mixes sources across rows."""
-    ttm = rec.get("income_stmt_ttm") or {}
-    q = rec.get("income_stmt_quarterly") or {}
-    a = rec.get("income_stmt_annual") or {}
+    as_of = _date(as_of) if as_of is not None else None
+    ttm = _not_after(rec.get("income_stmt_ttm") or {}, as_of)
+    q = _not_after(rec.get("income_stmt_quarterly") or {}, as_of)
+    a = _not_after(rec.get("income_stmt_annual") or {}, as_of)
     qd = sorted((dd for dd, c in q.items() if all(_num((c or {}).get(r)) is not None for r in rows)), reverse=True)
     q4 = qd[:4]
     q4_ok = len(q4) == 4 and all(70 <= (_d(q4[i]) - _d(q4[i + 1])).days <= 112 for i in range(3))
@@ -313,25 +326,33 @@ def flow_ttm(rec, rows=("Total Revenue", "EBITDA")):
                 "divergence_vs_4q_pct": div}
     if q4_ok:
         return {"state": VALID, "source": "SUM_4Q", "end": q4[0], "values": sum4}
-    it = rec.get("income_stmt_interim") or {}
+    it = _not_after(rec.get("income_stmt_interim") or {}, as_of)
     if it and fy_end:
         cur = max(it)
         prior = [dd for dd in it if abs((_d(cur) - _d(dd)).days - 365) <= 7]
-        if prior and _d(cur) > _d(fy_end) and it[cur].get("period_months") == it[prior[0]].get("period_months"):
+        # ⚑ B09-R06 (P-C, 24-Oct-2026): FY + YTD - prior YTD needs MATCHED, STATED period lengths.
+        #   `None == None` used to read as a match, so two ABSENT period lengths admitted a TTM built
+        #   from YTD tables of unknown span. Both lengths must be present, positive and equal.
+        _pm_cur = _num((it.get(cur) or {}).get("period_months"))
+        _pm_pri = _num((it.get(prior[0]) or {}).get("period_months")) if prior else None
+        if prior and _d(cur) > _d(fy_end) and _pm_cur and _pm_pri and _pm_cur > 0 and _pm_cur == _pm_pri:
             vals = {r: ttm_from_ytd(_num(a[fy_end].get(r)), _num(it[cur].get(r)), _num(it[prior[0]].get(r)))
                     for r in rows}
             if all(v is not None for v in vals.values()):
                 return {"state": VALID, "source": "FY_PLUS_YTD", "end": cur, "values": vals}
     return {"state": MISSING, "source": None,
-            "why": "no provider TTM, no 4 consecutive quarters and no reconcilable FY + YTD - prior YTD"}
+            "why": ("no provider TTM, no 4 consecutive quarters and no reconcilable FY + YTD - prior YTD "
+                    "(interim period lengths must be stated and equal; columns after as_of are not evidence)")}
 
 
-def latest_diluted_shares(rec):
-    """STOCK measure: the latest valid point-in-time diluted share observation (no TTM formula)."""
+def latest_diluted_shares(rec, as_of=None):
+    """STOCK measure: the latest valid point-in-time diluted share observation (no TTM formula).
+    B09-R06 (P-C): an observation dated after `as_of` is not point-in-time and is never selected."""
+    as_of = _date(as_of) if as_of is not None else None
     obs = []
     for src, key in (("TTM", "income_stmt_ttm"), ("QUARTERLY", "income_stmt_quarterly"),
                      ("ANNUAL", "income_stmt_annual")):
-        for dd, c in (rec.get(key) or {}).items():
+        for dd, c in _not_after(rec.get(key) or {}, as_of).items():
             v = _num((c or {}).get("Diluted Average Shares"))
             if v and v > 0:
                 obs.append((dd, src, v))
@@ -357,7 +378,7 @@ def ev_components(rec, as_of, *, p0=None, fx=None):
     bs = rec.get("balance_sheet_annual") or {}
     p0 = p0 or _price(rec)
     c = {"P0_quote": p0}
-    ft = flow_ttm(rec)
+    ft = flow_ttm(rec, as_of=as_of)
     c["ttm"] = {k: ft.get(k) for k in ("source", "end", "divergence_vs_4q_pct", "why")}
     if ft["state"] != VALID:
         return c, ft["state"], ft.get("why")
@@ -378,12 +399,13 @@ def ev_components(rec, as_of, *, p0=None, fx=None):
     if eb["state"] != VALID:
         return c, eb["state"], eb.get("why")
     r0, r1 = r0 * eb["factor"], r1 * eb["factor"]
-    c.update(NTM_REV=w0 * r0 + (1.0 - w0) * r1, w0=round(w0, 4), fy0_end=str(fy0_end))
+    c.update(NTM_REV=w0 * r0 + (1.0 - w0) * r1, w0=round(w0, 4), fy0_end=str(fy0_end),
+             REV_FY0=r0, REV_FY1=r1)                 # B09-R06: the blend's parts, for FY1-only variants
     td, tc = _num(info.get("totalDebt")), _num(info.get("totalCash"))
     if td is None or tc is None:
         return c, MISSING, "current net debt (totalDebt/totalCash) missing"
     c["ND"] = td - tc                                           # reporting currency, MRQ (stock)
-    sh = latest_diluted_shares(rec)
+    sh = latest_diluted_shares(rec, as_of=as_of)
     if not sh:
         return c, MISSING, "no diluted share observation (basic count is a different quantity)"
     c["SHARES"], c["shares_asof"], c["shares_source"] = sh["value"], sh["as_of"], sh["source"]
@@ -555,7 +577,11 @@ def _finish(out):
     out["case_id"] = "HV-" + hashlib.sha256(json.dumps(
         {k: out.get(k) for k in ("ticker", "method_id", "pit_fingerprint", "as_of", "hurdle_pct",
                                  "declared_field", "stress_policy")}, sort_keys=True, default=str).encode()).hexdigest()[:16]
-    out["capital_authority"] = False                # SHADOW (§16.4)
+    out["capital_authority"] = False                # the CASE carries no authority by itself (§16.4)
+    # B09-R09 / ISA-0744 (P-C, 24-Oct-2026): the declared role, reconciled with actual use. The LIVE capital
+    # engine builds its ER12 from this case (central, routes, bridge inputs, sensitivities, FX); the
+    # authority is the engine's Capital Decision Receipt, never this artefact on its own.
+    out["authority_role"] = HV_AUTHORITY_ROLE
     if isinstance(out.get("route_record"), dict):
         out["route_record"]["review_state"] = out.get("state")
         out["route_record"]["case_id"] = out["case_id"]
@@ -781,6 +807,7 @@ def shadow_month(month_label, *, root=None, as_of=None, hurdle_pct=None, records
         cmp_ = compare(cases)
         doc = {"_meta": {"month": month_label, "as_of": as_of, "method_id": method_id(),
                          "method_version": HV_METHOD_VERSION, "mode": "SHADOW", "capital_authority": False,
+                         "authority_role": HV_AUTHORITY_ROLE,
                          "fx_inputs": fxb, "stress_policy": stress_policy, "provider_ttm": ttm_note,
                          "produced_at": datetime.datetime.now().isoformat(timespec="seconds")},
                "comparison": cmp_, "cases": cases}
@@ -1060,4 +1087,4 @@ if __name__ == "__main__":
     import sys
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
-    print(json.dumps(shadow_month(sys.argv[1] if len(sys.argv) > 1 else datetime.date.today().strftime("%b_%Y").lower()), default=str, indent=1))
+    print(json.dumps(shadow_month(sys.argv[1] if len(sys.argv) > 1 else __import__("run_cycle").cycle_label()), default=str, indent=1))

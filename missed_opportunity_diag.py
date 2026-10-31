@@ -244,6 +244,148 @@ def _month_inputs(month_label, here):
 
 
 # ── build ────────────────────────────────────────────────────────────────────────────────
+# ── P-D (ISA-0891, 24-Oct-2026): MISSED-OPPORTUNITY RECORDING - the closed loop over the engine's FROZEN dispositions ──
+# To be inserted into missed_opportunity_diag.py (one home for MOA).
+#
+# capital_decision_ledger.jsonl already freezes, at decision time, EVERY universe name's disposition (SELECTED,
+# HARD_BLOCKED, RISK_BLOCKED, ECONOMICS_FAILED, CASE_PENDING, NOT_IN_SCOPE, IDENTITY_REFUSED ...) with
+# outcome_horizons_months [3, 6, 12] - and NOTHING read it back. This is the reader: each ledger row's names are
+# joined to the weekly GBP total-return store on the decision Friday and the horizon Friday; a horizon is MATURED only
+# when the store holds the horizon Friday (never extrapolated). Results are grouped by disposition so the question
+# "what did the names we did NOT buy go on to do?" has an answer per gate, beside the broad-equity benchmark.
+# DOCTRINE (unchanged): outcome never classifies decision quality by itself; nothing here feeds a score, gate or rank.
+import datetime as _dt_pd
+
+
+def _friday_on_or_before(d):
+    return d - _dt_pd.timedelta(days=(d.weekday() - 4) % 7)
+
+
+def _add_months_pd(d, k):
+    y, m = divmod(d.month - 1 + k, 12)
+    import calendar as _cal
+    return _dt_pd.date(d.year + y, m + 1, min(d.day, _cal.monthrange(d.year + y, m + 1)[1]))
+
+
+def _level_on(levels, fri, back=1):
+    """GBP level on the Friday `fri` or, if that week is absent, up to `back` earlier Friday(s) (never later)."""
+    for k in range(back + 1):
+        v = levels.get((fri - _dt_pd.timedelta(days=7 * k)).isoformat())
+        if v is not None:
+            return v
+    return None
+
+
+def disposition_outcomes(ledger_rows, store, as_of, benchmark_levels=None, horizons=(3, 6, 12)):
+    """-> {state, rows_read, by_horizon: {h: {matured_rows, by_disposition: {disp: {n, priced, mean_pct, median_pct,
+    hit_rate_vs_benchmark}}, benchmark_mean_pct}}, next_maturity, per_name}. Pure given its inputs."""
+    import statistics as _st
+    import sleeve_risk as _sr
+    last = max((d for n in (store.get("names") or {}).values() for d in (n.get("observations") or {})), default=None)
+    last = _dt_pd.date.fromisoformat(last) if last else None
+    out = {"state": "OK", "rows_read": 0, "store_last_friday": last and last.isoformat(), "by_horizon": {},
+           "next_maturity": None, "per_name": [], "doctrine": "outcome alone never grades a decision (MOA doctrine)"}
+    nxt = None
+    agg = {h: {} for h in horizons}
+    bench = {h: [] for h in horizons}
+    seen = set()
+    for row in ledger_rows or []:
+        if not row.get("as_of") or not row.get("dispositions"):
+            continue
+        key = (row.get("month"), row.get("as_of"), row.get("receipt_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out["rows_read"] += 1
+        d0 = _friday_on_or_before(_dt_pd.date.fromisoformat(str(row["as_of"])[:10]))
+        for h in horizons:
+            hf = _friday_on_or_before(_add_months_pd(d0, h))
+            if last is None or hf > last:
+                nxt = hf if nxt is None or hf < nxt else nxt
+                continue
+            if benchmark_levels:
+                b0, b1 = _level_on(benchmark_levels, d0), _level_on(benchmark_levels, hf)
+                b = (b1 / b0 - 1.0) if (b0 and b1) else None
+            else:
+                b = None
+            if b is not None:
+                bench[h].append(b)
+            for t, disp in (row.get("dispositions") or {}).items():
+                cell = agg[h].setdefault(disp, {"n": 0, "priced": [], "hits": 0, "hit_n": 0})
+                cell["n"] += 1
+                try:
+                    lv = _sr._levels(store, t)
+                except Exception:                                       # noqa: BLE001
+                    lv = {}
+                v0, v1 = _level_on(lv, d0), _level_on(lv, hf)
+                if not (v0 and v1):
+                    continue
+                r = v1 / v0 - 1.0
+                cell["priced"].append(r)
+                if b is not None:
+                    cell["hit_n"] += 1
+                    cell["hits"] += int(r > b)
+                out["per_name"].append({"ticker": t, "disposition": disp, "decided": d0.isoformat(), "horizon_m": h,
+                                        "return_pct": round(100 * r, 2),
+                                        "vs_benchmark_pp": None if b is None else round(100 * (r - b), 2)})
+    for h in horizons:
+        rows = {}
+        for disp, c in agg[h].items():
+            p = c["priced"]
+            rows[disp] = {"n": c["n"], "priced": len(p),
+                          "mean_pct": round(100 * sum(p) / len(p), 2) if p else None,
+                          "median_pct": round(100 * _st.median(p), 2) if p else None,
+                          "hit_rate_vs_benchmark": round(c["hits"] / c["hit_n"], 3) if c["hit_n"] else None}
+        out["by_horizon"][str(h)] = {"by_disposition": rows,
+                                     "benchmark_mean_pct": round(100 * sum(bench[h]) / len(bench[h]), 2) if bench[h] else None,
+                                     "matured": bool(rows)}
+    out["next_maturity"] = nxt and nxt.isoformat()
+    n_mat = sum(1 for h in horizons if out["by_horizon"][str(h)]["matured"])
+    out["line"] = ("Missed-opportunity record: %d frozen decision(s); %s" %
+                   (out["rows_read"], ("%d horizon(s) matured" % n_mat) if n_mat else
+                    "no horizon matured yet - first 3-month read %s" % (out["next_maturity"] or "UNKNOWN")))
+    return out
+
+
+def _selftest_disposition_outcomes(ok):
+    import datetime as _d
+    fr = [_d.date(2026, 1, 2) + _d.timedelta(days=7 * i) for i in range(40)]
+    store = {"names": {"WIN": {"observations": {f.isoformat(): {"gbp": 100 * (1.01 ** i)} for i, f in enumerate(fr)}},
+                       "LOSE": {"observations": {f.isoformat(): {"gbp": 100 * (0.99 ** i)} for i, f in enumerate(fr)}}}}
+    rows = [{"month": "jan_2026", "as_of": "2026-01-09", "receipt_id": "R1",
+             "dispositions": {"WIN": "HARD_BLOCKED", "LOSE": "SELECTED", "GHOST": "CASE_PENDING"}}]
+    bl = {f.isoformat(): 100.0 for f in fr}
+    o = disposition_outcomes(rows, store, _d.date(2026, 10, 1), benchmark_levels=bl)
+    h3 = o["by_horizon"]["3"]["by_disposition"]
+    ok("MOA-D: a blocked name that rose is recorded against its gate (3m)", h3["HARD_BLOCKED"]["mean_pct"] > 10)
+    ok("MOA-D: hit rate vs benchmark is measured", h3["HARD_BLOCKED"]["hit_rate_vs_benchmark"] == 1.0)
+    ok("MOA-D negative control: an unpriced name is counted but never priced as zero",
+       h3["CASE_PENDING"]["n"] == 1 and h3["CASE_PENDING"]["priced"] == 0 and h3["CASE_PENDING"]["mean_pct"] is None)
+    ok("MOA-D negative control: a horizon beyond the store is NOT matured (12m from Jan-2026 on a Sep-2026 store)",
+       not o["by_horizon"]["12"]["matured"] and o["next_maturity"] is not None)
+
+
+def _disposition_outcomes_for(here, asof):
+    """Read the engine's frozen dispositions + the weekly GBP store + VUAG weekly levels; never raises."""
+    try:
+        rows = []
+        p = os.path.join(here, "capital_decision_ledger.jsonl")
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as fh:
+                rows = [json.loads(l) for l in fh if l.strip()]
+        store = _load(os.path.join(here, "stock_weekly_returns.json"), {}) or {}
+        bl = None
+        try:
+            import fund_performance as _fp
+            import whole_book_risk as _wbr
+            bl = _wbr.fund_weekly_levels(_fp.nav_series_for("VUAG", _fp.load_universe().get("VUAG")))
+        except Exception:                                               # noqa: BLE001
+            bl = None
+        return disposition_outcomes(rows, store, asof, benchmark_levels=bl)
+    except Exception as exc:                                            # noqa: BLE001
+        return {"state": "FAILED", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def build(month_label, here=None, fetch=True, top_n=DEFAULT_TOP_N, asof=None):
     here = here or HERE
     asof = asof or date.today()
@@ -282,6 +424,8 @@ def build(month_label, here=None, fetch=True, top_n=DEFAULT_TOP_N, asof=None):
     return {
         "window_days": window_days,
         "window_warning": window_warning,
+        # P-D / ISA-0891: the engine's frozen dispositions read back at 3/6/12 months (the closed loop)
+        "disposition_outcomes": _disposition_outcomes_for(here, asof),
         "schema_version": SCHEMA_VERSION,
         "month": month_label,
         "window": {"from": start.isoformat(), "to": asof.isoformat()},
@@ -376,6 +520,7 @@ def _selftest():
     finally:
         _sh.rmtree(_d, ignore_errors=True)
 
+    _selftest_disposition_outcomes(ok)
     print("\n" + ("MOA SELFTEST PASS" if not fails else f"MOA SELFTEST FAIL {fails}"))
     return 1 if fails else 0
 

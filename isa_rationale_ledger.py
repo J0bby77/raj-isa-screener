@@ -58,7 +58,7 @@ CAPITAL_GATING = {
     "ER_RERATE_NEUTRAL_BAND": ("scoring_config.py", "Decides which names get zero re-rate credit rather than a penalty."),
     "EVIDENCE_ER_CONF_MIN": ("scoring_config.py", "er_confidence floor for the fundamentals evidence route."),
     "MIN_HOLD_DAYS": ("scoring_config.py", "Anti-churn rule; blocks an exit inside the window. Not paused with the rest of compliance."),
-    "DRAWDOWN_TRANCHES": ("scoring_config.py", "The B1 ladder: when reserve capital is deployed."),
+    "DRAWDOWN_TRANCHES": ("scoring_config.py", "The B1 crossing thresholds observed against the episode high (S3/B04: observations, not purchases)."),
     "DRAWDOWN_LOOKBACK": ("scoring_config.py", "Window defining the trailing high the ladder measures against."),
     "DRAWDOWN_BUFFER_GBP": ("scoring_config.py", "Cash excluded from the deployable reserve."),
     "PRICE_MOM_BLEND": ("scoring_config.py", "Reintroduces the 21 days the 12-1m window deliberately skips (ISA-0146 / BL-6)."),
@@ -76,6 +76,7 @@ CAPITAL_GATING = {
     "RISK_WINDOW_WEEKS": ("isa_policy.py", "The covariance window (weeks of consecutive Friday GBP returns) behind the D27 sleeve-risk ceiling that REFUSES entries/holdings, the ISA-0600 beta admission gate, the A2.1 correlation admission gate and the rho_sleeve sizing input (ISA-0680)."),
     "RISK_MIN_WEEKS": ("isa_policy.py", "Below this many consecutive overlapping weeks a covariance quantity is REFUSED (UNMEASURED -> A2.3 adverse default / gate UNMEASURED) rather than estimated (ISA-0680)."),
     "SECTOR_CAP_NAV": ("concentration_control.py", "Post-trade direct-stock exposure to one canonical sector as a fraction of total ISA NAV; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
+    "RISK_APPETITE": ("isa_policy.py", "Raj's whole-ISA loss limit (P-D, ISA-0888, 24-Oct-2026): a plan that RAISES the governing severe-scenario loss while it is at/above the limit is REVIEW_REQUIRED and its buys execute only with Raj's explicit Checkpoint-D tick-14 approval; never a sale."),
     "THEME_CAP_SLEEVE": ("concentration_control.py", "Post-trade exposure to one canonical theme as a fraction of the post-trade direct-stock sleeve; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
 }
 

@@ -28,6 +28,24 @@ def _c(name, default):
         return default
 
 
+def _strict_bool(v):
+    """B09-R10 (P-C, 24-Oct-2026): True only for a declared True (bool True / 'true' / 'yes' / 1). The string
+    'false' used to be truthy, so a documented_cause or thesis flag of 'false' PASSED (EV-0254)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v == 1
+    return str(v).strip().lower() in ("true", "yes", "y", "1")
+
+
+def _finite_pct(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if (f == f and f not in (float("inf"), float("-inf"))) else None
+
+
 def etf_tactical_valid(*, ucits_broad_based, position_pct, tactical_total_pct_after,
                        min_hold_ok, thesis_has_trigger_and_exit, regime_state=None,
                        tilt=None, documented_cause=False):
@@ -45,6 +63,10 @@ def etf_tactical_valid(*, ucits_broad_based, position_pct, tactical_total_pct_af
         _regime_active = _comp.active()
     except Exception:
         _regime_active = True         # fail safe: treat as if a PAD regime binds
+    min_hold_ok = _strict_bool(min_hold_ok)
+    thesis_has_trigger_and_exit = _strict_bool(thesis_has_trigger_and_exit)
+    documented_cause = _strict_bool(documented_cause)
+    ucits_broad_based = _strict_bool(ucits_broad_based)
     if not ucits_broad_based:
         if _regime_active:
             reasons.append("not UCITS broad-based (two-line test fail — preclearance exemption void)")
@@ -57,11 +79,18 @@ def etf_tactical_valid(*, ucits_broad_based, position_pct, tactical_total_pct_af
             reasons.append("[WARN] not UCITS broad-based — permitted while PAD regime is paused, "
                            "but carries restoration risk if a bank regime returns "
                            "(compliance.restoration_risk)")
-    if position_pct is None or position_pct > float(_c("ETF_TACTICAL_MAX_POSITION_PCT", 5.0)):
-        reasons.append(f"position > {_c('ETF_TACTICAL_MAX_POSITION_PCT', 5.0)}% ISA cap")
+    # ⚑ B09-R10 (P-C): the DECLARED config name is ETF_TACTICAL_MAX_POS_PCT (scoring_config B4/D16, ISA-0434
+    #   removed the long alias) - reading the long name always took the 5.0 default, so an approved change
+    #   of the cap could never bind (EV-0246). NaN / negative sizes are refused (EV-0247/0248).
+    _cap_pos = float(_c("ETF_TACTICAL_MAX_POS_PCT", 5.0))
+    _cap_tot = float(_c("ETF_TACTICAL_MAX_TOTAL_PCT", 10.0))
+    _pp, _tt = _finite_pct(position_pct), _finite_pct(tactical_total_pct_after)
+    if _pp is None or _pp < 0 or _pp > _cap_pos:
+        reasons.append(f"position {position_pct!r} missing/non-finite/negative or > {_cap_pos}% ISA cap")
         blocking += 1
-    if tactical_total_pct_after is None or tactical_total_pct_after > float(_c("ETF_TACTICAL_MAX_TOTAL_PCT", 10.0)):
-        reasons.append(f"tactical total > {_c('ETF_TACTICAL_MAX_TOTAL_PCT', 10.0)}% ISA cap")
+    if _tt is None or _tt < 0 or _tt > _cap_tot or (_pp is not None and _tt < _pp):
+        reasons.append(f"tactical total {tactical_total_pct_after!r} missing/non-finite/negative, below the "
+                       f"position, or > {_cap_tot}% ISA cap")
         blocking += 1
     if not min_hold_ok:
         reasons.append(f"intended hold < {_c('ETF_TACTICAL_MIN_HOLD_MONTHS', 3)} months (anti-churn)")
@@ -70,21 +99,39 @@ def etf_tactical_valid(*, ucits_broad_based, position_pct, tactical_total_pct_af
         reasons.append("thesis missing regime/factor trigger + exit condition at entry")
         blocking += 1
     menu = _c("REGIME_B4_MENU", {})
-    if regime_state is not None:
+    # ⚑ B09-R10 (P-C, EV-0250/0251): the regime menu is a CONTROL; a missing regime or a missing tilt
+    #   cannot be checked against it, so it BLOCKS (R4.3) unless a cause is documented. Both used to bypass.
+    if regime_state is None or str(regime_state).upper() not in menu:
+        if not documented_cause:
+            reasons.append(f"regime_state {regime_state!r} unknown - the B7(3) menu cannot be evaluated")
+            blocking += 1
+    elif tilt is None:
+        if not documented_cause:
+            reasons.append("tilt not declared - the B7(3) menu cannot be evaluated")
+            blocking += 1
+    else:
         allowed = menu.get(str(regime_state).upper(), [])
-        if tilt is not None and tilt not in allowed and not documented_cause:
+        if tilt not in allowed and not documented_cause:
             reasons.append(f"tilt '{tilt}' not in {str(regime_state).upper()} menu {allowed} "
                            "and no documented cause (B7(3))")
             blocking += 1
     return (blocking == 0), reasons
 
 
-if __name__ == "__main__":
+def _selftest():
+    """R5.5: real assertions with labelled negative controls (P-C wrapped the former __main__ block)."""
     ok, r = etf_tactical_valid(ucits_broad_based=True, position_pct=4.0,
                                tactical_total_pct_after=8.0, min_hold_ok=True,
                                thesis_has_trigger_and_exit=True,
                                regime_state="LATE_CYCLE", tilt="min_vol")
-    assert ok and not r, r
+    assert ok and not r, ("positive control: a valid LATE_CYCLE min_vol tilt passes", r)
+    # B09-R10 (P-C) negative controls: NaN / negative / missing regime / missing tilt / truthy 'false'
+    for _kw in ({"position_pct": float("nan")}, {"position_pct": -1.0}, {"regime_state": None},
+                {"tilt": None}, {"thesis_has_trigger_and_exit": "false"}):
+        _b = dict(ucits_broad_based=True, position_pct=4.0, tactical_total_pct_after=8.0, min_hold_ok=True,
+                  thesis_has_trigger_and_exit=True, regime_state="LATE_CYCLE", tilt="min_vol")
+        _b.update(_kw)
+        assert not etf_tactical_valid(**_b)[0], ("negative control: a broken input must not pass", _kw)
     ok, r = etf_tactical_valid(ucits_broad_based=False, position_pct=6.0,
                                tactical_total_pct_after=11.0, min_hold_ok=False,
                                thesis_has_trigger_and_exit=False,
@@ -98,3 +145,9 @@ if __name__ == "__main__":
                                regime_state="RISK_ON", tilt="min_vol", documented_cause=True)
     assert ok, r
     print("etf_tactical SELF-TEST OK (U-B4)")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_selftest())

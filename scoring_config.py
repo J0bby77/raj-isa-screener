@@ -460,7 +460,16 @@ FUND_GATE_PCT       = (round(REQUIRED_RETURN_MID - 1.9, 1)
 
 # ── Doc B (New Capabilities) P2 constants — B1/B2/B3/B4/B7 ─────────────────────────────────
 DRAWDOWN_PROTOCOL_ACTIVE = True          # B1 — rollback: False (state file retained)
-DRAWDOWN_TRANCHES   = [10, 20, 30]       # B1/D10 — % below 252d high; 1/(remaining) of reserve each
+DRAWDOWN_TRANCHES   = [10, 20, 30]       # B1 — OBSERVED crossing thresholds (% below the episode high). S3/B04
+                                         #   (Raj 10-Oct-2026): 10 -> 1 opportunity, 20 -> 2 more, 30 -> fresh review only.
+                                         #   No reserve division and no t30 purchase (B04-R09).
+DRAWDOWN_OPPORTUNITY_POLICY = {10: 1, 20: 2}   # S3/B04 — opportunities created per threshold (Raj 10-Oct-2026)
+DRAWDOWN_REVIEW_PCT = 30                 # S3/B04 — retain the three, trigger a fresh review; never a fourth opportunity
+DRAWDOWN_FUND_ROUTER_OVERFLOW = True     # P-D/ISA-0886 — when VUAG's approved 12.5% limit binds, the review's remaining
+                                         #   capacity flows through the EXISTING fund router (capital_destination.allocate_funds,
+                                         #   approved caps/bands, estimation-free ranking). Rollback: False -> VUAG-capped (S3).
+WHOLE_BOOK_RISK_METRIC = True            # P-D/ISA-0887 — the engine compares plans on post-action WHOLE-ISA GBP volatility when
+                                         #   every held fund's weekly series qualifies. Rollback: False -> stock-sleeve GBP vol.
 DRAWDOWN_LOOKBACK   = 252                # B1/D9 — trailing-high window (VUAG GBP daily close)
 DRAWDOWN_BUFFER_GBP = 500.0              # B1/D11 — cash buffer excluded from the reserve
 MMF_SWEEP_MIN_GBP   = 1500.0             # B2/D14 — idle cash >= this AND no committed action
@@ -979,8 +988,11 @@ LISTING_POLICY_ACTIVE = True
 # declaration with a reason) - never by inference. Not referenced by any scoring function, so this
 # block does not move the identity it records.
 SCORE_DEFINITIONS = {
-    "fb755e66c700ac43": {"id": "SD-2026-09-23", "status": "CURRENT", "since": "2026-09-23",
-                         "basis": "ISA-0720 (TB-2026-09-23-02): Part B metric 9 and the +1y growth read via forward_growth_observation; _rev_estimate_score no longer falls back to trailing revenueGrowth",
+    "de45dba8e650227c": {"id": "SD-2026-10-24", "status": "CURRENT", "since": "2026-10-24",
+                         "basis": "October P-C / B09-R04 (10-Oct audit): statement series are read NEWEST-FIRST BY COLUMN DATE (never provider column order); Part A revenue CAGR and the 5yr override use ELAPSED calendar time between the dated endpoints (revenue_cagr_basis '<n>yr_elapsed'), never a column count; quarterly YoY pairs by date (350-380 days); annual YoY only between adjacent fiscal years. Not declared compatible with SD-2026-09-23: a name with irregular, unsorted or gapped statement columns scores differently (that is the defect corrected)",
+                         "compatible_with": []},
+    "fb755e66c700ac43": {"id": "SD-2026-09-23", "status": "HISTORICAL", "since": "2026-09-23", "until": "2026-10-23",
+                         "basis": "ISA-0720 (TB-2026-09-23-02): Part B metric 9 and the +1y growth read via forward_growth_observation; _rev_estimate_score no longer falls back to trailing revenueGrowth. Superseded by SD-2026-10-24 (B09-R04 dated statement series)",
                          "compatible_with": []},
     "680b67139d457657": {"id": "SD-2026-08-21", "status": "HISTORICAL", "since": "2026-08-21", "until": "2026-09-22",
                          "basis": "mirror 7580eb1397..23b880be4f; Part B metric 9 / growth fallback to trailing-quarter earningsGrowth (the ISA-0720 defect)",
@@ -990,6 +1002,21 @@ SCORE_DEFINITIONS = {
     "ecb29eed68f4893a": {"id": "SD-2026-07-18", "status": "HISTORICAL", "compatible_with": []},
     "65fab637c6d9b8c1": {"id": "SD-2026-07-04", "status": "HISTORICAL", "compatible_with": []},
 }
+def _selftest():
+    """R5.5 (P-C): the scoring-definition registry is well-formed - exactly one CURRENT, the running code's
+    identity is declared CURRENT, HISTORICAL entries carry no compatibility by inference. Not referenced by
+    any scoring function, so it does not move the identity it checks."""
+    import score_definition as _sd
+    cur = [h for h, e in SCORE_DEFINITIONS.items() if e.get("status") == "CURRENT"]
+    assert len(cur) == 1, ("negative control: two CURRENT definitions must not coexist", cur)
+    ident = _sd.current_identity(refresh=True)
+    assert ident["hash"] == cur[0] and ident["declared"], ("the running scoring code must be the declared CURRENT", ident["hash"], cur)
+    assert not _sd.compatible(cur[0], "0" * 16, SCORE_DEFINITIONS), "negative control: an undeclared hash must not read as compatible"
+    assert all(isinstance(e.get("compatible_with"), list) for e in SCORE_DEFINITIONS.values()), "every entry states compatible_with"
+    print("scoring_config selftest OK (CURRENT %s = %s)" % (SCORE_DEFINITIONS[cur[0]]["id"], cur[0]))
+    return 0
+
+
 SCORE_PANEL_SCHEMA_VERSION = "2.0"   # 2.0 = rows carry score_definition_* stamps (ISA-0619)
 # The provenance of every (run_date|group) population written BEFORE the stamps existed, from the
 # GitHub fallback mirror (J0bby77/raj-isa-screener) bracketing each run date, corroborated from
@@ -1072,3 +1099,9 @@ SCORE_PANEL_PROVENANCE = {
 # sensitivity. True restores the pre-ISA-0745 additive buyback yield EXACTLY (used by the D-24
 # historical acceptance replays, which were recorded under that method).
 ER_SHARECOUNT_IN_BASE = False
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--selftest" in _sys.argv:
+        _sys.exit(_selftest())

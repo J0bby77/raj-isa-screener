@@ -263,7 +263,7 @@ def build_e2(data):
         except (TypeError, ValueError):
             return '&mdash;'
         # superscript 'd' marks a probability-weighted (E1-derived) floor vs the fixed tier
-        return base + ('<sup>d</sup>' if c.get('floor_source') == 'derived' else '')
+        return base + ('<sup>d</sup>' if str(c.get('floor_source') or '').startswith('derived') else '')
 
     rows_html = ''
     # rank by VCI Source Score desc (deployability), tiebreak ACS desc — NOT ACS-primary

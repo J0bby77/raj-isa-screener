@@ -251,6 +251,15 @@ def parse(folder=None, files=None, as_of=None):
     rows = []
     for fp in files:
         wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+        # ⚑ ISA-0900 (Raj 26-Oct-2026: "I have provided the cash record required"): the statement COVERS every posting
+        #   up to the moment it was exported, not merely to its last dated row - a quiet week after the last posting is
+        #   covered, not unknown. The export stamp (workbook created) is recorded per file; consumers take
+        #   max(last dated row, export date) as the coverage end. An absent stamp leaves the last row as the end.
+        try:
+            _cr = getattr(wb.properties, "created", None)
+            res.setdefault("file_exports", {})[os.path.basename(fp)] = _cr.isoformat() if _cr else None
+        except Exception:                                                   # noqa: BLE001
+            res.setdefault("file_exports", {})[os.path.basename(fp)] = None
         frows = []
         for ws in wb.worksheets:
             hdr = None

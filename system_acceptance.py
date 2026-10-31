@@ -66,7 +66,25 @@ def path_declaration(root: str = HERE, path_id: str = DEFAULT_PATH) -> dict:
     return dict(p, _capabilities=doc.get("capabilities") or [])
 
 
+_IMPORTS_MEMO: dict = {}
+
+
 def _imports_of(path: str) -> set:
+    """ISA-0896 (25-Oct-2026) - COST ONLY: memoised on the file's stat identity (path_fingerprint re-parsed the whole
+    import closure, ~166 files, on every call). Returns a fresh set. ISA_PERF_0896=0 bypasses."""
+    import isa_source_cache as _isc
+    if not _isc.perf_memo_enabled():
+        return _imports_of_uncached(path)
+    k = _isc.stat_identity(path)
+    if k is not None and k in _IMPORTS_MEMO:
+        return set(_IMPORTS_MEMO[k])
+    out = _imports_of_uncached(path)
+    if k is not None:
+        _IMPORTS_MEMO[k] = frozenset(out)
+    return out
+
+
+def _imports_of_uncached(path: str) -> set:
     import ast
     try:
         tree = ast.parse(open(path, encoding="utf-8").read())

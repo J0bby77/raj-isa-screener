@@ -669,8 +669,10 @@ def parse_portfolio(xlsx_path: str) -> dict:
             # denominators); tracked separately in the record list for the sweep line.
             cash_value += v
             mmf_value += v
+            # ISA-0904 (26-Oct-2026): units and unit price kept, so the review can state how many units to SELL to
+            #   fund a purchase (mmf_funding) - consumers that read value_gbp are unchanged
             mmf_holdings.append({"name": investment, "ticker": _canonical_ticker(ticker),
-                                 "value_gbp": v})
+                                 "value_gbp": v, "quantity": safe_float(qty), "price": safe_float(price)})
             continue
 
         # Extract clean name (remove exchange/ISIN suffix)

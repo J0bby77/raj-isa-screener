@@ -970,22 +970,36 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
     # --- §4 asymmetry floor (only when an asymmetry ratio and/or structure is provided) ---
     floor = None
     floor_source = "fixed"
+    floor_detail = None
     if fv_asymmetry is not None or asset_structure is not None:
+        floor_mode = getattr(cfg, "VCI_FLOOR_MODE", "fixed")
         try:
             import bottleneck_fv as _bfv
-            floor_mode = getattr(cfg, "VCI_FLOOR_MODE", "fixed")
             if floor_mode == "derived" and (p_thesis is not None or L is not None
                                             or catalyst_type is not None or days_to_catalyst is not None):
-                floor, floor_source = _bfv.derive_floor(asset_structure, catalyst_type, p_thesis, L,
+                # B09-R11 (P-C, 24-Oct-2026): ONE home - the disclosed derivation; a requirement above the
+                # policy cap is compared at its TRUE level (EV-0368) and a non-derivable floor blocks.
+                floor_detail = _bfv.derive_floor_detail(asset_structure, catalyst_type, p_thesis, L,
                                                         days_to_catalyst, mode="derived",
                                                         req_annual=req_annual)
+                floor, floor_source = floor_detail["floor"], floor_detail["source"]
             else:
                 floor = _bfv.select_floor(asset_structure)
-        except Exception:
-            floor = (getattr(cfg, "VCI_FV_ASYMMETRY_MIN_PLATFORM", 2.0)
-                     if str(asset_structure).lower() == "platform"
-                     else getattr(cfg, "VCI_FV_ASYMMETRY_MIN_SINGLE", 2.5))
-        if fv_asymmetry is None:
+        except Exception as _fe:
+            # ⚑ B09-R11 (P-C, EV-0369): a failure while the DERIVED floor is in force is a REFUSAL - it
+            #   used to fall back to the fixed tier and PASS a name the derived floor may block.
+            if floor_mode == "derived":
+                floor, floor_source = None, "derivation_failed"
+                floor_detail = {"source": "derivation_failed", "blocks": True,
+                                "why": "%s: %s" % (type(_fe).__name__, _fe)}
+            else:
+                floor = (getattr(cfg, "VCI_FV_ASYMMETRY_MIN_PLATFORM", 2.0)
+                         if str(asset_structure).lower() == "platform"
+                         else getattr(cfg, "VCI_FV_ASYMMETRY_MIN_SINGLE", 2.5))
+        _blocking = ("priors_unavailable", "priors_invalid", "derivation_failed")
+        if floor_source in _blocking or floor is None or floor != floor:
+            blocked = True; gates.append(f"fv_floor {floor_source}:refused_not_fixed")
+        elif fv_asymmetry is None:
             blocked = True; gates.append("fv_asymmetry:unavailable")
         elif fv_asymmetry < floor:
             blocked = True; gates.append(f"fv_asymmetry {fv_asymmetry:.2f} < floor {floor} ({asset_structure}/{floor_source})")
@@ -1007,6 +1021,7 @@ def apply_vci_final_gates(acs_total, mgmt_unstable=False, falls_on_beat=False,
         "fv_asymmetry": fv_asymmetry,
         "fv_floor": floor,
         "fv_floor_source": floor_source,
+        "fv_floor_detail": floor_detail,                 # B09-R11: requirement, cap, p/L, horizon, feasibility
     }
 
 

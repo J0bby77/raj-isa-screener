@@ -1274,9 +1274,13 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                                  "Windows disagree — decide WHICH window represents the forward "
                                  "case, then re-band. Not dead money."
                                  if r["band"] == "WINDOW_SPLIT" else
-                                 "No new money; retain only" if r["band"] == "RETAIN-ONLY" else
+                                 # ⚑ ISA-0918: FRS is a SELL-ORDER vote only (A7/ISA-0351); new money is decided by
+                                 #   capital_destination. This wording may never claim a new-money verdict.
+                                 "Earlier in the sell order if money is needed; new money follows the allocation rules"
+                                 if r["band"] == "RETAIN-ONLY" else
                                  "Cannot be assessed — resolve the data gap before any decision"
-                                 if r["band"] == "UNSCORED" else "Eligible for new money"),
+                                 if r["band"] == "UNSCORED" else
+                                 "Later in the sell order; new money follows the allocation rules"),
              "why": r["rationale"][:3]}
             for i, r in enumerate(stack)],
         "correlation_redundancy": redundancy,
@@ -1398,6 +1402,9 @@ def _selftest():
     import fund_performance as _fp869
     _bsrc = open(os.path.abspath(__file__), encoding="utf-8").read()
     _bbody = _bsrc[_bsrc.index("def build("):_bsrc.index("# ---------------------------------------------------------------- selftest")]
+    _src_fas = open(os.path.abspath(__file__), encoding="utf-8").read()
+    _bad = [p for p in ('"No new money; retain only"', '"Eligible for new money"') if p in _src_fas.split("def _selftest")[0]]
+    assert not _bad, "ISA-0918 MUST-FIRE: the Fund Action Stack may not state a new-money verdict (FRS votes on sell order only): %r" % _bad
     assert "fp.nav_series_for(sedol, u" in _bbody and 'u.get("yf_symbol") or u.get("isin")' not in _bbody, \
         "ISA-0869 MUST-FIRE: build() reads NAV through nav_series_for only (a second door went missing Polar's series)"
     assert _fp869.nav_freshness("Z", {}, dt.date(2026, 10, 31), series=[], state={"funds": {}})["state"] == "NO_SERIES", \

@@ -586,6 +586,52 @@ def _assemble_universe(eligible, held, tk, mom_map, registry, hurdle=70.0, q_spa
     return uni
 
 
+ER_CARRY_FIELDS = ("er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own",
+                   "er_anchor_divergence", "er_anchor_divergence_pct",
+                   "er_anchor_corroborated", "er_multiple_field", "er_multiple_value",
+                   "er_growth_clamped", "er_rerate_clamped", "er_anchor_table_as_of",
+                   "er_anchor_table_group", "er_anchor_mode",
+                   # B09-R09 (P-C): the typed state and the method identity travel with the number
+                   "er_state", "er_method_id", "er_config_id", "er_identity", "er_role")
+
+
+def carry_er_stamp(e, erd):
+    """Copy a fresh E[r] stamp onto a rerank entry: the total, its TERMS (H4), the anchor evidence
+    (D-24) and the typed state + method identity (B09-R09), then RECOMPUTE the capital-signal conflict
+    against the entry's current FV (B09-R10, EV-0266) - never carried from an older stamp."""
+    e["expected_return_12_24m"] = erd.get("expected_return_12_24m")
+    e["er_confidence"] = erd.get("er_confidence")
+    e["er_basis"] = erd.get("er_basis")
+    e["er_growth"] = erd.get("er_growth")
+    e["er_rerate"] = erd.get("er_rerate")
+    e["er_yield"] = erd.get("er_yield")
+    for _k in ER_CARRY_FIELDS:
+        e[_k] = erd.get(_k)
+    _er.apply_capital_signal_conflict(e)
+    return e
+
+
+def _selftest():
+    """R5.5 (P-C): the carry is complete and the conflict is recomputed, with labelled negative controls."""
+    fails = []
+
+    def ok(name, cond):
+        print(("PASS " if cond else "FAIL ") + name)
+        if not cond:
+            fails.append(name)
+    erd = {"expected_return_12_24m": 30.0, "er_confidence": 1.0, "er_basis": "b", "er_state": "OK",
+           "er_identity": "ERID-x", "er_config_id": "c", "er_role": "ADDITIVE_DIAGNOSTIC", "er_method_id": "m"}
+    e = carry_er_stamp({"ticker": "AAA", "implied_upside_fv": -0.40, "capital_signal_conflict": False}, dict(erd))
+    ok("the identity fields travel with the number", all(e.get(k) == erd[k] for k in ("er_identity", "er_config_id", "er_role", "er_state")))
+    ok("negative control: a stale carried 'no conflict' must not survive a divergent FV", e.get("capital_signal_conflict") is True)
+    e2 = carry_er_stamp({"ticker": "BBB", "implied_upside_fv": 0.30}, dict(erd, expected_return_12_24m=20.0))
+    ok("positive control: aligned signals are not flagged", e2.get("capital_signal_conflict") is False)
+    e3 = carry_er_stamp({"ticker": "CCC"}, {"expected_return_12_24m": None})
+    ok("negative control: a missing input must not read as a measured 'no conflict'", e3.get("capital_signal_conflict") is None)
+    print("rerank_watchlist selftest: %d FAIL(s)" % len(fails))
+    return 1 if fails else 0
+
+
 def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, action_stack_ctx=None):
     with open(scored_path, encoding="utf-8") as f:
         scored = json.load(f)
@@ -912,23 +958,8 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
         except Exception:
             _erd = None
         if _erd:
-            e["expected_return_12_24m"] = _erd.get("expected_return_12_24m")
-            e["er_confidence"] = _erd.get("er_confidence")
-            e["er_basis"] = _erd.get("er_basis")
-            # H4: carry the TERMS, not just the total. Without them a name below the deploy
-            # floor records only that it failed, and "forward earnings are falling" is
-            # indistinguishable from "the de-rate term is pinned at its cap" — opposite facts.
-            e["er_growth"] = _erd.get("er_growth")
-            e["er_rerate"] = _erd.get("er_rerate")
-            e["er_yield"] = _erd.get("er_yield")
-            # D-24: the anchor evidence travels with the number. Without er_status the gate
-            # cannot tell a measured 4.0% from a partial one, and they are opposite facts.
-            for _k in ("er_status", "er_rerate_status", "er_anchor_xs", "er_anchor_own",
-                       "er_anchor_divergence", "er_anchor_divergence_pct",
-                       "er_anchor_corroborated", "er_multiple_field", "er_multiple_value",
-                       "er_growth_clamped", "er_rerate_clamped", "er_anchor_table_as_of",
-                       "er_anchor_table_group", "er_anchor_mode"):
-                e[_k] = _erd.get(_k)
+            # H4 terms, D-24 anchor evidence, B09-R09 identity, B09-R10 conflict recompute - ONE helper
+            carry_er_stamp(e, _erd)
         if td.get("revision_stage") is not None:
             e["revision_stage"] = td.get("revision_stage")   # first-class field (A3; flag-string retired)
         # A5 v3: sightings from the A8 score panel — the alternative evidence route
@@ -1009,7 +1040,7 @@ def run(scored_path, watchlist_path, hurdle=70.0, max_wl=10, metrics_path=None, 
     # E1 — Global Action Stack (CONTRACTS #6). Additive new output; off by default.
     if getattr(_cfg, "BUILD_ACTION_STACK", False):
         try:
-            month_label = date.today().strftime("%b_%Y").lower()
+            month_label = __import__("run_cycle").cycle_label()   # ISA-0910: the cycle the pre-run reads back
             universe = _assemble_universe(eligible, held, tk, mom_map, registry, hurdle, q_span)
             # Jul-26 Part 8: sector/theme-cap + diversification context. The pre-run builds it from the
             # X-Ray/portfolio look-through and passes it in (or drops action_stack_ctx.json beside the
@@ -1085,4 +1116,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     main()

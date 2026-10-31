@@ -103,28 +103,88 @@ def select_floor(asset_structure: Optional[str]) -> float:
     return _floor_platform() if str(asset_structure).lower() == "platform" else _floor_single()
 
 
-def derive_floor(asset_structure: Optional[str], catalyst_type: Optional[str] = None,
-                 p_thesis: Optional[float] = None, L: Optional[float] = None,
-                 days_to_catalyst: Optional[float] = None, mode: Optional[str] = None,
-                 req_annual: Optional[float] = None):
-    """E1 applied floor. Returns (floor, floor_source). mode 'fixed' -> FWDVCI tier."""
+# ⚑ B09-R11 (P-C, 24-Oct-2026). THE FLOOR DISCLOSES ITS REQUIREMENT AND CANNOT CLAIM AN INFEASIBLE HURDLE MET.
+#   applied = clamp(A_min, fixed tier, VCI_FLOOR_MAX) hid the requirement: p 0.10, L 0.60, a 20% hurdle needs an
+#   asymmetry of 8.4x, the cap printed 4.0x, and a name AT 4.0x was deploy-eligible although its probability-
+#   weighted return at 4.0x is -24% (EV-0355/0356/0357). A 3-year catalyst displayed the same 4.0x as a 1-year
+#   one. Missing priors fell back to the fixed tier and stayed eligible (EV-0358); a NaN prior produced a NaN
+#   floor every comparison passed (EV-0360); a failed derived-anchor lookup became 'fixed' mode (EV-0369).
+#   NOW: the numerical priors and the cap are PRESERVED (no retuning - accepted analysis pending); the policy
+#   floor is still published, but eligibility compares against the TRUE requirement when it exceeds the cap,
+#   and every non-derivable case is a BLOCKING source, never the fixed tier in disguise.
+FLOOR_BLOCKING_SOURCES = ("priors_unavailable", "priors_invalid", "derivation_failed")
+
+
+def derive_floor_detail(asset_structure: Optional[str], catalyst_type: Optional[str] = None,
+                        p_thesis: Optional[float] = None, L: Optional[float] = None,
+                        days_to_catalyst: Optional[float] = None, mode: Optional[str] = None,
+                        req_annual: Optional[float] = None) -> dict:
+    """E1 floor with full disclosure: {floor (the eligibility threshold), source, applied_policy_floor,
+    required_asymmetry_uncapped, fixed_minimum, policy_cap, p_thesis, L, horizon_years, hurdle_over_horizon,
+    required_annual_return, feasibility, blocks, why}. Never raises."""
     fixed = select_floor(asset_structure)
+    cap = float(_c("VCI_FLOOR_MAX", 4.0))
     mode = (mode or _c("VCI_FLOOR_MODE", "fixed"))
+    out = {"floor": fixed, "source": "fixed", "applied_policy_floor": fixed, "fixed_minimum": fixed,
+           "policy_cap": cap, "required_asymmetry_uncapped": None, "p_thesis": p_thesis, "L": L,
+           "horizon_years": None, "hurdle_over_horizon": None, "required_annual_return": req_annual,
+           "feasibility": "FIXED_TIER", "blocks": False, "mode": mode, "why": None}
     if mode != "derived":
-        return fixed, "fixed"
+        return out
     if p_thesis is None or L is None:
         lp, ll = lookup_priors(asset_structure, catalyst_type)
         p_thesis = p_thesis if p_thesis is not None else lp
         L = L if L is not None else ll
-    if p_thesis is None or L is None or p_thesis <= 0:
-        return fixed, "prior_default"          # no odds -> fall back, never auto-deploy on a guess
-    T = max((float(days_to_catalyst) / 365.0) if days_to_catalyst else 1.0, 0.5)
-    req = float(req_annual if req_annual is not None
-               else _policy_derived("VCI_REQUIRED_ANNUAL_RETURN"))   # ISA-0432
+        out.update(p_thesis=p_thesis, L=L, prior_basis="vci_base_rates.json / VCI_P_THESIS_PRIORS lookup")
+    if p_thesis is None or L is None:
+        out.update(source="priors_unavailable", feasibility="UNDETERMINED", blocks=True,
+                   why="derived floor mode with no p_thesis/L for %s/%s - the hurdle cannot be stated, so the name is "
+                       "not eligible (never the fixed tier in disguise)" % (asset_structure, catalyst_type))
+        return out
+    try:
+        p_, l_ = float(p_thesis), float(L)
+    except (TypeError, ValueError):
+        p_, l_ = float("nan"), float("nan")
+    if not (math.isfinite(p_) and math.isfinite(l_) and 0.0 < p_ <= 1.0 and 0.0 <= l_ <= 1.0):
+        out.update(source="priors_invalid", feasibility="UNDETERMINED", blocks=True,
+                   why="p_thesis %r / L %r outside p in (0,1], L in [0,1] or non-finite - refused" % (p_thesis, L))
+        return out
+    try:
+        T = max((float(days_to_catalyst) / 365.0) if days_to_catalyst else 1.0, 0.5)
+        req = float(req_annual if req_annual is not None
+                    else _policy_derived("VCI_REQUIRED_ANNUAL_RETURN"))   # ISA-0432
+        if not math.isfinite(req) or not math.isfinite(T):
+            raise ValueError("non-finite hurdle/horizon")
+    except Exception as exc:                                             # noqa: BLE001
+        out.update(source="derivation_failed", feasibility="UNDETERMINED", blocks=True,
+                   why="the derived floor could not be computed (%s: %s) - refused, not fixed mode"
+                       % (type(exc).__name__, exc))
+        return out
     h = (1.0 + req) ** T - 1.0
-    a_min = 1.0 + ((1.0 - p_thesis) * L + h) / p_thesis
-    applied = min(max(a_min, fixed), float(_c("VCI_FLOOR_MAX", 4.0)))
-    return round(applied, 4), "derived"
+    a_min = 1.0 + ((1.0 - p_) * l_ + h) / p_
+    applied = min(max(a_min, fixed), cap)
+    out.update(p_thesis=p_, L=l_, horizon_years=round(T, 4), hurdle_over_horizon=round(h, 6),
+               required_annual_return=req, required_asymmetry_uncapped=round(a_min, 4),
+               applied_policy_floor=round(applied, 4))
+    if a_min > cap + 1e-12:
+        out.update(floor=round(a_min, 4), source="derived_requirement_exceeds_cap",
+                   feasibility="REQUIREMENT_ABOVE_POLICY_CAP",
+                   why=("the hurdle needs %.2fx over %.2f years at p=%.2f, L=%.2f; the %.1fx policy cap is preserved as "
+                        "the published floor but CANNOT certify the hurdle - eligibility needs the true %.2fx"
+                        % (a_min, T, p_, l_, cap, a_min)))
+    else:
+        out.update(floor=round(applied, 4), source="derived", feasibility="FEASIBLE_WITHIN_CAP")
+    return out
+
+
+def derive_floor(asset_structure: Optional[str], catalyst_type: Optional[str] = None,
+                 p_thesis: Optional[float] = None, L: Optional[float] = None,
+                 days_to_catalyst: Optional[float] = None, mode: Optional[str] = None,
+                 req_annual: Optional[float] = None):
+    """E1 floor. Returns (eligibility_floor, floor_source); the full disclosure is derive_floor_detail().
+    mode 'fixed' -> FWDVCI tier. A source in FLOOR_BLOCKING_SOURCES blocks eligibility (B09-R11)."""
+    d = derive_floor_detail(asset_structure, catalyst_type, p_thesis, L, days_to_catalyst, mode, req_annual)
+    return d["floor"], d["source"]
 
 
 @dataclass
@@ -255,6 +315,11 @@ def evaluate_deploy_eligibility(*, acs_total: Optional[float], fv: BottleneckFV,
         asym = fv.fv_asymmetry_p25
 
     blocked = False
+    # B09-R11 (P-C): a floor that could not be derived, or is non-finite, BLOCKS - it never passes silently
+    if fv.floor_source in FLOOR_BLOCKING_SOURCES:
+        blocked = True; reasons.append("floor %s:refused_not_fixed" % fv.floor_source)
+    elif fv.floor is None or not math.isfinite(float(fv.floor)):
+        blocked = True; reasons.append("floor non-finite (%r):refused" % (fv.floor,))
     if falls_on_beat:
         blocked = True; reasons.append("F3 price_falls_on_beat:NO_DEPLOY")
     if not has_catalyst:
@@ -267,6 +332,8 @@ def evaluate_deploy_eligibility(*, acs_total: Optional[float], fv: BottleneckFV,
         blocked = True; reasons.append(f"acs {adj:.1f} < {thr:g} floor")
     if asym is None:
         blocked = True; reasons.append("fv_asymmetry unavailable")
+    elif fv.floor is None or not math.isfinite(float(fv.floor)):
+        pass                                            # already blocked above
     elif asym < fv.floor:
         blocked = True; reasons.append(f"fv_asymmetry {asym} < {fv.floor} floor ({fv.asset_structure}/{fv.floor_source})")
 

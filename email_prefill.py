@@ -474,9 +474,8 @@ def email_subject(run_date: date) -> str:
     Sunday this pre-run feeds (the Sunday on or after run_date), e.g. pre-run Sat 03-Oct-2026 ->
     'Monthly ISA Portfolio Review - Oct 2026'; pre-run Sat 31-Oct -> review Sun 01-Nov -> 'Nov 2026'.
     It is NOT the portfolio data month (run_month_label), which the report body keeps."""
-    from datetime import timedelta as _td795
-    review = run_date + _td795(days=(6 - run_date.weekday()) % 7)
-    return EMAIL_SUBJECT_PREFIX + review.strftime("%b %Y")
+    import run_cycle as _rcy795   # ISA-0910: the rule's ONE home (it used to be implemented only here)
+    return EMAIL_SUBJECT_PREFIX + _rcy795.cycle_run_month(run_date)
 
 
 def build_meta(portfolio: dict, run_date: date) -> dict:
@@ -530,15 +529,12 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         {
             "label": "Stock Sleeve",
             "value": f"{stock_pct:.1f}%",
-            "sub":   f"£{s['stock_sleeve_value_gbp']:,.2f} | Target: 10–15% (Phase 1)",
+            # ISA-0902: the hard-coded 'Target: 10-15% (Phase 1)' outlived the phase; the target lives in the
+            #   phase status line (s6 summary), never as a stale literal here.
+            "sub":   f"£{s['stock_sleeve_value_gbp']:,.2f} in individual company shares",
             "style": "info",
         },
-        {
-            "label": "MoM Change",
-            "value": "[Claude to fill]",
-            "sub":   "vs prior month AJ Bell file",
-            "style": "normal",
-        },
+        # ISA-0900: the 'MoM Change' tile is retired - the account bridge (report_measures) is the one source.
     ]
 
     # Holdings table (all positions)
@@ -634,12 +630,26 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
         "semis_line": ((analytics.get("factor_lookthrough") or {}).get("semis") or {}).get("line"),
         # B08-R01/R02 (P-B6): whole-ISA exposure coverage - the pounds each exposure answer covers
         "exposure_line": (analytics.get("exposure_coverage") or {}).get("line"),
+        # P-D (B08-R03/R06/R07/R09/R10): whole-ISA risk, stress vs Raj's limit, drawdown record, scale (Step 6.10s)
+        "whole_isa_risk_line": ((analytics.get("whole_isa") or {}).get("whole_book_risk") or {}).get("line"),
+        "stress_line": ((analytics.get("whole_isa") or {}).get("whole_book_stress") or {}).get("line"),
+        "wealth_line": ((analytics.get("whole_isa") or {}).get("wealth_record") or {}).get("line"),
+        "scale_line": ((analytics.get("whole_isa") or {}).get("scale_readiness") or {}).get("line"),
         "kpis":               kpis,
         "holdings":           all_holdings,
         "performance_header": "Portfolio vs MSCI World (Benchmark: Global Large-Cap Blend Equity)",
         "performance":        perf,
         "notes":              notes,
     }
+
+
+def apply_report_measures(s6: dict, rm) -> dict:
+    """ISA-0900 RENDERER feed: attach the pre-run's reporting-only measures to s6 exactly as computed.
+    Absent is stated (state ABSENT), never an empty table. No calculation here (R20.2)."""
+    s6 = dict(s6 or {})
+    s6["report_measures"] = (dict(rm) if isinstance(rm, dict) and rm else
+                             {"state": "ABSENT", "why": "summary.report_measures not written by this run's pre-run"})
+    return s6
 
 
 def apply_account_return(s6: dict, ar) -> dict:
@@ -675,8 +685,10 @@ def apply_account_return(s6: dict, ar) -> dict:
             return ("%s TWR %+.2f%% / money-weighted %+.2f%% from GBP %s (%s, %s) to GBP %s (%s) with GBP %s of external flows"
                     % (name, w["twr_pct"], w.get("mwr_pct") or 0.0, format(w["start"]["value_gbp"], ",.2f"), w["start"]["date"],
                        w["start"]["source"], format(w["end"]["value_gbp"], ",.2f"), w["end"]["date"], format(w["flows_total_gbp"], ",.2f")))
-        line = ("Account return (ISA-0642): " + _txt(c, "calendar YTD") + "; " + _txt(t, "tax-year-to-date") + ". "
-                + str((c if c.get("state") == "OK" else t).get("basis") or "") + ". The X-Ray YTD row is HOLDINGS-based.")
+        _basis = str((c if c.get("state") == "OK" else t).get("basis") or "").strip().rstrip(".")
+        line = ("Account return (ISA-0642): " + _txt(c, "calendar YTD").rstrip(".") + "; "
+                + _txt(t, "tax-year-to-date").rstrip(".") + ". " + (_basis + ". " if _basis else "")   # ISA-0902: no '. .'
+                + "The X-Ray YTD row is HOLDINGS-based.")
     s6["performance"] = perf
     s6["account_return_line"] = line
     s6["notes"] = ((s6.get("notes") or "") + " " + line).strip()
@@ -1188,6 +1200,11 @@ def build_s10(portfolio: dict, analytics: dict, run_date: date) -> dict:
 # ---------------------------------------------------------------------------
 # Skeleton sections (Claude fills entirely)
 # ---------------------------------------------------------------------------
+# ISA-0905 (28-Oct-2026): the /100 conviction score is RETIRED (D21). Skeletons carry this marker, never a
+# '[XX/100]' placeholder - the placeholder gate (ISA-0793) refused the send until a retired score was invented.
+CONVICTION_RETIRED = "n/a - /100 retired (D21)"
+
+
 def skeleton_s1() -> dict:
     return {
         "intro": "[Claude fills: one-sentence summary of this month's best action.]",
@@ -1196,8 +1213,7 @@ def skeleton_s1() -> dict:
                 "action":           "BUY / SELL / HOLD",
                 "name":             "[Stock/Fund name]",
                 "size":             "[£X (~N shares/units)]",
-                "conviction":       "[XX/100 High/Medium]",
-                "conviction_level": "high",
+                "conviction":       CONVICTION_RETIRED,
                 "timing":           "[This week / Wait for entry / etc.]",
                 "note":             _pf_trade_note_hint(),
             }
@@ -1276,9 +1292,17 @@ def _s2_standing_lines(analytics=None) -> list:
     lines.extend(_s2_north_star_lines(analytics))
     ds = load_json_optional(os.path.join(SCRIPT_DIR, "drawdown_state.json"))
     if ds and ds.get("last_check"):
-        lines.append(f"Drawdown ladder: {ds.get('drawdown_pct', 0):+.1f}% from 252d high | "
-                     f"tranches fired {sum(1 for v in (ds.get('tranches_fired') or {}).values() if v)}/3 | "
-                     f"reserve £{(ds.get('reserve_gbp') or 0):,.0f} | regime {ds.get('regime_state') or 'n/a'}")
+        # S3/B04: thresholds CROSSED are observations; opportunities carry the purchase entitlement
+        _ops = [o for o in (ds.get("opportunities") or []) if o.get("episode_id") == ds.get("episode_id")]
+        _live = [o for o in _ops if o.get("state") in ("OPEN", "APPROVED", "STARTED")]
+        _act = [o for o in _live if o.get("actionable_now")]
+        lines.append(f"Drawdown: {ds.get('drawdown_pct', 0):+.1f}% from episode high {ds.get('episode_high', ds.get('high_252d'))} | "
+                     f"thresholds crossed {sum(1 for v in (ds.get('tranches_fired') or {}).values() if v)}/3 | "
+                     + (f"opportunities {len(_live)} live ({len(_act)} actionable"
+                        + (", this review's ceiling £{:,.0f}".format(sum(float(o.get('proposed_gbp') or 0) for o in _act)) if _act else "")
+                        + ")" if ds.get("protocol_active", True) else "protocol OFF (no opportunities)")
+                     + f" | regime {ds.get('regime_state') or 'n/a'}"
+                     + (" | ⚑ 30% FRESH REVIEW required" if (ds.get("fresh_review") or {}).get("episode_id") == ds.get("episode_id") else ""))
     else:
         lines.append("Drawdown ladder: state not yet seeded — first monitor run populates (B1)")
     # A21: paused S/O RAISES the bar (+5 conviction, one size notch down); NEVER gates timing.
@@ -1318,7 +1342,7 @@ def skeleton_s3() -> list:
             "action":        "BUY",
             "ticker":        "[TICKER]",
             "name":          "[Company Name]",
-            "conviction":    "[XX/100]",
+            "conviction":    CONVICTION_RETIRED,
             "metrics_table": [
                 {
                     "label":      "[Metric]",
@@ -1364,7 +1388,7 @@ def skeleton_s5() -> dict:
                 "rank":         1,
                 "ticker":       "[TICKER]",
                 "name":         "[Company]",
-                "score":        "[XX/50 | Conv: XX/100]",
+                "score":        "[XX/50]",
                 "score_level":  "high",
                 "sector":       "[Sector]",
                 "entry_level":  "[$XX or £XX]",
@@ -1387,7 +1411,8 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
     """
     Build s5 watchlist section from watchlist_scored.json output.
     Items are pre-populated with quantitative fields from normalise_adapter.py.
-    Claude fills: detail_items paragraphs (thesis for top 3), excluded notes, conviction scores.
+    Claude fills: detail_items paragraphs (thesis for top 3) and excluded notes. (ISA-0905: no conviction score -
+    the /100 score is retired, D21.)
 
     Fix Pack P2 (P5/P7b + A2/A3/A4/D7): the PRIMARY column is the metric that orders the list —
     the unified Source Score (deployment_priority_rank). Conviction/part-scores are secondary.
@@ -1427,7 +1452,6 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
             "source_score": _s9.get("source_score", "—"),
             "score":        row.get("score", "—"),          # secondary: raw parts (legacy display)
             "score_level":  row.get("score_level", "normal"),
-            "conviction":   _s9.get("strategic_conviction_score", "—"),   # secondary
             "tier":         _s9.get("tier", "—"),
             "revision_stage": _s9.get("revision_stage", row.get("revision_stage", "—")),  # A3
             "expected_return_12_24m": (f"{_er:.1f}%" if isinstance(_er, (int, float)) else "—"),
@@ -1484,10 +1508,8 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
     # Conviction ranking note
     in_window = [r.get("ticker") for r in raw_items if r.get("in_window")]
     ranking_note = (
-        f"[Claude fills Step 11 conviction scores. "
-        f"In-window names requiring Step 11 scoring: {in_window if in_window else 'none at entry level this month'}. "
-        f"Analyst disparity flags: "
-        f"{[r.get('ticker') for r in raw_items if r.get('analyst_disparity')]}]"
+        "Ranking is by Source Score; the /100 conviction score is retired (D21, ISA-0905) and is not scored. "
+        f"Analyst disparity flags: {[r.get('ticker') for r in raw_items if r.get('analyst_disparity')]}"
     )
 
     return {
@@ -1496,13 +1518,11 @@ def build_s5_from_scored(scored: dict, step9: dict = None) -> dict:
         "detail_items": detail_items,
         # P5-T3 legend: all three scores + what each governs
         "legend": ("Ranking is by SOURCE SCORE (0-100, unified screen=deploy — deployability "
-                   "order). Conviction (45/60/75 bands) = decision readiness, secondary. "
-                   "ACS = asymmetric-sleeve track (separate VCI table). Entry level is "
+                   "order). ACS = asymmetric-sleeve track (separate VCI table). Entry level is "
                    "'Target buy (display)' — never a ranking input. E[r] = expected 12-24m "
                    "return pa (A2); Stage = revision stage (A3); one deploy verdict per row "
-                   "(T1 gate set: ns/stage/E[r]/clean-flags). Size mode (A5v3): full = "
-                   "evidence-confirmed + conviction >= 75; starter = thin evidence, capped 1.5% "
-                   "with a recorded scale-up trigger — tenure never gates or caps."),
+                   "(T1 gate set: ns/stage/E[r]/clean-flags). Size = position_sizing.ladder() on "
+                   "evidence_state (ISA-0905: the /100 conviction score and A5v3 size modes are retired)."),
         "_conviction_ranking_note": ranking_note,
         "_conviction_ranking":      scored.get("conviction_ranking", []),
     }
@@ -1679,7 +1699,7 @@ def build_s3_from_scored(scored: dict, step9: dict = None) -> list:
             "action":        skel.get("action", "BUY"),
             "ticker":        skel.get("ticker", ""),
             "name":          skel.get("name", ""),
-            "conviction":    skel.get("conviction", "[Claude fills /100]"),
+            "conviction":    skel.get("conviction", CONVICTION_RETIRED),
             "metrics_table": skel.get("metrics_table", []),
             "_part_a_table": skel.get("part_a_table", []),
             "_part_b_table": skel.get("part_b_table", []),
@@ -1721,6 +1741,7 @@ def build_vci_sleeve_from_step9(step9: dict) -> dict:
             "fv_asymmetry": e.get("fv_asymmetry"),
             "fv_asymmetry_p25": e.get("fv_asymmetry_p25"),
             "fv_floor": e.get("fv_floor"),
+            "floor_source": e.get("floor_source"),        # ISA-0823: the floor's basis reaches the renderer
             "days_to_catalyst": e.get("days_to_catalyst"),
             "deploy_eligible": e.get("deploy_eligible"),
             "status": e.get("decision_bucket", e.get("tier", "Watchlist")),
@@ -1922,6 +1943,33 @@ def concentration_line(cde, readiness=None):
     else:
         tail = " LIVE readiness: UNREADABLE at email build."
     return head + ": " + body + "." + uns + tail
+
+
+def appetite_guard_line(cde):
+    """P-D (ISA-0887/0888): the comparator's risk basis and Raj's 50%-limit guard on the selected plan. Renderer only."""
+    rm = (cde or {}).get("risk_metric") or {}
+    ag = (cde or {}).get("appetite_guard") or {}
+    if not rm and not ag:
+        return ("Whole-ISA risk in the decision (P-D): NO RECORD in this receipt - the plans were compared on stock-sleeve "
+                "risk only (a pre-P-D receipt).")
+    basis = rm.get("basis") or "UNKNOWN"
+    s = ("Whole-ISA risk in the decision (P-D): plans compared on %s%s"
+         % ("WHOLE-ISA GBP volatility (stocks + funds together)" if basis == "WHOLE_BOOK_MEASURED"
+            else "stock-sleeve GBP volatility (%s)" % (rm.get("why") or basis),
+            "" if rm.get("no_action_whole_book_gbp_vol") is None else
+            "; holding still = GBP %s a year" % format(round(rm["no_action_whole_book_gbp_vol"]), ",")))
+    sel = ag.get("selected") or {}
+    st = ag.get("state")
+    if st == "REVIEW_REQUIRED":
+        s += (". APPETITE REVIEW REQUIRED: the selected plan takes the severe-scenario loss from %s%% to %s%% against "
+              "your %s%% limit - its buys execute only with your explicit approval (Checkpoint-D tick 14); nothing is sold."
+              % (sel.get("pre_loss_pct"), sel.get("post_loss_pct"), sel.get("appetite_pct")))
+    elif st in ("PASS", "NOT_ENFORCED", "UNDECLARED"):
+        s += ". Appetite guard %s (severe-scenario loss %s%% after the plan, limit %s%%)." % (
+            st, sel.get("post_loss_pct"), sel.get("appetite_pct", "undeclared"))
+    else:
+        s += ". Appetite guard %s." % (st or "NOT_EVALUATED")
+    return s
 
 
 def switch_contest_line(cde):
@@ -2207,6 +2255,12 @@ def build_capital_router_block(cd: dict, wr: dict = None) -> dict:
                      "band": ("%.2f-%.2f%%" % (w.get("low"), w.get("high"))
                               if w.get("low") is not None and w.get("high") is not None
                               else "-")})
+    # ⚑ ISA-0918: the allocation rules' OWN reason per funded fund (capital_destination.fund_allocation_reasons),
+    #   rendered verbatim - never re-derived here.
+    _why = cd.get("allocation_reasons") or {}
+    for r in rows:
+        r["why"] = (_why.get(r["sedol"]) or {}).get("line")
+    out["fund_reasons"] = {k: v.get("line") for k, v in _why.items() if v.get("line")}
     out["allocation_rows"] = rows
     out["allocation_line"] = (
         "Fund allocation %s: %s across %d destination(s); %s unallocated."
@@ -2375,7 +2429,9 @@ SUMMARY_RENDERED = {
     "factor_lookthrough":         "build_s6",                     # s6
     "theme_autoclassify":         "concentration_line",           # s2 - ISA-0700 P-B7 auto-classification (via readiness)
     "exposure_coverage":          "build_s6",                     # s6 - B08-R01/R02 whole-ISA coverage (P-B6)
+    "whole_isa":                  "build_s6",                     # s6 - P-D whole-ISA risk / stress / record / scale (Step 6.10s)
     "account_return":             "apply_account_return",         # s6 - ISA-0642 (6) actual-account YTD
+    "report_measures":            "apply_report_measures",        # s6 - ISA-0900 bridge / contributions / holdings / return history
     "regime_state":               "_s2_standing_lines",           # s2 standing line
     "drawdown":                   "_s2_standing_lines",           # s2 B1 ladder line
     "return_architecture":        "_ra_load",                     # s8 Section C
@@ -2411,6 +2467,24 @@ SUMMARY_RENDERED = {
     "fetch_universe":             "build_integrity_block",        # s7 — measurement/coverage
     "execution_ledger":           "build_integrity_block",        # s11 — framework health
     "integrity_report":           "build_integrity_block",        # s11 — framework health
+    # ── ISA-0448 (25-Oct-2026): RENDERED by ONE renderer, build_summary_lines (positive or capital-bearing content) ──
+    "mmf_sweep":                  "build_summary_lines",  # ISA-0448 -> s2
+    "watchlist_promotion_log":    "build_summary_lines",  # ISA-0448 -> s5
+    "watchlist_rerank":           "build_summary_lines",  # ISA-0903 -> s5 (the FINAL ranking's changes)
+    "reversal_worklist":          "build_summary_lines",  # ISA-0448 -> s5
+    "vci_calibration_state":      "build_summary_lines",  # ISA-0448 -> s5
+    "phase_status":               "build_summary_lines",  # ISA-0448 -> s6
+    "concentration":              "build_summary_lines",  # ISA-0448 -> s6
+    "position_alerts":            "build_summary_lines",  # ISA-0448 -> s7
+    "process_concentration":      "build_summary_lines",  # ISA-0448 -> s8
+    "strategic_allocation":       "build_summary_lines",  # ISA-0448 -> s8
+    "t4_mandate_drift":           "build_summary_lines",  # ISA-0448 -> s8
+    "lookthrough":                "build_summary_lines",  # ISA-0448 -> s8
+    "fund_holdings_declared":     "build_summary_lines",  # ISA-0448 -> s8
+    "fund_categories":            "build_summary_lines",  # ISA-0448 -> s8
+    "rebalancing_candidates":     "build_summary_lines",  # ISA-0448 -> s8
+    "cash_statement":             "build_summary_lines",  # ISA-0448 -> s10
+    "transactions":               "build_summary_lines",  # ISA-0448 -> s10
 }
 
 # key -> the warning-stage prefix that carries its decision content into the pre-run warning
@@ -2500,6 +2574,9 @@ SUMMARY_ESCALATED = {
     # WHICH name and on what measured beta, because that name is still a legitimate SWITCH
     # candidate and the distinction changes what the review does with it (ISA-0600).
     "sleeve_gate": "SLEEVE GATE",                   # Step 8 — the beta constraint on additions
+    # ISA-0448 (25-Oct-2026): calibration-universe price coverage is infrastructure for the IC/rule-friction studies; its
+    #   decision content IS the exception (coverage below the 85% acceptance floor), emitted with this prefix.
+    "universe_price_coverage": "Universe price coverage",
 }
 
 # key -> why the email is not its surface. A reason, never an empty string: a key parked here
@@ -2534,6 +2611,31 @@ SUMMARY_OUT_OF_SCOPE = {
                                 "whether the pipeline still FITS, an engineering question "
                                 "about the run rather than a figure about the portfolio; a "
                                 "breach surfaces as a RUNTIME warning, not an email row",
+    # ── ISA-0448 (25-Oct-2026): each traced to its producer and to what the email already carries ──────────
+    "fund_expected_return":    "ISA-0328 PUBLISHED, NOT OPERATIVE: the fund structural E[r] (Step 6.11b) moves no verdict "
+                               "(return_architecture.ER_BASIS_OPERATIVE unchanged); its measured figure already reaches the "
+                               "review as the Step 6.11b warning line, and rendering it would present a non-operative E[r] "
+                               "as the approved one",
+    "regional_m":              "ISA-0160 input to the non-operative Step 6.11b fund E[r] (regional M layer state and world "
+                               "identity), not a portfolio figure; a failure reaches the review as a Step 6.11a warning",
+    "missed_opportunity":      "a pointer (prior month + path) to the MOA attribution artefact, not a figure; its matured "
+                               "read-back (disposition_outcomes) is owned by ISA-0891 and has no matured decision before "
+                               "Jan-2027",
+    "regimes":                 "the authority/corroborator record behind summary.regime_state, which s2 renders in the B1 "
+                               "drawdown standing line; macro_regime is the review's own Step 4 judgement written in s9 - "
+                               "rendering the record would be a second home for both",
+    "shadow_ledger":           "SHADOW research cohorts (books A/B/C per month) that move no capital; evidence for the "
+                               "S6 study dispositions, and rendering them would present a SHADOW return beside the real one",
+    "t1_revisions_crosstab":   "a diagnostic study (revision state x T1 qualification) for the S6 adopt/wait/retire "
+                               "decision; no decision consumes it this run",
+    "conviction_capture":      "the Step 9 judgement-record skeleton's state; the email builder's own judgement gate "
+                               "(ISA-0698) reads the record and refuses an unjudged build, and s2 renders the gate outcome",
+    "reversal_flag_tickers":   "the ticker list behind summary.reversal_worklist, which s5 renders in full (with tiers); a "
+                               "second list would be a second home",
+    "xray_1yr_return_pct":     "the X-Ray portfolio 1-year return, already rendered in the s6 performance table's 1 Year row "
+                               "from xray_data trailing_returns; a second rendering would be a second home",
+    "xray_1yr_benchmark_pct":  "the X-Ray benchmark 1-year return, already rendered in the s6 performance table's 1 Year row "
+                               "from xray_data trailing_returns; a second rendering would be a second home",
 }
 
 # key -> the LIVE register item tracking the decision that has not been made. ⚑ THIS IS NOT A
@@ -2545,16 +2647,269 @@ SUMMARY_OUT_OF_SCOPE = {
 # from the defect it hunts teaches the reader to disbelieve it. A dict comprehension is not a
 # literal, so it would have forced the regex back.
 SUMMARY_UNADJUDICATED_ITEM = "ISA-0448"
-SUMMARY_UNADJUDICATED = (
-        "cash_statement", "transactions", "concentration", "process_concentration",
-        "strategic_allocation", "t4_mandate_drift", "lookthrough", "fund_holdings_declared",
-        "fund_categories", "regional_m", "fund_expected_return", "position_alerts",
-        "missed_opportunity", "regimes", "shadow_ledger", "t1_revisions_crosstab",
-        "conviction_capture", "watchlist_promotion_log", "reversal_worklist",
-        "reversal_flag_tickers", "mmf_sweep", "phase_status", "rebalancing_candidates",
-        "universe_price_coverage", "xray_1yr_return_pct", "xray_1yr_benchmark_pct",
-        "vci_calibration_state",
-)
+# ⚑ ISA-0448 (25-Oct-2026): EMPTY. All 27 keys parked here were traced one by one and moved to a real bucket
+#   (16 RENDERED via build_summary_lines, 1 ESCALATED, 10 OUT_OF_SCOPE). A new key must be declared in the change
+#   that writes it; parking it here again needs a LIVE register item named by SUMMARY_UNADJUDICATED_ITEM.
+SUMMARY_UNADJUDICATED = ()
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0448 (25-Oct-2026) — ONE renderer for the summary keys adjudicated RENDERED in that change.
+#
+# Each key -> (email section, line function). A line function turns the pre-run's own summary value into
+# plain-text lines with a severity ("warn" = an adverse state the reader must see; "info" otherwise). Nothing
+# here computes a decision figure: every number is the pre-run's, re-stated. build_monthly_isa_email renders
+# the lines once (_summary_lines_html); a WARN line is a verdict row, so lean triage carries it (ISA-0642).
+# test_isa0642_output MF-12 asserts SUMMARY_RENDERED's build_summary_lines keys == LINE_RENDERERS' keys.
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+def _ln_num(v, fmt="{:,.2f}"):
+    try:
+        return fmt.format(float(v))
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+
+
+def _ln_names(xs, n=12):
+    xs = [str(x.get("ticker") if isinstance(x, dict) else x) for x in (xs or [])]
+    if not xs:
+        return "none"
+    return ", ".join(xs[:n]) + (" +%d more" % (len(xs) - n) if len(xs) > n else "")
+
+
+def _ln_pct(v):
+    return "n/a" if v is None else _ln_num(v, "{:+.2f}") + "%"
+
+
+def _ln_mmf_sweep(v):
+    v = v or {}
+    st = v.get("status")
+    if st == "SWEEP":
+        return [("MMF sweep: SWEEP GBP %s into %s - %s" % (_ln_num(v.get("amount_gbp")), v.get("instrument") or "UNKNOWN",
+                                                         v.get("note") or "no note"), "info")]
+    return [("MMF sweep: %s%s" % (st or "UNKNOWN", (" - %s" % v["note"]) if v.get("note") else ""),
+             "warn" if st in (None, "ERROR", "FAILED", "UNKNOWN") else "info")]
+
+
+def _ln_position_alerts(v):
+    v = v or {}
+    st = v.get("status")
+    if st not in ("ALERTS", "NO_ALERTS", "OK", "CLEAR"):
+        return [("Position alerts (weekly store): %s - %s" % (st or "UNKNOWN", v.get("note") or v.get("error") or "no detail"),
+                 "warn")]
+    out = [("Position alerts (weekly store as of %s; detection only, never an execution trigger): %s alert(s), %s on held "
+            "names%s" % (v.get("as_of") or "UNKNOWN", v.get("n_alerts", 0), v.get("n_held", 0),
+                         "; store STALE" if v.get("stale") else ""), "warn" if v.get("stale") else "info")]
+    _watch = []
+    for a in v.get("alerts") or []:
+        if a.get("class") != "HELD":
+            _r0 = next((r for r in (a.get("rules_fired") or []) if r.get("value_pct") is not None), None)
+            _watch.append("%s %s%s" % (a.get("ticker"), (_r0 or {}).get("rule") or "rule", (" %s" % _ln_pct(_r0["value_pct"])) if _r0 else ""))
+            continue
+        rules = []
+        for r in a.get("rules_fired") or []:
+            if r.get("value_pct") is None:
+                rules.append(str(r.get("rule")))
+            else:
+                rules.append("%s %s vs %s%s" % (r.get("rule"), _ln_pct(r.get("value_pct")), _ln_pct(r.get("threshold_pct")),
+                                                (" -> %s" % r["advice"]) if r.get("advice") else ""))
+        act = str(a.get("actionability") or "").split(" ")[0]
+        out.append(("%s (%s): %s%s" % (a.get("ticker"), a.get("class"), "; ".join(rules) or "rule UNKNOWN",
+                                        ("; %s" % act) if act else ""), "warn"))
+    if _watch:
+        out.append(("Watchlist/candidate alerts (%d, review at the next scheduled run): %s" % (len(_watch), "; ".join(_watch)),
+                    "info"))
+    return out
+
+
+def _ln_transactions(v):
+    v = v or {}
+    rec = v.get("broker_reconciliation")
+    t = ("Transactions (%s): %s trade(s) - buys %s; sells %s; dealing costs GBP %s; net cash GBP %s; distributions GBP %s; "
+         "broker reconciliation %s" % (v.get("source_file") or "no export", v.get("n_trades", "UNKNOWN"), _ln_names(v.get("buys")),
+                                       _ln_names(v.get("sells")), _ln_num(v.get("dealing_costs_gbp")),
+                                       _ln_num(v.get("net_cash_impact_gbp")), _ln_num(v.get("distributions_gbp")), rec or "UNKNOWN"))
+    bad = rec not in ("MATCH", "MATCHED", "OK", "RECONCILED") or v.get("status") not in (None, "OK")
+    return [(t, "warn" if bad else "info")]
+
+
+def _ln_cash_statement(v):
+    v = v or {}
+    inv = v.get("invariants_failed") or []
+    t = ("Cash statement (%s): opening GBP %s -> closing GBP %s; FX charge rate %s%%; invariants failed: %s; ledger rows "
+         "unmatched %s, pending %s" % (", ".join(v.get("source_files") or []) or "none", _ln_num(v.get("opening_balance_gbp")),
+                                       _ln_num(v.get("closing_balance_gbp")), v.get("fx_rate_pct", "UNKNOWN"),
+                                       ", ".join(str(x) for x in inv) or "none", v.get("ledger_unmatched", "UNKNOWN"),
+                                       v.get("ledger_pending", "UNKNOWN")))
+    return [(t, "warn" if (inv or not v.get("source_files")) else "info")]
+
+
+def _ln_phase_status(v):
+    return [("Stock-sleeve phase status (Step 6.7): %s" % (v or "UNKNOWN"), "info" if v else "warn")]
+
+
+def _ln_rebalancing(v):
+    return [("Fund rebalancing candidates (Step 6 analytics): %s" % ("UNKNOWN" if v is None else v), "info")]
+
+
+def _ln_concentration(v):
+    v = v or {}
+    if v.get("coverage_pct") is None:
+        return [("Risk concentration (Step 6.07): NOT MEASURED - %s" % (v.get("reason") or "no coverage"), "warn")]
+    return [("Risk concentration (Step 6.07): %s clusters; largest cluster %s%%; effective bets by risk %s; first principal "
+             "component %s%% of variance; coverage %s%%" % (v.get("n_clusters", "UNKNOWN"), v.get("largest_cluster_pct", "UNKNOWN"),
+                                                          v.get("effective_bets_by_risk", "UNKNOWN"), v.get("pc1_variance_pct", "UNKNOWN"),
+                                                          v.get("coverage_pct")), "info")]
+
+
+def _ln_process_concentration(v):
+    v = v or {}
+    return [("Process/manager concentration: largest %s = %s%% of the fund sleeve; declared coverage %s%%; effective "
+             "processes (declared) %s" % (v.get("largest_process") or "UNKNOWN", v.get("largest_pct_of_fund_sleeve", "UNKNOWN"),
+                                          v.get("declared_coverage_pct", "UNKNOWN"), v.get("n_eff_declared", "UNKNOWN")), "info")]
+
+
+def _ln_strategic_allocation(v):
+    v = v or {}
+    a = v.get("active_share_pct") or {}
+    u = v.get("unauthorised_material_bets") or {}
+    bets = [b for xs in u.values() for b in (xs or [])]
+    return [("Strategic allocation vs %s: active share region %s%%, sector %s%%; unauthorised material bets - region: %s; "
+             "sector: %s" % (v.get("reference_authority") or "UNKNOWN", a.get("region", "UNKNOWN"), a.get("sector", "UNKNOWN"),
+                             _ln_names(u.get("region")), _ln_names(u.get("sector"))), "warn" if bets else "info")]
+
+
+def _ln_t4(v):
+    v = v or {}
+    fb = v.get("fire_rate_band") or {}
+    band = fb.get("band_pct") or [None, None]
+    return [("T4 mandate drift: firing %s; watch %s; refused %s; fire rate %s%% (band %s-%s%%: %s)"
+             % (_ln_names(v.get("firing")), _ln_names(v.get("watch")), _ln_names(v.get("refused")), fb.get("fire_rate_pct", "UNKNOWN"),
+                band[0], band[-1], fb.get("state") or "UNKNOWN"),
+             "warn" if (v.get("firing") or fb.get("state") != "OK") else "info")]
+
+
+def _ln_lookthrough(v):
+    v = v or {}
+    return [("Look-through (Step 6.06): H10 overlap %s (%s flag(s)); H9 block %s; H9 flag %s; H9 unknown %s"
+             % (v.get("h10_status") or "UNKNOWN", v.get("h10_flags", "UNKNOWN"), _ln_names(v.get("h9_block")),
+                _ln_names(v.get("h9_flag")), _ln_names(v.get("h9_unknown"))),
+             "warn" if (v.get("h10_status") != "OK" or v.get("h9_block")) else "info")]
+
+
+def _ln_holdings_declared(v):
+    v = v or {}
+    return [("Declared fund holdings (H9 store): %s of %s absent, %s partial" % (v.get("absent", "UNKNOWN"), v.get("of", "UNKNOWN"),
+                                                                              v.get("partial", "UNKNOWN")), "info")]
+
+
+def _ln_fund_categories(v):
+    v = v or {}
+    return [("Declared fund peer-group categories (Step 6.05): %s of %s" % (v.get("declared", "UNKNOWN"), v.get("of", "UNKNOWN")),
+             "info")]
+
+
+def _ln_watchlist_log(v):
+    v = v or {}
+    ad, rm = v.get("additions") or [], v.get("removals") or []
+    sf = v.get("screen_freshness") or {}
+    age = sf.get("age_days")
+    stale = bool(v.get("stale_scores")) or (isinstance(age, (int, float)) and age > 14)
+    return [("Screen-stage watchlist changes, before the live re-rank (%s): added %d (%s); removed %d (%s); score updates %s; stale scores %s; newest screen %s "
+             "(%s days old)" % (v.get("run_date") or "UNKNOWN", len(ad), _ln_names(ad), len(rm), _ln_names(rm),
+                                (len(v["score_updates"]) if isinstance(v.get("score_updates"), list) else v.get("score_updates", "UNKNOWN")),
+                                (len(v["stale_scores"]) if isinstance(v.get("stale_scores"), list) else v.get("stale_scores", "UNKNOWN")),
+                                sf.get("newest_screen") or "UNKNOWN",
+                                "UNKNOWN" if age is None else age), "warn" if stale else "info")]
+
+
+def _ln_rerank(v):
+    """ISA-0903: the FINAL watchlist changes (Step 7.5 live re-rank) - the ranking s5 shows."""
+    v = v or {}
+    if v.get("state") == "UNPARSEABLE":
+        return [("Final watchlist (live re-rank, Step 7.5): log UNPARSEABLE - the ranking below is the re-rank's; its "
+                 "changes are not stated", "warn")]
+    pr, de = v.get("promoted") or [], v.get("demoted") or []
+    return [("Final watchlist (live re-rank, Step 7.5, %s): moved on %d (%s); moved off %d (%s); %s names re-scored live. "
+             "The table above is this ranking." % (v.get("run_date") or "UNKNOWN", len(pr), _ln_names(pr), len(de),
+                                                   _ln_names(de), v.get("rescored", "UNKNOWN")), "info")]
+
+
+def _ln_reversal(v):
+    v = v or []
+    if not v:
+        return [("A20 reversal worklist: none", "info")]
+    return [("A20 reversal worklist (%d): %s - each needs a targeted news and filings check at Step 9/10 before new "
+             "capital (REVIEW_REQUIRED)" % (len(v), ", ".join("%s (%s)" % (w.get("ticker"), w.get("tier") or "?") for w in v)),
+             "warn")]
+
+
+def _ln_vci_cal(v):
+    v = v or {}
+    return [("VCI calibration (advisory): gate passed %s; resolved outcomes %s"
+             % ("YES" if v.get("calibration_gate_passed") else "NO",
+                v.get("resolved_outcomes") if v.get("resolved_outcomes") is not None else "not yet recorded"),   # ISA-0902
+             "info")]
+
+
+LINE_RENDERERS = {
+    "mmf_sweep":               ("s2_capital_allocation", _ln_mmf_sweep),
+    "watchlist_promotion_log": ("s5_watchlist", _ln_watchlist_log),
+    "watchlist_rerank":        ("s5_watchlist", _ln_rerank),           # ISA-0903
+    "reversal_worklist":       ("s5_watchlist", _ln_reversal),
+    "vci_calibration_state":   ("s5_watchlist", _ln_vci_cal),
+    "phase_status":            ("s6_portfolio_snapshot", _ln_phase_status),
+    "concentration":           ("s6_portfolio_snapshot", _ln_concentration),
+    "position_alerts":         ("s7_stock_sleeve", _ln_position_alerts),
+    "process_concentration":   ("s8_fund_review", _ln_process_concentration),
+    "strategic_allocation":    ("s8_fund_review", _ln_strategic_allocation),
+    "t4_mandate_drift":        ("s8_fund_review", _ln_t4),
+    "lookthrough":             ("s8_fund_review", _ln_lookthrough),
+    "fund_holdings_declared":  ("s8_fund_review", _ln_holdings_declared),
+    "fund_categories":         ("s8_fund_review", _ln_fund_categories),
+    "rebalancing_candidates":  ("s8_fund_review", _ln_rebalancing),
+    "cash_statement":          ("s10_tax_tracker", _ln_cash_statement),
+    "transactions":            ("s10_tax_tracker", _ln_transactions),
+}
+
+
+def _broker_refusal_lines(bd):
+    """ISA-0726: the names the broker-dealability rule (ISA-0607) refused as capital destinations, per name."""
+    if not isinstance(bd, dict):
+        return []
+    ref = bd.get("refused_from_deployable_stack") or []
+    if bd.get("state") != "OK":
+        return [("Broker dealability (ISA-0607): declaration state %s - %s" % (bd.get("state") or "UNKNOWN",
+                                                                             bd.get("load_error") or "no detail"), "warn")]
+    if not ref:
+        return [("Broker dealability (ISA-0607): %s of %s ranked rows dealable online; none refused"
+                 % (bd.get("n_dealable_online", "UNKNOWN"), bd.get("n_rows", "UNKNOWN")), "info")]
+    return [("Refused as capital destinations by broker dealability (ISA-0607; %s of %s ranked rows dealable online): %s"
+             % (bd.get("n_dealable_online", "UNKNOWN"), bd.get("n_rows", "UNKNOWN"),
+                "; ".join("%s #%s Src %s %s %s" % (r.get("ticker"), r.get("deployment_rank", "?"), r.get("source_score", "?"),
+                                                   r.get("venue") or "venue UNKNOWN", r.get("state") or "UNKNOWN") for r in ref)),
+             "warn")]
+
+
+def build_summary_lines(summary, step9=None) -> dict:
+    """ISA-0448 + ISA-0726 -> {email section key: [{key, text, severity}]}. Absent keys produce nothing (no line
+    is invented); a line function that raises produces a WARN line naming the key, never a silent gap."""
+    out = {}
+    summary = summary or {}
+    for key, (sec, fn) in LINE_RENDERERS.items():
+        if key not in summary:
+            continue
+        try:
+            rows = fn(summary.get(key))
+        except Exception as e:                                          # noqa: BLE001
+            rows = [("summary.%s: render failed (%s: %s) - figure UNKNOWN; read run_context summary.%s"
+                     % (key, type(e).__name__, e, key), "warn")]
+        for text, sev in rows or []:
+            out.setdefault(sec, []).append({"key": key, "text": text, "severity": sev})
+    for text, sev in _broker_refusal_lines(((step9 or {}).get("_meta") or {}).get("broker_dealability")):
+        out.setdefault("s2_capital_allocation", []).append(
+            {"key": "step9_pre._meta.broker_dealability", "text": text, "severity": sev})
+    return out
 
 
 def build_integrity_block(fetch_report=None, correlation_coverage=None,
@@ -2612,10 +2967,11 @@ def build_integrity_block(fetch_report=None, correlation_coverage=None,
                       "not re-decided (append-only), %s of %s universe names mapped. %d REFUSED "
                       "and NAMED%s. \u2691 An entry requires provenance AND a live exchange its "
                       "declared venue permits: a bare `ONT` answers from NYQ for Onterris, Inc."
-                      % (st, smr.get("n_admitted"), smr.get("n_kept"), smr.get("n_mapped_after"),
-                         smr.get("n_universe"), len(ref),
+                      % (tuple(("not recorded" if x is None else x) for x in (     # ISA-0902: never 'None'
+                          st, smr.get("n_admitted"), smr.get("n_kept"), smr.get("n_mapped_after"),
+                          smr.get("n_universe"))) + (len(ref),
                          (" (" + ", ".join(str(r.get("ticker")) for r in ref) + ")")
-                         if ref else ""))
+                         if ref else "")))
     ie = instrument_eligibility or {}
     if ie:
         # ISA-0860: the instrument type / ISA-eligibility stage (OpenFIGI + HMRC table), stated with its basis
@@ -3071,6 +3427,42 @@ def artefact_month_problem(doc: dict, run_ml: str, name: str):
     return None
 
 
+# ⚑ ISA-0898 (26-Oct-2026): the three-layer writing standard (Run_Context §Writing Standard). The prefill declares
+#   every narrative field the review must write as a '[Claude: ...]' placeholder, so the placeholder gate (exit 3)
+#   and the narrative gate (exit 4) both name what is missing. Existing values are never overwritten.
+_NP = "[Claude: %s]"
+_DEALING = ("BUY", "SELL", "ADD", "TRIM")
+
+
+def apply_narrative_placeholders(data: dict) -> dict:
+    s1 = data.setdefault("s1_decision_summary", {})
+    s1.setdefault("verdict", _NP % "one-line verdict for the month")
+    s1.setdefault("plain_english", _NP % "the month in plain English - for a reader with no financial knowledge")
+    s1.setdefault("attention_plain", [_NP % "what needs Raj's attention, in plain English (one item per line)"])
+    for a in s1.get("actions") or []:
+        a.setdefault("verdict", _NP % "one-line verdict: action, quantity, amount")
+        a.setdefault("plain_english", _NP % "what the company does, why it, why now, what could go wrong")
+        if str(a.get("action", "")).strip().upper().split(" ")[0] in _DEALING:
+            for k in ("instrument", "ticker", "amount_gbp", "price_low", "price_max", "price_ccy", "quantity_line",
+                      "prices", "all_in_cost", "readiness"):          # ISA-0904: amount_gbp (all-in, a number) funds the plan
+                a.setdefault(k, _NP % k)
+    for c in data.get("s3_investment_cases") or []:
+        c.setdefault("verdict", _NP % "one-line verdict")
+        c.setdefault("plain_english", _NP % "why this company, in plain English")
+        if str(c.get("action", "")).upper() in _DEALING:
+            for k in ("what_it_does", "why_now", "what_could_break", "why_this_size", "next_check"):
+                c.setdefault(k, _NP % k.replace("_", " "))
+    for k in ("s2_capital_allocation", "s6_portfolio_snapshot", "s7_stock_sleeve", "s8_fund_review"):
+        if isinstance(data.get(k), dict):
+            data[k].setdefault("plain_english", _NP % "this chapter in plain English")
+    for it in (data.get("s9_macro") or {}).get("items") or []:
+        it.setdefault("so_what", _NP % "what it means for Raj's portfolio")
+        it.setdefault("trigger", _NP % "what would make us act")
+    for it in (data.get("s11_retrospective") or {}).get("items") or []:
+        it.setdefault("plain_english", _NP % "the lesson in plain English")
+    return data
+
+
 def build_prefilled_email(
     portfolio: dict,
     analytics: dict,
@@ -3157,7 +3549,7 @@ def build_prefilled_email(
                                  "ceiling and the step-down ceiling is reported, not enforced. While unmeasured, "
                                  "fund-funded buys are allowed and labelled 'brake UNMEASURED'.")
 
-    return {
+    _data = {
         "_instructions": (
             "Pre-populated by email_prefill.py v2. "
             "Fields marked '[Claude fills]' or '[Claude: ...]' must be completed during the run. "
@@ -3171,14 +3563,21 @@ def build_prefilled_email(
         "s3_investment_cases":    build_s3_from_scored(scored, step9=step9) if has_scored else skeleton_s3(),
         "s4_liquidation_tracker": skeleton_s4(),
         "s5_watchlist":           _s5,
-        "s6_portfolio_snapshot":  apply_account_return(build_s6(portfolio, analytics, xray),
+        "s6_portfolio_snapshot":  apply_report_measures(apply_account_return(build_s6(portfolio, analytics, xray),
                                                        (_rc.get("summary") or {}).get("account_return")),   # ISA-0642 (6)
+                                                       (_rc.get("summary") or {}).get("report_measures")),  # ISA-0900
         "s7_stock_sleeve":        _s7_out,
         "s8_fund_review":         build_s8(portfolio, analytics, xray),
         "s9_macro":               skeleton_s9(),
         "s10_tax_tracker":        build_s10(portfolio, analytics, run_date),
         "s11_retrospective":      skeleton_s11(),
     }
+    # ISA-0448 + ISA-0726 (25-Oct-2026): the computed summary lines, placed on their sections (rendered once by
+    #   build_monthly_isa_email._summary_lines_html). Read from the SAME run context as every block above.
+    for _sec, _lines in build_summary_lines((_rc.get("summary") or {}), step9 or {}).items():
+        if isinstance(_data.get(_sec), dict):
+            _data[_sec].setdefault("summary_lines", []).extend(_lines)
+    return apply_narrative_placeholders(_data)
 
 
 def main():
@@ -3266,7 +3665,7 @@ def main():
     if has_scored:
         in_win = [r.get('ticker') for r in scored.get('s5_watchlist_rows', []) if r.get('in_window')]
         print(f"  In-window names:        {in_win if in_win else 'none'}")
-    print('  Claude fills: s1/s2/s3 narratives/s4/s5 detail/s7 thesis/s8 est_returns/s9/s11/conviction scores.')
+    print('  Claude fills: s1/s2/s3 narratives/s4/s5 detail/s7 thesis/s8 est_returns/s9/s11 (no conviction score - retired, ISA-0905).')
 
 
 def _valuation_diag_text(vc):
@@ -3322,7 +3721,10 @@ def build_held_underwriting_block(hu: dict, lineage: dict = None) -> dict:
                      "valuation_diag": _valuation_diag_text(r.get("valuation_comparability")),
                      "thesis": _thesis_text(((lineage or {}).get("rows") or {}).get(r.get("ticker")))})
     line = ("Held-stock underwriting (ISA-0722): %d of %d held names carry a current case (%s); "
-            "original E[r] NOT_CAPTURED_CONTEMPORANEOUSLY for %d legacy holding(s)."
+            "original E[r] NOT_CAPTURED_CONTEMPORANEOUSLY for %d legacy holding(s). "
+            "Original/Current here are the ADDITIVE DIAGNOSTIC E[r] (screen estimate); the figure that "
+            "authorises or contests capital for a held name is the engine's ER12, shown per holding in s2 "
+            "'Switch contest' (B09-R09/R13)."
             % (hu.get("n_cases_held", 0), hu.get("n_expected", 0),
                ", ".join("%s %d" % (k, len(v)) for k, v in sorted((hu.get("by_state") or {}).items())),
                len(hu.get("not_captured_original") or [])))
@@ -3488,6 +3890,12 @@ def _selftest():
         "ISA-0851 MUST-FIRE: an absent schedule renders UNKNOWN, never PAUSED"
     assert "ACTIVE £900/mo" in build_b5_trajectory(_ts851, date(2027, 5, 1)), \
         "ISA-0851 NEGATIVE CONTROL: after the scheduled restart the line reads ACTIVE at the scheduled amount"
+    _np = apply_narrative_placeholders({"s1_decision_summary": {"actions": [{"action": "BUY"}, {"action": "HOLD", "verdict": "kept"}]},
+                                        "s9_macro": {"items": [{"title": "t"}]}})
+    _a = _np["s1_decision_summary"]["actions"]
+    assert _a[0]["price_low"].startswith("[Claude") and "price_low" not in _a[1] and _a[1]["verdict"] == "kept", \
+        ("ISA-0898: placeholders declared for a dealing action only, existing values kept", _a)
+    assert _np["s9_macro"]["items"][0]["so_what"].startswith("[Claude"), "ISA-0898: s9 'what it means' declared"
     print("email_prefill selftest OK (ISA-0722 held-underwriting renderer + ISA-0608 s3 population)")
     return 0
 

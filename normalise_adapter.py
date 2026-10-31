@@ -55,13 +55,13 @@ HIGH_SCORE_THRESHOLD      = 37    # /50 (canonical in scoring_config; overridden
 # Analyst rating values that do NOT trigger disparity flag
 STRONG_RATINGS = {"strongbuy", "strong buy", "buy"}
 
-# Growth stock conviction brackets (/50 → preliminary; refined to /100 at Step 9)
-# Claude overrides with the 10-dimension conviction score at Step 9.
+# Growth stock scorecard bands (/50, display only). ISA-0905: they were once 'refined to /100 at Step 9'; the /100
+# conviction score is retired (D21), so nothing refines them. The live table is _cfg.GROWTH_CONVICTION_BRACKETS.
 SCORE_TO_PRELIM_CONVICTION = [
-    (50, "High Conviction",   "high",   "[Claude: refine to /100 at Step 9]"),
-    (44, "Medium Conviction", "medium", "[Claude: refine to /100 at Step 9]"),
-    (38, "Watch but Wait",    "low",    "[Claude: refine to /100 at Step 9]"),
-    (0,  "No Action",         "low",    "[Claude: refine to /100 at Step 9]"),
+    (50, "High Conviction",   "high",   "scorecard band only (D21)"),
+    (44, "Medium Conviction", "medium", "scorecard band only (D21)"),
+    (38, "Watch but Wait",    "low",    "scorecard band only (D21)"),
+    (0,  "No Action",         "low",    "scorecard band only (D21)"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -550,6 +550,15 @@ def build_overlay_summary(s: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Conviction bracket functions — one per pipeline
 # ---------------------------------------------------------------------------
+# ISA-0905 (28-Oct-2026): the /100 conviction score is RETIRED (D21, Raj 28-Aug-2026) - sizing is
+# position_sizing.ladder() on evidence_state, capital is the Capital Decision Receipt. The growth pipeline
+# therefore writes this marker, NEVER a '[Claude fills /100 ...]' placeholder: the email placeholder gate
+# (ISA-0793) refused to send until the session invented a retired score. VCI's ACS /100 is a different,
+# live measure and is untouched.
+CONVICTION_RETIRED = "n/a - /100 retired (D21)"
+BAND_NOTE = "Scorecard band only - the /100 conviction score is retired (D21)"
+
+
 def prelim_conviction_bracket(total_score, total_max=None) -> dict:
     """Growth preliminary conviction bracket; max-aware (/50 base, /54 semi-hardware)."""
     ts = total_score or 0
@@ -560,11 +569,11 @@ def prelim_conviction_bracket(total_score, total_max=None) -> dict:
                 "total_score": ts, "total_max": tmax,
                 "bracket":          label,
                 "level":            level,
-                "note":             note,
-                "conviction_score": "[Claude fills /100 at Step 9]",
+                "note":             BAND_NOTE,                  # ISA-0905: never the config's '/100' prompt
+                "conviction_score": CONVICTION_RETIRED,
             }
     return {"total_score": ts, "total_max": tmax, "bracket": "No Action", "level": "low",
-            "conviction_score": "[Claude fills /100 at Step 9]"}
+            "conviction_score": CONVICTION_RETIRED}
 
 
 def _acs_of(s: dict):
@@ -648,7 +657,7 @@ def build_s5_row(ticker: str, s: dict, wl_entry: dict | None) -> dict:
         # growth_stock
         score_display = (
             f"{s.get('part_a_score', '?')}/{s.get('part_b_score', '?')} "
-            f"({s.get('total_score', '?')}/{s.get('total_max',50)}) | Conv: {conv['conviction_score']}"
+            f"({s.get('total_score', '?')}/{s.get('total_max',50)})"
         )
 
     return {
@@ -746,7 +755,6 @@ def _build_s3_skeleton_growth(ticker: str, s: dict) -> dict:
         {"label": "Part A Score",       "value": f"{s.get('part_a_score','?')}/28",  "assessment": s.get("part_a_status",""),  "signal": "green" if (s.get("part_a_score") or 0) >= PART_A_STRONG_THRESHOLD else "amber"},
         {"label": "Part B Score",       "value": f"{s.get('part_b_score','?')}/{s.get('part_b_max',22)}",  "assessment": s.get("part_b_status",""),  "signal": "green" if (s.get("part_b_score") or 0) >= PART_B_STRONG_THRESHOLD else "amber"},
         {"label": "Combined Score",     "value": f"{s.get('total_score','?')}/{s.get('total_max',50)}",   "assessment": conv["bracket"],             "signal": conv["level"] if conv["level"] != "low" else "amber"},
-        {"label": "Conviction Score",   "value": conv["conviction_score"],            "assessment": conv["note"],                "signal": "amber"},
         {"label": "Current Price",      "value": fmt_price(s.get("current_price"), s.get("currency")), "assessment": "", "signal": ""},
         {"label": "Entry Level",        "value": fmt_price(s.get("_entry_level"), s.get("_entry_currency")), "assessment": "In range ✓" if s.get("_in_window") else "Above entry", "signal": "green" if s.get("_in_window") else "amber"},
         {"label": "Target Gap (display)", "value": fmt_pct(_tgap(s)),    "assessment": analyst["analyst_rating_clean"], "signal": "green" if (_tgap(s) or 0) > 0.20 else "amber"},
@@ -971,7 +979,7 @@ def run(metrics_path: str, out_path: str) -> dict:
                 "part_a_score":   s.get("part_a_score"),
                 "part_b_score":   s.get("part_b_score"),
                 "score_display":  f"{s.get('total_score', '?')}/{s.get('total_max',50)}",
-                "conviction_score": "[Claude fills /100 at Step 9]",
+                "conviction_score": CONVICTION_RETIRED,
                 "target_upside":  fmt_pct(_tgap(s)),   # D7 display gap
                 "implied_upside_fv": fmt_pct(s.get("implied_upside_fv")),  # D7 canonical
                 "expected_return_12_24m": s.get("expected_return_12_24m"), # A2 (% pa)
@@ -1028,11 +1036,10 @@ def run(metrics_path: str, out_path: str) -> dict:
 
         "instructions_for_run": {
             "step_9": (
-                "Read conviction_ranking. Note pipeline field per entry — "
-                "growth_stock entries use 10-dimension conviction score /100; "
-                "energy entries use same 10-dimension framework adapted for energy; "
-                "vci entries use ACS score already encoded in conviction_score. "
-                "For each in-window name: fill conviction_score. Confirm or override Step 10 selection."
+                "Read conviction_ranking (the name is historical: it is the Source-Score ranking). "
+                "The growth /100 conviction score is RETIRED (D21, ISA-0905) - do NOT score it; Step 9 "
+                "records thesis_state + rationale for REQUIRED names (conviction_capture). VCI entries carry "
+                "their live ACS in conviction_score. Step 10 decides from the Capital Decision Receipt."
             ),
             "step_10": (
                 "For the decided action: read s3_case_skeletons entry for that ticker. "
@@ -1120,6 +1127,13 @@ def _selftest() -> int:
     import inspect as _i2
     _pat = 'acs_score") ' + 'or s.get("_acs_score")'
     assert _pat not in _i2.getsource(sys.modules[__name__]), "ISA-0792: no `or`-coalescing of ACS"; n += 1
+    # ISA-0905: the growth pipeline never asks the session for the retired /100 score
+    _g = prelim_conviction_bracket(40, 50)
+    assert _g["conviction_score"] == CONVICTION_RETIRED and "[Claude" not in _g["conviction_score"], \
+        "ISA-0905 MUST-FIRE: no /100 conviction placeholder"; n += 1
+    assert prelim_conviction_bracket(0, 50)["conviction_score"] == CONVICTION_RETIRED, "ISA-0905: low branch too"; n += 1
+    assert prelim_conviction_bracket_vci(82)["conviction_score"] == "ACS 82/100", \
+        "ISA-0905 NEGATIVE CONTROL: the live VCI ACS is still rendered"; n += 1
     print("normalise_adapter selftest: %d assertions, 0 failed" % n)
     return n
 
