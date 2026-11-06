@@ -25,7 +25,7 @@ Outputs
 What it derives
 ---------------
   * normalised transaction type (buy / sell / transfer_in / distribution /
-    equalisation / conversion / unclassified)
+    equalisation / conversion / split / unclassified)
   * ticker, resolved from the free-text broker description
   * true dealing cost per trade:  |Amount - (Quantity x Price)|  and cost as a
     % of gross consideration  -> calibrates the Step 10.6 cost estimate
@@ -88,14 +88,30 @@ TYPE_MAP = {
     "subscription":              "cash_in",
     "contribution":              "cash_in",
     "withdrawal":                "cash_out",
+    # ISA-0922b/ISA-0923 (31-Oct-2026): a share SUBDIVISION. AJ Bell exports the units ADDED (quantity 1245
+    # for CSH2 5 -> 1,250 on 27-Oct-2026, verified against the broker's own holding), zero cash, no price.
+    # 'Consolidation' is deliberately NOT mapped: no export has yet shown its sign convention, so it stays
+    # EXPOSED as unclassified (R2.10 - never guessed) until a real row proves it.
+    "subdivision":               "split",
 }
 
 # Cash direction by normalised type. Rows that move units but not cash are 0.
 CASH_SIGN = {
     "buy": -1, "sell": +1, "cash_in": +1, "cash_out": -1,
     "transfer_in": 0, "transfer_out": 0, "equalisation": 0,
-    "distribution": 0, "conversion": 0, "unclassified": 0,
+    "distribution": 0, "conversion": 0, "unclassified": 0, "split": 0,
 }
+
+# ISA-0923 - ONE HOME for the unit effect of a ledger row (R4.4). Every consumer that rebuilds a
+# quantity from ledger rows reads it here instead of enumerating its own type list. `conversion` is
+# NOT here: its two legs need class lineage (CLASS_CONVERSIONS), which its consumers handle.
+UNIT_SIGN = {"buy": +1, "transfer_in": +1, "split": +1, "sell": -1, "transfer_out": -1}
+
+
+def unit_delta(entry):
+    """Signed units a ledger row adds to (+) or removes from (-) its position; 0 for rows that move
+    no units (income, cash, unclassified) and for `conversion` (lineage-dependent - see UNIT_SIGN)."""
+    return UNIT_SIGN.get((entry or {}).get("type"), 0) * float((entry or {}).get("quantity") or 0.0)
 
 # Types that represent an actual dealing execution (what the ledger reconciles).
 TRADE_TYPES = {"buy", "sell"}
@@ -491,6 +507,12 @@ def merge_rows(ledger, rows, stamp):
         if r["uid"] in existing:
             dupes += 1
             old = existing[r["uid"]]
+            if old.get("type") == "unclassified" and r.get("type") not in (None, "unclassified"):
+                # ISA-0923: the importer has since learned this broker label - re-type in place (typed, never silent).
+                ledger["transitions"].append({"kind": "RECLASSIFIED", "uid": r["uid"], "raw_type": r.get("raw_type"),
+                                              "old_type": "unclassified", "new_type": r["type"], "at": stamp,
+                                              "source_file": r.get("source_file")})
+                old["type"], old["cash_impact_gbp"] = r["type"], r.get("cash_impact_gbp")
             if not old.get("ticker") and r.get("ticker"):
                 old["ticker"], old["ticker_match"] = r["ticker"], r.get("ticker_match")
                 old["asset_class"] = r.get("asset_class")
@@ -556,7 +578,7 @@ def fifo_round_trips(entries):
     """
     by_ticker = {}
     for e in sorted(entries, key=lambda x: x["date"]):
-        if e["type"] not in TRADE_TYPES or not e.get("ticker"):
+        if (e["type"] not in TRADE_TYPES and e["type"] != "split") or not e.get("ticker"):
             continue
         by_ticker.setdefault(e["ticker"], []).append(e)
 
@@ -567,6 +589,15 @@ def fifo_round_trips(entries):
             qty = e.get("quantity") or 0
             amt = e.get("amount_gbp") or 0
             if not qty:
+                continue
+            if e["type"] == "split":
+                # ISA-0923: a subdivision adds `qty` units across the open lots pro rata at zero cost:
+                # each lot's units scale by r and its unit cost by 1/r, so cost basis and dates are kept.
+                held = sum(l[0] for l in lots)
+                if held > 1e-9:
+                    r = (held + qty) / held
+                    for l in lots:
+                        l[0], l[1] = l[0] * r, l[1] / r
                 continue
             unit = amt / qty
             if e["type"] == "buy":
@@ -641,6 +672,9 @@ def open_positions(entries):
             else:
                 p["quantity"] += qty
                 p["cost_gbp"] += (e.get("amount_gbp") or 0)
+            continue
+        if e["type"] == "split":
+            p["quantity"] += qty            # ISA-0923: units added, book cost unchanged
             continue
         if e["type"] in ("buy", "transfer_in"):
             p["quantity"] += qty
@@ -1050,6 +1084,35 @@ def _selftest() -> int:
     _l3 = {"entries": [dict(_row("z1", "R7", tk=None), description="NetApp Inc")], "_meta": {}}
     assert reresolve_unmapped(_l3, {}, names, "2026-10-11") == 1 and _l3["entries"][0]["ticker"] == "NTAP" \
         and _l3["transitions"][0]["via"] == "ledger_reresolve", "ISA-0866: an older-export unmapped row is re-resolved on import"; n += 1
+    # ── ISA-0923: unit-only corporate actions (the 27-Oct-2026 CSH2 subdivision, real figures) ──
+    assert TYPE_MAP.get(_norm("Subdivision")) == "split" and CASH_SIGN["split"] == 0, \
+        "MUST-FIRE ISA-0923: 'Subdivision' is a typed zero-cash unit event"; n += 1
+    assert "consolidation" not in TYPE_MAP, \
+        "NEGATIVE CONTROL ISA-0923: 'Consolidation' stays EXPOSED (unclassified) until a real export proves its sign"; n += 1
+    _c = [{"date": "2026-09-01", "type": "buy", "ticker": "CSH2", "quantity": 9.0, "amount_gbp": 11277.0},
+          {"date": "2026-10-05", "type": "sell", "ticker": "CSH2", "quantity": 4.0, "amount_gbp": 5013.81},
+          {"date": "2026-10-27", "type": "split", "ticker": "CSH2", "quantity": 1245.0, "amount_gbp": 0.0}]
+    _op = open_positions(_c)["CSH2"]
+    assert abs(_op["quantity"] - 1250.0) < 1e-9 and abs(_op["cost_gbp"] - round(11277.0 * 5 / 9, 2)) < 0.01, \
+        ("MUST-FIRE ISA-0923: 5 units + 1,245 subdivided = the broker's 1,250, book cost unchanged", _op)
+    assert abs(open_positions(_c[:2])["CSH2"]["quantity"] - 5.0) < 1e-9, "NEGATIVE CONTROL: without the split row, 5"; n += 2
+    _rt = fifo_round_trips(_c + [{"date": "2026-11-02", "type": "sell", "ticker": "CSH2", "quantity": 1250.0,
+                                  "amount_gbp": 6300.0}])
+    _post = [t for t in _rt if t["sell_date"] == "2026-11-02"]
+    assert len(_post) == 1 and abs(_post[0]["quantity"] - 1250.0) < 1e-6 and _post[0]["buy_date"] == "2026-09-01" \
+        and abs(_post[0]["cost_basis_gbp"] - round(11277.0 * 5 / 9, 2)) < 0.02 and "note" not in _post[0], \
+        ("MUST-FIRE ISA-0923: a post-split sale FIFO-matches the rescaled lot (cost and buy date kept)", _post); n += 1
+    assert unit_delta(_c[2]) == 1245.0 and unit_delta(_c[1]) == -4.0 and unit_delta({"type": "distribution", "quantity": 0}) == 0 \
+        and unit_delta({"type": "conversion", "quantity": 5}) == 0, "ISA-0923: one home for a row's unit effect"; n += 1
+    _l4 = {"entries": [dict(_row("s1", "R44", typ="unclassified", tk="CSH2"), raw_type="Subdivision", cash_impact_gbp=0.0)],
+           "_meta": {}}
+    _st6 = merge_rows(_l4, [dict(_row("s1", "R44", typ="split", tk="CSH2"), raw_type="Subdivision", cash_impact_gbp=0.0)],
+                      "2026-10-31")
+    assert _l4["entries"][0]["type"] == "split" and _l4["transitions"][-1]["kind"] == "RECLASSIFIED" and _st6["added"] == 0, \
+        "MUST-FIRE ISA-0923: a row ingested as 'unclassified' is re-typed in place once the label is known (typed, not duplicated)"; n += 1
+    _st7 = merge_rows(_l4, [dict(_row("s1", "R44", typ="split", tk="CSH2"), raw_type="Subdivision")], "2026-11-01")
+    assert len([t for t in _l4["transitions"] if t["kind"] == "RECLASSIFIED"]) == 1, \
+        "NEGATIVE CONTROL ISA-0923: re-import is idempotent (no second RECLASSIFIED)"; n += 1
     print("extract_transactions selftest: %d assertions, 0 failed" % n)
     return 0
 

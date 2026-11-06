@@ -5532,8 +5532,13 @@ def _prerun_phase_b(_ctx):
         # ⚑ ISA-0590 — the run's own start time, so the ISA-0321 register gate does not
         # fire on the artefacts THIS run just wrote. Tighter than the prefix list:
         # a file the run did NOT write still trips it.
+        # ⚑ ISA-0922 (31-Oct-2026) — under prerun_runner one OCCURRENCE spans several processes
+        # (run, phase A/B, fetch, run). The runner exports its sync snapshot so the gate exempts
+        # every file the occurrence wrote in ANY pass - and still flags a LIVE edit made before the sync.
+        _sync_man = os.environ.get("ISA_PRERUN_SYNC_MANIFEST") or None
         _fc = {}
-        _recs = _cchk.check_all(tagged=True, since_ts=_RUN_STARTED_AT, fire_counts=_fc)
+        _recs = _cchk.check_all(tagged=True, since_ts=_RUN_STARTED_AT, fire_counts=_fc,
+                                sync_manifest=_sync_man)
         _a18_err = [r["message"] for r in _recs if r["severity"] == "ERROR"]
         _a18_warn = [r["message"] for r in _recs if r["severity"] != "ERROR"]
         for _m in _a18_err:
@@ -5551,6 +5556,8 @@ def _prerun_phase_b(_ctx):
         summary["a18_consistency"] = {"n_error": len(_a18_err), "n_warn": len(_a18_warn),
                                       "basis": "ISA-0546 - severity declared at production",
                                       "fire_counts": _fc, "warn_pairs": _warn_pairs,
+                                      "register_gate_boundary": ("occurrence_sync_manifest (ISA-0922)"
+                                                                 if _sync_man else "process_start (ISA-0590)"),
                                       "unexpected_warn_pairs": _unexpected_warn_pairs}
         if _unexpected_warn_pairs:
             print(f"  A18: WARN pair(s) other than the regime branch fired this run - "

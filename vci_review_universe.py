@@ -130,11 +130,12 @@ def current_held_vci(root: str = None, *, portfolio_doc=None, ledger=None, decis
     rolled, conflicts = [], []
     ledger_through = max((str(e.get("date") or "") for e in ledger), default=None)
     for e in ledger:
-        if (e.get("asset_class") != "stock" or e.get("type") not in ("buy", "sell")
+        if (e.get("asset_class") != "stock" or e.get("type") not in ("buy", "sell", "split")
                 or not snap or str(e.get("date") or "") <= snap):
             continue
         k = key(e.get("ticker"))
-        q = float(e.get("quantity") or 0.0) * (1 if e["type"] == "buy" else -1)
+        from extract_transactions import unit_delta as _ud    # ISA-0923: one home (a split adds units)
+        q = _ud(e)
         qty[k] = qty.get(k, 0.0) + q
         disp.setdefault(k, e.get("ticker"))
         rolled.append({"date": e.get("date"), "ticker": e.get("ticker"), "type": e["type"], "quantity": e.get("quantity")})
@@ -311,6 +312,17 @@ def _selftest(verbose: bool = True) -> int:
     ok(any(m["key"] == "ABCL" and m["holding_state"] == UNKNOWN_CONFLICT for m in h3["members"]),
        "H3 an over-sale conflicts: kept IN the population, typed UNKNOWN_CONFLICT")
     ok(current_held_vci(portfolio_doc={"stocks": None})["state"] == "UNKNOWN", "H4 no snapshot -> UNKNOWN")
+    # ISA-0923: a subdivision after the snapshot then a full sale -> the name leaves CURRENT_HELD_VCI (no over-sale)
+    _q = next(float(s.get("quantity") or 0) for s in snap["stocks"] if s.get("ticker") == "QBTS")
+    _sp = [{"date": "2026-09-15", "asset_class": "stock", "type": "split", "ticker": "QBTS", "quantity": _q},
+           {"date": "2026-09-16", "asset_class": "stock", "type": "sell", "ticker": "QBTS", "quantity": 2 * _q}]
+    _h5 = current_held_vci(portfolio_doc=snap, ledger=_sp, decisions=dec, binaries=binr)
+    ok("QBTS" not in [m["key"] for m in _h5["members"]] or not any(
+        m["key"] == "QBTS" and m["holding_state"] == UNKNOWN_CONFLICT for m in _h5["members"]),
+       "ISA-0923 MUST-FIRE: a 2:1 subdivision then a sale of 2x units is a clean exit, not an over-sale conflict")
+    _h6 = current_held_vci(portfolio_doc=snap, ledger=[_sp[1]], decisions=dec, binaries=binr)
+    ok(any(m["key"] == "QBTS" and m["holding_state"] == UNKNOWN_CONFLICT for m in _h6["members"]),
+       "ISA-0923 NEGATIVE CONTROL: the same sale WITHOUT the split row is an over-sale conflict")
     # the September shape: QMS advancement omitted QBTS (held) and IONQ (watchlist)
     qms = [{"ticker": t, "qms": 90 - i} for i, t in enumerate(["ALAB", "RGTI", "ABCL", "ONT.L", "INFQ", "CRSP"])]
     qms.append({"ticker": "LOWP", "qms": 10, "pre_inflection_override": True})

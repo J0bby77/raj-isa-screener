@@ -1071,8 +1071,42 @@ def pair_vci_decision_captured(root=None, ledger_path=None, glob_fn=None):
     return errs
 
 
+def _load_sync_manifest(sync_manifest):
+    """ISA-0922: (files, ws_isa) from a prerun_runner sync_manifest.json path or dict, else (None, None).
+    Anything unreadable or malformed returns (None, None) - it exempts NOTHING (fail-closed)."""
+    if not sync_manifest:
+        return None, None
+    try:
+        man = sync_manifest if isinstance(sync_manifest, dict) else json.load(open(sync_manifest, encoding="utf-8"))
+        files, ws_isa = man.get("files"), man.get("ws_isa")
+        if not isinstance(files, dict) or not files or not ws_isa:
+            return None, None
+        return files, os.path.normpath(ws_isa)
+    except Exception:                                            # noqa: BLE001
+        return None, None
+
+
+def _written_since_sync(fp, files, ws_isa):
+    """ISA-0922: True iff `fp` (inside the occurrence's workspace) is NEW since the sync or its
+    (size, mtime_ns) differs from the snapshot. A file outside the workspace is never exempt."""
+    try:
+        rel = os.path.relpath(os.path.normpath(os.path.abspath(fp)), ws_isa)
+    except ValueError:
+        return False
+    if rel.startswith(".."):
+        return False
+    try:
+        st = os.stat(fp)
+    except OSError:
+        return False
+    snap = files.get(rel)
+    if snap is None:
+        return True
+    return int(snap[0]) != st.st_size or int(snap[1]) != st.st_mtime_ns
+
+
 @empty_semantics("C-C", population="source files changed today", reason="valid empty only when the source scan ran over a non-empty tree and found no change today")
-def pair_register_updated_after_build(root=None, today=None, items=None, since_ts=None):
+def pair_register_updated_after_build(root=None, today=None, items=None, since_ts=None, sync_manifest=None):
     """ISA-0321. A build that did not touch the register FAILS the battery.
 
     ⚑ ISA-0590 (04-Sep-2026) — `since_ts` IS THE RUN'S OWN START TIME, AND IT MAKES THIS GATE
@@ -1089,12 +1123,23 @@ def pair_register_updated_after_build(root=None, today=None, items=None, since_t
     call `check_all()` outside a run) NOTHING is exempted and full strictness applies.
 
     The gate's own docstring already names the failure mode it fell into: *"a gate that fired on
-    its own outputs would be turned off within a week — the way every waived rule dies."*"""
+    its own outputs would be turned off within a week — the way every waived rule dies."*
+
+    ⚑ ISA-0922 (31-Oct-2026) — THE BOUNDARY IS THE OCCURRENCE, NOT THE PROCESS. ISA-0801/0845 split
+    one logical pre-run into several processes over one private workspace (run, run, phase A, phase
+    B, fetch, run). `since_ts` is ONE process's start, so a file an EARLIER pass of the same occurrence
+    wrote looked like a build and the 31-Oct November pre-run ended COMPLETE_WITH_ERRORS. The runner
+    now hands every run stage `sync_manifest` - the occurrence's own sync snapshot (path -> [size,
+    mtime_ns, sha]). A file is the OCCURRENCE's output iff it is NEW since the sync or its (size,
+    mtime_ns) moved from the snapshot - an exact identity test, no clock window. A source file edited
+    on LIVE today BEFORE the sync is byte-identical to its snapshot and STILL trips the gate, so this
+    is no looser than ISA-0590. An unreadable manifest exempts nothing (fail-closed to since_ts)."""
     import datetime as _dt
     root = root or HERE
     today = today or _dt.date.today().isoformat()
     changed, self_written = [], []
     n_scanned = 0
+    _snap, _snap_root = _load_sync_manifest(sync_manifest)
     for fp in _register_gate_sources(root):
         n_scanned += 1
         try:
@@ -1105,6 +1150,9 @@ def pair_register_updated_after_build(root=None, today=None, items=None, since_t
             continue
         if since_ts is not None and mt >= float(since_ts):
             self_written.append(os.path.basename(fp))     # this run wrote it — not a build
+            continue
+        if _snap is not None and _written_since_sync(fp, _snap, _snap_root):
+            self_written.append(os.path.basename(fp))     # ISA-0922: this OCCURRENCE wrote it
             continue
         changed.append(os.path.basename(fp))
     if not n_scanned:
@@ -7773,9 +7821,11 @@ def pair_suite_runtime_budget(status=None, root=None, history=None) -> list:
         return [{"severity": WARN, "message": "ISA-0896: suite runtime budget UNREADABLE (%s: %s)" % (type(e).__name__, e)}]
 
 
-def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
+def check_all(tagged: bool = False, since_ts=None, fire_counts=None, sync_manifest=None):
     """`since_ts` (ISA-0590): the calling RUN's start time, so the register gate does not fire on
     the run's own outputs. Omitted outside a run, where full strictness is correct.
+    `sync_manifest` (ISA-0922): the pre-run OCCURRENCE's sync snapshot (path or dict) - files the
+    occurrence wrote in any of its passes are its outputs, not a build.
 
     ⚑ ISA-0543 (A18 half) - `fire_counts`, when a caller passes a mutable dict, is populated
     IN PLACE with `{pair_name: {"n_warn": int, "n_error": int}}` for every `pair_*` call this
@@ -7901,7 +7951,8 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None):
         import scoring_config as cfg
         errs += _tally("pair_anchor", pair_anchor(state, getattr(cfg, "REQUIRED_RETURN_MID", None)))
         errs += _tally("pair_anchor_cadence", pair_anchor_cadence(state))
-        errs += _tally("pair_register_updated_after_build", pair_register_updated_after_build(since_ts=since_ts))
+        errs += _tally("pair_register_updated_after_build", pair_register_updated_after_build(since_ts=since_ts,
+                                                                   sync_manifest=sync_manifest))
         errs += _tally("pair_max_scale", pair_max_scale(cfg))
     except Exception as e:
         errs.append(f"A18/A19: anchor/config check failed to run ({e})")
@@ -8278,6 +8329,40 @@ def _selftest():
         os.remove(_f)
         assert pair_register_updated_after_build(_td, _t, _stale), \
             "ISA-0524 C-C MUST-FIRE: a tree with NO scannable source is UNKNOWN, never a clean pass"
+    # ---- ISA-0922: the boundary is the OCCURRENCE (multi-pass checkpointed pre-run) --------------
+    with _tf.TemporaryDirectory() as _wsd:
+        _ws_isa = os.path.join(_wsd, "ISA"); _inv = os.path.join(_ws_isa, "Investment Analysis")
+        os.makedirs(_inv)
+        _today_ts = _dt2.datetime.fromisoformat(_t).timestamp()
+        _pa, _pb, _pc = (os.path.join(_inv, n) for n in ("pass1_output.json", "live_edit.py", "fetch_new.json"))
+        for _p in (_pa, _pb):
+            open(_p, "w").write("{}\n")
+            os.utime(_p, (_today_ts + 60,) * 2)                  # both modified 'today', before the sync
+        _man = {"ws_isa": _ws_isa, "files": {}}
+        for _p in (_pa, _pb):
+            _st = os.stat(_p)
+            _man["files"][os.path.relpath(_p, _ws_isa)] = [_st.st_size, _st.st_mtime_ns, None]
+        # an EARLIER pass of the occurrence rewrites one file and creates another; then a LATER pass starts
+        open(_pa, "w").write('{"pass": 1}\n'); os.utime(_pa, (_today_ts + 120,) * 2)
+        open(_pc, "w").write("{}\n"); os.utime(_pc, (_today_ts + 130,) * 2)
+        _later_pass_start = _today_ts + 300
+        _r = pair_register_updated_after_build(_inv, _t, _stale, since_ts=_later_pass_start)
+        assert _r and "pass1_output.json" in _r[0], \
+            "NEGATIVE CONTROL ISA-0922: the process start alone flags an earlier pass's output (the 31-Oct defect)"
+        _r = pair_register_updated_after_build(_inv, _t, _stale, since_ts=_later_pass_start, sync_manifest=_man)
+        assert _r and "live_edit.py" in _r[0] and "pass1_output.json" not in _r[0] and "fetch_new.json" not in _r[0], \
+            "MUST-FIRE ISA-0922: with the sync snapshot the occurrence's own outputs are exempt AND a file " \
+            "modified on LIVE today before the sync (unchanged since) STILL trips the gate"
+        os.utime(_pb, (_dt2.datetime(2026, 1, 1).timestamp(),) * 2)
+        _m2 = dict(_man, files=dict(_man["files"]))
+        _m2["files"][os.path.relpath(_pb, _ws_isa)] = [os.stat(_pb).st_size, os.stat(_pb).st_mtime_ns, None]
+        assert not pair_register_updated_after_build(_inv, _t, _stale, since_ts=_later_pass_start, sync_manifest=_m2), \
+            "ISA-0922: only occurrence outputs changed today -> no build -> silent"
+        assert pair_register_updated_after_build(_inv, _t, _stale, since_ts=_later_pass_start,
+                                                 sync_manifest={"files": "garbage"}), \
+            "NEGATIVE CONTROL ISA-0922: a malformed manifest exempts NOTHING (fail-closed)"
+        assert not _written_since_sync(os.path.join(_wsd, "outside.py"), _man["files"], _ws_isa), \
+            "ISA-0922: a file outside the occurrence workspace is never exempt"
     # an unevaluable D-4 trigger must FAIL, never pass as "no flow"
     assert pair_anchor_cadence({**_cad_ok,
                                 "flow_trigger": {"status": "UNKNOWN", "blocks": True,

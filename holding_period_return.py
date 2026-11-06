@@ -105,6 +105,7 @@ FLOW_SEMANTICS = {
     "distribution": "income",       # zero if accumulated, positive if paid out as cash
     "equalisation": "income",
     "conversion": "lineage",
+    "split": "units_only",          # ISA-0923: a subdivision adds units, moves no capital
 }
 
 
@@ -260,6 +261,11 @@ def build_flows(entries, sedols, lineage=None, price_at=None, universe=None):
             why = ("income paid out to cash" if cf else
                    "ACCUMULATED inside the fund (cash impact 0) — already in the NAV; counting "
                    "amount_gbp here would double-count it")
+        elif sem == "units_only":
+            # ISA-0923: the unit effect is read from the ledger's ONE home, never restated here.
+            from extract_transactions import unit_delta as _ud
+            cf, du = 0.0, _ud(r)
+            why = "share subdivision - units added, no capital moved"
         elif sem == "lineage":
             # ⚑ DIRECTION IS READ FROM THE DECLARATION, NEVER INFERRED.
             # The first cut guessed it from "this class had prior buys and nothing after", which
@@ -711,7 +717,27 @@ def build(portfolio_path=None, out_path=None, as_of=None):
     return res
 
 
+def _selftest() -> int:
+    """ISA-0923 (31-Oct-2026): the flow walk's unit-only semantic. The full module battery lives in
+    tests_jul2026/test_holding_period_return.py; this selftest is the change's own must-fire + negative control."""
+    _nop = lambda *_a, **_k: (None, "no price (selftest)")             # noqa: E731
+    base = {"date": "2026-09-01", "type": "buy", "raw_type": "Purchase", "ticker": "X", "description": "x",
+            "quantity": 5.0, "amount_gbp": 6265.44, "cash_impact_gbp": -6265.44, "reference": "b1"}
+    spl = dict(base, date="2026-10-27", type="split", raw_type="Subdivision", quantity=1245.0, amount_gbp=0.0,
+               cash_impact_gbp=0.0, reference="s1")
+    rows, units, notes = build_flows([base, spl], {"X"}, {"links": []}, _nop)
+    assert units["X"] == 1250.0 and rows[1]["cf_gbp"] == 0.0 and not any("UNKNOWN" in n for n in notes), \
+        ("MUST-FIRE ISA-0923: a subdivision adds its units (5 + 1,245 = 1,250) at zero cashflow", units, rows, notes)
+    rows2, units2, notes2 = build_flows([base, dict(spl, type="rights_issue_or_whatever")], {"X"}, {"links": []}, _nop)
+    assert units2["X"] == 5.0 and rows2[1]["cf_gbp"] is None and any("UNKNOWN" in n for n in notes2), \
+        ("NEGATIVE CONTROL ISA-0923: an unknown type must not add units and is REPORTED, never counted", units2, notes2)
+    print("holding_period_return selftest: 2 assertions, 0 failed")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     ap = argparse.ArgumentParser(description="money-weighted holding-period returns")
     ap.add_argument("--portfolio", default=None)
     ap.add_argument("--out", default=None)

@@ -361,10 +361,10 @@ def valuation_comparability(original_case: Optional[dict], current_case: Optiona
 
 # ─────────────────────────────────────────── the monthly capture (pre-run, R4.11) ─────
 
-def _declared_binaries(root):
+def _declared_binaries(root, as_of=None):
     try:
         import position_sizing as _ps
-        return _ps.load_declared_binaries(root) or {}
+        return _ps.load_declared_binaries(root, as_of=as_of) or {}
     except Exception:                                                   # noqa: BLE001
         return {}
 
@@ -402,7 +402,14 @@ def capture_month(*, portfolio_path, scored_path=None, step9_path=None, as_of=No
     if scored_path and os.path.exists(scored_path):
         with open(scored_path, encoding="utf-8") as fh:
             scored = (json.load(fh).get("tickers") or {})
-    declared = _declared_binaries(root)
+    # ISA-0925: the declarations in force on the BOOK's own date (a later sale's retirement must not rewrite it)
+    _bd = None
+    try:
+        _dd = ((pf.get("_meta") or {}).get("data_date") or "").strip()
+        _bd = datetime.datetime.strptime(_dd, "%d-%b-%Y").date().isoformat() if _dd else None
+    except Exception:                                                   # noqa: BLE001
+        _bd = None
+    declared = _declared_binaries(root, as_of=_bd)
     alias = _aliases(declared)
     src = os.path.basename(scored_path) if scored_path else None
     cases, rows = [], []

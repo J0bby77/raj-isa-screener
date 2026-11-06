@@ -960,8 +960,9 @@ def _selftest(verbose: bool = True) -> int:
 
 
 def month_label(d=None) -> str:
-    d = _d(d) or datetime.date.today()
-    return "%s_%d" % (calendar.month_abbr[d.month].lower(), d.year)
+    # ⚑ ISA-0928 (04-Nov-2026): the RUN CYCLE (run_cycle, ISA-0910 one home), never the wall-clock month.
+    import run_cycle as _rcy
+    return _rcy.cycle_label(_d(d))
 
 
 def portfolio_path(month, here=None) -> str:

@@ -203,11 +203,13 @@ def parse_quarterly_pdf(fp, refs, extract_text=None, ledger=None):
     held = {}                                          # quantity held per code AT the statement date, from the ledger
     for e in sorted((ledger or {}).get("entries") or [], key=lambda x: str(x.get("date"))):
         ed = _date(e.get("date"))
-        if not ed or ed > d or e.get("type") not in ("buy", "sell", "transfer_in", "transfer_out", "conversion"):
+        if not ed or ed > d or e.get("type") not in ("buy", "sell", "transfer_in", "transfer_out", "conversion", "split"):
             continue
         c = _trade_code(e)
         q = float(e.get("quantity") or 0)
-        sign = -1 if e.get("type") in ("sell", "transfer_out") else 1
+        # ISA-0923: the sign of every non-conversion row comes from the ledger's ONE home (a split adds units)
+        from extract_transactions import UNIT_SIGN as _US
+        sign = _US.get(e.get("type"), 1)
         if e.get("type") == "conversion" and str(c).endswith("-INV") and held.get(c):
             sign = -1
         held[c] = held.get(c, 0.0) + sign * q

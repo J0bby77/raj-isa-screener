@@ -82,9 +82,21 @@ import os as _os
 # month sliced off today. Real-date stamps ('%Y-%m-%d', '%d %b %Y', isoformat()) are NOT cycle identity.
 WALL_CLOCK_LABEL = _re.compile(
     r"(?:today|now|utcnow)\(\)\)?\s*\.strftime\(\s*['\"](?:%b_%Y|%b %Y|%b-%Y|%Y_%m)['\"]"
-    r"|(?:today|now|utcnow)\(\)\s*\.isoformat\(\)\s*\[\s*:\s*7\s*\]")
+    r"|(?:today|now|utcnow)\(\)\s*\.isoformat\(\)\s*\[\s*:\s*7\s*\]"
+    # ⚑ ISA-0928 (04-Nov-2026): three more spellings of a wall-clock month LABEL that this guard could not see -
+    #   framework_integrity._MONTHS[d.month - 1] (the execution ledger: 0/37 capabilities live all November),
+    #   calendar.month_abbr[d.month] (issuer_freshness.month_label) and strftime('%b').lower() (fund_learning).
+    r"|_?MONTHS\[\s*\w+\.month\s*-\s*1\s*\]"
+    r"|month_abbr\[\s*\w+\.month\s*\]"
+    r"|strftime\(\s*['\"]%b['\"]\s*\)\s*\.lower\(\)")
 # Deliberate real-date uses that match the shape. Each entry names WHY it is a date, not a cycle.
-ALLOWED: dict = {}
+ALLOWED: dict = {
+    # ISA-0928: a DATE display ('04-Nov-26' register date column), not a cycle label - it names a day.
+    # (file, exact line text fragment) -> why. Line-scoped by CONTENT, not by file, so a future cycle label in the
+    #   same file is still caught.
+    ("isa_register.py", 'return f"{d.day:02d}-{_MONTHS[d.month - 1]}-{str(d.year)[2:]}"'):
+        "fmt_ddmmmyy renders a calendar DATE (dd-Mmm-yy) for the register views; it never names a cycle",
+}
 
 
 def wall_clock_cycle_derivations(root: str):
@@ -102,7 +114,8 @@ def wall_clock_cycle_derivations(root: str):
             t = ln.strip()
             if t.startswith("#") or t.startswith("assert ") or not WALL_CLOCK_LABEL.search(ln):
                 continue
-            if (fn, i) in ALLOWED or fn in ALLOWED:
+            if (fn, i) in ALLOWED or fn in ALLOWED or any(
+                    isinstance(k, tuple) and k[0] == fn and isinstance(k[1], str) and k[1] in ln for k in ALLOWED):
                 continue
             out.append((fn, i, t[:160]))
     return out
@@ -110,6 +123,19 @@ def wall_clock_cycle_derivations(root: str):
 
 def _selftest() -> int:
     D = _dt.date
+    # ISA-0928 MUST-FIRE: the guard sees all three retired spellings, and the line-scoped date allowance holds.
+    import tempfile as _tf928
+    _g = _tf928.mkdtemp()
+    open(_os.path.join(_g, "a.py"), "w").write(
+        "def f(d):\n    return '%s_%d' % (_MONTHS[d.month - 1], d.year)\n"
+        "def g(d):\n    return '%s_%d' % (calendar.month_abbr[d.month].lower(), d.year)\n"
+        "def h(d):\n    return f\"x_{d.strftime('%b').lower()}_{d.year}.json\"\n")
+    open(_os.path.join(_g, "isa_register.py"), "w").write(
+        '    return f"{d.day:02d}-{_MONTHS[d.month - 1]}-{str(d.year)[2:]}"\n'
+        "    lab = '%s_%d' % (_MONTHS[x.month - 1], x.year)\n")
+    _hits = wall_clock_cycle_derivations(_g)
+    assert sorted((f, n) for f, n, _t in _hits) == [("a.py", 2), ("a.py", 4), ("a.py", 6), ("isa_register.py", 2)], \
+        "ISA-0928 MUST-FIRE: the guard names the 3 retired spellings and a NEW cycle label in isa_register, not its date line: %r" % (_hits,)
     # MUST-FIRE (the measured defect): the month-wrap pre-run is November's.
     assert cycle_label(D(2026, 10, 31)) == "nov_2026", "ISA-0910 MUST-FIRE: Sat 31-Oct-2026 feeds Sun 01-Nov"
     assert previous_cycle_ym(D(2026, 10, 31)) == "2026-10", "ISA-0910 MUST-FIRE: the Nov cycle analyses OCTOBER screens"

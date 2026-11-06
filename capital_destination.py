@@ -2936,8 +2936,15 @@ def _apply_judgement_refusals(pipe: dict, refusals, scope_doc) -> list:
     return applied
 
 
-def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
+def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None, step9=None, scored=None) -> dict:
     """P3 -> P6. Returns the qualified candidate list and the deployment order for P4.
+
+    ⚑ ISA-0924 (31-Oct-2026): `step9` = (doc, name) - the caller's MONTH-BOUND step9_pre. The Capital
+    Decision Engine passes the exact bytes its receipt hashes (INPUT_FILES step9_pre_{month}); without
+    it, build(oct) after the November pre-run read November's population. Omitted (callers with no
+    month), the newest step9_pre by _meta.produced_at is read exactly as before.
+    `scored` = (doc_or_None, name_or_why) - the caller's month-bound watchlist_scored (scored_as_of): the
+    evidence-state channels come from it. A bound None is an UNAVAILABLE input (noted), never the newest file.
 
     ⚑ EVERY FAILURE IS A NAMED REFUSAL, never an empty list. `candidates: None` in the result
     means *the pipeline could not build a list*; `candidates: []` means *it built one and
@@ -2961,10 +2968,17 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
                            % (type(exc).__name__, exc))}
 
     # ── inputs, each named, each degrading to a STATED gap rather than a silent default ────
-    try:
-        s9, s9_name = _latest_step9_pre()
-    except DestinationRefused as exc:
-        return {"state": "REFUSED", "candidates": None, "sequence": None, "reason": str(exc)}
+    if step9 is not None:
+        s9, s9_name = step9                              # ISA-0924: the caller's month-bound population
+        if not isinstance(s9, dict):
+            return {"state": "REFUSED", "candidates": None, "sequence": None,
+                    "reason": "ISA-0924: the bound step9_pre %r is not a document - the router refuses rather than "
+                              "silently reading another month's population" % (s9_name,)}
+    else:
+        try:
+            s9, s9_name = _latest_step9_pre()
+        except DestinationRefused as exc:
+            return {"state": "REFUSED", "candidates": None, "sequence": None, "reason": str(exc)}
 
     def _opt(loader, label):
         try:
@@ -2975,7 +2989,13 @@ def capital_pipeline(portfolio: dict, policy: dict, *, as_of=None) -> dict:
 
     vci = _opt(lambda: json.loads((HERE / "vci_deploy_aug_2026.json").read_text("utf-8")),
                "vci_deploy")
-    scored = _opt(lambda: _newest_scored(), "watchlist_scored")
+    if scored is not None:                              # ISA-0924: the caller's month-bound scored frame
+        scored, _sc_name = scored
+        if scored is None:
+            notes.append("watchlist_scored unavailable for the bound month (%s) - ISA-0924: never the newest "
+                         "file of another month" % (_sc_name,))
+    else:
+        scored = _opt(lambda: _newest_scored(), "watchlist_scored")
 
     # ── correlation: ONE home (correlation_engine.assess) over the measured store ──────────
     corr, weekly, chan = None, None, None
@@ -3289,6 +3309,46 @@ def _suffix(ticker, portfolio):
     return ticker
 
 
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def _month_key(label):
+    """'oct_2026' -> (2026, 10); anything else -> None (never guessed)."""
+    import re as _re
+    m = _re.fullmatch(r"([a-z]{3})_(\d{4})", str(label or ""))
+    if not m or m.group(1) not in _MONTHS:
+        return None
+    return (int(m.group(2)), _MONTHS.index(m.group(1)) + 1)
+
+
+def scored_as_of(month, root=None):
+    """ISA-0924 (31-Oct-2026) -> (doc_or_None, name_or_why): the watchlist_scored frame a receipt for `month`
+    was formed on - the LATEST month label NOT AFTER `month`, searched in `root` (and its archive), then this
+    module's tree. A later month's frame is never read (the 31-Oct November commit made build(oct_2026) read
+    November's evidence channels). Ordered by the month LABEL, not mtime: an mtime is reset by any copy."""
+    import month_artefacts as _MA
+    want = _month_key(month)
+    if want is None:
+        return None, "unparseable month %r" % (month,)
+    best = None
+    for d in [str(root or HERE), str(HERE)]:
+        for p in _MA.month_glob(d, "watchlist_scored_*.json"):
+            lab = os.path.basename(p)[len("watchlist_scored_"):-len(".json")]
+            k = _month_key(lab)
+            if k is None or k > want:
+                continue
+            if best is None or k > best[0]:
+                best = (k, p)
+        if best is not None:
+            break
+    if best is None:
+        return None, "no watchlist_scored_* at or before %s" % month
+    try:
+        return json.loads(Path(best[1]).read_text(encoding="utf-8")), os.path.basename(best[1])
+    except Exception as e:                                              # noqa: BLE001
+        return None, "%s unreadable (%s)" % (os.path.basename(best[1]), type(e).__name__)
+
+
 def _newest_scored():
     ps = sorted(HERE.glob("watchlist_scored_*.json"))
     if not ps:
@@ -3423,8 +3483,14 @@ def judgement_scope_from_receipt(receipt_verification, held=()) -> dict:
 
 def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, universe_path=None,
           weights_path=None, nav_dir=None, out_path=None, as_of=None,
-          judgement_refusals=None, judgement_scope_doc=None, new_capital_control=None):
-    """`judgement_refusals` (ISA-0698): {ticker: reason} for REQUIRED names whose mandatory
+          judgement_refusals=None, judgement_scope_doc=None, new_capital_control=None,
+          decision_receipt=None):
+    """`decision_receipt` (ISA-0927): None (production) -> sleeve_split verifies the RUN month's stored
+    Capital Decision Receipt; a dict is used AS the verified receipt reading. Only a selftest / fixture
+    may pass one - a fixture that routes a hypothetical amount must never read the live month's receipt,
+    because that receipt is bound to the REAL book and the ISA-0811 guard correctly refuses it.
+
+    `judgement_refusals` (ISA-0698): {ticker: reason} for REQUIRED names whose mandatory
     judgement is missing/invalid, or the string "ALL_REQUIRED_UNKNOWN_SCOPE". Each such candidate
     is refused new capital BY NAME and its pound flows through the existing demand-pull /
     fund routing. Must be accompanied by the PRE-JUDGEMENT `judgement_scope_doc`; the refused
@@ -3488,7 +3554,8 @@ def build(amount_gbp=None, new_subscription_gbp=0.0, portfolio_path=None, univer
                          sequence=dict(pipe.get("sequence") or {},
                                        population_binding=pipe.get("population_binding")),
                          input_state=_istate, new_capital_control=new_capital_control,
-                         receipt_month=_mmm_yyyy_of(as_of), judgement_refused=judgement_refusals)
+                         receipt_month=_mmm_yyyy_of(as_of), judgement_refused=judgement_refusals,
+                         decision_receipt=decision_receipt)
     split["pipeline"] = {k: pipe.get(k) for k in
                          ("state", "step9_pre_source", "notes", "detail", "correlation")}
     _ac = pipe.get("all_candidates") or {}
@@ -4601,6 +4668,49 @@ def _raises_dr(fn) -> bool:
     return False
 
 
+def selftest_receipt_leaks(root=None) -> list:
+    """ISA-0927 — the month-roll fixture-coupling class, as a MECHANICAL check (not prose).
+
+    A fixture that routes a STATED amount through the router must not read the live run month's Capital
+    Decision Receipt: that receipt is bound to the real book, so the fixture's verdict flips with the month
+    (passes while the live receipt happens to fit, RED at the roll). Rule, checked by AST over this module's
+    `_selftest` and every test surface (tests_jul2026/*.py, capability_checks.py):
+      * a `build(...)` call carrying `amount_gbp=` must also carry `decision_receipt=`;
+      * a `sleeve_split(...)` call must carry `decision_receipt=` or `new_capital_control=` (a fixture
+        control declares the engine authority it assumes - NCC_OPEN_FIXTURE pins SHADOW).
+    Production callers (monthly_isa_prerun) pass no amount and read the real book + real receipt, which is
+    the intended coupling. Returns ["path:line call", ...]; empty = hermetic."""
+    import ast as _ast
+    import glob as _gl
+    base = Path(root) if root else HERE
+    files = [base / "capital_destination.py", base / "capability_checks.py"] + \
+        [Path(f) for f in sorted(_gl.glob(str(base / "tests_jul2026" / "*.py")))]
+    leaks = []
+    for f in files:
+        if not f.exists():
+            continue
+        try:
+            tree = _ast.parse(f.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError as exc:
+            leaks.append("%s: UNPARSEABLE (%s) - hermeticity UNKNOWN (R4.3)" % (f.name, exc))
+            continue
+        scopes = [tree]
+        if f.name == "capital_destination.py":
+            scopes = [n for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef) and n.name == "_selftest"]
+        for sc in scopes:
+            for n in _ast.walk(sc):
+                if not isinstance(n, _ast.Call):
+                    continue
+                fn = n.func.attr if isinstance(n.func, _ast.Attribute) else getattr(n.func, "id", None)
+                kws = {k.arg for k in n.keywords if k.arg}
+                if fn == "build" and "amount_gbp" in kws and "decision_receipt" not in kws:
+                    if f.name == "capital_destination.py" or (isinstance(n.func, _ast.Attribute)):
+                        leaks.append("%s:%d build(amount_gbp=...) without decision_receipt=" % (f.name, n.lineno))
+                elif fn == "sleeve_split" and not ({"decision_receipt", "new_capital_control", "_engine_authority"} & kws):
+                    leaks.append("%s:%d sleeve_split(...) without decision_receipt= / new_capital_control=" % (f.name, n.lineno))
+    return leaks
+
+
 def _selftest(verbose=True) -> int:
     import tempfile
     fails = []
@@ -4761,17 +4871,62 @@ def _selftest(verbose=True) -> int:
        d["sleeve_split"]["state"] in SLEEVE_SPLIT_STATES
        and bool(d["sleeve_split"]["reason"]))
     # ⚑ the denominator control — a NEW subscription must enlarge the total
+    # ⚑⚑ ISA-0927 (04-Nov-2026): d2 routes a HYPOTHETICAL £11,250. It used to read the LIVE run month's Capital
+    #   Decision Receipt (engine authority LIVE), which is bound to the REAL book - so it passed in October only
+    #   because October's receipt happened to fit £11,000, and went RED at the November roll (receipt spends
+    #   £12,135.34; the ISA-0811 different-book guard correctly refused). A fixture amount must carry a fixture
+    #   receipt AND a fixture control: hermetic, month-independent, and still on the production LIVE-engine path.
+    #   It also asserted the cap against the hard-coded AUGUST book while build() routes on the CURRENT book
+    #   (ISA-0488 class) - the cap is now tested on the book build() actually used.
+    _rd2 = {"state": "VALID", "receipt": {
+        "receipt_id": "CDR-SELFTEST-D2", "content_sha256": "fixture", "state": "DECISION_COMPLETE",
+        "capital_authorised": True, "min_entry_gbp": 1000.0,
+        "selected_actions": [{"ticker": "FIXD2", "gbp": 1000.0, "action": "START", "currency": "USD",
+                              "economic_max_price_major": 10.0}]}}
+    _ncc_d2 = dict(NCC_OPEN_FIXTURE, fixture_engine_authority="LIVE")
     d2 = build(amount_gbp=11250.0, new_subscription_gbp=11250.0,
-               out_path=tempfile.mktemp(suffix=".json"))
-    ck("new subscription enlarges the denominator (cap tested on the post-trade total)",
-       d2["state"] == "OK" and all(
-           (next(f["value_gbp"] for f in json.load(open(HERE / "portfolio_data_aug_2026.json"))["funds"]
-                 if f["ticker"] == k) + v)
-           / (json.load(open(HERE / "portfolio_data_aug_2026.json"))["summary"]["total_value_gbp"] + 11250.0)
-           <= json.load(open(HERE / "target_weights.json"))["thresholds"]["max_single_fund_pct"] + 1e-9
-           for k, v in d2["fund_allocation"]["allocation"].items()))
+               out_path=tempfile.mktemp(suffix=".json"),
+               decision_receipt=_rd2, new_capital_control=_ncc_d2)
+    _bk2 = _load_portfolio(None)
+    _cap2 = json.load(open(HERE / "target_weights.json"))["thresholds"]["max_single_fund_pct"]
+    _fa2 = (d2.get("fund_allocation") or {}).get("allocation") or {}
+    _ss2 = d2.get("sleeve_split") or {}
+    ck("ISA-0927 HERMETIC: d2 consumed the FIXTURE receipt, never the live month's (receipt id is the fixture's)",
+       (_ss2.get("decision_receipt") or {}).get("receipt_id") == "CDR-SELFTEST-D2"
+       and _ss2.get("state") == "STOCK_SLEEVE_ENGINE_ALLOCATED")
+    ck("ISA-0927 MUST-FIRE (anti-vacuous): the fund sleeve RECEIVES capital in d2 and conserves it - "
+       "amount - fixture stock - reserve = fund_max = sum(fund allocation)",
+       sum(_fa2.values()) > 0
+       and abs(float(_ss2.get("fund_max_gbp") or 0) - (11250.0 - 1000.0
+               - float(json.load(open(HERE / "target_weights.json"))["stock_sleeve"]["cash_reserve_gbp"]))) <= TOL_GBP
+       and abs(sum(_fa2.values()) + float((d2.get("fund_allocation") or {}).get("unallocated_gbp") or 0)
+               - float(_ss2.get("fund_max_gbp") or 0)) <= 1.0)
+    ck("new subscription enlarges the denominator (cap tested on the post-trade total, on the book build() used)",
+       d2["state"] == "OK" and bool(_fa2) and all(
+           (next(f["value_gbp"] for f in _bk2["funds"] if f["ticker"] == k) + v)
+           / (_bk2["summary"]["total_value_gbp"] + 11250.0) <= _cap2 + 1e-9
+           for k, v in _fa2.items()))
     ck("subscription case still refuses Ranmore",
-       d2["fund_allocation"]["allocation"].get("BR2Q8G6", 0.0) == 0.0)
+       _fa2.get("BR2Q8G6", 0.0) == 0.0)
+    _rd2big = json.loads(json.dumps(_rd2)); _rd2big["receipt"]["selected_actions"][0]["gbp"] = 99999.0
+    ck("ISA-0927 NEGATIVE CONTROL: the build() passthrough reaches the ISA-0811 guard - an oversize fixture "
+       "receipt on the hypothetical amount REFUSES",
+       _raises_dr(lambda: build(amount_gbp=11250.0, new_subscription_gbp=11250.0,
+                                out_path=tempfile.mktemp(suffix=".json"),
+                                decision_receipt=_rd2big, new_capital_control=_ncc_d2)))
+    ck("ISA-0927 HERMETICITY GUARD (mechanical, repo-wide): every fixture call that routes a stated amount "
+       "pins its receipt authority", not selftest_receipt_leaks())
+    _gtd = Path(tempfile.mkdtemp(prefix="cd_leak_"))
+    (_gtd / "tests_jul2026").mkdir()
+    (_gtd / "capital_destination.py").write_text(
+        "def _selftest():\n    build(amount_gbp=1.0)\n    build(amount_gbp=1.0, decision_receipt={})\n")
+    (_gtd / "tests_jul2026" / "test_x.py").write_text(
+        "import capital_destination as cd\ncd.sleeve_split(1.0, {}, {}, 0.0)\n"
+        "cd.sleeve_split(1.0, {}, {}, 0.0, new_capital_control=cd.NCC_OPEN_FIXTURE)\n")
+    _lk = selftest_receipt_leaks(_gtd)
+    ck("ISA-0927 MUST-FIRE: the hermeticity guard names EXACTLY the planted leaks (unpinned build + unpinned "
+       "sleeve_split) and passes the pinned twins",
+       len(_lk) == 2 and any("capital_destination.py:2" in x for x in _lk) and any("test_x.py:2" in x for x in _lk))
 
     # ── ISA-0698 · judgement scope is mechanical and refusals re-route by name ───────────────
     _jd = {"state": "OK", "_meta": {"as_of": "2026-09-16"}, "sleeve_split": {
@@ -5141,6 +5296,48 @@ def _selftest(verbose=True) -> int:
     ck("ISA-0913 NEGATIVE CONTROL: a judged selected name refuses nothing, and the pass STILL re-runs the router on the "
        "receipt (the pre-run unauthorised plan must not stand)",
        _s3b["refused_capital"] == [] and _s3b["rerouted"] and _calls3[-1]["judgement_refusals"] == {})
+    # ── ISA-0924: the router reads the CALLER's month-bound step9_pre, never the newest file, when given one ──
+    _orig924 = globals()["_latest_step9_pre"]
+    _calls924 = []
+
+    def _spy924():
+        _calls924.append(1)
+        return _orig924()
+    globals()["_latest_step9_pre"] = _spy924
+    try:
+        try:
+            _r924 = capital_pipeline({"stocks": [], "funds": []}, {}, as_of="2026-10-31",
+                                     step9=({"_meta": {"produced_at": "2026-10-03"}, "watchlist": []}, "step9_pre_oct_2026.json"))
+        except Exception as _e924:                                   # noqa: BLE001
+            _r924 = {"state": "RAISED", "reason": "%s: %s" % (type(_e924).__name__, _e924)}
+        ck("ISA-0924 MUST-FIRE: a bound step9 (the engine's month) is used and the newest-file reader is NOT called",
+           not _calls924 and _r924.get("step9_pre_source") in (None, "step9_pre_oct_2026.json"))
+        _r924b = capital_pipeline({"stocks": [], "funds": []}, {}, as_of="2026-10-31", step9=(None, "step9_pre_x.json"))
+        ck("ISA-0924 NEGATIVE CONTROL: a bound step9 that is not a document REFUSES (never falls back to the newest month)",
+           _r924b.get("state") == "REFUSED" and "ISA-0924" in str(_r924b.get("reason")) and not _calls924)
+        try:
+            capital_pipeline({"stocks": [], "funds": []}, {}, as_of="2026-10-31")
+        except Exception:                                            # noqa: BLE001
+            pass
+        ck("ISA-0924 NEGATIVE CONTROL: with no bound step9 the router still reads the newest step9_pre (callers with no month)",
+           len(_calls924) == 1)
+    finally:
+        globals()["_latest_step9_pre"] = _orig924
+    # ── ISA-0924 R5.14: scored_as_of keys on the receipt MONTH (label order, never mtime) ──
+    import tempfile as _tf924
+    _d924 = _tf924.mkdtemp()
+    for _lab in ("sep_2026", "oct_2026", "nov_2026"):
+        Path(_d924, "watchlist_scored_%s.json" % _lab).write_text(json.dumps({"tickers": {}, "lab": _lab}))
+    os.utime(Path(_d924, "watchlist_scored_sep_2026.json"), (4102444800, 4102444800))   # newest mtime is NOT newest month
+    ck("ISA-0924 R5.14 T-1: a receipt month BEFORE the newest frame reads its own (oct -> oct, not nov)",
+       scored_as_of("oct_2026", _d924)[1] == "watchlist_scored_oct_2026.json")
+    ck("ISA-0924 R5.14 T: the newest month reads itself (nov -> nov)", scored_as_of("nov_2026", _d924)[1] == "watchlist_scored_nov_2026.json")
+    ck("ISA-0924 R5.14 T+1: a month with no frame of its own reads the latest EARLIER label, never a later one (dec -> nov)",
+       scored_as_of("dec_2026", _d924)[1] == "watchlist_scored_nov_2026.json")
+    ck("ISA-0924 R5.14 repeat_same_occurrence: the same month twice -> the same frame (pure read)",
+       scored_as_of("oct_2026", _d924) == scored_as_of("oct_2026", _d924))
+    ck("ISA-0924 R5.14 next_occurrence NEGATIVE CONTROL: a month before every frame -> UNAVAILABLE (None), never a later frame",
+       scored_as_of("jan_2026", _d924)[0] is None)
     print(f"\ncapital_destination selftest: {len(fails)} failure(s)"
           + (" -> " + ", ".join(fails) if fails else " — all assertions green"))
     OUTPUT_DIR = _saved_output_dir

@@ -232,6 +232,9 @@ def stage_run(live_inv: str, occurrence: str, ws_base: Optional[str] = None, tim
     t0 = time.time()
     # ISA-0845: unbuffered so a cut-off pass still logs how far it got (a block-buffered pipe lost the tail)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", ISA_PRERUN_PHASE_FILE=phase_file)
+    # ⚑ ISA-0922: the occurrence's sync snapshot, so the ISA-0321 register gate treats every file ANY pass of
+    #   this occurrence wrote as an output (the gate's boundary is the occurrence, not one process's start).
+    env["ISA_PRERUN_SYNC_MANIFEST"] = os.path.join(ws, "sync_manifest.json")
     # ⚑ ISA-0911: the occurrence id lets shadow_ledger replace a cohort ITS OWN earlier pass froze. Exported only while
     #   the occurrence has NOT committed - after a commit the cohort is published and immutable to every later pass.
     env.pop("ISA_PRERUN_OCCURRENCE", None)
@@ -587,6 +590,22 @@ def _selftest() -> int:
     _r4 = stage_run(live2, occ3, wsb2, cmd=_probe)
     ok("ISA-0911 NEGATIVE CONTROL: after the occurrence commits, the run stage no longer receives it (the cohort is published)",
        "OCC=None" in open(_r4["log"], encoding="utf-8").read(), _r4)
+    # ── ISA-0922: every run stage receives the occurrence's sync snapshot (the register gate's boundary) ────────
+    _probe5 = [sys.executable, "-c", "import os,json; p=os.environ.get('ISA_PRERUN_SYNC_MANIFEST'); "
+                                     "print('MAN=' + str(bool(p and json.load(open(p)).get('occurrence')=='prerun-envprobe'))); "
+                                     "print('Review task reads: x')"]
+    _r5 = stage_run(live2, occ3, wsb2, cmd=_probe5)
+    ok("ISA-0922 MUST-FIRE: the run stage receives ISA_PRERUN_SYNC_MANIFEST naming THIS occurrence's sync snapshot",
+       "MAN=True" in open(_r5["log"], encoding="utf-8").read(), _r5)
+    _probe6 = [sys.executable, "-c", "import os; print('MAN6=' + str(os.environ.get('ISA_PRERUN_SYNC_MANIFEST'))); "
+                                     "print('Review task reads: x')"]
+    os.environ["ISA_PRERUN_SYNC_MANIFEST"] = "/stale/other_occurrence/sync_manifest.json"
+    try:
+        _r6 = stage_run(live2, occ3, wsb2, cmd=_probe6)
+    finally:
+        os.environ.pop("ISA_PRERUN_SYNC_MANIFEST", None)
+    ok("ISA-0922 NEGATIVE CONTROL: a stale inherited ISA_PRERUN_SYNC_MANIFEST is overwritten with this occurrence's",
+       "/stale/other_occurrence" not in open(_r6["log"], encoding="utf-8").read(), _r6)
     shutil.rmtree(base2, ignore_errors=True)
     shutil.rmtree(base, ignore_errors=True)
     print("prerun_runner selftest: %d FAIL(s)" % len(fails))

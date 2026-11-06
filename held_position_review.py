@@ -74,11 +74,12 @@ def classify_declared_only(names, ledger_entries, book_date, declared=None) -> d
     for t in sorted(names or []):
         keys = {str(t).upper()} | {str(a).upper() for a in
                                     (((declared or {}).get(t) or {}).get("aliases") or [])}
+        # ISA-0923: a subdivision changes the unit count, so it is part of the net; signs from the ONE home
+        from extract_transactions import unit_delta as _ud
         tr = sorted((e for e in (ledger_entries or [])
-                     if e.get("type") in ("buy", "sell") and str(e.get("ticker") or "").upper() in keys),
+                     if e.get("type") in ("buy", "sell", "split") and str(e.get("ticker") or "").upper() in keys),
                     key=lambda e: str(e.get("date") or ""))
-        net = sum((float(e.get("quantity") or 0.0) if e["type"] == "buy"
-                   else -float(e.get("quantity") or 0.0)) for e in tr)
+        net = sum(_ud(e) for e in tr)
         last = tr[-1] if tr else None
         if (last is not None and last["type"] == "sell" and abs(net) < 1e-6 and book_date
                 and str(last.get("date") or "9999") <= str(book_date)):
@@ -204,7 +205,7 @@ def review(portfolio_path: str, *, root: Optional[str] = None, today: Optional[s
                     "ceiling is UNAPPLIED, not satisfied." % type(exc).__name__)
     try:
         import position_sizing as _ps
-        declared = _ps.load_declared_binaries(root)
+        declared = _ps.load_declared_binaries(root, as_of=_book_date)   # ISA-0925: in force on the BOOK date
         min_entry = _ps.min_entry_gbp(float(nav))["min_entry_gbp"]
     except Exception as exc:                                         # noqa: BLE001
         return {"state": "UNAVAILABLE", "rows": [], "summary": {},
@@ -749,6 +750,14 @@ def _selftest(verbose: bool = True) -> int:
     ok(_c2["stale"] == ["NEWB"] and not _c2["closed"],
        "ISA-0866 rev c NEGATIVE CONTROL: a name BOUGHT after the book date (the 12-Sep NTAP case) "
        "remains a STALE SLEEVE: %s" % _c2)
+    # ISA-0923: a subdivision between the buy and a full sale must not leave phantom units
+    _ls = [{"date": "2026-07-01", "type": "buy", "ticker": "SPLT", "quantity": 5},
+           {"date": "2026-08-01", "type": "split", "ticker": "SPLT", "quantity": 45},
+           {"date": "2026-09-01", "type": "sell", "ticker": "SPLT", "quantity": 50}]
+    ok(classify_declared_only(["SPLT"], _ls, "2026-10-02")["closed"] == {"SPLT": "2026-09-01"},
+       "ISA-0923 MUST-FIRE: buy 5, 10:1 subdivision (+45), sell 50 -> CLOSED")
+    ok(classify_declared_only(["SPLT"], [_ls[0], _ls[2]], "2026-10-02")["stale"] == ["SPLT"],
+       "ISA-0923 NEGATIVE CONTROL: without the split row the same sale over-sells -> STALE, never closed")
     _c3 = classify_declared_only(["ABCL"], _led, "2026-09-01")
     ok(_c3["stale"] == ["ABCL"],
        "ISA-0866 rev c NEGATIVE CONTROL: a sale AFTER the book date does not close the declaration "

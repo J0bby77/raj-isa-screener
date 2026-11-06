@@ -657,7 +657,12 @@ BINARY_POSITIONS_FILE = "vci_binary_positions.json"
 UNDECLARED = "UNDECLARED"
 
 
-def load_declared_binaries(root: Optional[str] = None) -> dict:
+def load_declared_binaries(root: Optional[str] = None, as_of: Optional[str] = None) -> dict:
+    """The declared binary registry. ⚑ ISA-0925 (31-Oct-2026) - POINT IN TIME: with `as_of` (the BOOK date being
+    reviewed), a declaration retired by retire_closed_declarations whose `sold_on` is AFTER that date was in force on
+    it and is returned with the live `positions`. A book on or after the sale sees exactly `positions` (retirement only
+    ever happens for sales on or before the current book date), so the current run is unchanged by construction; a
+    re-bought name's fresh `positions` entry always wins. Without `as_of`, `positions` only (unchanged)."""
     import json as _json
     import os as _os
     root = root or _os.path.dirname(_os.path.abspath(__file__))
@@ -665,7 +670,13 @@ def load_declared_binaries(root: Optional[str] = None) -> dict:
     if not _os.path.exists(path):
         return {}
     with open(path, encoding="utf-8") as fh:
-        return (_json.load(fh) or {}).get("positions") or {}
+        doc = _json.load(fh) or {}
+    pos = dict(doc.get("positions") or {})
+    if as_of:
+        for tk, ent in (doc.get("retired") or {}).items():
+            if tk not in pos and isinstance(ent, dict) and str(ent.get("sold_on") or "") > str(as_of)[:10]:
+                pos[tk] = {k: v for k, v in ent.items() if k not in ("sold_on", "retired_on", "retired_basis")}
+    return pos
 
 
 def retire_closed_declarations(closed: dict, root: Optional[str] = None, today: Optional[str] = None,
@@ -1050,8 +1061,16 @@ def binary_budget_report(portfolio_path: str, *, budget_pct: float = 1.5,
             for x in stocks]
     # ISA-0706: through the single home, so this report and held_position_review cannot
     # disagree — they are the same calculation and they publish the same calc_id.
-    _auth = held_binary_budget(held, budget_pct=budget_pct, max_concurrent=max_concurrent,
-                               root=root)
+    # ISA-0925: the declarations in force on THIS book's own date (a later sale's retirement must not rewrite it)
+    _bd = None
+    try:
+        import datetime as _dtb
+        _dd = ((pd.get("_meta") or {}).get("data_date") or "").strip()
+        _bd = _dtb.datetime.strptime(_dd, "%d-%b-%Y").date().isoformat() if _dd else None
+    except Exception:                                                   # noqa: BLE001
+        _bd = None
+    _auth = held_binary_budget(held, declared=load_declared_binaries(root, as_of=_bd), budget_pct=budget_pct,
+                               max_concurrent=max_concurrent, root=root)
     hb = {"rows": _auth["rows"], "refusals": _auth["refusals"],
           "unpriceable_successors": _auth["unpriceable_successors"],
           "n_held": _auth["n_held"], "n_binary": _auth["n_binary"]}
@@ -3019,6 +3038,31 @@ def _selftest():
     assert _n0548 >= 10, "the ISA-0548 control block must not be emptied by a refactor"
     # ⚑ NEGATIVE CONTROL: a HELD stock absent from the binary registry must be REFUSED, never
     #   read as not-a-binary — `false` is a declaration, absence means nobody has decided.
+    # ── ISA-0925: the registry is read POINT IN TIME for a book date ──
+    import tempfile as _tf925, json as _j925
+    _d925 = _tf925.mkdtemp()
+    _j925.dump({"positions": {"MU": {"is_binary": False}},
+                "retired": {"ABCL": {"is_binary": True, "catalyst_status": "RESOLVED_POSITIVE_SUCCESSOR_PENDING",
+                                     "sold_on": "2026-09-14", "retired_on": "2026-10-31", "retired_basis": "x"},
+                            "MU": {"is_binary": True, "sold_on": "2026-12-01"}}},
+               open(os.path.join(_d925, BINARY_POSITIONS_FILE), "w"))
+    _a = load_declared_binaries(_d925, as_of="2026-08-31")
+    assert "ABCL" in _a and _a["ABCL"]["is_binary"] is True and "sold_on" not in _a["ABCL"], \
+        ("MUST-FIRE ISA-0925: a declaration retired by a LATER sale was in force on an earlier book", _a)
+    assert "ABCL" not in load_declared_binaries(_d925, as_of="2026-10-30"), \
+        "NEGATIVE CONTROL ISA-0925: on a book on/after the sale the retired declaration is absent"
+    assert "ABCL" not in load_declared_binaries(_d925), \
+        "NEGATIVE CONTROL ISA-0925: without a book date only `positions` is read (unchanged)"
+    assert load_declared_binaries(_d925, as_of="2026-08-31")["MU"] == {"is_binary": False}, \
+        "ISA-0925: a live `positions` entry always wins over a retired one"
+    # R5.14 temporal matrix around the 14-Sep sale (the book date is the clock this reader keys on)
+    assert "ABCL" in load_declared_binaries(_d925, as_of="2026-09-13"), "ISA-0925 R5.14 T-1: book the day BEFORE the sale -> in force"
+    assert "ABCL" not in load_declared_binaries(_d925, as_of="2026-09-14"), "ISA-0925 R5.14 T: book ON the sale date -> retired (sold on/before the book)"
+    assert "ABCL" not in load_declared_binaries(_d925, as_of="2026-09-15"), "ISA-0925 R5.14 T+1: book the day AFTER the sale -> retired"
+    assert load_declared_binaries(_d925, as_of="2026-09-13") == load_declared_binaries(_d925, as_of="2026-09-13"), \
+        "ISA-0925 R5.14 repeat_same_occurrence: the same book date twice -> the identical registry (no state written)"
+    assert "ABCL" not in load_declared_binaries(_d925, as_of="2026-10-30"), \
+        "ISA-0925 R5.14 next_occurrence: the next month's book (30-Oct) -> retired"
     assert held_binary_rows([{"ticker": "NOPE", "size_pct": 1.0}],
                             declared={})["refusals"], "absence must refuse"
     # ⚑ NEGATIVE CONTROL: one unpriceable PENDING binary must WITHHOLD the whole committed

@@ -73,12 +73,80 @@ _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun",
 
 
 def _mmm_yyyy(d: Optional[datetime.date] = None) -> str:
-    d = d or datetime.date.today()
-    return "%s_%d" % (_MONTHS[d.month - 1], d.year)
+    """The RUN-CYCLE label ('nov_2026') - never the wall-clock month.
+
+    ⚑ ISA-0928 (04-Nov-2026): this read the CALENDAR month of `d or today`. ISA-0910 made run_cycle the one home
+    for "which month a run belongs to" (Sat 31-Oct is the NOVEMBER run), but this private copy stayed on the wall
+    clock, so the November pre-run's seven AUTHORISED runs were flushed into the OCTOBER ledger file and
+    every November reader (capability_registry R4.14, the FI preflight, discussion_preflight) found no ledger:
+    0/37 capabilities live. One home now (R4.4)."""
+    import run_cycle as _rcy
+    return _rcy.cycle_label(d)
 
 
 def ledger_path(d: Optional[datetime.date] = None) -> str:
     return os.path.join(OUT, "execution_ledger_%s.json" % _mmm_yyyy(d))
+
+
+def migrate_cycle_ledgers(out_dir: Optional[str] = None, write: bool = True) -> dict:
+    """ISA-0928 one-off (idempotent) migration of WALL-CLOCK ledgers onto the run cycle.
+
+    For every legacy `execution_ledger_<m>.json`, each runs[] entry whose `flushed_at` maps (run_cycle) to a
+    DIFFERENT cycle is copied into that cycle's ledger, stamped `migrated_from`, and its own per-run live_run
+    counts are added to that ledger's records (kind live_run, caller `migrated:<file>`). Dedupe key: (flushed_at,
+    binding) - re-running moves nothing. Legacy files are NEVER modified (they remain the record of what was
+    written). -> {"moved": [...], "files_written": [...], "state": "MIGRATED"|"NOTHING_TO_MIGRATE"}."""
+    import glob as _gl
+    import run_cycle as _rcy
+    d0 = out_dir or OUT
+    moved, writes = [], {}
+    for src in sorted(_gl.glob(os.path.join(d0, "execution_ledger_*.json"))):
+        lab = os.path.basename(src)[len("execution_ledger_"):-len(".json")]
+        try:
+            doc = json.load(open(src, encoding="utf-8"))
+        except Exception:                                               # noqa: BLE001
+            continue
+        for run in (doc.get("runs") or []):
+            fa = str(run.get("flushed_at") or "")[:10]
+            if not fa:
+                continue
+            cyc = _rcy.cycle_label(fa)
+            if cyc == lab:
+                continue
+            dst = os.path.join(d0, "execution_ledger_%s.json" % cyc)
+            tgt = writes.get(dst)
+            if tgt is None:
+                tgt = (json.load(open(dst, encoding="utf-8")) if os.path.exists(dst) else
+                       {"_what": "P0.1 live-path execution ledger - keyed by RUN CYCLE (ISA-0928)",
+                        "as_of": datetime.datetime.now().isoformat(timespec="seconds"), "records": {}, "runs": []})
+            key = json.dumps([run.get("flushed_at"), run.get("binding")], sort_keys=True, default=str)
+            if any(json.dumps([r.get("flushed_at"), r.get("binding")], sort_keys=True, default=str) == key
+                   for r in tgt.get("runs") or []):
+                continue
+            nr = dict(run, migrated_from=os.path.basename(src), migrated_basis="ISA-0928 run_cycle %s" % cyc)
+            tgt.setdefault("runs", []).append(nr)
+            recs = tgt.setdefault("records", {})
+            for q, n in (run.get("live_run") or {}).items():
+                if not n:
+                    continue
+                mod, _, fn = q.partition(".")
+                rec = recs.setdefault(q, {"module": mod, "function": fn, "calls": 0, "kinds": {}, "callers": []})
+                rec["calls"] += int(n)
+                rec["kinds"]["live_run"] = rec["kinds"].get("live_run", 0) + int(n)
+                _c = "migrated:%s" % os.path.basename(src)
+                if _c not in rec["callers"]:
+                    rec["callers"].append(_c)
+            writes[dst] = tgt
+            moved.append({"flushed_at": run.get("flushed_at"), "from": os.path.basename(src), "to": os.path.basename(dst)})
+    if write:
+        for dst, tgt in writes.items():
+            tgt["runs"].sort(key=lambda r: str(r.get("flushed_at")))
+            tmp = dst + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(tgt, fh, indent=1, ensure_ascii=False)
+            os.replace(tmp, dst)
+    return {"state": "MIGRATED" if moved else "NOTHING_TO_MIGRATE", "moved": moved,
+            "files_written": sorted(os.path.basename(x) for x in writes) if write else []}
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -2653,6 +2721,42 @@ def _selftest() -> int:
     finally:
         _RUN_BINDING.clear(); _RUN_BINDING.update(_saved_bind)
         _LEDGER_MEM.clear(); _LEDGER_MEM.update(_saved_mem)
+    # ── ISA-0928: the ledger is keyed by RUN CYCLE (run_cycle), with an idempotent legacy migration ─────────
+    _d928 = datetime.date
+    _L928 = lambda lab: "execution_ledger_%s.json" % lab     # fixture names, built - not inputs (A18/ISA-0498)
+    ok("ISA-0928 R5.14 T-1: Sun 25-Oct-2026 (the October cycle's last date) is the OCTOBER ledger; Mon 26-Oct already feeds 1-Nov",
+       os.path.basename(ledger_path(_d928(2026, 10, 25))) == _L928("oct_2026")
+       and os.path.basename(ledger_path(_d928(2026, 10, 26))) == _L928("nov_2026"))
+    ok("ISA-0928 MUST-FIRE R5.14 T: the Sat 31-Oct pre-run flushes into the NOVEMBER ledger (was oct - wall clock)",
+       os.path.basename(ledger_path(_d928(2026, 10, 31))) == _L928("nov_2026"))
+    ok("ISA-0928 R5.14 T+1: Wed 04-Nov reads the same November ledger the 31-Oct pre-run wrote",
+       ledger_path(_d928(2026, 11, 4)) == ledger_path(_d928(2026, 10, 31)))
+    ok("ISA-0928 R5.14 repeat_same_occurrence: the same date always resolves the same ledger",
+       ledger_path(_d928(2026, 10, 31)) == ledger_path(_d928(2026, 10, 31)))
+    ok("ISA-0928 R5.14 next_occurrence: the Sat 05-Dec pre-run opens the DECEMBER ledger; 3-Oct stays October (negative control)",
+       os.path.basename(ledger_path(_d928(2026, 12, 5))) == _L928("dec_2026")
+       and os.path.basename(ledger_path(_d928(2026, 10, 3))) == _L928("oct_2026"))
+    _tdm = tempfile.mkdtemp()
+    _runA = {"flushed_at": "2026-10-03T09:14:57", "binding": {"authority": "AUTHORISED", "dry_run": False, "build_id": "TB-A"},
+             "live_run": {"m.f": 3}}
+    _runB = {"flushed_at": "2026-10-31T11:34:46", "binding": {"authority": "AUTHORISED", "dry_run": False, "build_id": "TB-B"},
+             "live_run": {"m.f": 5, "m.g": 1}}
+    _legacy = {"records": {"m.f": {"module": "m", "function": "f", "calls": 8, "kinds": {"live_run": 8}, "callers": ["x"]}},
+               "runs": [_runA, _runB]}
+    json.dump(_legacy, open(os.path.join(_tdm, _L928("oct_2026")), "w"))
+    _legacy_bytes = open(os.path.join(_tdm, _L928("oct_2026")), "rb").read()
+    _m1 = migrate_cycle_ledgers(_tdm)
+    _nov = load_ledger(os.path.join(_tdm, _L928("nov_2026")))
+    ok("ISA-0928 MUST-FIRE: migration moves ONLY the 31-Oct run into the November ledger, with its own counts and provenance",
+       _m1["state"] == "MIGRATED" and len(_m1["moved"]) == 1 and len(_nov["runs"]) == 1
+       and _nov["runs"][0]["migrated_from"] == _L928("oct_2026")
+       and _nov["records"]["m.f"]["kinds"]["live_run"] == 5 and _nov["records"]["m.g"]["calls"] == 1
+       and bound_live_calls(_nov).get("m.f", {}).get("calls") == 5, _m1)
+    _m2 = migrate_cycle_ledgers(_tdm)
+    ok("ISA-0928 NEGATIVE CONTROL: migration is idempotent (a second pass moves nothing) and never edits the legacy file",
+       _m2["state"] == "NOTHING_TO_MIGRATE"
+       and open(os.path.join(_tdm, _L928("oct_2026")), "rb").read() == _legacy_bytes
+       and len(load_ledger(os.path.join(_tdm, _L928("nov_2026")))["runs"]) == 1)
     # wiring: the production orchestrator binds AFTER Step 0a authority and BEFORE the Step 6.99 flush
     _pr = os.path.join(HERE, "monthly_isa_prerun.py")
     if os.path.exists(_pr):

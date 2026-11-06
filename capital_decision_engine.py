@@ -204,6 +204,16 @@ DECISION_LEDGER = "capital_decision_ledger.jsonl"
 from month_artefacts import ARCHIVE_REL      # ISA-0832: one home for the archive location
 
 
+def month_pipeline(month: str, inp: dict, root: str, portfolio: dict, policy: dict, as_of=None) -> dict:
+    """ISA-0924 (31-Oct-2026) - ONE home for the candidate pipeline a receipt for `month` is formed on: the
+    router reads THIS month's step9_pre (the bytes INPUT_FILES hashes) and the scored frame as of this month,
+    never the newest files on disk. build() and every test/consumer that re-forms a month's pipeline call this."""
+    import capital_destination as _cd
+    return _cd.capital_pipeline(portfolio, policy, as_of=as_of,
+                                step9=(inp["step9_pre"], os.path.basename(input_path(month, "step9_pre", root))),
+                                scored=_cd.scored_as_of(month, root))
+
+
 def input_path(month: str, key: str, root: str = HERE) -> str:
     """ISA-0832 (04-Oct-2026) - ONE home for where a month's input lives. After the monthly review,
     capture_archive --purge MOVES the month's inputs (e.g. portfolio_data_<month>.json) into
@@ -2345,7 +2355,9 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         store = inp.get("weekly_store") if inp.get("weekly_store") is not None else _srs.load()
     if pipeline is None:
         import capital_destination as _cd
-        pipeline = _cd.capital_pipeline(portfolio, policy, as_of=as_of)
+        # ⚑ ISA-0924: the router reads THIS month's step9_pre - the same bytes INPUT_FILES hashes into the
+        #   receipt - never the newest file on disk (build(oct) after the November pre-run read November).
+        pipeline = month_pipeline(month, inp, root, portfolio, policy, as_of)
     try:
         import return_architecture as _ra
         _cr = _ra.derive_cash_rate()

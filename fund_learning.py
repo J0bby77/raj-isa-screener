@@ -77,8 +77,10 @@ def load_study(path=None):
 
 
 def store_name(as_of=None):
-    d = as_of or dt.date.today()
-    return f"fund_learning_{d.strftime('%b').lower()}_{d.year}.json"
+    # ⚑ ISA-0928 (04-Nov-2026): the store is keyed by the RUN CYCLE (run_cycle, ISA-0910 one home), never the
+    #   wall-clock month - a month-wrap pre-run (Sat 31-Oct) belongs to the NEXT month's cycle.
+    import run_cycle as _rcy
+    return "fund_learning_%s.json" % _rcy.cycle_label(as_of)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
