@@ -11,7 +11,7 @@
       "fetch_failure",
       "UNKNOWN"
     ],
-    "updated": "2026-10-24T08:19:44+00:00"
+    "updated": "2026-11-06T09:27:43+00:00"
   },
   "names": {
     "F250-SPI|AAS.L": {
@@ -8359,7 +8359,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ACGL"
@@ -8373,7 +8373,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ADI"
@@ -8387,7 +8387,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ADM"
@@ -8401,7 +8401,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AES"
@@ -8415,7 +8415,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AFL"
@@ -8429,7 +8429,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AIG"
@@ -8443,7 +8443,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AIZ"
@@ -8457,7 +8457,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AJG"
@@ -8471,7 +8471,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ALB"
@@ -8485,7 +8485,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ALL"
@@ -8499,7 +8499,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AMP"
@@ -8513,7 +8513,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AMT"
@@ -8527,7 +8527,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AON"
@@ -8541,7 +8541,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "APA"
@@ -8555,7 +8555,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "APD"
@@ -8569,7 +8569,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "APO"
@@ -8583,7 +8583,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AQN.TO"
@@ -8597,7 +8597,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ARE"
@@ -8611,7 +8611,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ARES"
@@ -8625,7 +8625,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 4,
+      "runs_missing": 5,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AVB"
@@ -8639,7 +8639,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AVY"
@@ -8653,7 +8653,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AXP"
@@ -8667,7 +8667,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BAC"
@@ -8681,7 +8681,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BALL"
@@ -8695,7 +8695,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BBY"
@@ -8709,7 +8709,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BEN"
@@ -8723,7 +8723,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BF.B"
@@ -8737,7 +8737,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BIIB"
@@ -8751,7 +8751,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BKNG"
@@ -8765,7 +8765,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 2,
+      "runs_missing": 3,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BLDR"
@@ -8779,7 +8779,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BLK"
@@ -8793,7 +8793,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BNY"
@@ -8807,7 +8807,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BRK.B"
@@ -8821,7 +8821,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BRO"
@@ -8835,7 +8835,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BX"
@@ -8849,7 +8849,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BXP"
@@ -8863,7 +8863,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "C"
@@ -8877,7 +8877,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CB"
@@ -8891,7 +8891,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CBRE"
@@ -8905,7 +8905,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CCI"
@@ -8919,7 +8919,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CDW"
@@ -8933,7 +8933,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CF"
@@ -8947,7 +8947,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CFG"
@@ -8961,7 +8961,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CHRW"
@@ -8975,7 +8975,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CINF"
@@ -8989,7 +8989,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CLX"
@@ -9003,7 +9003,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CMS"
@@ -9017,7 +9017,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "COF"
@@ -9031,10 +9031,23 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "COP"
+    },
+    "SP500|COR": {
+      "first_missing": "2026-11-06",
+      "first_seen": "2026-08-07",
+      "group": "SP500",
+      "last_price": null,
+      "last_seen": "2026-10-17",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "COR"
     },
     "SP500|CPT": {
       "first_missing": "2026-10-17",
@@ -9045,7 +9058,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CPT"
@@ -9059,7 +9072,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CSGP"
@@ -9073,7 +9086,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CSX"
@@ -9087,7 +9100,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CTVA"
@@ -9101,7 +9114,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CVX"
@@ -9115,7 +9128,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DD"
@@ -9129,7 +9142,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DE"
@@ -9143,7 +9156,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DHR"
@@ -9157,7 +9170,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DLR"
@@ -9171,7 +9184,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DOC"
@@ -9185,7 +9198,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DOW"
@@ -9199,7 +9212,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DTE"
@@ -9213,7 +9226,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "DVN"
@@ -9227,7 +9240,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ECHO"
@@ -9241,7 +9254,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EDPFY"
@@ -9255,7 +9268,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EG"
@@ -9269,7 +9282,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EL"
@@ -9283,7 +9296,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ELV"
@@ -9297,7 +9310,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EOG"
@@ -9311,7 +9324,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EQIX"
@@ -9325,7 +9338,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 4,
+      "runs_missing": 5,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EQR"
@@ -9339,7 +9352,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EQT"
@@ -9353,7 +9366,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ERIE"
@@ -9367,7 +9380,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ESS"
@@ -9381,7 +9394,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ETR"
@@ -9395,7 +9408,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EXPD"
@@ -9409,7 +9422,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EXR"
@@ -9423,7 +9436,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FCX"
@@ -9437,7 +9450,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FDXF"
@@ -9451,10 +9464,23 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FERG"
+    },
+    "SP500|FFIV": {
+      "first_missing": "2026-11-06",
+      "first_seen": "2026-08-07",
+      "group": "SP500",
+      "last_price": null,
+      "last_seen": "2026-10-17",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "FFIV"
     },
     "SP500|FITB": {
       "first_missing": "2026-10-17",
@@ -9465,7 +9491,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FITB"
@@ -9479,7 +9505,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FLEX"
@@ -9493,7 +9519,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FOX"
@@ -9507,7 +9533,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FOXA"
@@ -9521,7 +9547,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FRT"
@@ -9535,7 +9561,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "FTV"
@@ -9549,7 +9575,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "GIS"
@@ -9563,7 +9589,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "GL"
@@ -9577,7 +9603,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "GNRC"
@@ -9591,7 +9617,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "GPN"
@@ -9605,7 +9631,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "GS"
@@ -9619,7 +9645,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HAS"
@@ -9633,7 +9659,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HBAN"
@@ -9647,7 +9673,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HIG"
@@ -9661,7 +9687,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HPQ"
@@ -9675,7 +9701,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HRL"
@@ -9689,7 +9715,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HST"
@@ -9703,7 +9729,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "HUM"
@@ -9717,7 +9743,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "IBDRY"
@@ -9731,7 +9757,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "IFF"
@@ -9745,7 +9771,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-10-02",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ILMN"
@@ -9759,7 +9785,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "INTC"
@@ -9773,7 +9799,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "INVH"
@@ -9787,7 +9813,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "IRM"
@@ -9801,7 +9827,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "IVZ"
@@ -9815,7 +9841,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "JBHT"
@@ -9843,7 +9869,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "JPM"
@@ -9857,7 +9883,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KEY"
@@ -9871,7 +9897,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KEYS"
@@ -9885,7 +9911,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KHC"
@@ -9899,7 +9925,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KIM"
@@ -9913,7 +9939,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KKR"
@@ -9927,7 +9953,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KMB"
@@ -9941,7 +9967,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KMI"
@@ -9955,10 +9981,23 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "KR"
+    },
+    "SP500|KVUE": {
+      "first_missing": "2026-11-06",
+      "first_seen": "2026-08-07",
+      "group": "SP500",
+      "last_price": null,
+      "last_seen": "2026-10-17",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "KVUE"
     },
     "SP500|L": {
       "first_missing": "2026-10-17",
@@ -9969,7 +10008,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "L"
@@ -9983,7 +10022,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "LOW"
@@ -9997,7 +10036,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "LYB"
@@ -10011,7 +10050,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MAA"
@@ -10025,7 +10064,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MAS"
@@ -10039,7 +10078,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MCHP"
@@ -10053,7 +10092,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MET"
@@ -10067,7 +10106,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MLM"
@@ -10081,7 +10120,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MMM"
@@ -10095,7 +10134,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MO"
@@ -10109,7 +10148,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MOS"
@@ -10123,7 +10162,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MPC"
@@ -10137,7 +10176,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MRNA"
@@ -10151,7 +10190,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MRSH"
@@ -10165,7 +10204,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MS"
@@ -10179,7 +10218,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "MTB"
@@ -10193,7 +10232,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NEM"
@@ -10207,7 +10246,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NG.L"
@@ -10221,7 +10260,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NKE"
@@ -10235,7 +10274,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NPI.TO"
@@ -10249,7 +10288,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NRG"
@@ -10263,7 +10302,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NSC"
@@ -10277,7 +10316,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NTRS"
@@ -10291,7 +10330,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NUE"
@@ -10305,7 +10344,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NVR"
@@ -10319,7 +10358,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NWS"
@@ -10333,7 +10372,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NWSA"
@@ -10347,7 +10386,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "NXPI"
@@ -10361,7 +10400,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "O"
@@ -10375,7 +10414,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ODFL"
@@ -10389,7 +10428,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ON"
@@ -10403,7 +10442,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "OXY"
@@ -10417,7 +10456,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PCAR"
@@ -10431,7 +10470,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PFE"
@@ -10445,7 +10484,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PFG"
@@ -10459,7 +10498,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PGR"
@@ -10473,7 +10512,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PLD"
@@ -10487,7 +10526,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PNC"
@@ -10501,7 +10540,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PRU"
@@ -10515,7 +10554,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PSA"
@@ -10528,7 +10567,7 @@
       "last_seen": "2026-10-02",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "PSKY"
@@ -10542,7 +10581,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "PSX"
@@ -10556,7 +10595,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "Q"
@@ -10570,7 +10609,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "REG"
@@ -10584,7 +10623,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "RF"
@@ -10598,10 +10637,23 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "RJF"
+    },
+    "SP500|ROK": {
+      "first_missing": "2026-11-06",
+      "first_seen": "2026-08-07",
+      "group": "SP500",
+      "last_price": null,
+      "last_seen": "2026-10-17",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "ROK"
     },
     "SP500|RVTY": {
       "first_missing": "2026-10-17",
@@ -10612,7 +10664,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "RVTY"
@@ -10626,10 +10678,23 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SBAC"
+    },
+    "SP500|SBUX": {
+      "first_missing": "2026-11-06",
+      "first_seen": "2026-08-07",
+      "group": "SP500",
+      "last_price": null,
+      "last_seen": "2026-10-17",
+      "reason": "UNKNOWN",
+      "reason_source": null,
+      "runs_missing": 1,
+      "status": "suspected_gone",
+      "terminal_return_pct": null,
+      "ticker": "SBUX"
     },
     "SP500|SCHW": {
       "first_missing": "2026-10-17",
@@ -10640,7 +10705,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SCHW"
@@ -10653,7 +10718,7 @@
       "last_seen": "2026-10-02",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "SMCI"
@@ -10667,7 +10732,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SPG"
@@ -10681,7 +10746,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SRE"
@@ -10695,7 +10760,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SSE.L"
@@ -10709,7 +10774,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "STLD"
@@ -10723,7 +10788,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "STT"
@@ -10737,7 +10802,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "STZ"
@@ -10751,7 +10816,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SWK"
@@ -10765,7 +10830,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SWKS"
@@ -10779,7 +10844,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "SYF"
@@ -10792,8 +10857,8 @@
       "last_seen": "2026-09-19",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 2,
-      "status": "suspected_gone",
+      "runs_missing": 3,
+      "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "TAP"
     },
@@ -10806,7 +10871,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TFC"
@@ -10820,7 +10885,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TGT"
@@ -10834,7 +10899,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TMO"
@@ -10848,7 +10913,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TRGP"
@@ -10862,7 +10927,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TRMB"
@@ -10876,7 +10941,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TROW"
@@ -10890,7 +10955,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TRV"
@@ -10903,8 +10968,8 @@
       "last_seen": "2026-09-19",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 2,
-      "status": "suspected_gone",
+      "runs_missing": 3,
+      "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "TTD"
     },
@@ -10917,7 +10982,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "TXN"
@@ -10931,7 +10996,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "UDR"
@@ -10945,7 +11010,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "UNP"
@@ -10959,7 +11024,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "UPS"
@@ -10973,7 +11038,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "USB"
@@ -10987,7 +11052,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VICI"
@@ -11001,7 +11066,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VLO"
@@ -11015,7 +11080,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-09-04",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VMRK"
@@ -11029,7 +11094,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VTR"
@@ -11043,7 +11108,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "VTRS"
@@ -11056,7 +11121,7 @@
       "last_seen": "2026-10-02",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "WBD"
@@ -11070,7 +11135,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WELL"
@@ -11084,7 +11149,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WFC"
@@ -11098,7 +11163,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WRB"
@@ -11112,7 +11177,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WSM"
@@ -11126,7 +11191,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WTW"
@@ -11140,7 +11205,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "WY"
@@ -11154,7 +11219,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "XEL"
@@ -11168,7 +11233,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "XOM"
@@ -11182,7 +11247,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "ZBRA"
