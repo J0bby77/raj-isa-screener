@@ -1628,7 +1628,7 @@
    "source": "declared alias FRO.OL -> FRO.OL (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "FRO.OL",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-10-31"
+   "admitted_on": "2026-11-08"
   },
   {
    "ticker": "FROG",
@@ -3219,7 +3219,7 @@
    "source": "declared alias QBTS -> QBTS (stock_price_fetch.SYMBOL_MAP)",
    "declared_alias_of": "QBTS",
    "verified_by": "declared_alias_exchange_verified",
-   "admitted_on": "2026-10-31"
+   "admitted_on": "2026-11-08"
   },
   {
    "ticker": "RACE.MI",
@@ -4310,7 +4310,7 @@
    "alias": "ABCL",
    "symbol": "ABCL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "NMS"
    ],
@@ -4322,7 +4322,7 @@
    "alias": "AVGO",
    "symbol": "AVGO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -4341,7 +4341,7 @@
    "alias": "COCO",
    "symbol": "COCO",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -4360,7 +4360,7 @@
    "alias": "FRO",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "identity": {
     "listing": "FRO.OL",
     "venue": "OSL",
@@ -4388,7 +4388,7 @@
    "alias": "FRO.OL",
    "symbol": "FRO.OL",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "OSL"
    ],
@@ -4400,7 +4400,7 @@
    "alias": "IWMO.L",
    "symbol": "IWMO.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4413,7 +4413,7 @@
    "alias": "MU",
    "symbol": "MU",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "ASE",
     "BTS",
@@ -4432,7 +4432,7 @@
    "alias": "ONT",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4445,7 +4445,7 @@
    "alias": "ONT.L",
    "symbol": "ONT.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4458,7 +4458,7 @@
    "alias": "QBTS",
    "symbol": "QBTS",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "NMS"
    ],
@@ -4470,7 +4470,7 @@
    "alias": "SWDA.L",
    "symbol": "SWDA.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4483,7 +4483,7 @@
    "alias": "VUAG.L",
    "symbol": "VUAG.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
@@ -4496,7 +4496,7 @@
    "alias": "VWRL.L",
    "symbol": "VWRL.L",
    "declared_in": "stock_price_fetch.SYMBOL_MAP",
-   "verified_on": "2026-10-31",
+   "verified_on": "2026-11-08",
    "expected_exchanges": [
     "IOB",
     "LSE"
