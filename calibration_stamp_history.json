@@ -181,6 +181,13 @@
     "schema_version": "1.0",
     "stamped_at": "2026-11-06"
   },
+  "2026-11-13|NASDAQ": {
+    "fingerprint": "7e6fc8157576",
+    "group": "NASDAQ",
+    "run_date": "2026-11-13",
+    "schema_version": "1.0",
+    "stamped_at": "2026-11-13"
+  },
   "_pool_exclusions": {
     "2026-08-07|SP500": {
       "approved_by": "raj",
