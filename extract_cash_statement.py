@@ -91,6 +91,35 @@ FX_RATE_SOURCE = ("AJ Bell cash statement 2026-27, literal 'FX Charge (0.50%)' r
                   "corroborated by COCO 03-Aug-2026 executing at GBP1,354.99 vs a "
                   "GBP1,384.75 estimate built on 0.75%")
 
+# ⚑ ISA-0810 (19-Nov-2026) - FX_RATE_FRACTION above is the INCOME-conversion charge (the cash statement's
+#   'FX Charge (0.50%)' rows convert dividends/corporate-action payments to sterling). It is NOT the charge on
+#   DEALING in a foreign-currency share, which is TIERED by deal value and is the ONE home below. Register H13
+#   (05-Aug-2026) read the income rows as the dealing rate; every USD stock buy in the dealing record measures
+#   (cost - commission)/consideration = 0.75% (AVGO 29.87/3,982.00, MU 15.03/2,004.34 ...), the first tier.
+DEALING_FX_TIERS = ((10000.0, 0.0075), (10000.0, 0.0050), (None, 0.0025))   # (band width GBP, fraction)
+DEALING_FX_SOURCE = ("AJ Bell published charges (Youinvest ISA/DA/SIPP charges PDFs effective 1-Apr-2024; help "
+                     "article 'What are the charges on international dealing', read 19-Nov-2026): first GBP 10,000 "
+                     "0.75%, next GBP 10,000 0.50%, value over GBP 20,000 0.25% - a blended rate on the deal value; "
+                     "MEASURED 0.75% on every sub-GBP 10k USD buy in transaction_ledger.json")
+
+
+def dealing_fx_gbp(deal_value_gbp: float) -> float:
+    """ISA-0810: the tiered AJ Bell FX charge (GBP) on a foreign-currency deal of `deal_value_gbp`.
+    RAISES on a negative or non-finite value (a cost of an unknown deal is not zero, R4.1)."""
+    import math as _m
+    v = float(deal_value_gbp)
+    if not _m.isfinite(v) or v < 0:
+        raise ValueError("dealing_fx_gbp: deal value %r is not a finite non-negative GBP amount" % (deal_value_gbp,))
+    fee, left = 0.0, v
+    for width, frac in DEALING_FX_TIERS:
+        part = left if width is None else min(left, width)
+        fee += part * frac
+        left -= part
+        if left <= 0:
+            break
+    return round(fee, 2)
+
+
 OPENING_BALANCE_RE = re.compile(r"^\s*\*+\s*balance\s*b/?f\s*\*+", re.I)
 
 # ⚑ ISA-0642 (19-Oct-2026). TRANSFER_IN — cash moved INTO this ISA from another account, by

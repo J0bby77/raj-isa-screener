@@ -67,7 +67,7 @@ CAPITAL_GATING = {
     "PRICE_MOM_SKIP": ("scoring_config.py", "Days skipped to exclude short-term reversal."),
     "CONVICTION_FRACTIONS": ("scoring_config.py", "Conviction bands; gates deployment at Step 9."),
     "VCI_SOURCE_WEIGHTS": ("scoring_config.py", "Ranks the VCI sleeve, from which real starters are bought."),
-    "FX_RATE_FRACTION": ("extract_cash_statement.py", "Every USD trade cost estimate in the framework."),
+    "FX_RATE_FRACTION": ("extract_cash_statement.py", "Income/corporate-action FX conversion (0.50%). DEALING FX is tiered - extract_cash_statement.dealing_fx_gbp (ISA-0810)."),
     # ⚑ ISA-0729 (23-Sep-2026): ISA-0465 (16-Sep) DECLARED rationale for these two backstops in
     #   isa_rationale_declarations.json but never listed them here, so refresh() refused the whole
     #   declarations file (R4.4 contract) - found when tests_jul2026's rationale-ledger suite was

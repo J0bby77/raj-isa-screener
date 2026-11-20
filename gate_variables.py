@@ -79,6 +79,10 @@ COLS = [
     # all failed a gate. Logged here so it is measured monthly rather than noticed once.
     "t1_qualified", "est_rev_direction", "source_score", "revision_stage",
     "schema_version",
+    # ISA-0878/0931 (19-Nov-2026): where THIS row came from. "captured_live" for every row the screen/pre-run
+    # writes; "recovered:<source>:sha256=<...>" for original rows restored from a retained backup. A recovered
+    # row is an ORIGINAL observation, never a reconstruction; rows that predate this column read blank (unknown).
+    "row_provenance",
 ]
 
 # Plausible domain per numeric variable: (lo, hi, unit). A value outside its range is a WRITE
@@ -183,26 +187,110 @@ def log_gate_variables(records, group=None, run_date=None, store=None, strict=Tr
 
     assert_ranges(rows, strict=strict)          # ← nothing is written if a level looks like a gap
 
+    for rec in rows:
+        if not rec.get("row_provenance"):
+            rec["row_provenance"] = "captured_live"
     new = pd.DataFrame(rows, columns=COLS)
-    if os.path.exists(store):
-        old = pd.read_csv(store)
-        for c in COLS:
-            if c not in old.columns:
-                old[c] = None
-        old = old[COLS]
-        key = ["run_date", "group", "ticker"]
-        oi = old.set_index(key)
-        ni = new.set_index(key)
-        oi = oi[~oi.index.duplicated(keep="last")]
-        ni = ni[~ni.index.duplicated(keep="last")]
-        # FIELD-WISE: incoming wins per-cell where it has a value; existing values survive
-        # wherever the incoming cell is null. See score_panel_logger.py for the 29-Jul-2026
-        # data-loss incident this pattern exists to prevent.
-        merged = ni.combine_first(oi).reset_index()[COLS]
-    else:
-        merged = new
-    merged.to_csv(store, index=False)
-    return len(new), len(merged)
+    return _durable_merge(store, new)
+
+
+class GateStoreUnreadable(RuntimeError):
+    """The existing store has bytes that cannot be parsed. It is PRESERVED (never overwritten) and the incoming
+    rows are written to a pending sidecar so this run's capture is not lost (ISA-0878/0931)."""
+
+
+PENDING_DIR = "gate_variables_pending"
+
+
+def _durable_merge(store, new):
+    """Field-wise idempotent merge on (run_date, group, ticker) through durable_store.cas_update: atomic replace,
+    read-back verified, refused on a concurrent change (ISA-0882). A ZERO_BYTE or HEADER_ONLY store is an empty
+    store (it holds nothing to preserve); an UNREADABLE non-empty store is never overwritten."""
+    import io
+    import pandas as pd
+    import durable_store as _ds
+    out = {}
+
+    def _merge(old_bytes):
+        st = _ds.classify_csv_store(store)["state"] if old_bytes is not None else _ds.ABSENT
+        out["prior_state"] = st
+        if st in (_ds.ABSENT, _ds.ZERO_BYTE, _ds.HEADER_ONLY):
+            merged = new
+        else:
+            try:
+                old = pd.read_csv(io.BytesIO(old_bytes), low_memory=False)
+            except Exception as exc:                                    # noqa: BLE001
+                raise GateStoreUnreadable("%s is %s and unparseable (%s: %s) - preserved, not overwritten"
+                                          % (store, st, type(exc).__name__, exc))
+            for c in COLS:
+                if c not in old.columns:
+                    old[c] = None
+            old = old[COLS]
+            key = ["run_date", "group", "ticker"]
+            oi = old.set_index(key)
+            ni = new.set_index(key)
+            oi = oi[~oi.index.duplicated(keep="last")]
+            ni = ni[~ni.index.duplicated(keep="last")]
+            # FIELD-WISE: incoming wins per-cell where it has a value; existing values survive
+            # wherever the incoming cell is null. See score_panel_logger.py for the 29-Jul-2026
+            # data-loss incident this pattern exists to prevent.
+            merged = ni.combine_first(oi).reset_index()[COLS]
+        out["n_total"] = len(merged)
+        return _ds.csv_bytes(merged)
+
+    try:
+        _ds.cas_update(store, _merge)
+    except GateStoreUnreadable:
+        side = os.path.join(os.path.dirname(os.path.abspath(store)), PENDING_DIR)
+        rd = str(new["run_date"].iloc[0]) if len(new) else "unknown"
+        gp = str(new["group"].iloc[0]) if len(new) else "unknown"
+        _ds.atomic_to_csv(new, os.path.join(side, "%s_%s.csv" % (rd, gp)))
+        raise
+    return len(new), out.get("n_total", len(new))
+
+
+def restore_backup_rows(backup_path, *, source_label, store=None):
+    """Restore ORIGINAL rows from a retained backup (Raj approved 19-Nov-2026 for the 03-Oct baseline bundle).
+    Rows keep every original value; row_provenance = recovered:<label>:sha256=<backup sha>. Existing store rows
+    win on conflict (combine_first with the store as incoming), so a live capture is never overwritten."""
+    import pandas as pd
+    import durable_store as _ds
+    store = store or STORE
+    b = _ds.read_bytes(backup_path)
+    if b is None:
+        raise FileNotFoundError(backup_path)
+    sha = _ds.sha256_bytes(b)
+    bk = pd.read_csv(backup_path, low_memory=False)
+    missing = [c for c in COLS if c not in bk.columns and c != "row_provenance"]
+    if missing:
+        raise ValueError("backup lacks columns %s - refuse a partial restore" % missing)
+    bk["row_provenance"] = "recovered:%s:sha256=%s" % (source_label, sha)
+    bk = bk[COLS]
+    key = ["run_date", "group", "ticker"]
+    res = {}
+
+    def _merge(old_bytes):
+        import io
+        st = _ds.classify_csv_store(store)["state"] if old_bytes is not None else _ds.ABSENT
+        if st in (_ds.ABSENT, _ds.ZERO_BYTE, _ds.HEADER_ONLY):
+            merged = bk
+            res["store_rows_kept"] = 0
+        else:
+            cur = pd.read_csv(io.BytesIO(old_bytes), low_memory=False)
+            for c in COLS:
+                if c not in cur.columns:
+                    cur[c] = None
+            cur = cur[COLS]
+            res["store_rows_kept"] = len(cur)
+            ci = cur.set_index(key); bi = bk.set_index(key)
+            ci = ci[~ci.index.duplicated(keep="last")]; bi = bi[~bi.index.duplicated(keep="last")]
+            merged = ci.combine_first(bi).reset_index()[COLS]        # LIVE rows win; backup fills only gaps
+        res["n_total"] = len(merged)
+        return _ds.csv_bytes(merged)
+
+    w = _ds.cas_update(store, _merge)
+    res.update(backup_rows=len(bk), backup_sha256=sha, store_sha256=w.get("sha256"))
+    return res
 
 
 # ── coverage (the Item 1 acceptance test) ────────────────────────────────────────────────
@@ -487,6 +575,44 @@ def _selftest():
         # R4 crosstab
         ct = revisions_crosstab(store=st, group="NASDAQ", run_date="2026-08-07")
         ok("U-GV9 revisions crosstab builds", ct["rows"] >= 2 and "table" in ct)
+        # ISA-0878/0931/0882 (19-Nov-2026): the store states that froze capture from 17-Oct
+        import pandas as _pd
+        import durable_store as _ds
+        _rec = [{"ticker": "ZB1", "gate_code": "Gate 1", "passed": False}]
+        for _label, _seed in (("ZERO_BYTE", b""), ("HEADER_ONLY", (",".join(COLS) + "\n").encode())):
+            _p = os.path.join(td, "gv_%s.csv" % _label)
+            open(_p, "wb").write(_seed)
+            try:
+                _n = log_gate_variables(_rec, group="G", run_date="2026-11-20", store=_p)
+                _df = _pd.read_csv(_p)
+                ok("U-GV10 %s store accepts the append (was EmptyDataError on 0 bytes)" % _label,
+                   _n == (1, 1) and _df.loc[0, "row_provenance"] == "captured_live")
+            except Exception as _e:                                    # noqa: BLE001
+                ok("U-GV10 %s store accepts the append" % _label, False)
+        _u = os.path.join(td, "gv_bad.csv")
+        open(_u, "wb").write(b"\xff\xfe\x00\x01garbage")
+        _before = open(_u, "rb").read()
+        try:
+            log_gate_variables(_rec, group="G", run_date="2026-11-20", store=_u)
+            ok("U-GV11 NEGATIVE CONTROL: unreadable store refused", False)
+        except GateStoreUnreadable:
+            ok("U-GV11 NEGATIVE CONTROL: unreadable store PRESERVED and rows sent to the pending sidecar",
+               open(_u, "rb").read() == _before
+               and os.path.exists(os.path.join(td, PENDING_DIR, "2026-11-20_G.csv")))
+        _live = os.path.join(td, "gv_live.csv"); open(_live, "wb").write(b"")
+        log_gate_variables([{"ticker": "AAA", "gate_code": "Gate 4", "passed": False, "gross_margin": 0.5}],
+                           group="G", run_date="2026-08-14", store=_live)
+        _bk = os.path.join(td, "gv_backup.csv")
+        _pd.DataFrame([{**{c: None for c in COLS}, "run_date": "2026-08-14", "group": "G", "ticker": "AAA",
+                        "gross_margin": 0.1},
+                       {**{c: None for c in COLS}, "run_date": "2026-08-14", "group": "G", "ticker": "BBB",
+                        "gross_margin": 0.2}]).drop(columns=["row_provenance"]).to_csv(_bk, index=False)
+        _r = restore_backup_rows(_bk, source_label="fixture", store=_live)
+        _df = _pd.read_csv(_live).set_index("ticker")
+        ok("U-GV12 restore: live row wins, backup fills the gap, provenance stamped",
+           _r["n_total"] == 2 and abs(_df.loc["AAA", "gross_margin"] - 0.5) < 1e-9
+           and str(_df.loc["BBB", "row_provenance"]).startswith("recovered:fixture:sha256=")
+           and _df.loc["AAA", "row_provenance"] == "captured_live")
 
     print("SELFTEST PASS" if not fails else f"SELFTEST FAIL ({len(fails)})")
     _pw0704.STORE = _pw_saved

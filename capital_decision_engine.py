@@ -4150,9 +4150,24 @@ def main(argv=None) -> int:
         return amend_cli(month, opt("--amend"), opt("--root", HERE))
     if month and "--execution-check" in argv:
         # ISA-0850: --cash is required (missing -> REFUSED_CASH_UNKNOWN inside execution_check, never skipped)
+        _cash, _snap = opt("--cash"), None
+        if "--cash-from-snapshot" in argv:
+            # P2 (19-Nov-2026): current settled cash from the newest RECONCILED broker snapshot (broker_snapshot.py);
+            # a stale/unreconciled/absent snapshot REFUSES here - it is never replaced by a typed-in figure silently.
+            if _cash is not None:
+                print("CDE_REFUSED --cash and --cash-from-snapshot are exclusive (one cash source per check)")
+                return 2
+            import broker_snapshot as _bs
+            _snap = _bs.cash_for_execution(opt("--root", HERE))
+            if _snap["state"] != "USABLE":
+                print(json.dumps({"state": _snap["state"], "why": _snap["why"]}, indent=1))
+                return 3
+            _cash = _snap["cash_gbp"]
         r = execution_check(month, opt("--execution-check"), float(opt("--price")), opt("--currency"),
-                            opt("--quote-ts"), opt("--cash"), opt("--root", HERE),
+                            opt("--quote-ts"), _cash, opt("--root", HERE),
                             fx_quote_per_gbp=opt("--fx"))           # ISA-0856: required for a non-GBP quote
+        if _snap is not None:
+            r["cash_source"] = {k: _snap.get(k) for k in ("state", "as_of", "why", "commitments", "mmf_value_gbp")}
         print(json.dumps({k: v for k, v in r.items()}, indent=1, default=str))
         return 0 if r["state"] == "EXECUTABLE" else 3
     if month and "--record-fill" in argv:

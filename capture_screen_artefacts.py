@@ -46,7 +46,52 @@ REGIME         = "regime_history.csv"        # regime in force per formation dat
 FULL_DATA_RE = re.compile(r"(?P<run_date>\d{8})_(?P<group>[A-Za-z0-9\-]+)_full_data\.csv$")
 
 CONSTITUENT_COLS = ["run_date", "group", "ticker", "company", "sector", "in_index", "scored",
-                    "gate_code", "security_type"]
+                    "gate_code", "security_type",
+                    # ISA-0935 (19-Nov-2026): typed disposition + the ORIGINAL reason + where the row came from
+                    "disposition", "gate_reason", "row_source"]
+# ISA-0935: one vocabulary for why a fetched constituent is not scored. Derived from the screen's own recorded
+# gate_code/outcome (an original record) - never inferred from missing values.
+DISPOSITIONS = ("PASS", "DETERMINISTIC_REJECT", "DATA_UNRESOLVED", "TECHNICAL_FAILURE", "UNSPECIFIED")
+
+
+def disposition_of(gate_outcome, gate_code) -> str:
+    o = str(gate_outcome or "").strip().lower()
+    c = str(gate_code or "").strip()
+    if o == "pass" or c.lower() == "pass":
+        return "PASS"
+    if c.upper().startswith("GATE_DATA_UNRESOLVED"):
+        return "DATA_UNRESOLVED"
+    if c.upper().startswith("TECHNICAL_SOURCE_FAILURE"):
+        return "TECHNICAL_FAILURE"
+    if c.lower().startswith("gate "):
+        return "DETERMINISTIC_REJECT"
+    return "UNSPECIFIED"
+
+
+def raw_gate_results_path(full_data_path, run_date=None, group=None, roots=()):
+    """The screen's own raw gate-results file for this run - the INDEPENDENT observed universe (every
+    constituent the screen fetched, pass or not). Looked up beside the full_data file first, then in the
+    given roots (their outputs/ and archive/*/). None when absent (the caller types that, never assumes)."""
+    import glob as _g
+    base = os.path.basename(str(full_data_path))
+    cands = []
+    m = re.match(r"(\d{8})_(.+)_full_data\.csv$", base)
+    if m:
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(full_data_path)),
+                                  "%s_%s_yf_gate_results.csv" % (m.group(1), m.group(2))))
+        ymd, grp = m.group(1), m.group(2)
+    elif run_date and group:
+        ymd, grp = str(run_date).replace("-", "")[:8], str(group)
+    else:
+        return None
+    for r in roots or ():
+        cands += [os.path.join(r, "outputs", "%s_%s_yf_gate_results.csv" % (ymd, grp)),
+                  os.path.join(r, "%s_%s_yf_gate_results.csv" % (ymd, grp))]
+        cands += sorted(_g.glob(os.path.join(r, "archive", "*", "%s_%s_yf_gate_results.csv" % (ymd, grp))))
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
 REGIME_COLS = ["run_date", "market_regime", "regime_basis", "drawdown_pct", "tranches_fired",
                "macro_regime", "resolver_state", "captured_at", "source", "stamp_basis",
                "source_as_of", "source_lag_days"]
@@ -90,9 +135,10 @@ def _merge_csv(path, new_rows, key_cols, all_cols):
         merged = ni.combine_first(oi).reset_index()[all_cols]
     else:
         merged = new
-    tmp = path + ".tmp"
-    merged.to_csv(tmp, index=False)
-    os.replace(tmp, path)                     # atomic; a kill mid-write leaves no partial file
+    # ISA-0882 (19-Nov-2026): unique temporary + read-back verification (a fixed `.tmp` name let two writers
+    # collide on the same temporary)
+    import durable_store as _ds
+    _ds.atomic_to_csv(merged, path)
     return len(new), len(merged)
 
 
@@ -144,9 +190,13 @@ def _sec_type(company, ticker=None):
 
 # ---------------------------------------------------------------- 2. PIT constituents
 def capture_constituents(full_data_path, dest_root, run_date, group, gate_vars_path=None):
-    """Point-in-time index membership: the union of everything the screen SAW that week —
-    scored names from full_data, plus gate-rejected names from gate_variables.csv. The union
-    is the membership; `scored` and `gate_code` record which side of the gate each fell."""
+    """Point-in-time index membership: the union of everything the screen SAW that week.
+
+    ISA-0935 (19-Nov-2026): the gate-rejected side no longer depends on gate_variables.csv alone. The screen's
+    own raw gate-results file is the INDEPENDENT observed universe; gate_variables rows supply the rich levels
+    where they exist, and any raw-universe name still missing is added from the raw file with its ORIGINAL
+    code/reason (row_source=raw_gate_results). A join failure is a TYPED result, never ok=True on a smaller set,
+    and the return carries the population bridge screen_completion conserves against."""
     import pandas as pd
     rows, seen = [], set()
     try:
@@ -162,12 +212,17 @@ def capture_constituents(full_data_path, dest_root, run_date, group, gate_vars_p
         rows.append({"run_date": run_date, "group": group, "ticker": tk,
                      "company": r.get("company"), "sector": r.get("sector"),
                      "in_index": True, "scored": True, "gate_code": "pass",
-                     "security_type": _sec_type(r.get("company"), tk)})
+                     "security_type": _sec_type(r.get("company"), tk),
+                     "disposition": "PASS", "gate_reason": None, "row_source": "full_data"})
+    join = {"gate_variables": "NOT_PROVIDED", "raw_gate_results": "ABSENT"}
     if gate_vars_path and os.path.exists(gate_vars_path):
         try:
+            if os.path.getsize(gate_vars_path) == 0:
+                raise ValueError("gate_variables store is ZERO_BYTE")
             gv = pd.read_csv(gate_vars_path, low_memory=False)
             gv = gv[(gv.get("run_date").astype(str) == str(run_date)) &
                     (gv.get("group").astype(str) == str(group))]
+            n0 = len(rows)
             for _, r in gv.iterrows():
                 tk = r.get("ticker")
                 if not isinstance(tk, str) or not tk or tk in seen:
@@ -176,14 +231,80 @@ def capture_constituents(full_data_path, dest_root, run_date, group, gate_vars_p
                 rows.append({"run_date": run_date, "group": group, "ticker": tk,
                              "company": r.get("company"), "sector": r.get("sector"),
                              "in_index": True, "scored": False, "gate_code": r.get("gate_code"),
-                             "security_type": _sec_type(r.get("company"), tk)})
+                             "security_type": _sec_type(r.get("company"), tk),
+                             "disposition": disposition_of(None, r.get("gate_code")),
+                             "gate_reason": r.get("gate_reason"), "row_source": "gate_variables"})
+            join["gate_variables"] = "JOINED %d" % (len(rows) - n0)
         except Exception as e:
-            print(f"  WARN constituents: gate_variables join skipped — {e}", file=sys.stderr)
+            join["gate_variables"] = "FAILED: %s: %s" % (type(e).__name__, e)
+            print(f"  WARN constituents: gate_variables join FAILED (typed, not skipped) - {e}", file=sys.stderr)
+    raw_path = raw_gate_results_path(full_data_path, run_date, group, roots=(dest_root,))
+    raw_universe = None
+    raw_ids = set()
+    if raw_path:
+        try:
+            raw = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
+            raw_ids = {t for t in raw["ticker"] if t}
+            raw_universe = len(raw_ids)
+            n0 = len(rows)
+            for _, r in raw.iterrows():
+                tk = r.get("ticker")
+                if not tk or tk in seen:
+                    continue
+                seen.add(tk)
+                disp = disposition_of(r.get("gate_outcome"), r.get("gate_code"))
+                rows.append({"run_date": run_date, "group": group, "ticker": tk,
+                             "company": r.get("company") or None, "sector": r.get("sector") or None,
+                             "in_index": True, "scored": False,
+                             "gate_code": r.get("gate_code") or None,
+                             "security_type": _sec_type(r.get("company"), tk),
+                             "disposition": disp, "gate_reason": r.get("gate_reason") or None,
+                             "row_source": "raw_gate_results"})
+            join["raw_gate_results"] = "READ %s (+%d rows)" % (os.path.basename(raw_path), len(rows) - n0)
+        except Exception as e:
+            join["raw_gate_results"] = "UNREADABLE: %s: %s" % (type(e).__name__, e)
     n_new, n_tot = _merge_csv(os.path.join(dest_root, CONSTITUENTS), rows,
                               ["run_date", "group", "ticker"], CONSTITUENT_COLS)
-    return {"ok": True, "rows_in": n_new, "store_total": n_tot,
-            "scored": sum(1 for r in rows if r["scored"]),
-            "rejected": sum(1 for r in rows if not r["scored"])}
+    by_disp = {}
+    for r in rows:
+        by_disp[r["disposition"]] = by_disp.get(r["disposition"], 0) + 1
+    got = {r["ticker"] for r in rows}
+    bridge = {"raw_universe": raw_universe, "raw_path": os.path.basename(raw_path) if raw_path else None,
+              "captured": len(rows), "scored": sum(1 for r in rows if r["scored"]),
+              "rejected": sum(1 for r in rows if not r["scored"]), "by_disposition": by_disp,
+              "raw_missing": sorted(raw_ids - got)[:20], "n_raw_missing": len(raw_ids - got),
+              "not_in_raw": sorted(got - raw_ids)[:20] if raw_ids else None}
+    ok = raw_universe is not None and bridge["n_raw_missing"] == 0
+    return {"ok": ok, "state": "CONSERVED" if ok else ("UNMEASURED" if raw_universe is None else "SHORT"),
+            "rows_in": n_new, "store_total": n_tot, "scored": bridge["scored"], "rejected": bridge["rejected"],
+            "join": join, "population_bridge": bridge}
+
+
+def recover_constituents_from_raw(dest_root, raw_path, run_date, group):
+    """ISA-0935 recovery of ORIGINAL identities/reasons for a past run from its retained raw gate-results file.
+    Adds only names the store lacks for that run (existing rows win); row_source=recovered_raw_gate_results.
+    No rich gate variable is invented - they stay absent in gate_variables.csv (typed missing)."""
+    import pandas as pd
+    raw = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
+    cpath = os.path.join(dest_root, CONSTITUENTS)
+    have = set()
+    if os.path.exists(cpath):
+        c = pd.read_csv(cpath, dtype=str, keep_default_na=False)
+        have = set(c[(c["run_date"].str[:10] == str(run_date)) & (c["group"] == str(group))]["ticker"])
+    rows = []
+    for _, r in raw.iterrows():
+        tk = r.get("ticker")
+        if not tk or tk in have:
+            continue
+        disp = disposition_of(r.get("gate_outcome"), r.get("gate_code"))
+        rows.append({"run_date": run_date, "group": group, "ticker": tk, "company": r.get("company") or None,
+                     "sector": r.get("sector") or None, "in_index": True, "scored": disp == "PASS",
+                     "gate_code": r.get("gate_code") or ("pass" if disp == "PASS" else None),
+                     "security_type": _sec_type(r.get("company"), tk), "disposition": disp,
+                     "gate_reason": r.get("gate_reason") or None, "row_source": "recovered_raw_gate_results"})
+    n_new, n_tot = _merge_csv(cpath, rows, ["run_date", "group", "ticker"], CONSTITUENT_COLS) if rows else (0, None)
+    return {"run_date": run_date, "group": group, "raw_rows": len(raw), "already": len(have), "added": len(rows),
+            "store_total": n_tot}
 
 
 # ---------------------------------------------------------------- 3. regime stamp

@@ -655,6 +655,16 @@ def all_holding_period_returns(portfolio, ledger=None, lineage=None, as_of=None,
     entries = ledger.get("entries", [])
     meta = portfolio.get("_meta", {}) or {}
     td = as_of or _parse_broker_date(meta.get("data_date"))
+    # ⚑ ISA-0732 (19-Nov-2026): the valuation is AS OF td, so only flows on or before td belong to it. Before this,
+    #   a July valuation was paired with every later trade in the ledger (15 later trades, GBP 46,370.10 gross,
+    #   measured by the 12-Nov audit) - units and cashflows that did not exist at the valuation date.
+    n_all = len(entries)
+    if td is not None:
+        _cut = td.isoformat() if hasattr(td, "isoformat") else str(td)
+        entries = [e for e in entries if str(e.get("date") or "")[:10] <= _cut[:10]]
+    flows_bound = {"as_of": td.isoformat() if td else None, "entries_total": n_all,
+                   "entries_used": len(entries), "entries_after_as_of_excluded": n_all - len(entries),
+                   "basis": "ISA-0732: trade-date basis; a flow dated after the valuation is excluded"}
     rows = {}
     for h in (portfolio.get("funds", []) or []) + (portfolio.get("stocks", []) or []):
         sd = h.get("ticker")
@@ -673,6 +683,7 @@ def all_holding_period_returns(portfolio, ledger=None, lineage=None, as_of=None,
         "min_anchor_span_years": MWR_MIN_SPAN_DOWNWARD,
         "anchor_modes": {"downward_only_from_years": MWR_MIN_SPAN_DOWNWARD,
                          "symmetric_from_years": MWR_MIN_SPAN_SYMMETRIC},
+        "flows_bound": flows_bound,
         "conversion_candidates": detect_conversion_candidates(entries),
         "lineage_declared": lineage.get("links", []),
         "holdings": rows,
@@ -731,7 +742,19 @@ def _selftest() -> int:
     rows2, units2, notes2 = build_flows([base, dict(spl, type="rights_issue_or_whatever")], {"X"}, {"links": []}, _nop)
     assert units2["X"] == 5.0 and rows2[1]["cf_gbp"] is None and any("UNKNOWN" in n for n in notes2), \
         ("NEGATIVE CONTROL ISA-0923: an unknown type must not add units and is REPORTED, never counted", units2, notes2)
-    print("holding_period_return selftest: 2 assertions, 0 failed")
+    # ISA-0732 MUST-FIRE: a valuation dated before a later trade must not see that trade
+    _b = dict(base, ticker="X", date="2026-07-01", quantity=10.0, amount_gbp=1000.0, cash_impact_gbp=-1000.0, reference="b0")
+    _later = dict(base, ticker="X", date="2026-08-15", quantity=40.0, amount_gbp=4600.0, cash_impact_gbp=-4600.0, reference="b9")
+    _pf = {"_meta": {"data_date": "31-Jul-2026"}, "funds": [],
+           "stocks": [{"ticker": "X", "quantity": 10.0, "value_gbp": 1100.0, "cost_gbp": 1000.0, "name": "x", "kind": "stock"}]}
+    _r = all_holding_period_returns(_pf, ledger={"entries": [_b, _later]}, lineage={"links": []}, universe={}, price_at=_nop)
+    assert _r["flows_bound"]["entries_after_as_of_excluded"] == 1 and _r["flows_bound"]["entries_used"] == 1, \
+        ("MUST-FIRE ISA-0732: the 15-Aug trade is after the 31-Jul valuation and must be excluded", _r["flows_bound"])
+    _r2 = all_holding_period_returns(dict(_pf, _meta={"data_date": "31-Aug-2026"}), ledger={"entries": [_b, _later]},
+                                     lineage={"links": []}, universe={}, price_at=_nop)
+    assert _r2["flows_bound"]["entries_after_as_of_excluded"] == 0, \
+        ("NEGATIVE CONTROL ISA-0732: a valuation after both trades keeps both", _r2["flows_bound"])
+    print("holding_period_return selftest: 4 assertions, 0 failed")
     return 0
 
 

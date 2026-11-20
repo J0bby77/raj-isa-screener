@@ -740,9 +740,11 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
         item["updated_on"] = _today()
         existing[item["id"]] = item
         rows = list(existing.values())
-        _p(ITEMS_FILE).write_text(
-            "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n",
-            encoding="utf-8")
+        # ISA-0882 (19-Nov-2026): the canonical register was rewritten IN PLACE - a kill mid-write truncated the one
+        # store that cannot be rebuilt. Atomic replace + read-back verification via durable_store.
+        import durable_store as _ds
+        _ds.atomic_write_text(str(_p(ITEMS_FILE)),
+                              "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n")
     else:
         store_dir().mkdir(parents=True, exist_ok=True)
         with _p(ITEMS_FILE).open("a", encoding="utf-8") as fh:

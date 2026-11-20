@@ -3769,6 +3769,19 @@ def pair_task_authority(ta=None, health_fn=None):
                    f"({v.get('off_schedule_fires')}) while declared occurrence(s) {v.get('missed')} were missed - "
                    f"the INSTALLED schedule disagrees with SCHEDULED_TASKS_SETUP.md, so the task silently never runs")
             errs.append(msg if v.get("capital_relevant") else warn(msg))
+    # ISA-0936 (19-Nov-2026): receipt integrity. Unreadable LEGACY lines are permanent history (preserved, never
+    # rewritten) -> one visible WARN; an unreadable per-record SEGMENT means the durable writer itself failed -> ERROR.
+    integ = h.get("ledger_integrity") or {}
+    if integ.get("state") == "DEGRADED":
+        det = integ.get("corrupt_detail") or []
+        seg = [d for d in det if str(d.get("source", "")).endswith("task_invocations.d")]
+        leg = [d for d in det if d not in seg]
+        if seg:
+            errs.append("ISA-0936: %d unreadable receipt SEGMENT(s) %s - the durable receipt writer failed"
+                        % (len(seg), [d.get("segment") for d in seg][:5]))
+        if leg:
+            errs.append(warn("ISA-0936: %d legacy task-ledger line(s) unreadable %s (PERMANENT, preserved; receipts "
+                             "inside them are UNVERIFIED, not absent)" % (len(leg), [d.get("line") for d in leg])))
     soft = sorted(k for k, v in (h.get("tasks") or {}).items()
                   if v.get("effective_state") != "ENFORCED" and v.get("capital_relevant"))
     if soft:

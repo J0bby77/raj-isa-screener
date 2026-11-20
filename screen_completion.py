@@ -52,7 +52,10 @@ STORE = "screen_completion_receipts.json"
 RECEIPT_VERSION = "1.0"
 STATES = ("COMPLETE", "DEGRADED", "INCOMPLETE", "FAILED")
 MANDATORY = ("workbook", "screen_history", "score_panel", "constituents", "fallback",
-             "retrospective", "source_performance")
+             "retrospective", "source_performance",
+             # ISA-0935 (19-Nov-2026): the captured universe must CONSERVE the screen's own raw gate population
+             # (an independent observation), not merely the constituents store it was itself derived from.
+             "population")
 ANCILLARY = ("regime", "capture_status")
 PRIMARY_ROUTES = ("local_primary",)
 FALLBACK_ROUTES = ("composio_fallback", "constituent_hybrid")
@@ -116,6 +119,29 @@ def _workbook(root, iso, group, workbook=None):
         return _comp("OK", "canonical workbook present", path=os.path.basename(hits[0]),
                      bytes=os.path.getsize(hits[0]))
     return _comp("MISSING", "no canonical workbook 'Growth Stock Analysis <%s> W-e %s.xlsx'" % (group, dd))
+
+
+def raw_gate_path(root: str, iso: str, group: str):
+    """The screen's raw `<YYYYMMDD>_<GROUP>_yf_gate_results.csv` (every fetched constituent, pass or not) in
+    outputs/, the root, or archive/*/. None = the independent population is UNMEASURED (never assumed)."""
+    import glob as _g
+    ymd = iso.replace("-", "")
+    name = "%s_%s_yf_gate_results.csv" % (ymd, group)
+    for c in [os.path.join(root, "outputs", name), os.path.join(root, name)] + sorted(
+            _g.glob(os.path.join(root, "archive", "*", name))):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _raw_ids(path):
+    ids, dup = [], 0
+    with open(path, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            t = (r.get("ticker") or "").strip()
+            if t:
+                ids.append(t)
+    return ids
 
 
 def evaluate(group: str, run_date: str, *, root: str = None, route: str = None,
@@ -205,8 +231,29 @@ def evaluate(group: str, run_date: str, *, root: str = None, route: str = None,
         rf["state"], capture_state=rf["state"], findings=len(rf.get("ledger") or []),
         promoted=sum(1 for x in rf.get("ledger") or [] if x.get("disposition") == "PROMOTED"),
         observations=sum(1 for x in rf.get("ledger") or [] if x.get("disposition") == "OBSERVATION"))
-    # population waterfall
+    # population waterfall, conserved against the INDEPENDENT raw gate population (ISA-0935)
     pop = population(fd or [], cons)
+    rp = raw_gate_path(root, iso, group)
+    if rp is None:
+        comps["population"] = _comp("UNMEASURED", "no raw gate-results file for this run - the expected universe "
+                                    "cannot be established (UNKNOWN, not zero)")
+    else:
+        try:
+            ids = _raw_ids(rp)
+            raw_set, cons_set = set(ids), {r.get("ticker") for r in cons}
+            miss, extra = sorted(raw_set - cons_set), sorted(cons_set - raw_set)
+            pop.update(raw_universe=len(raw_set), raw_duplicates=len(ids) - len(raw_set),
+                       raw_missing=len(miss), not_in_raw=len(extra), raw_path=os.path.relpath(rp, root))
+            if not miss and not extra and pop["state"] == "RECONCILED":
+                comps["population"] = _comp("OK", "captured universe conserves the raw gate population",
+                                            raw_universe=len(raw_set))
+            else:
+                comps["population"] = _comp("MISMATCH", "captured %d vs raw %d: %d raw name(s) missing, %d not in raw, "
+                                            "waterfall %s" % (len(cons_set), len(raw_set), len(miss), len(extra),
+                                                              pop["state"]),
+                                            raw_universe=len(raw_set), missing_sample=miss[:10], extra_sample=extra[:10])
+        except Exception as exc:                                        # noqa: BLE001
+            comps["population"] = _comp("UNMEASURED", "raw gate-results unreadable (%s: %s)" % (type(exc).__name__, exc))
     # overall
     missing = [c for c in MANDATORY if comps[c]["state"] not in ("OK", "NOT_USED", "RECONCILED")]
     anc = [c for c in ANCILLARY if comps[c]["state"] != "OK"]
@@ -327,6 +374,11 @@ def _selftest(verbose: bool = True) -> int:
             {"run_date": D, "group": G, "ticker": "B", "scored": "True", "gate_code": "pass"},
             {"run_date": D, "group": G, "ticker": "C", "scored": "False", "gate_code": "Gate 1"}])
         w("regime_history.csv", [{"run_date": D, "stamp_basis": "live"}])
+        os.makedirs(os.path.join(td, "outputs"), exist_ok=True)
+        _raw = "outputs/%s_%s_yf_gate_results.csv" % (D.replace("-", ""), G)
+        w(_raw, [{"ticker": "A", "gate_outcome": "pass", "gate_code": ""},
+                 {"ticker": "B", "gate_outcome": "pass", "gate_code": ""},
+                 {"ticker": "C", "gate_outcome": "", "gate_code": "Gate 1"}])
         with open(os.path.join(td, "Growth Stock Analysis Stoxx 600 W-e 26-Sep-26.xlsx"), "wb") as fh:
             fh.write(b"xlsx")
         json.dump({"run_date": "20260926", "group": G, "ok": True, "action": "captured"},
@@ -383,6 +435,31 @@ def _selftest(verbose: bool = True) -> int:
         # 9. an unreconciled waterfall is named
         pop = population([{"final_status": "X"}], [{"scored": "True"}, {"scored": "True"}])
         ck("NEGATIVE CONTROL: universe != scored + rejected -> UNRECONCILED", pop["state"] == "UNRECONCILED")
+        # 10. ISA-0935 MUST-FIRE: the raw population is larger than the captured universe (the 24-Oct/6-Nov/13-Nov/
+        #     14-Nov shape: rejected names never reached constituents) -> MISMATCH -> INCOMPLETE, never COMPLETE
+        w("score_panel.csv", [{"run_date": D, "group": G, "ticker": "A"}, {"run_date": D, "group": G, "ticker": "B"}])
+        w("regime_history.csv", [{"run_date": D, "stamp_basis": "live"}])
+        w(_raw, [{"ticker": t, "gate_outcome": o, "gate_code": c} for t, o, c in
+                 (("A", "pass", ""), ("B", "pass", ""), ("C", "", "Gate 1"), ("D", "", "Gate 4"),
+                  ("E", "", "GATE_DATA_UNRESOLVED"))])
+        r10 = evaluate(G, D, root=td, route="local_primary")
+        ck("ISA-0935 MUST-FIRE: truncated universe (3 captured vs 5 raw) -> population MISMATCH -> INCOMPLETE",
+           r10["components"]["population"]["state"] == "MISMATCH" and r10["state"] == "INCOMPLETE"
+           and r10["population"]["raw_missing"] == 2)
+        # 11. no raw file -> UNMEASURED -> INCOMPLETE (absence is never OK)
+        os.replace(os.path.join(td, _raw), os.path.join(td, _raw + ".moved"))
+        r11 = evaluate(G, D, root=td, route="local_primary")
+        ck("ISA-0935 NEGATIVE CONTROL: no independent raw population -> UNMEASURED -> INCOMPLETE",
+           r11["components"]["population"]["state"] == "UNMEASURED" and r11["state"] == "INCOMPLETE")
+        # 12. a VALID zero-reject cohort (raw == scored, nothing rejected) is COMPLETE, not a false alarm
+        w(_raw, [{"ticker": "A", "gate_outcome": "pass", "gate_code": ""},
+                 {"ticker": "B", "gate_outcome": "pass", "gate_code": ""}])
+        w("constituents_history.csv", [
+            {"run_date": D, "group": G, "ticker": "A", "scored": "True", "gate_code": "pass"},
+            {"run_date": D, "group": G, "ticker": "B", "scored": "True", "gate_code": "pass"}])
+        r12 = evaluate(G, D, root=td, route="local_primary")
+        ck("ISA-0935 POSITIVE: a valid zero-reject cohort conserves and reads COMPLETE",
+           r12["components"]["population"]["state"] == "OK" and r12["state"] == "COMPLETE", )
     finally:
         if old_store is None:
             os.environ.pop("ISA_REGISTER_STORE", None)

@@ -70,6 +70,9 @@ AJ_BELL_DEALING_COST = 5.0       # £5 per trade
 # Every trade-cost estimate the framework has produced has overstated FX by a third.
 # `extract_cash_statement.FX_RATE_FRACTION` is the single home; this reads it and only falls
 # back if that import fails, in which case it uses the CORRECTED value and says so.
+# ⚑ ISA-0810 (19-Nov-2026) CORRECTION OF THE NOTE ABOVE: the 0.50% rows are INCOME conversions; DEALING FX is
+#   tiered (0.75% on the first GBP 10k) - extract_cash_statement.dealing_fx_gbp. FX_COST_PCT has no reader in this
+#   module (kept for import compatibility); never use it to cost a deal.
 try:
     from extract_cash_statement import FX_RATE_FRACTION as FX_COST_PCT   # 0.005
 except Exception:                                                        # pragma: no cover

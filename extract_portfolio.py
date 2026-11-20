@@ -64,7 +64,7 @@ FUND_OVERRIDE_TICKERS = {
 }
 
 # Exchanges that indicate a direct stock holding (not a fund)
-STOCK_EXCHANGES = {"NASDAQ", "NYSE", "LSE", "XTRA", "EPA", "TSX"}
+STOCK_EXCHANGES = {"NASDAQ", "NYSE", "LSE", "XTRA", "EPA", "TSX", "XMAD"}   # XMAD: ISA-0855/P2
 
 # Exchanges where a listing could be either a stock or a fund — check FUND_OVERRIDE
 AMBIGUOUS_EXCHANGES = {"LSE"}
@@ -79,13 +79,36 @@ IDENTIFIER_SCHEMES = {"SEDOL", "ISIN", "CUSIP"}
 # the stock sleeve and watchlist reconcile on the same symbol. Extend as needed.
 IDENTIFIER_TICKER_MAP = {
     "BKM4N88": "PCTY",   # Paylocity Holding Corp (held under SEDOL, not NASDAQ:PCTY)
+    # ISA-0855/P2 (19-Nov-2026, fix on finding): bought 02-Nov-2026 (AJ Bell ref 44626CNRRDV, 388 sh), recorded by the
+    # capital engine and its fill ledger as ATCO-A.ST; the broker export lists it under SEDOL. Without this the first
+    # month-end book holding it (December) carried 'BLDBN41' and joined no fill, receipt, risk or price series.
+    "BLDBN41": "ATCO-A.ST",   # ATLAS COPCO AB SER'A'NPV (SEDOL:BLDBN41)
 }
 
+# ISA-0855/P2 (19-Nov-2026): a non-UK/US listing arrives as "(<MIC>:<symbol>)" with the bare symbol in the Ticker
+# column. The framework keys such names by Yahoo suffix (stock_price_fetch.SUFFIX_EXCHANGE). The mapping is
+# EXCHANGE-QUALIFIED on purpose: a bare 'IDR' is a different (US) issuer - never map a symbol without its MIC.
+# Only MICs actually observed in this account are declared; an unknown MIC is reported, never guessed (R4.8).
+MIC_SUFFIX = {
+    "XMAD": ".MC",   # Bolsa de Madrid - Indra Sistemas (XMAD:IDR) bought 02-Nov-2026, ref 44626CNR1GR, IDR.MC
+}
+UNMAPPED_MIC_SEEN = set()
 
-def _canonical_ticker(ticker) -> str:
-    """Map a broker identifier to its canonical exchange ticker (upper-cased)."""
+
+def _canonical_ticker(ticker, investment_name=None) -> str:
+    """Map a broker identifier to its canonical exchange ticker (upper-cased). With the holding's name, a
+    "(MIC:SYMBOL)" listing on a declared MIC gets its exchange suffix (XMAD:IDR -> IDR.MC)."""
     t = str(ticker or "").strip().upper()
-    return IDENTIFIER_TICKER_MAP.get(t, t)
+    if t in IDENTIFIER_TICKER_MAP:
+        return IDENTIFIER_TICKER_MAP[t]
+    m = re.search(r"\(([A-Z]+):([A-Z0-9][A-Z0-9.\-/]*)\)", str(investment_name or ""))
+    if m and "." not in t:
+        mic, sym = m.group(1).upper(), m.group(2).upper()
+        if mic in MIC_SUFFIX and sym == t:
+            return t + MIC_SUFFIX[mic]
+        if mic not in STOCK_EXCHANGES and mic not in IDENTIFIER_SCHEMES and mic != "FUND" and mic not in MIC_SUFFIX:
+            UNMAPPED_MIC_SEEN.add(mic)
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +674,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
         if v_raw is None and kind not in ("cash",):
             # ISA-0849 (EV-0098): an unreadable value is a VALUATION GAP, not a measured zero. The row is
             # retained (named, typed) and NOT summed; book_coverage below goes INCOMPLETE.
-            unresolved.append({"name": investment, "ticker": _canonical_ticker(ticker), "kind": kind,
+            unresolved.append({"name": investment, "ticker": _canonical_ticker(ticker, investment), "kind": kind,
                                "state": "UNVALUED", "value_gbp": None, "raw_value": None if value is None else str(value),
                                "quantity": safe_float(qty), "price": safe_float(price),
                                "why": "value cell unreadable (%r) - a valuation gap is never a 0" % (value,)})
@@ -671,7 +694,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
             mmf_value += v
             # ISA-0904 (26-Oct-2026): units and unit price kept, so the review can state how many units to SELL to
             #   fund a purchase (mmf_funding) - consumers that read value_gbp are unchanged
-            mmf_holdings.append({"name": investment, "ticker": _canonical_ticker(ticker),
+            mmf_holdings.append({"name": investment, "ticker": _canonical_ticker(ticker, investment),
                                  "value_gbp": v, "quantity": safe_float(qty), "price": safe_float(price)})
             continue
 
@@ -681,7 +704,7 @@ def parse_portfolio(xlsx_path: str) -> dict:
         record = {
             "name":         clean_name,
             "full_name":    investment,
-            "ticker":       _canonical_ticker(ticker),
+            "ticker":       _canonical_ticker(ticker, investment),
             "quantity":     safe_float(qty),
             "price":        safe_float(price),
             "value_gbp":    v,
@@ -1208,6 +1231,14 @@ def _selftest(verbose: bool = True) -> int:
         if not cond:
             fails.append(name)
 
+    ok("ISA-0855/P2 MUST-FIRE: the SEDOL-listed Atlas Copco holding is keyed ATCO-A.ST (the fill/receipt identity)",
+       _canonical_ticker("BLDBN41", "ATLAS COPCO AB SER'A'NPV (SEDOL:BLDBN41)") == "ATCO-A.ST")
+    ok("ISA-0855/P2 MUST-FIRE: XMAD:IDR is keyed IDR.MC",
+       _canonical_ticker("IDR", "Indra Sistemas SA SHS Class -A- (XMAD:IDR)") == "IDR.MC")
+    ok("ISA-0855/P2 NEGATIVE CONTROL: a bare IDR with no MIC is NOT mapped (a different US issuer)",
+       _canonical_ticker("IDR", "Idaho Strategic Resources (NYSE:IDR)") == "IDR" and _canonical_ticker("IDR") == "IDR")
+    ok("ISA-0855/P2 NEGATIVE CONTROL: US/UK listings are unchanged",
+       _canonical_ticker("AVGO", "Broadcom Inc (NASDAQ:AVGO)") == "AVGO" and _canonical_ticker("SMT", "Scottish Mortgage Ord (LSE:SMT)") == "SMT")
     ok("ISA-0779 MUST-FIRE: a SIPP export (ACB8G2S) against the ISA cash statement (ACB8G2I) is MISMATCH",
        account_identity_verdict(account_ids_in("portfolio-ACB8G2S-SIPP (4)"),
                                 account_ids_in("Account charge for funds - Apr 2026 - ACB8G2I"))["state"] == "MISMATCH")

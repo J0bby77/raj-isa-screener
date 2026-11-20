@@ -130,6 +130,10 @@ STATIC_TICKER_OVERRIDES = {
     "micron technology inc":                   "MU",
     "broadcom inc":                            "AVGO",
     "oxford nanopore technologies plc":        "ONT",
+    # ISA-0855/P2 (19-Nov-2026, fix on finding): bought 02-Nov-2026 after the 31-Oct portfolio file (refs
+    # 44626CNRRDV / 44626CNR1GR); the fill ledger and capital receipt key them ATCO-A.ST / IDR.MC.
+    "atlas copco ab ser'a'npv":                "ATCO-A.ST",
+    "indra sistemas sa shs class -a-":         "IDR.MC",
     # Fund share classes that no longer appear in any saved portfolio file
     # because they were converted away. Suffixed so they never collide with
     # the surviving class's real SEDOL -- see CLASS_CONVERSIONS.
@@ -241,6 +245,13 @@ def build_ticker_map(isa_folder):
                     if not m:
                         continue
                     desc, _exch, ticker = m.groups()
+                    # ISA-0855/P2: the SAME canonical identity extract_portfolio gives the holding (SEDOL / MIC mapping),
+                    # so a December portfolio file can never re-key ATCO-A.ST as 'BLDBN41' or IDR.MC as 'IDR'
+                    try:
+                        from extract_portfolio import _canonical_ticker as _ct
+                        ticker = _ct(ticker, str(row[0]))
+                    except Exception:                                   # noqa: BLE001
+                        pass
                     mapping.setdefault(_norm(desc), ticker.upper())
         finally:
             try:
@@ -1113,6 +1124,14 @@ def _selftest() -> int:
     _st7 = merge_rows(_l4, [dict(_row("s1", "R44", typ="split", tk="CSH2"), raw_type="Subdivision")], "2026-11-01")
     assert len([t for t in _l4["transitions"] if t["kind"] == "RECLASSIFIED"]) == 1, \
         "NEGATIVE CONTROL ISA-0923: re-import is idempotent (no second RECLASSIFIED)"; n += 1
+    # ISA-0855/P2 (19-Nov-2026): the 02-Nov purchases resolve to the fill/receipt identity, from the static tier
+    _m = {}
+    for _d, _t in STATIC_TICKER_OVERRIDES.items():
+        _m.setdefault(_norm(_d), _t.upper())
+    assert resolve_ticker("ATLAS COPCO AB SER'A'NPV", _m)[0] == "ATCO-A.ST", "MUST-FIRE ISA-0855/P2: Atlas Copco -> ATCO-A.ST"; n += 1
+    assert resolve_ticker("Indra Sistemas SA SHS Class -A-", _m)[0] == "IDR.MC", "MUST-FIRE ISA-0855/P2: Indra -> IDR.MC"; n += 1
+    assert resolve_ticker("Idaho Strategic Resources Inc", _m)[0] is None, \
+        "NEGATIVE CONTROL ISA-0855/P2: an unrelated 'IDR' issuer is not captured by the Indra override"; n += 1
     print("extract_transactions selftest: %d assertions, 0 failed" % n)
     return 0
 

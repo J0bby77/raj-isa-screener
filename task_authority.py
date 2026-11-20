@@ -70,6 +70,11 @@ RECEIPT_SCHEMA = "1.0.0"
 STATE_REL = os.path.join("Dashboard", "state")
 CONTRACTS_REL = os.path.join(STATE_REL, "task_contracts.json")
 LEDGER_REL = os.path.join(STATE_REL, "task_invocations.jsonl")
+# ISA-0936 (19-Nov-2026): the legacy JSONL is now READ-ONLY history (its two interleaved lines 172/173 are
+# preserved byte-for-byte as evidence). Every new receipt is ONE immutable file in this directory, written by
+# durable_store.write_record - concurrent scheduled sessions (separate VMs on the shared OneDrive folder) can
+# no longer interleave, because no two writers ever share a file.
+SEGMENT_DIR_REL = os.path.join(STATE_REL, "task_invocations.d")
 LAUNCHER_FILE = "LAUNCHER.md"
 TZ_NAME = "Europe/London"
 ISA_WINDOWS_ROOT = (r"C:\Users\rjoba\OneDrive\Documents\OneDrive\Documents\Raj\Finance"
@@ -250,7 +255,9 @@ def expected_occurrences(task: dict, task_key: str, start: datetime.date, end: d
 
 # ─────────────────────────────────────────────────────────────── ledger
 
-def read_ledger(root: str = HERE) -> list:
+def _legacy_lines(root: str = HERE) -> list:
+    """Legacy JSONL rows; an unparseable physical line becomes a TYPED CORRUPT_LINE carrying its line number,
+    sha256, byte length and any receipt ids visible in it (identities only - nothing is reconstructed, R7.5)."""
     p = os.path.join(root, LEDGER_REL)
     out = []
     txt = _read_text(p)
@@ -263,15 +270,59 @@ def read_ledger(root: str = HERE) -> list:
         try:
             out.append(json.loads(line))
         except ValueError:
-            out.append({"kind": "CORRUPT_LINE", "line": i})
+            import hashlib as _h
+            ids = sorted(set(re.findall(r"TIR-[0-9T]+-[a-z0-9-]+-[0-9a-f]{6}", line)))
+            out.append({"kind": "CORRUPT_LINE", "line": i, "source": LEDGER_REL,
+                        "sha256": _h.sha256(line.encode("utf-8")).hexdigest(), "bytes": len(line.encode("utf-8")),
+                        "fragment_receipt_ids": ids,
+                        "basis": "ISA-0936: original bytes preserved in place; receipts inside are UNVERIFIED, "
+                                 "not absent and not reconstructed"})
     return out
 
 
+def _segment_records(root: str = HERE) -> list:
+    import durable_store as _ds
+    recs = _ds.read_records(os.path.join(root, SEGMENT_DIR_REL))
+    for r in recs:
+        if r.get("kind") == _ds.CORRUPT_SEGMENT:
+            r["kind"] = "CORRUPT_LINE"           # one typed vocabulary for every reader of the ledger
+            r["source"] = SEGMENT_DIR_REL
+        r.pop("_segment", None)
+    return sorted(recs, key=lambda r: str(r.get("invoked_at") or r.get("completed_at") or r.get("segment") or ""))
+
+
+def read_ledger(root: str = HERE) -> list:
+    """Legacy history first, then the per-record segments in time order. Corruption is TYPED, never dropped."""
+    return _legacy_lines(root) + _segment_records(root)
+
+
+def ledger_integrity(root: str = HERE, ledger: list = None) -> dict:
+    """ISA-0936: CLEAN only when every physical receipt is readable. DEGRADED names what cannot be verified
+    so no consumer can read an unreadable receipt as healthy coverage or as 'did not run'."""
+    led = ledger if ledger is not None else read_ledger(root)
+    bad = [r for r in led if r.get("kind") == "CORRUPT_LINE"]
+    return {"state": "DEGRADED" if bad else "CLEAN", "records": len(led) - len(bad), "corrupt": len(bad),
+            "corrupt_detail": [{k: r.get(k) for k in ("source", "line", "segment", "sha256", "bytes",
+                                                     "fragment_receipt_ids")} for r in bad],
+            "why": ("%d unreadable receipt record(s): invocation/completion coverage around them is UNVERIFIED"
+                    % len(bad)) if bad else "every receipt record readable"}
+
+
 def _append(rec: dict, root: str = HERE) -> None:
-    p = os.path.join(root, LEDGER_REL)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, sort_keys=True, ensure_ascii=False) + "\n")
+    """ISA-0936: one immutable record file per receipt event (durable_store.write_record)."""
+    import durable_store as _ds
+    ts = str(rec.get("invoked_at") or rec.get("completed_at") or _now(None).isoformat(timespec="seconds"))
+    stamp = re.sub(r"[^0-9T]", "", ts)[:15]
+    base = "%s-%s-%s" % (stamp, rec.get("receipt_id") or "NORECEIPT", rec.get("kind") or "RECORD")
+    d = os.path.join(root, SEGMENT_DIR_REL)
+    for attempt in range(6):
+        name = base if attempt == 0 else "%s-%d" % (base, attempt)
+        try:
+            _ds.write_record(d, name, rec)
+            return
+        except _ds.RecordConflict:
+            continue                              # a second, different event in the same second: new name
+    raise TaskAuthorityError("could not write receipt %s durably (6 name conflicts)" % base)
 
 
 def effective_state(task_key: str, task: dict = None, ledger: list = None, root: str = HERE) -> str:
@@ -599,7 +650,10 @@ def health(root: str = HERE, now=None, contracts: dict = None, ledger: list = No
         out[k] = {"effective_state": eff, "capital_relevant": bool(t.get("capital_relevant")),
                   "expected": exp, "missed": missed, "state": st, "off_schedule_fires": off if missed else []}
     n_enf_missed = sum(1 for v in out.values() if v["effective_state"] == ENFORCED and v["missed"])
-    return {"state": "RED" if n_enf_missed else "OK", "as_of": now.isoformat(timespec="seconds"),
+    integ = ledger_integrity(root, led)
+    return {"state": "RED" if n_enf_missed else ("DEGRADED_EVIDENCE" if integ["state"] != "CLEAN" else "OK"),
+            "as_of": now.isoformat(timespec="seconds"),
+            "ledger_integrity": integ,
             "tasks": out,
             "n_legacy": sum(1 for v in out.values() if v["effective_state"] == LEGACY_OBSERVED),
             "n_probation": sum(1 for v in out.values() if v["effective_state"] == PROBATION),

@@ -123,14 +123,16 @@ def round_trip_cost(position_gbp: float, *, stock_is_usd: bool = True,
                    if r.get("asset_class") == "stock" and r.get("type") == "buy"
                    and r.get("cost_gbp") is not None]
     commission_stock = min(stock_costs)
+    # ISA-0810 (19-Nov-2026): the DEALING FX charge is tiered (0.75% / 0.50% / 0.25%) and has its own home;
+    # FX_RATE_FRACTION (0.50%) is the INCOME-conversion rate and understated every sub-GBP 10k dealing leg.
     try:
-        from extract_cash_statement import FX_RATE_FRACTION as FX
-        fx_src = "extract_cash_statement.FX_RATE_FRACTION"
+        from extract_cash_statement import dealing_fx_gbp as _dfx, DEALING_FX_SOURCE as _dfs
+        fx_src = "extract_cash_statement.dealing_fx_gbp (%s)" % _dfs[:120]
     except Exception as e:                                            # noqa: BLE001
         return {"state": "UNMEASURED",
-                "reason": ("the FX charge has one home (extract_cash_statement.FX_RATE_FRACTION) "
+                "reason": ("the dealing FX charge has one home (extract_cash_statement.dealing_fx_gbp) "
                            "and it could not be read: %s: %s" % (type(e).__name__, e))}
-    fx_gbp = (position_gbp * FX) if stock_is_usd else 0.0
+    fx_gbp = _dfx(position_gbp) if stock_is_usd else 0.0
     total = sell_fund + commission_stock + fx_gbp
 
     try:
@@ -154,8 +156,8 @@ def round_trip_cost(position_gbp: float, *, stock_is_usd: bool = True,
                                                  "rows — the commission with no FX inside it"
                                                  % n_bs), unit="GBP"),
         "fx_charge_gbp": _fig(round(fx_gbp, 2), as_of=_today(), source=fx_src, unit="GBP",
-                              note=("AJ Bell charges %.2f%% on the USD leg; not applied to a "
-                                    "GBP-denominated purchase" % (FX * 100))),
+                              note=("AJ Bell tiered dealing FX (0.75% first GBP 10k, 0.50% next 10k, 0.25% above) "
+                                    "on a non-GBP leg; not applied to a GBP-denominated purchase")),
         "round_trip_gbp": round(total, 2),
         "round_trip_fraction_of_position": (None if fraction is None else round(fraction, 5)),
         "declared_max_fraction": round(max_fraction, 5),
@@ -557,6 +559,10 @@ def selftest(verbose=True) -> int:
        abs(c["declared_max_fraction"]
            - (c["fund_sell_gbp"]["value"] + c["stock_buy_commission_gbp"]["value"])
            / c["min_economic_trade_gbp"]) < 1e-9)
+    _c4k = round_trip_cost(4000.0)
+    ck("ISA-0810 MUST-FIRE: a GBP 4,000 non-GBP leg is charged the 0.75% first-tier DEALING FX (GBP 30.00), not the "
+       "0.50% income-conversion rate (GBP 20.00)",
+       _c4k.get("state") != "MEASURED" or abs(_c4k["fx_charge_gbp"]["value"] - 30.0) < 0.005)
     ck("a GBP leg carries NO FX charge and a USD leg does (negative control)",
        round_trip_cost(4000.0, stock_is_usd=False)["fx_charge_gbp"]["value"] == 0.0
        and c["fx_charge_gbp"]["value"] > 0.0)

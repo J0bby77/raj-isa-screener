@@ -193,7 +193,9 @@ def log_from_full_data(df, group, run_date, store, part_a_max=28.0, part_b_max=2
     _bad = sorted({str(v) for v in merged["run_date"] if not RUN_DATE_ISO.match(str(v))})
     if _bad:
         raise RunDateFormatError(f"non-ISO run_date values would be written to {store}: {_bad}")
-    merged.to_csv(store, index=False)
+    # ISA-0882 (19-Nov-2026): atomic replace, read-back verified (was an in-place rewrite of a ~2 MB history store)
+    import durable_store as _ds
+    _ds.atomic_to_csv(merged, store)
     return len(new), len(merged)
 
 
