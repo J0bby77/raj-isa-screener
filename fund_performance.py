@@ -16,6 +16,15 @@ import csv, datetime as dt, json, os, sys
 
 from isa_metric import Metric, Missing, is_present, value_or, as_dict
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 SCHEMA_VERSION = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 UNIVERSE = os.path.join(SCRIPT_DIR, "fund_universe.json")
@@ -81,12 +90,131 @@ def _read_cache(symbol):
     return out or None
 
 
-def _write_cache(symbol, series):
+def _write_cache(symbol, series, *, basis=None, depth_held_from=None, provider="yfinance"):
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(_cache_path(symbol), "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh); w.writerow(["date", "close"])
         for d, c in series:
             w.writerow([d.isoformat(), f"{c:.6f}"])
+    if basis is not None:
+        _write_provenance(symbol, basis, series, depth_held_from=depth_held_from, provider=provider)
+
+
+# ---------------------------------------------------------------- price basis + provenance (ISA-0901 / ISA-0874)
+# ⚑ ISA-0901 (20-Nov-2026): THE PRICE BASIS IS DECLARED PER SHARE CLASS, never one setting for every fund.
+#   Every series used to be fetched with auto_adjust=True. An ACCUMULATION class already carries its income in
+#   the price, and Yahoo ALSO reports the notional accumulation distribution as a dividend (Artemis UK/European
+#   I Acc: 5 events since 2021), so auto-adjusting counted the income twice - ~3-3.5pp/yr of return that does
+#   not exist (raw close = the X-Ray to 2dp on 1Y/3Y/5Y for all 11 Yahoo-fed funds; the double-counted series
+#   moved two OTHER funds' bands through the sleeve-relative P75 stretch and fired T4 on Artemis European).
+#   acc -> the raw close; inc -> the dividend-reinvested (adjusted) close. A class that declares neither is
+#   REFUSED (PriceBasisUndeclared) - an uninformed choice is refused, not guessed (R4.8).
+PRICE_BASES = {"acc": "raw_close", "inc": "total_return_adjusted"}
+PRICE_BASIS_STATES = ("BASIS_RECORDED", "PROVENANCE_UNRECORDED", "BASIS_MISMATCH", "PRICE_BASIS_UNDECLARED",
+                      "DECLARED_LOCAL_SERIES")
+REQUIREMENTS_TXT = os.path.join(SCRIPT_DIR, "requirements.txt")
+
+
+class PriceBasisUndeclared(RuntimeError):
+    """A share class with no declared acc_or_inc: its price basis cannot be chosen, so it is refused (R4.8)."""
+
+
+def price_basis_for(u):
+    a = str((u or {}).get("acc_or_inc") or "").strip().lower()
+    if a not in PRICE_BASES:
+        raise PriceBasisUndeclared("share class %r declares no acc_or_inc (acc|inc): price basis refused, not guessed"
+                                   % ((u or {}).get("share_class") or (u or {}).get("name") or (u or {}).get("isin")))
+    return PRICE_BASES[a]
+
+
+def _prov_path(symbol): return os.path.join(CACHE_DIR, f"{symbol.replace('/','_')}.prov.json")
+
+
+def _provider_version():
+    try:
+        from importlib import metadata as _md
+        return _md.version("yfinance")
+    except Exception:                                                   # noqa: BLE001
+        return None
+
+
+def _pinned_version(path=None):
+    try:
+        for line in open(path or REQUIREMENTS_TXT, encoding="utf-8"):
+            s = line.strip()
+            if s.lower().startswith("yfinance=="):
+                return s.split("==", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _write_provenance(symbol, basis, series, depth_held_from=None, provider="yfinance"):
+    """ISA-0874 leg 3: every series a writer produces records WHAT made it - provider, provider version (and
+    the pin it should have been), price basis, when, and the depth it was held to. A sidecar, so every existing
+    reader of the CSV is untouched."""
+    pv, pin = _provider_version(), _pinned_version()
+    doc = {"schema_version": 1, "symbol": symbol, "provider": provider, "provider_version": pv,
+           "pinned_version": pin,
+           "version_state": ("UNKNOWN" if not pv or not pin else ("MATCHES_PIN" if pv == pin else "DIFFERS_FROM_PIN")),
+           "basis": basis, "fetched_at": dt.datetime.now().isoformat(timespec="seconds"),
+           "first": series[0][0].isoformat() if series else None, "last": series[-1][0].isoformat() if series else None,
+           "points": len(series or []),
+           "depth_held_from": depth_held_from.isoformat() if hasattr(depth_held_from, "isoformat") else depth_held_from}
+    with open(_prov_path(symbol), "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+    return doc
+
+
+def read_provenance(symbol):
+    try:
+        return json.load(open(_prov_path(symbol), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def provenance_state(symbol, declared_basis):
+    """-> {state, declared_basis, recorded_basis, provider_version, pinned_version, version_state, fetched_at,
+    depth_held_from}. A cache with no sidecar is PROVENANCE_UNRECORDED - never assumed to be either basis."""
+    pr = read_provenance(symbol) if symbol else None
+    if not pr:
+        return {"state": "PROVENANCE_UNRECORDED", "declared_basis": declared_basis, "recorded_basis": None,
+                "why": "no provenance sidecar - the cache predates ISA-0874 (fetched with auto_adjust=True under an "
+                       "unrecorded yfinance version)"}
+    st = "BASIS_RECORDED" if pr.get("basis") == declared_basis else "BASIS_MISMATCH"
+    return {"state": st, "declared_basis": declared_basis, "recorded_basis": pr.get("basis"),
+            "provider": pr.get("provider"), "provider_version": pr.get("provider_version"),
+            "pinned_version": pr.get("pinned_version"), "version_state": pr.get("version_state"),
+            "fetched_at": pr.get("fetched_at"), "depth_held_from": pr.get("depth_held_from")}
+
+
+def nav_series_provenance(sedol, u):
+    """The door's provenance view of one fund (typed, never blank)."""
+    ls = (u or {}).get("local_series")
+    if ls:
+        return {"state": "DECLARED_LOCAL_SERIES", "declared_basis": ls.get("basis"), "recorded_basis": ls.get("basis"),
+                "why": "declared local_series with its own factsheet reconciliation (load_local_series)"}
+    try:
+        basis = price_basis_for(u)
+    except PriceBasisUndeclared as e:
+        return {"state": "PRICE_BASIS_UNDECLARED", "declared_basis": None, "recorded_basis": None, "why": str(e)}
+    return provenance_state((u or {}).get("yf_symbol") or (u or {}).get("isin"), basis)
+
+
+def _supersede_copy(symbol, recorded_basis):
+    """Keep the bytes a basis migration replaces (rollback / audit). nav_cache/_superseded/ is a SUBDIRECTORY so
+    no `nav_cache/*.csv` reader can pick it up."""
+    import shutil
+    src_p = _cache_path(symbol)
+    if not os.path.exists(src_p):
+        return None
+    d = os.path.join(CACHE_DIR, "_superseded")
+    os.makedirs(d, exist_ok=True)
+    dst = os.path.join(d, "%s.%s.%s.csv" % (symbol.replace("/", "_"), recorded_basis or "unrecorded",
+                                            dt.date.today().strftime("%Y%m%d")))
+    if not os.path.exists(dst):
+        shutil.copy2(src_p, dst)
+    return dst
 
 
 def _scale_for(u):
@@ -95,7 +223,7 @@ def _scale_for(u):
     return 100.0 if (u or {}).get("price_unit") == "GBp" else 1.0
 
 
-def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale=1.0):
+def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale=1.0, *, basis):
     """[(date, close)] ascending, dividend-reinvested. Cached so the 45s sandbox
     ceiling cannot half-complete a 12-fund run.
 
@@ -107,6 +235,9 @@ def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale
     return-adequacy median, produced NOTHING for any of the twelve funds on any run since it was
     added, and read as "not applicable" rather than "never fetched". `window_coverage()` below
     now makes that class of silence impossible to repeat."""
+    if basis not in PRICE_BASES.values():
+        raise PriceBasisUndeclared("fetch_nav_history(%r): basis %r is not one of %s (ISA-0901: declared per class)"
+                                   % (symbol, basis, sorted(PRICE_BASES.values())))
     if not symbol:
         return []
     if use_cache and not refresh:
@@ -122,29 +253,34 @@ def fetch_nav_history(symbol, period="max", use_cache=True, refresh=False, scale
         if not cached:
             return []
         return [(d, v / scale) for d, v in cached] if scale != 1.0 else cached
-    series = _yf_history(symbol, period)
+    series = _yf_history(symbol, period, basis=basis)
     if series is None:
         return _cached_or_empty()
     series = _hold_depth(series, cached)
     if not _series_supersedes(series, cached):
         return _cached_or_empty()
     if series and use_cache:
-        _write_cache(symbol, series)
+        _write_cache(symbol, series, basis=basis, depth_held_from=(cached[0][0] if cached else None))
     if scale != 1.0:
         series = [(d, c / scale) for d, c in series]
     return series
 
 
-def _yf_history(symbol, period="max"):
-    """[(date, close)] auto-adjusted (dividends reinvested) from yfinance, or None on any failure.
+def _yf_history(symbol, period="max", *, basis):
+    """[(date, close)] from yfinance at the DECLARED price basis, or None on any failure.
+    basis 'total_return_adjusted' = auto_adjust=True (dividends reinvested; an INCOME class);
+    basis 'raw_close' = auto_adjust=False Close (an ACCUMULATION class: income is already in the price -
+    auto-adjusting it counts the income twice, ISA-0901).
     A FULL history every time, never an increment: auto_adjust rescales the past at each
     distribution, so an increment spliced onto an older adjusted cache would drop the dividend."""
+    if basis not in PRICE_BASES.values():
+        raise PriceBasisUndeclared("_yf_history(%r): undeclared basis %r" % (symbol, basis))
     try:
         import yfinance as yf
     except ImportError:
         return None
     try:
-        h = yf.Ticker(symbol).history(period=period, auto_adjust=True)["Close"]
+        h = yf.Ticker(symbol).history(period=period, auto_adjust=(basis == "total_return_adjusted"))["Close"]
     except Exception:                                                   # noqa: BLE001
         return None
     series = []
@@ -190,7 +326,8 @@ NAV_REFRESH_HOURS = 18         # an attempt inside 18 h is not repeated (re-run 
 FT_HIST_URL = ("https://markets.ft.com/data/equities/ajax/get-historical-prices"
                "?startDate={start}&endDate={end}&symbol={xid}")
 FT_JUNCTION_TOL_PCT = 0.05     # FT vs the cached series on overlapping dates
-NAV_STATES = ("FRESH", "STALE_CACHE", "SOURCE_FAILED", "SOURCE_DISAGREES", "MANUAL_SERIES", "NO_SERIES")
+NAV_STATES = ("FRESH", "STALE_CACHE", "SOURCE_FAILED", "SOURCE_DISAGREES", "MANUAL_SERIES", "NO_SERIES",
+              "PRICE_BASIS_UNDECLARED")
 
 
 def _bdays_after(d0, d1):
@@ -317,8 +454,53 @@ def refresh_nav_cache(as_of, budget_s=25.0, universe=None, *, get=None, yf_histo
             except ValueError:
                 recent = False
             fetched = False
+            basis, migrate = None, False
+            if route == "YF":
+                try:
+                    basis = price_basis_for(u)
+                except PriceBasisUndeclared as _pbe:
+                    basis = None
+                    rec["why_basis"] = str(_pbe)
+                rec["price_basis"] = basis
+                if basis is not None and cached:
+                    _pst = provenance_state(sym, basis)
+                    rec["provenance_before"] = _pst.get("state")
+                    # ⚑ ISA-0901: a cache whose recorded basis is absent or different is MIGRATED here, by the
+                    #   cache's declared writer - a fresh-but-wrong-basis cache is not FRESH.
+                    migrate = _pst.get("state") != "BASIS_RECORDED"
             if route == "MANUAL":
                 rec["state"], rec["why"] = "MANUAL_SERIES", "declared manual local_series; no feed"
+            elif route == "YF" and basis is None:
+                rec["state"], rec["why"] = "PRICE_BASIS_UNDECLARED", rec.get("why_basis")
+            elif migrate and not (recent and p.get("state") in ("SOURCE_FAILED", "STALE_CACHE")
+                                  and p.get("basis_migration_failed")):
+                if _t.time() - t0 > budget_s:
+                    rec["state"], rec["why"] = "STALE_CACHE", ("refresh budget %.0f s spent before this fund's basis "
+                                                               "migration to %s - cache kept at its recorded basis"
+                                                               % (budget_s, basis))
+                else:
+                    fetched = True
+                    rec["attempted_at"] = now.isoformat(timespec="seconds")
+                    new = yf_history(sym, basis=basis) if sym else None
+                    new = _hold_depth(new, cached) if new else new
+                    covers = (bool(new) and new[0][0] <= cached[0][0] + dt.timedelta(days=7)
+                              and new[-1][0] >= cached[-1][0])
+                    if not covers:
+                        rec["state"] = "STALE_CACHE" if new else "SOURCE_FAILED"
+                        rec["why"] = ("basis migration to %s REFUSED: %s - the existing cache is kept, typed by its "
+                                      "provenance" % (basis, "no series returned" if not new else
+                                                      "the new series (%s..%s) does not cover the cache (%s..%s)"
+                                                      % (new[0][0], new[-1][0], cached[0][0], cached[-1][0])))
+                        rec["basis_migration_failed"] = True
+                    else:
+                        _prev = read_provenance(sym)
+                        rec["basis_migration"] = {"from": (_prev or {}).get("basis"), "to": basis,
+                                                  "superseded_copy": _supersede_copy(sym, (_prev or {}).get("basis")),
+                                                  "depth_held_from": cached[0][0].isoformat(), "points": len(new)}
+                        _write_cache(sym, new, basis=basis, depth_held_from=cached[0][0])
+                        newest = new[-1][0]
+                        rec["state"] = "FRESH" if not nav_needs_refresh(newest, as_of) else "STALE_CACHE"
+                        rec["why"] = "re-fetched %d points at the declared basis %s (migration)" % (len(new), basis)
             elif not nav_needs_refresh(newest, as_of):
                 rec["state"], rec["why"] = "FRESH", "cache within %d business days of the run date" % NAV_STALE_BDAYS
             elif recent and p.get("state") in ("SOURCE_FAILED", "SOURCE_DISAGREES", "STALE_CACHE"):
@@ -331,7 +513,7 @@ def refresh_nav_cache(as_of, budget_s=25.0, universe=None, *, get=None, yf_histo
                 fetched = True
                 rec["attempted_at"] = now.isoformat(timespec="seconds")
                 if route == "YF":
-                    new = yf_history(sym) if sym else None
+                    new = yf_history(sym, basis=basis) if sym else None
                     new = _hold_depth(new, cached) if new else new
                     if new is None:
                         rec["state"], rec["why"] = "SOURCE_FAILED", "yfinance returned nothing for %s" % sym
@@ -339,7 +521,7 @@ def refresh_nav_cache(as_of, budget_s=25.0, universe=None, *, get=None, yf_histo
                         rec["state"], rec["why"] = "STALE_CACHE", (
                             "yfinance series (newest %s) does not advance/cover the cache" % new[-1][0])
                     else:
-                        _write_cache(sym, new)
+                        _write_cache(sym, new, basis=basis, depth_held_from=(cached[0][0] if cached else None))
                         newest = new[-1][0]
                         rec["state"] = "FRESH" if not nav_needs_refresh(newest, as_of) else "STALE_CACHE"
                         rec["why"] = "re-fetched %d points" % len(new)
@@ -369,6 +551,8 @@ def refresh_nav_cache(as_of, budget_s=25.0, universe=None, *, get=None, yf_histo
                 rec["state"] = "NO_SERIES"
             rec["newest"] = newest.isoformat() if newest else None
             rec["age_days"] = (as_of - newest).days if newest else None
+            if route == "YF" and basis is not None and sym:
+                rec["provenance"] = provenance_state(sym, basis)
             rec["fetched_this_call"] = fetched
             rec["as_of_run"] = as_of.isoformat()
             if not fetched and rec["state"] != "STALE_CACHE" and p.get("attempted_at") and "attempted_at" not in rec:
@@ -513,7 +697,7 @@ def _held_series(u, refresh=False):
         if s:
             return s
     sym = (u or {}).get("yf_symbol") or (u or {}).get("isin")
-    return fetch_nav_history(sym, use_cache=True, refresh=refresh, scale=_scale_for(u))
+    return fetch_nav_history(sym, use_cache=True, refresh=refresh, scale=_scale_for(u), basis=price_basis_for(u))
 
 
 # ⚑ ISA-0919 (Raj 29-Oct-2026) - DECLARED SHARE-CLASS HISTORY SPLICE. A share class younger than the fund
@@ -580,13 +764,95 @@ def history_splice(sedol, u, held, base=None):
     return res
 
 
-def nav_series_for(sedol, u, refresh=False):
+def nav_series_for(sedol, u, refresh=False, with_state=False):
     """THE one way to get a NAV series for a fund. Local series first where declared, then the
     feed. One home (R4.4) — every caller that had its own `yf_symbol or isin` line was a place a
     fund with no feed could go quietly missing. ISA-0919: a declared history_splice is applied HERE, so
     every consumer of the door sees the same joined history (or the same refusal)."""
+    _fi_mark("fund_performance", "nav_series_for")                      # ISA-0940: declared capability producer
     held = _held_series(u, refresh=refresh)
-    return history_splice(sedol, u, held)[0]
+    series, state = history_splice(sedol, u, held)
+    return (series, state) if with_state else series
+
+
+# ---------------------------------------------------------------- the door's declared consumers (ISA-0942 / ISA-0874 leg 1)
+# Every production module that reads fund NAV through nav_series_for, with the history WINDOW it consumes. One
+# declaration, asserted by door_callsite_audit(): a new caller, or a caller that leaves, fails the selftest until
+# this table says what it reads (R4.6.3). Depth of every series is held at the cache start (2016-08-05 on the
+# yfinance caches, _hold_depth) - a consumer that wants "full history" reads exactly that depth.
+NAV_DOOR_CONSUMERS = {
+    "fund_performance": "WINDOWS 1m/3m/6m/1y/3y/5y/10y trailing to the calendar as_of (MIN_COVERAGE 98%); nav_freshness = newest point",
+    "fund_action_stack": "monthly month-end returns: last 60 (5y) and 36 (3y) months for mean/stddev, correlation >= 24 months; FRS returns via fund_performance()",
+    "holding_period_return": "point lookups: NAV on/before each transfer date (<= 7 days back)",
+    "benchmark_registry": "monthly returns over the full held depth, split in two halves (DRIFT_MIN_MONTHS 48); noise floors were measured on this depth",
+    "fund_learning": "monthly panel over the full held depth; rolling 36-month windows (ROLLING_WINDOW_M) for T4 calibration",
+    "whole_book_risk": "weekly last-NAV-of-week levels over the common whole-book window",
+    "whole_book_stress": "weekly levels over the common whole-book window (same series_fn as whole_book_risk)",
+    "concentration_clusters": "monthly returns over the common window (MIN_COMMON_MONTHS 24)",
+    "report_measures": "1M/3M/6M/YTD/1Y/3Y pa/5Y pa to the run date; 1Y/3Y/5Y at the X-Ray's corroborated date",
+    "fund_pair_test": "monthly returns, common window >= 24 months (H7)",
+    "missed_opportunity_diag": "VUAG weekly levels (benchmark baseline)",
+    "beta_alpha_study": "monthly returns over the full held depth (study, not a decision input)",
+    "extract_xray": "1Y/3Y/5Y trailing at each candidate month-end strike (printed date - 100 days .. report date) - X-Ray date corroboration (ISA-0202)",
+}
+# Calls that bypass the door. Only fund_performance's own internals may make them; anything else is a defect,
+# except these DECLARED exemptions (each names why; a stale exemption fails the audit too).
+NAV_DOOR_PRIVATE = ("fetch_nav_history", "load_local_series", "_yf_history", "_held_series", "_read_cache")
+NAV_DOOR_EXEMPT = {
+    "test_fund_performance.py": "the door's own regression suite reads raw caches by symbol on purpose",
+    "test_benchmark_registry.py": "negative controls on load_local_series reconciliation (it must RAISE)",
+    "fund_pair_test.py": "ISA-0919 selftest asserts door == _held_series for an undeclared fund (equivalence check)",
+}
+# Readers that open nav_cache/*.csv FILES directly (not a call above). Their bytes are migrated in place by the
+# cache's declared writer, but they bypass provenance - owned by ISA-0945, listed so they are visible, not silent.
+NAV_DOOR_DIRECT_READERS = {
+    "capital_destination.py": "ISA-0945: _load_sleeve (regime coverage) / _fund_levels read nav_cache/<symbol>.csv",
+    "fund_expected_return.py": "ISA-0945: sigma_fund reads the nav_cache glob by stem",
+    "whole_book_risk.py": "ISA-0945: _nav_stamp (mtime cache-invalidation stamp only, no values)",
+    "isa_tree_scope.py": "not a reader: lists nav_cache as a non-source directory",
+}
+
+
+def door_callsite_audit(root=None):
+    """-> {state PASS|FAIL, violations, stale_exemptions, undeclared_consumers, stale_consumers, direct_readers}.
+    AST over every top-level module (and tests_jul2026/): no attribute call to a NAV_DOOR_PRIVATE name outside
+    fund_performance.py except a declared exemption; the set of modules calling `.nav_series_for` equals
+    NAV_DOOR_CONSUMERS; every module using the 'nav_cache' path literal is a declared direct reader."""
+    import ast as _ast, glob as _glob
+    root = root or SCRIPT_DIR
+    files = sorted(_glob.glob(os.path.join(root, "*.py")) + _glob.glob(os.path.join(root, "tests_jul2026", "*.py")))
+    viol, callers, used_ex, direct = [], set(), set(), {}
+    for f in files:
+        base = os.path.basename(f)
+        mod = base[:-3]
+        if base == "fund_performance.py":
+            continue
+        try:
+            tree = _ast.parse(open(f, encoding="utf-8").read())
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute):
+                if n.func.attr in NAV_DOOR_PRIVATE:
+                    if base in NAV_DOOR_EXEMPT:
+                        used_ex.add(base)
+                    else:
+                        viol.append("%s:%d calls .%s outside the door" % (base, n.lineno, n.func.attr))
+                elif n.func.attr == "nav_series_for" and not base.startswith("test_"):
+                    callers.add(mod)
+            if isinstance(n, _ast.Constant) and n.value == "nav_cache":
+                direct.setdefault(base, n.lineno)
+    callers.add("fund_performance")
+    undeclared = sorted(callers - set(NAV_DOOR_CONSUMERS))
+    stale = sorted(set(NAV_DOOR_CONSUMERS) - callers)
+    stale_ex = sorted(set(NAV_DOOR_EXEMPT) - used_ex)
+    undeclared_direct = sorted(set(direct) - set(NAV_DOOR_DIRECT_READERS))
+    stale_direct = sorted(set(NAV_DOOR_DIRECT_READERS) - set(direct))
+    ok_ = not (viol or undeclared or stale or stale_ex or undeclared_direct or stale_direct)
+    return {"state": "PASS" if ok_ else "FAIL", "violations": viol, "stale_exemptions": stale_ex,
+            "undeclared_consumers": undeclared, "stale_consumers": stale,
+            "undeclared_direct_readers": undeclared_direct, "stale_direct_readers": stale_direct,
+            "consumers": sorted(callers), "direct_readers": direct}
 
 
 # ---------------------------------------------------------------- maths
@@ -767,9 +1033,18 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
             else f"local_series:{u['local_series']['path']}") if u.get("local_series")
            else f"yfinance:{sym}")
     scale = _scale_for(u)
-    _held = (load_local_series(u) if u.get("local_series")
-             else fetch_nav_history(sym, refresh=refresh, scale=scale))
-    series, _spl = history_splice(sedol, u, _held)                 # ISA-0919: the declared splice, via the one home
+    # ⚑ ISA-0942 (20-Nov-2026): through THE door, so the class's declared price basis, provenance and splice reach
+    #   the FRS return adequacy, the anchor rule and return_architecture's realised leg (this function fed all three
+    #   while reading the cache itself).
+    try:
+        series, _spl = nav_series_for(sedol, u, refresh=refresh, with_state=True)
+    except PriceBasisUndeclared as _pbe:
+        out["status"] = "price_basis_undeclared"
+        for w in WINDOWS:
+            out["returns"][w] = {"cumulative": as_dict(Missing(str(_pbe), as_of, "fund_universe")),
+                                 "annualised": as_dict(Missing(str(_pbe), as_of, "fund_universe"))}
+        return out
+    out["nav_provenance"] = nav_series_provenance(sedol, u)
     if _spl.get("state") != "NOT_DECLARED":
         out["history_splice"] = _spl
         if _spl.get("state") == "APPLIED":
@@ -830,8 +1105,12 @@ def fund_performance(sedol, as_of, universe=None, broker_price=None,
         used_proxy = False
         if isinstance(cum, Missing) and label in proxy.get("applies_to", []):
             if proxy_series is None:
-                proxy_series = fetch_nav_history(proxy["yf_symbol"],
-                                                 refresh=refresh, scale=scale)
+                try:
+                    proxy_series = fetch_nav_history(proxy["yf_symbol"], refresh=refresh, scale=scale,
+                                                     basis=price_basis_for(proxy))
+                except PriceBasisUndeclared as _ppe:
+                    proxy_series = []
+                    out["notes"].append("%s: proxy %s NOT used - %s" % (label, proxy.get("isin"), _ppe))
             psrc = f"yfinance:{proxy['yf_symbol']}[{proxy['flag']}]"
             pc, pa = trailing_return(proxy_series, effective_as_of, yrs, psrc, label)
             if is_present(pc):
@@ -1025,11 +1304,12 @@ def _selftest():
         CACHE_DIR = _cd
         _write_csv_series(os.path.join(cdir, "POLAR.csv"), [(D(2026, 7, 31), 193.97), (D(2026, 8, 4), 205.35)])
         _write_csv_series(os.path.join(cdir, "MAN.csv"), [(D(2026, 7, 31), 5.0)])
-        U = {"funds": {"G": {"name": "Good", "yf_symbol": "GOOD"}, "X": {"name": "Down", "yf_symbol": "DOWN"},
+        U = {"funds": {"G": {"name": "Good", "yf_symbol": "GOOD", "acc_or_inc": "acc"},
+                       "X": {"name": "Down", "yf_symbol": "DOWN", "acc_or_inc": "acc"},
                        "P": {"name": "Polar", "ft_xid": "1", "local_series": {"cache": "nav_cache/POLAR.csv"}},
                        "M": {"name": "Manual", "local_series": {"cache": "nav_cache/MAN.csv"}}}}
         new_hist = old_hist + [(D(2026, 8, 5) + dt.timedelta(days=i), 11.0) for i in range(0, 86)]  # to 29-Oct
-        yfh = lambda sym: new_hist if sym == "GOOD" else None                               # noqa: E731
+        yfh = lambda sym, basis=None: new_hist if sym == "GOOD" else None                   # noqa: E731
         ftp = json.dumps({"html": row % ("Tuesday, August 04, 2026", "205.35") + row % ("Thursday, October 29, 2026", "220.00")})
         T = D(2026, 10, 30)
         now = dt.datetime(2026, 10, 31, 9, 30)
@@ -1046,17 +1326,17 @@ def _selftest():
         ok("a declared manual series is MANUAL_SERIES (never silently fresh)", f["M"]["state"] == "MANUAL_SERIES", f["M"])
         ok("state file written with counts", json.load(open(stp))["counts"]["FRESH"] == 2)
         r2 = refresh_nav_cache(T, universe=U, get=lambda url: (_ for _ in ()).throw(AssertionError("no fetch")),
-                               yf_history=lambda s_: (_ for _ in ()).throw(AssertionError("no fetch")),
+                               yf_history=lambda s_, basis=None: (_ for _ in ()).throw(AssertionError("no fetch")),
                                now=now + dt.timedelta(minutes=5), state_path=stp, cache_dir=cdir)
         ok("R5.14 repeat_same_occurrence: a re-run within 18 h fetches nothing and keeps the typed states",
            r2["funds"]["X"]["state"] == "SOURCE_FAILED" and r2["funds"]["G"]["state"] == "FRESH"
            and not any(v["fetched_this_call"] for v in r2["funds"].values()), r2["funds"])
-        r3 = refresh_nav_cache(D(2026, 11, 27), universe=U, get=lambda url: "<html>x</html>", yf_history=lambda s_: None,
+        r3 = refresh_nav_cache(D(2026, 11, 27), universe=U, get=lambda url: "<html>x</html>", yf_history=lambda s_, basis=None: None,
                                now=dt.datetime(2026, 11, 28, 9, 30), state_path=stp, cache_dir=cdir)
         ok("R5.14 next_occurrence: a month later every fund is re-attempted; FT layout failure -> SOURCE_FAILED",
            r3["funds"]["G"]["state"] == "SOURCE_FAILED" and r3["funds"]["P"]["state"] == "SOURCE_FAILED"
            and r3["funds"]["G"]["fetched_this_call"], r3["funds"])
-        r4 = refresh_nav_cache(D(2026, 11, 27), universe=U, budget_s=-1, yf_history=lambda s_: None,
+        r4 = refresh_nav_cache(D(2026, 11, 27), universe=U, budget_s=-1, yf_history=lambda s_, basis=None: None,
                                now=dt.datetime(2026, 11, 29, 9, 30), state_path=os.path.join(tmp, "s4.json"), cache_dir=cdir)
         ok("budget spent -> STALE_CACHE (typed), never a silent pass", r4["funds"]["G"]["state"] == "STALE_CACHE", r4["funds"]["G"])
         # fetch_nav_history: failed refresh falls back to the cache, never []
@@ -1064,11 +1344,12 @@ def _selftest():
         _yh = _yf_history
         CACHE_DIR = cdir
         try:
-            _yf_history = lambda sym, period="max": None                                     # noqa: E731
+            _yf_history = lambda sym, period="max", basis=None: None                         # noqa: E731
             ok("MUST-FIRE (ISA-0869 CA2): fetch_nav_history(refresh=True) on a failed fetch returns the CACHE, not []",
-               fetch_nav_history("DOWN", refresh=True) == old_hist)
-            _yf_history = lambda sym, period="max": old_hist[:10]                            # noqa: E731
-            ok("MUST-FIRE: a truncated refresh never overwrites the cache", fetch_nav_history("DOWN", refresh=True) == old_hist
+               fetch_nav_history("DOWN", refresh=True, basis="raw_close") == old_hist)
+            _yf_history = lambda sym, period="max", basis=None: old_hist[:10]                # noqa: E731
+            ok("MUST-FIRE: a truncated refresh never overwrites the cache",
+               fetch_nav_history("DOWN", refresh=True, basis="raw_close") == old_hist
                and _read_cache("DOWN") == old_hist)
         finally:
             _yf_history = _yh
@@ -1128,6 +1409,115 @@ def _selftest():
     finally:
         shutil.rmtree(td, ignore_errors=True)
         _SPLICE_MEMO.clear()
+    # ── ISA-0901 / ISA-0874 / ISA-0942 (20-Nov-2026): price basis per class, provenance, migration, one door ──
+    ok("ISA-0901 MUST-FIRE: an ACC class reads the raw close", price_basis_for({"acc_or_inc": "acc"}) == "raw_close")
+    ok("ISA-0901 MUST-FIRE: an INC class reads the dividend-reinvested close",
+       price_basis_for({"acc_or_inc": "inc"}) == "total_return_adjusted")
+    try:
+        price_basis_for({"share_class": "X"}); ok("ISA-0901 NEGATIVE CONTROL: an undeclared class is REFUSED", False)
+    except PriceBasisUndeclared:
+        ok("ISA-0901 NEGATIVE CONTROL: an undeclared class is REFUSED", True)
+    try:
+        fetch_nav_history("ANY"); ok("R4.7 MUST-FIRE: fetch_nav_history without a basis RAISES (an un-updated caller fails)", False)
+    except TypeError:
+        ok("R4.7 MUST-FIRE: fetch_nav_history without a basis RAISES (an un-updated caller fails)", True)
+    import types as _ty
+    _seen = {}
+
+    class _H:
+        def __init__(self, adj):
+            self.adj = adj
+
+        def __getitem__(self, k):
+            v = 1.0 if not self.adj else 0.9
+            return _ty.SimpleNamespace(items=lambda: [(dt.datetime(2026, 1, 2), v), (dt.datetime(2026, 1, 5), v)])
+
+    class _T:
+        def __init__(self, s):
+            pass
+
+        def history(self, period="max", auto_adjust=True):
+            _seen["auto_adjust"] = auto_adjust
+            return _H(auto_adjust)
+    _yf_saved = sys.modules.get("yfinance")
+    sys.modules["yfinance"] = _ty.SimpleNamespace(Ticker=_T)
+    try:
+        r_raw = _yf_history("Z", basis="raw_close"); a_raw = _seen.get("auto_adjust")
+        r_adj = _yf_history("Z", basis="total_return_adjusted"); a_adj = _seen.get("auto_adjust")
+        ok("ISA-0901 MUST-FIRE: raw_close asks the provider for auto_adjust=False; adjusted asks for True",
+           a_raw is False and a_adj is True and r_raw[0][1] == 1.0 and r_adj[0][1] == 0.9, (a_raw, a_adj))
+    finally:
+        if _yf_saved is None:
+            sys.modules.pop("yfinance", None)
+        else:
+            sys.modules["yfinance"] = _yf_saved
+    tmp2 = tempfile.mkdtemp(prefix="fp_basis_")
+    _cd2 = CACHE_DIR
+    try:
+        cdir = os.path.join(tmp2, "nav_cache"); os.makedirs(cdir)
+        legacy = [(D(2016, 8, 5) + dt.timedelta(days=7 * i), 2.0 * (1.003 ** i)) for i in range(0, 530)]   # to ~Oct-2026
+        raw = [(d, v * 0.80) for d, v in legacy] + [(legacy[-1][0] + dt.timedelta(days=7), legacy[-1][1] * 0.8)]
+        deep_raw = [(D(2014, 1, 2), 1.0)] + raw
+        CACHE_DIR = cdir
+        _write_cache("ACCF", legacy)                                    # legacy: no provenance sidecar
+        _write_cache("INCF", legacy, basis="total_return_adjusted")     # already at its declared basis
+        _write_cache("SHRT", legacy)
+        CACHE_DIR = _cd2
+        U2 = {"funds": {"A": {"name": "Acc fund", "yf_symbol": "ACCF", "acc_or_inc": "acc"},
+                        "I": {"name": "Inc fund", "yf_symbol": "INCF", "acc_or_inc": "inc"},
+                        "S": {"name": "Short", "yf_symbol": "SHRT", "acc_or_inc": "acc"},
+                        "N": {"name": "Undeclared", "yf_symbol": "INCF"}}}
+        calls = []
+
+        def yfh2(sym, basis=None):
+            calls.append((sym, basis))
+            if sym == "SHRT":
+                return raw[200:]
+            return deep_raw if sym == "ACCF" else legacy
+        T2 = legacy[-1][0] + dt.timedelta(days=3)
+        rb = refresh_nav_cache(T2, universe=U2, yf_history=yfh2, now=dt.datetime(2026, 11, 21, 9, 0),
+                               state_path=os.path.join(tmp2, "st.json"), cache_dir=cdir)["funds"]
+        CACHE_DIR = cdir
+        acc_now, prov_a = _read_cache("ACCF"), read_provenance("ACCF")
+        shrt_now = _read_cache("SHRT")
+        sup = sorted(os.listdir(os.path.join(cdir, "_superseded"))) if os.path.isdir(os.path.join(cdir, "_superseded")) else []
+        CACHE_DIR = _cd2
+        ok("ISA-0901 MUST-FIRE: a FRESH legacy cache of an ACC class is MIGRATED by its declared writer to the raw close",
+           rb["A"].get("basis_migration", {}).get("to") == "raw_close" and acc_now and abs(acc_now[0][1] - legacy[0][1] * 0.8) < 1e-6
+           and prov_a and prov_a["basis"] == "raw_close" and rb["A"]["provenance"]["state"] == "BASIS_RECORDED", rb["A"])
+        ok("ISA-0901 MUST-FIRE: the migration holds depth at the old cache start (no 2014 history) and keeps the superseded bytes",
+           acc_now[0][0] == legacy[0][0] and any(x.startswith("ACCF.unrecorded.") for x in sup), (acc_now[:1], sup))
+        ok("ISA-0901 NEGATIVE CONTROL: a cache already at its declared basis is NOT migrated (and is FRESH)",
+           "basis_migration" not in rb["I"] and ("INCF", "total_return_adjusted") not in calls and rb["I"]["state"] == "FRESH", rb["I"])
+        ok("ISA-0901 NEGATIVE CONTROL: a migration whose series does not cover the cache is REFUSED, cache kept",
+           rb["S"].get("basis_migration_failed") and shrt_now == [(d, round(v, 6)) for d, v in legacy], rb["S"].get("why"))
+        ok("ISA-0901 MUST-FIRE: an undeclared class is PRICE_BASIS_UNDECLARED in the refresh (typed), never fetched",
+           rb["N"]["state"] == "PRICE_BASIS_UNDECLARED", rb["N"])
+        ok("ISA-0874 MUST-FIRE: provenance records provider version, pin and the version state",
+           prov_a.get("provider") == "yfinance" and prov_a.get("version_state") in ("MATCHES_PIN", "DIFFERS_FROM_PIN", "UNKNOWN")
+           and "pinned_version" in prov_a and prov_a.get("depth_held_from") == legacy[0][0].isoformat(), prov_a)
+        CACHE_DIR = cdir
+        ok("ISA-0874 NEGATIVE CONTROL: a cache with no sidecar is PROVENANCE_UNRECORDED (never assumed)",
+           provenance_state("NOPE", "raw_close")["state"] == "PROVENANCE_UNRECORDED")
+        ok("ISA-0874 MUST-FIRE: a recorded basis different from the declared one is BASIS_MISMATCH",
+           provenance_state("INCF", "raw_close")["state"] == "BASIS_MISMATCH")
+        CACHE_DIR = _cd2
+    finally:
+        CACHE_DIR = _cd2
+        shutil.rmtree(tmp2, ignore_errors=True)
+    import ast as _ast2
+    _fpsrc = open(os.path.abspath(__file__), encoding="utf-8").read()
+    _fpt = _ast2.parse(_fpsrc)
+    _fpfn = [n for n in _fpt.body if isinstance(n, _ast2.FunctionDef) and n.name == "fund_performance"][0]
+    _inner = {(c.func.id if isinstance(c.func, _ast2.Name) else getattr(c.func, "attr", None))
+              for c in _ast2.walk(_fpfn) if isinstance(c, _ast2.Call)}
+    ok("ISA-0942 MUST-FIRE: fund_performance() reads its series through nav_series_for (not fetch_nav_history / load_local_series)",
+       "nav_series_for" in _inner and "load_local_series" not in _inner and "history_splice" not in _inner, sorted(x for x in _inner if x))
+    aud = door_callsite_audit()
+    ok("ISA-0942 MUST-FIRE: no production module calls a NAV_DOOR_PRIVATE function outside fund_performance; consumers, "
+       "exemptions and direct readers are exactly as declared", aud["state"] == "PASS",
+       {k: aud[k] for k in ("violations", "stale_exemptions", "undeclared_consumers", "stale_consumers",
+                            "undeclared_direct_readers", "stale_direct_readers")})
     print("fund_performance selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

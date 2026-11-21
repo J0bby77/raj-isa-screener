@@ -966,6 +966,48 @@ def _dry_run_in_sandbox(args) -> int:
     return rc
 
 
+# ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
+FRS_XRAY_STATES = ("BOUND", "REFUSED_NO_RUN_XRAY", "REFUSED_PERIOD_MISMATCH", "REFUSED_PERIOD_UNVERIFIED")
+
+
+def _frs_run_inputs(month_label, portfolio_path, xray_path=None, root=None):
+    """ISA-0943 (20-Nov-2026): the X-Ray the Step 6.05 FRS cross-checks against is THE RUN'S OWN, bound by the
+    ISA-0830 identity rule (extract_xray.xray_identity_verdict: same period within XRAY_MAX_LAG_DAYS of the portfolio
+    export). -> {state in FRS_XRAY_STATES, xray_path (only when BOUND), why, identity}. Never a default month file:
+    a refusal degrades the cross-check only (DEGRADE_ONLY) - the FRS still runs on the golden source."""
+    _fi_mark("monthly_isa_prerun", "_frs_run_inputs")                  # ISA-0944: declared capability producer
+    root = root or SCRIPT_DIR
+    xp = xray_path or os.path.join(root, f"xray_data_{month_label}.json")
+    if not os.path.exists(xp):
+        return {"state": "REFUSED_NO_RUN_XRAY", "xray_path": None, "scope": "DEGRADE_ONLY",
+                "why": "no X-Ray extracted for the run month (%s) - the FRS cross-check is OFF this run, never a "
+                       "different month's file" % os.path.basename(xp)}
+    try:
+        import extract_xray as _ex
+        with open(xp, encoding="utf-8") as fh:
+            xm = json.load(fh).get("_meta") or {}
+        with open(portfolio_path, encoding="utf-8") as fh:
+            pm = json.load(fh).get("_meta") or {}
+        v = _ex.xray_identity_verdict(xm, pm)
+    except Exception as e:                                              # noqa: BLE001
+        return {"state": "REFUSED_PERIOD_UNVERIFIED", "xray_path": None, "scope": "DEGRADE_ONLY",
+                "why": "identity of %s unreadable: %s: %s" % (os.path.basename(xp), type(e).__name__, e)}
+    if v.get("period") == "MATCH":
+        return {"state": "BOUND", "xray_path": xp, "scope": "DEGRADE_ONLY", "identity": v,
+                "why": "run X-Ray %s bound: %s" % (os.path.basename(xp), v.get("why"))}
+    st = "REFUSED_PERIOD_MISMATCH" if v.get("period") == "MISMATCH" else "REFUSED_PERIOD_UNVERIFIED"
+    return {"state": st, "xray_path": None, "scope": "DEGRADE_ONLY", "identity": v,
+            "why": "X-Ray %s not bound to this run: %s" % (os.path.basename(xp), v.get("why"))}
+
+
 def main():
     # ⚑⚑ ISA-0589, 03-Sep-2026. THESE SIX ARE BOUND FIRST, BEFORE ANY GUARD CAN APPEND TO THEM.
     # They used to be initialised 111 lines below, AFTER the ISA-0572 memory-base guard and the
@@ -2791,8 +2833,15 @@ def main():
                 _port = json.load(_pf)
         except Exception:
             pass
+        # ⚑ ISA-0943 (20-Nov-2026): the run's own X-Ray, bound by identity - it used to be omitted, so the FRS
+        #   cross-checked against the August-2026 X-Ray every month.
+        _frs_in = _frs_run_inputs(month_label, portfolio_path, xray_path=xray_path)
+        summary["frs_xray_binding"] = {k: _frs_in.get(k) for k in ("state", "why", "scope")}
+        if _frs_in["state"] != "BOUND":
+            warnings.append("Step 6.05 X-RAY CROSS-CHECK OFF (%s, DEGRADE_ONLY): %s" % (_frs_in["state"], _frs_in["why"]))
         _fa = _fas.build(as_of=run_date if isinstance(run_date, dt_date) else None,
-                         portfolio=_port)
+                         portfolio=_port, xray=_frs_in.get("xray_path"),
+                         xray_binding={k: _frs_in.get(k) for k in ("state", "why", "scope")})
         _fa_path = os.path.join(SCRIPT_DIR, f"fund_action_stack_{month_label}.json")
         with open(_fa_path, "w", encoding="utf-8") as _f:
             json.dump(_fa, _f, indent=2, default=str)
@@ -6293,6 +6342,35 @@ def _selftest(verbose: bool = True) -> int:
     ok("ISA-0778 STRUCTURE: only the two STATUS-level `if errors:` remain in main()+_prerun_phase_b (status word and "
        "exit code) - any data step reading bare errors[] fails here (found at lines %s)" % _bare778,
        len(_bare778) == 2)
+    # ── ISA-0943 (20-Nov-2026): the FRS binds the run's own X-Ray or refuses (typed) ────────────────────────
+    import shutil as _sh943
+    _t943 = tempfile.mkdtemp(prefix="prerun943_")
+    try:
+        _pp = os.path.join(_t943, "portfolio_data_nov_2026.json")
+        json.dump({"_meta": {"account_ids": ["ACB8G2I"], "data_date": "30-Oct-2026"}}, open(_pp, "w"))
+        r0 = _frs_run_inputs("nov_2026", _pp, root=_t943)
+        ok("ISA-0943 MUST-FIRE: no X-Ray for the run month -> REFUSED_NO_RUN_XRAY (an August file beside it is never read)",
+           r0["state"] == "REFUSED_NO_RUN_XRAY" and r0["xray_path"] is None)
+        json.dump({"_meta": {"report_date": "31 Jul 2026", "account_ids": ["ACB8G2I"]}},
+                  open(os.path.join(_t943, "xray_data_aug_2026.json"), "w"))
+        ok("ISA-0943 NEGATIVE CONTROL: the August X-Ray present beside a November run is still not bound",
+           _frs_run_inputs("nov_2026", _pp, root=_t943)["state"] == "REFUSED_NO_RUN_XRAY")
+        _xp = os.path.join(_t943, "xray_data_nov_2026.json")
+        json.dump({"_meta": {"report_date": "30 Oct 2026", "account_ids": ["ACB8G2I"]}}, open(_xp, "w"))
+        r1 = _frs_run_inputs("nov_2026", _pp, root=_t943)
+        ok("ISA-0943 MUST-FIRE: the run month's X-Ray dated with the portfolio export is BOUND", r1["state"] == "BOUND"
+           and r1["xray_path"] == _xp)
+        json.dump({"_meta": {"report_date": "31 Aug 2026", "account_ids": ["ACB8G2I"]}}, open(_xp, "w"))
+        ok("ISA-0943 MUST-FIRE: a run-month file whose report date is another period is REFUSED_PERIOD_MISMATCH",
+           _frs_run_inputs("nov_2026", _pp, root=_t943)["state"] == "REFUSED_PERIOD_MISMATCH")
+        json.dump({"_meta": {"report_date": "unknown", "account_ids": ["ACB8G2I"]}}, open(_xp, "w"))
+        ok("ISA-0943 FAIL-CLOSED: an unreadable report date is REFUSED_PERIOD_UNVERIFIED, never BOUND",
+           _frs_run_inputs("nov_2026", _pp, root=_t943)["state"] == "REFUSED_PERIOD_UNVERIFIED")
+    finally:
+        _sh943.rmtree(_t943, ignore_errors=True)
+    _s943 = open(os.path.abspath(__file__), encoding="utf-8").read()
+    ok("ISA-0943 STRUCTURE: Step 6.05 passes the bound X-Ray into fund_action_stack.build",
+       "xray=_frs_in.get(\"xray_path\")" in _s943)
     if verbose:
         print("monthly_isa_prerun selftest: %d failure(s)" % len(fails))
     return 1 if fails else 0

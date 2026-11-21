@@ -58,6 +58,15 @@ sys.path.insert(0, HERE)
 
 from isa_metric import Metric, Missing, is_present, as_dict           # noqa: E402
 
+# ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 SCHEMA_VERSION = 1
 LEDGER_PATH = os.path.join(HERE, "transaction_ledger.json")
 LINEAGE_PATH = os.path.join(HERE, "position_lineage.json")
@@ -193,16 +202,26 @@ def nav_price_at(sedol, on_date, universe=None):
     except Exception:
         return None, "fund_performance unavailable"
     u = (universe or {}).get(sedol) or {}
-    sym = u.get("yf_symbol")
+    sym = u.get("yf_symbol") or ("local_series:%s" % (u.get("local_series") or {}).get("cache") if u.get("local_series") else None)
     if not sym:
-        return None, f"no yf_symbol for {sedol} in fund_universe"
-    series = fp.fetch_nav_history(sym, use_cache=True, scale=fp._scale_for(u))
+        return None, f"no NAV route (yf_symbol / local_series) for {sedol} in fund_universe"
+    # ⚑ ISA-0942 (20-Nov-2026): through THE door - the class's declared price basis, local series (Polar) and
+    #   splice reach the transfer re-valuation too. An ACC class's raw close IS its unit price; an INC class's
+    #   series is dividend-reinvested, so a past point is BELOW the traded price by the distributions since -
+    #   said on the row, never silently (ISA-0946).
+    try:
+        series = fp.nav_series_for(sedol, u)
+    except Exception as e:                                              # noqa: BLE001
+        return None, f"NAV door refused {sedol}: {type(e).__name__}: {e}"
     if not series:
-        return None, f"no NAV history cached for {sym}"
+        return None, f"no NAV history for {sym}"
     hit = fp._nav_on_or_before(series, on_date, max_back_days=7)
     if not hit:
         return None, f"no NAV within 7d on/before {on_date} for {sym}"
-    return hit[1], f"{sym} close {hit[1]:.4f} @{hit[0]}"
+    _inc = str(u.get("acc_or_inc") or "").lower() == "inc" and not u.get("local_series")
+    return hit[1], (f"{sym} close {hit[1]:.4f} @{hit[0]}"
+                    + (" (INC class: dividend-reinvested series, below the traded price by later distributions - ISA-0946)"
+                       if _inc else ""))
 
 
 def build_flows(entries, sedols, lineage=None, price_at=None, universe=None):
@@ -644,6 +663,7 @@ def holding_period_return(sedol, entries, broker_qty, terminal_value, terminal_d
 
 def all_holding_period_returns(portfolio, ledger=None, lineage=None, as_of=None,
                                universe=None, price_at=None):
+    _fi_mark("holding_period_return", "all_holding_period_returns")                      # ISA-0944: declared capability producer
     ledger = ledger if ledger is not None else load_ledger()
     lineage = lineage if lineage is not None else load_lineage()
     if universe is None:

@@ -32,6 +32,15 @@ mandate-index route fails both. `residual_caveat` carries the difference, per fu
 """
 import csv, json, os, sys, datetime as dt
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(HERE, "bench_cache")
 UNIVERSE = os.path.join(HERE, "fund_universe.json")
@@ -291,6 +300,7 @@ def mandate_drift(sedol, universe=None, fund_returns=None):
     fund is not a drifting fund, and the caller must exclude the component rather than guess it
     (R2.10, and the return_adequacy precedent that DEAD MONEY was once issued on unread returns).
     """
+    _fi_mark("benchmark_registry", "mandate_drift")                      # ISA-0940: declared capability producer
     U = universe if universe is not None else load_universe()
     mandate, basis = t4_mandate_for(sedol, U)
     bt, _c = comparator_for(sedol, U)

@@ -27,6 +27,15 @@ import math
 import sys
 from pathlib import Path
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -413,6 +422,7 @@ def t4_mandate_drift(panel=None, calibration=None, drop=None, universe=None):
     benchmark it published; `investor` means this is no longer the exposure Raj bought. Those are
     different claims and an alert that does not say which is not actionable.
     """
+    _fi_mark("fund_rotation_analysis", "t4_mandate_drift")                      # ISA-0940: declared capability producer
     if not T4_ENABLED:
         return {"state": "DISABLED", "reason": "fund_rotation_analysis.T4_ENABLED is False (R4.13)"}
     D = float(T4_DROP if drop is None else drop)

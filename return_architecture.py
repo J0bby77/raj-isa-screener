@@ -62,6 +62,15 @@ today.
 from __future__ import annotations
 import argparse, datetime as dt, json, math, os, sys
 
+# ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -439,6 +448,7 @@ def fund_inputs(frs_rows, tw, total_value):
     realised = fund_action_stack's own `return_adequacy_value` — IMPORTED, never recomputed,
                so Section A and the FRS can never disagree about what a fund earned.
     """
+    _fi_mark("return_architecture", "fund_inputs")                      # ISA-0944: declared capability producer
     twf = (tw or {}).get("funds", {}) or {}
     out = []
     for r in frs_rows:

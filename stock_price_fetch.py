@@ -52,6 +52,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import stock_return_store as srs
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.environ.get("ISA_OUT", HERE)
 
@@ -568,11 +577,18 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
 
     ⚑ `run()` NEVER DELETES A NAME. A ticker that fails every attempt is COUNTED and NAMED and
     its history is untouched — a fetch failure must never look like a delisting."""
+    _fi_mark("stock_price_fetch", "run")                      # ISA-0940: declared capability producer
     if not _flag():
         return {"state": "DISABLED", "flag": "stock_return_fetch",
                 "detail": "rollback: no fetch, store untouched, 6.12b identical to today"}
     rec_on = today or datetime.date.today()
-    store = srs.load()
+    try:
+        store = srs.load()
+    except srs.StoreFXUnqualified as exc:
+        # ⚑ ISA-0934: never append correctly-converted rows onto an unqualified (possibly
+        #   inverted) vintage - the series would mix two FX directions. Typed, store untouched.
+        return {"state": "STORE_FX_UNQUALIFIED", "store_unchanged": True, "reason": str(exc)[:600],
+                "detail": "ISA-0934: run stock_return_store.py --migrate-fx-direction first"}
     smap = symbol_map if symbol_map is not None else load_symbol_map()
     # ⚑ ISA-0549: the writer canonicalises BEFORE any union/fetch. A conflict REFUSES the fetch with
     #   the store untouched (never a silent merge of two different series).
@@ -653,6 +669,7 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
         # fixed, declared factor of exactly 0.01 (P1-A4).
         n_before = len(srs.record_of(store, t, smap).get("observations") or {})
         for f, level in sorted(wk.items()):
+            pair = quote = None
             if cur == "GBP":
                 fxr = None
             elif cur == "GBp":
@@ -662,15 +679,22 @@ def run(*, universe: Optional[Sequence[str]] = None, batch_size: int = BATCH_SIZ
                 if pair is None:
                     failed.append({"ticker": t, "reason": "no FX pair declared for %s" % cur})
                     break
-                fxr = (fx.get(pair) or {}).get(f)
-                if fxr is None:
+                quote = (fx.get(pair) or {}).get(f)
+                if quote is None:
                     # ⚑ SKIPPED AND COUNTED, never converted at a NEIGHBOURING rate.
                     skipped_obs += 1
                     continue
+                # ⚑⚑ ISA-0934 (20-Nov-2026): GBP<ccy>=X is <ccy> PER POUND (asserted by
+                #   _assert_fx_direction above). The store multiplies, so the multiplier is the
+                #   RECIPROCAL. Passing the quote itself stored AVGO at 1.79x and flipped the sign of
+                #   every weekly FX move for 222 series. The basis is declared, not inferred.
+                fxr = 1.0 / float(quote)
             try:
                 srs.record_level(store, t, f.isoformat(), level, cur,
                                  d["source"], fx_to_gbp=fxr,
-                                 total_return=d["total_return"], recorded_on=rec_on)
+                                 total_return=d["total_return"], recorded_on=rec_on,
+                                 fx_basis=(srs.FX_BASIS_GBP_PER_CCY if quote is not None else None),
+                                 fx_pair=pair, fx_quote=quote)
             except ValueError:
                 skipped_obs += 1
         n_after = len(srs.record_of(store, t, smap).get("observations") or {})
@@ -1859,6 +1883,25 @@ def _selftest() -> dict:
         pass
     n += 3
 
+    # ── E2. ISA-0934 FX DIRECTION THROUGH THE STORE — the multiplier is 1/quote ─────────────
+    # AVGO 30-Oct-2026: 326.08 USD at GBPUSD=X 1.3379 is GBP 243.73, NOT GBP 436.25.
+    srs.record_level(doc, "AVGO", "2026-10-30", 326.08, "USD", "selftest", fx_to_gbp=1.0 / 1.3379,
+                     recorded_on=D(2026, 10, 31), fx_basis=srs.FX_BASIS_GBP_PER_CCY,
+                     fx_pair="GBPUSD=X", fx_quote=1.3379)
+    av = doc["names"]["AVGO"]["observations"]
+    av = av[sorted(av)[0]]
+    assert abs(av["gbp"] - 326.08 / 1.3379) < 1e-6 and av["fx_basis"] == srs.FX_BASIS_GBP_PER_CCY, av
+    # NEGATIVE CONTROL: the quote passed as the multiplier (the defect) is REFUSED, three ways.
+    for kw in ({"fx_to_gbp": 1.3379},                                            # no basis
+               {"fx_to_gbp": 1.3379, "fx_basis": srs.FX_BASIS_GBP_PER_CCY, "fx_pair": "GBPUSD=X"},
+               {"fx_to_gbp": 1.3379, "fx_basis": srs.FX_BASIS_GBP_PER_CCY, "fx_quote": 1.3379}):
+        try:
+            srs.record_level(doc, "AVGO2", "2026-10-30", 326.08, "USD", "selftest", **kw)
+            raise AssertionError("ISA-0934 MUST-FIRE: the quote as multiplier must be REFUSED %r" % kw)
+        except ValueError:
+            pass
+    n += 4
+
     # ── F. UNIVERSE — the sixth source, and the refusal contract (ISA-0581, ISA-0577) ───
     st = {"names": {"AVGO": {}}}
     u = build_universe(store=st, portfolio_data={"stocks": [{"ticker": "MU"}]},
@@ -2056,7 +2099,7 @@ def _selftest() -> dict:
             "covers": ["month resolution (ISA-0579)", "venue expectation / ONT (ISA-0577)",
                        "declared-alias verification + typed venue contract (ISA-0725/0588/0582)",
                        "Friday alignment, no forward-fill (ISA-0455)",
-                       "FX direction (ISA-0429)", "GBp 0.01 arithmetic (ISA-0499)",
+                       "FX direction (ISA-0429)", "FX multiplier = 1/quote through the store (ISA-0934)", "GBp 0.01 arithmetic (ISA-0499)",
                        "universe incl. vci_deploy + refusal contract (ISA-0581)",
                        "symbol map append-only (R4.8)",
                        "venue/currency reconciliation (ISA-0587)"]}

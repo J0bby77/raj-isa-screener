@@ -39,6 +39,15 @@ failed to fetch.
 from __future__ import annotations
 import argparse, datetime as dt, json, math, os, statistics as st, sys
 
+# ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -337,19 +346,43 @@ def _xray_returns(xray_path=None):
     in opposite directions depending on which you believe** (11.48% vs 12.06% against a 12.0%
     B2 floor). Publishing either number alone would have produced a confident, unearned verdict.
     """
-    path = xray_path or os.path.join(HERE, "xray_data_aug_2026.json")
+    # ⚑ ISA-0943 (20-Nov-2026): NO DEFAULT FILE. This used to open the August-2026 X-Ray file whenever the caller passed
+    #   nothing - and the pre-run passed nothing, so every FRS since September cross-checked against the August X-Ray.
+    #   No X-Ray means no cross-check (typed NOT_SUPPLIED by build), never a stale one. The run's X-Ray is bound by
+    #   monthly_isa_prerun._frs_run_inputs (ISA-0830 identity rule).
+    if not xray_path:
+        return {}, None
     try:
-        d = json.load(open(path, encoding="utf-8"))
+        d = json.load(open(xray_path, encoding="utf-8"))
     except Exception:
         return {}, None
+    rows = [dict(h) for h in (d.get("fund_holdings", []) or [])]
+    rep_date = (d.get("_meta", {}) or {}).get("report_date") or (d.get("_meta", {}) or {}).get("as_of")
+    # ⚑ ISA-0202: every per-fund date is corroborated against the golden series before it is compared (one home:
+    #   extract_xray.stamp_fund_staleness; a file extracted before ISA-0202 is stamped here on read).
+    #   ALWAYS re-corroborated here, at 6.05, against the door as it stands AFTER the 6.04 NAV refresh/migration: the
+    #   stamp written at Step 2 extraction was measured before it (found in SHADOW 20-Nov-2026: the extraction-time
+    #   stamp still read the pre-migration Artemis series).
+    if rows:
+        import extract_xray as _ex
+        rows, _w = _ex.stamp_fund_staleness(rows, rep_date)
     out = {}
-    for h in d.get("fund_holdings", []) or []:
+    for h in rows:
         nm = str(h.get("name") or "").strip().lower()
         if nm and h.get("return_5yr") is not None:
             out[nm] = {"return_5yr": h["return_5yr"], "return_3yr": h.get("return_3yr"),
                        "return_1yr": h.get("return_1yr"),
-                       "as_of": h.get("as_of") or h.get("as_of_raw")}
-    return out, (d.get("_meta", {}) or {}).get("as_of")
+                       "as_of": h.get("as_of") or h.get("as_of_raw"),
+                       "date_state": h.get("date_state"),
+                       "date_corroboration": h.get("date_corroboration")}
+    import extract_xray as _ex2
+    _rd = _ex2._parse_any_date(rep_date)
+    return out, (_rd.isoformat() if _rd else None)
+
+
+def _xray_comparable(v):
+    """ISA-0202: an X-Ray figure is compared only when its printed date is CORROBORATED."""
+    return bool(v) and v.get("date_state") == "CORROBORATED"
 
 
 def _parse_xray_date(v):
@@ -393,7 +426,8 @@ def _match_xray(name, xr, xray_name=None):
 
 
 # ---------------------------------------------------------------- the build
-def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
+def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None, xray_binding=None):
+    _fi_mark("fund_action_stack", "build")                             # ISA-0944: declared capability producer
     import fund_performance as fp
     as_of = as_of or dt.date.today()
     universe = fp.load_universe()
@@ -405,7 +439,7 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
         if str(_sd).startswith("_"):
             continue
         _k, _v = _match_xray(None, xray_ret, _u.get("xray_name"))
-        _dd = _parse_xray_date((_v or {}).get("as_of"))
+        _dd = _parse_xray_date((_v or {}).get("as_of")) if _xray_comparable(_v) else None
         if _dd:
             xray_dates[_sd] = _dd
     bmin = _bucket_minimums()
@@ -640,7 +674,8 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
     for d in dominance:
         xa = _match_xray(None, xray_ret, (funds.get(d["dominated"]) or {}).get("xray_name"))[1]
         xb = _match_xray(None, xray_ret, (funds.get(d["dominated_by"]) or {}).get("xray_name"))[1]
-        if xa and xb and xa["return_5yr"] is not None and xb["return_5yr"] is not None:
+        if (_xray_comparable(xa) and _xray_comparable(xb)
+                and xa["return_5yr"] is not None and xb["return_5yr"] is not None):
             agrees = xb["return_5yr"] >= xa["return_5yr"]
             d["xray_confirms"] = bool(agrees)
             d["xray_returns"] = {"dominated": xa["return_5yr"], "dominated_by": xb["return_5yr"]}
@@ -897,7 +932,8 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
         # bucket verdict FLIPS between them is DISPUTED, not passed and not failed: acting on
         # either would be acting on a coin toss dressed as a measurement.
         xk, xv = _match_xray(h["name"], xray_ret, (funds.get(sedol) or {}).get("xray_name"))
-        x5 = xv["return_5yr"] if xv else None
+        _x_uncorr = bool(xv) and not _xray_comparable(xv)
+        x5 = xv["return_5yr"] if (xv and not _x_uncorr) else None
         # ⚑ COMPARE LIKE FOR LIKE. The first version compared the golden source at the RUN date
         # against X-Ray figures struck up to two months earlier, and reported the staleness as a
         # disagreement — it flagged JPM UK as DISPUTED when, at the X-Ray's own date, the two
@@ -939,6 +975,11 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
                            f"its own earlier date")
             else:
                 anchor_basis = "reconciled"
+        elif basis is not None and _x_uncorr:
+            anchor_basis = "xray_date_uncorroborated"
+            _xc = (xv or {}).get("date_corroboration") or {}
+            why.append("X-Ray figure NOT compared: its printed date %s is %s (%s) - the verdict rests on the golden "
+                       "source only (ISA-0202)" % (_xc.get("printed"), xv.get("date_state"), _xc.get("why")))
         elif basis is not None:
             why.append("no X-Ray figure for this fund — verdict rests on a SINGLE derivation")
         rows.append({
@@ -952,6 +993,7 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
             "anchor_rule_pass": anchor_pass, "bucket_minimum_pct": bm,
             "dominated_by": dom["dominated_by_name"] if dom else None,
             "xray_5y_ann": x5, "xray_match": xk, "anchor_basis": anchor_basis,
+            "xray_date_state": (xv or {}).get("date_state") if xv else None,
             "rationale": why, "unmeasured": unmeasured,
             "windows": wins, "window_passes": passes, "window_split": window_split,
             "data_status": h["status"],
@@ -1186,7 +1228,13 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None):
     return {
         "as_of": as_of.isoformat(),
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "xray_cross_check": {"funds_matched": sum(1 for r in rows if r.get("xray_match")),
+        "xray_cross_check": {"binding": (xray_binding or ({"state": "NOT_SUPPLIED", "why": "build() was given no "
+                                                       "X-Ray: no cross-check (ISA-0943 - never a default file)"}
+                                                       if not xray else {"state": "SUPPLIED_UNBOUND", "path": str(xray)})),
+                             "report_date": xray_as_of,
+                             "date_uncorroborated": [r["name"] for r in rows
+                                                     if r.get("anchor_basis") == "xray_date_uncorroborated"],
+                             "funds_matched": sum(1 for r in rows if r.get("xray_match")),
                              "disputed": [r["name"] for r in rows
                                           if r.get("anchor_basis") == "DISPUTED"],
                              "figures_differ_beyond_tolerance": [
@@ -1412,6 +1460,31 @@ def _selftest():
     assert _fp869.nav_freshness("Z", {}, dt.date(2026, 10, 31), series=[(dt.date(2026, 8, 4), 1.0)],
                                 state={"funds": {}})["state"] == "STALE_CACHE", \
         "ISA-0869 NEGATIVE CONTROL: an 88-day-old NAV must not read FRESH"
+
+    # ISA-0943 / ISA-0202 (20-Nov-2026)
+    assert _xray_returns(None) == ({}, None), \
+        "ISA-0943 MUST-FIRE: no X-Ray supplied -> no cross-check, never a default (August) file"
+    assert "xray_data_aug_2026.json" not in _bsrc.split("def _selftest")[0], \
+        "ISA-0943 NEGATIVE CONTROL: no hard-coded month file in the FRS"
+    assert not _xray_comparable({"return_5yr": 1.0, "date_state": "DATE_UNCORROBORATED"}) \
+        and not _xray_comparable({"return_5yr": 1.0}) and _xray_comparable({"date_state": "CORROBORATED"}), \
+        "ISA-0202 MUST-FIRE: only a CORROBORATED X-Ray date is compared"
+    import tempfile as _tf
+    _td = _tf.mkdtemp(prefix="fas_xr_")
+    try:
+        _xp = os.path.join(_td, "x.json")
+        json.dump({"_meta": {"report_date": "30 Oct 2026"}, "fund_holdings": [
+            {"name": "F", "return_5yr": 5.0, "as_of": "2026-09-30", "date_state": "CORROBORATED"},
+            {"name": "G", "return_5yr": 6.0, "as_of": "2026-07-31", "date_state": "DATE_UNCORROBORATED"}]}, open(_xp, "w"))
+        _xr, _xa = _xray_returns(_xp)
+        assert _xa == "2026-10-30", "ISA-0943 MUST-FIRE: the report date is read from _meta.report_date (the key the extractor writes)"
+        assert _xr["f"]["date_state"] == "NOT_CORROBORABLE" and _xr["g"]["date_state"] == "NOT_CORROBORABLE", \
+            ("ISA-0202 MUST-FIRE: a stamp carried in the file is NOT trusted - rows are re-corroborated at 6.05 against "
+             "the door (these fixture names have no declared join, so a carried 'CORROBORATED' becomes NOT_CORROBORABLE)",
+             _xr["f"]["date_state"], _xr["g"]["date_state"])
+    finally:
+        import shutil as _sh
+        _sh.rmtree(_td, ignore_errors=True)
 
     # anchor rule direction
     bm = _bucket_minimums()

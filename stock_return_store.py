@@ -70,7 +70,48 @@ TARGET_WEEKS = 104
 MIN_WEEKS = 52
 # P1.6 - a name unobserved for longer than this reads STALE and is EXCLUDED from the matrix.
 STALE_WEEKS = 2
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0934 (20-Nov-2026) — FX DIRECTION IS A DECLARED BASIS, NEVER INFERRED FROM A NUMBER
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# `fx_to_gbp` has always MEANT "pounds per one unit of the level's currency" (the multiplier).
+# The producer passed the Yahoo quote GBP<ccy>=X, which is <ccy> PER POUND, so every foreign
+# level from 28-Aug-2026 was MULTIPLIED by the inverse of the right number: AVGO 30-Oct
+# 326.08 USD x 1.3379 was stored as GBP 436.25 (true ~243.73). Ratios hid the scale, but NOT the
+# direction: each weekly return carried the FX move with its SIGN FLIPPED, so sigma, beta,
+# correlation and the 52-week worst were measured on a currency that does not exist.
+# ⚑ THE CONTRACT NOW: a non-GBP level is accepted only with fx_basis == FX_BASIS_GBP_PER_CCY,
+#   and, when the quote it came from is supplied, fx_to_gbp x fx_quote must equal 1.
+#   Every row carries its basis; `load()` REFUSES a store holding a foreign row without one,
+#   so restoring the pre-ISA-0934 file (or old code writing into a new file) cannot be read
+#   silently as qualified GBP (instruction §7: rollback must not restore a bad FX dependency).
+FX_BASIS_GBP_PER_CCY = "GBP_PER_CCY"      # multiplier: GBP for one unit of the source currency
+FX_BASIS_PENCE = "GBP_PER_GBX"            # fixed 0.01 (ISA-0499/0586)
+FX_BASIS_IDENTITY = "IDENTITY"            # GBP series, 1.0
+FX_VINTAGE = "fx-direction-v2/ISA-0934"
+FX_RECIPROCAL_TOL = 1e-6
+
+
+class StoreFXUnqualified(ValueError):
+    """The store holds a foreign-currency observation whose FX basis is not declared (ISA-0934)."""
+
+
+def fx_unqualified(doc: dict) -> dict:
+    """{ticker: n_rows} of observations whose GBP value cannot be trusted for direction:
+    a non-GBP series row (or a GBP-series row with a non-unit, non-pence factor) carrying no
+    declared fx_basis. Pure read; used by load() and by the migration."""
+    out = {}
+    for t, rec in ((doc or {}).get("names") or {}).items():
+        cur = (rec or {}).get("currency")
+        for o in ((rec or {}).get("observations") or {}).values():
+            if not isinstance(o, dict) or o.get("fx_basis"):
+                continue
+            f = o.get("fx_to_gbp", 1.0)
+            if cur not in (None, "GBP") or (f is not None and abs(float(f) - 1.0) > 1e-12
+                                              and abs(float(f) - 0.01) > 1e-12):
+                out[t] = out.get(t, 0) + 1
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
@@ -282,7 +323,9 @@ def _empty() -> dict:
             "schema_version": SCHEMA_VERSION, "names": {}, "fx": {}, "history": []}
 
 
-def load() -> dict:
+def load(allow_fx_unqualified: bool = False) -> dict:
+    """ISA-0934: REFUSES (StoreFXUnqualified) a store with any foreign row lacking a declared
+    fx_basis. `allow_fx_unqualified=True` is for the one-time migration and forensics only."""
     if not os.path.exists(STORE):
         return _empty()
     try:
@@ -299,6 +342,15 @@ def load() -> dict:
              "on": datetime.date.today().isoformat()})
         doc["schema_version"] = SCHEMA_VERSION
     doc.setdefault("names", {}); doc.setdefault("fx", {}); doc.setdefault("history", [])
+    if not allow_fx_unqualified:
+        _bad = fx_unqualified(doc)
+        if _bad:
+            raise StoreFXUnqualified(
+                "ISA-0934: %s holds %d foreign observation(s) across %d name(s) with no declared "
+                "fx_basis (e.g. %s). Their `gbp` values may be the INVERTED pre-ISA-0934 "
+                "conversion; refusing rather than measuring risk on them. Run "
+                "`stock_return_store.py --migrate-fx-direction` (lineage-stamped, original frozen)."
+                % (STORE, sum(_bad.values()), len(_bad), sorted(_bad)[:3]))
     return doc
 
 
@@ -315,7 +367,9 @@ def save(doc: dict) -> str:
 def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
                  source: str, fx_to_gbp: Optional[float] = None,
                  total_return: bool = False,
-                 recorded_on: Optional[datetime.date] = None) -> dict:
+                 recorded_on: Optional[datetime.date] = None,
+                 fx_basis: Optional[str] = None, fx_pair: Optional[str] = None,
+                 fx_quote: Optional[float] = None) -> dict:
     """Record ONE weekly close. Every observation carries as_of, source and currency (R4.2).
 
     ⚑ `total_return` is declared, never assumed. A price series and a total-return series are
@@ -346,6 +400,32 @@ def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
             f"{ticker}: level is in {_raw_cur} and no fx_to_gbp was supplied. A2.2 requires GBP "
             f"total return because FX correlation is part of realised risk; converting later "
             f"from a rate we did not capture at the time is not point-in-time (R6.4).")
+    # ⚑ ISA-0934: the DIRECTION is declared, then checked against the quote it came from.
+    if cur != "GBP" and not _is_pence:
+        if fx_basis != FX_BASIS_GBP_PER_CCY:
+            raise ValueError(
+                f"{ticker}: a {_raw_cur} level needs fx_basis={FX_BASIS_GBP_PER_CCY!r} (GBP per one "
+                f"{_raw_cur}); got {fx_basis!r}. ISA-0934: a GBP<ccy>=X quote is <ccy> PER POUND and "
+                f"multiplying by it inverts the conversion. Pass fx_to_gbp=1/quote.")
+        if not (float(fx_to_gbp) > 0):
+            raise ValueError(f"{ticker}: fx_to_gbp must be positive, got {fx_to_gbp!r}")
+        if fx_quote is not None and abs(float(fx_to_gbp) * float(fx_quote) - 1.0) > FX_RECIPROCAL_TOL:
+            raise ValueError(
+                f"{ticker}: fx_to_gbp {fx_to_gbp} x fx_quote {fx_quote} != 1 - the multiplier is not "
+                f"the reciprocal of the quote it claims to come from (ISA-0934)")
+        _band = _gbp_per_ccy_band(fx_pair) if fx_pair else None
+        if _band and not (_band[0] <= float(fx_to_gbp) <= _band[1]):
+            raise ValueError(
+                f"{ticker}: fx_to_gbp {fx_to_gbp} is outside the GBP-per-{_raw_cur} band "
+                f"[{_band[0]:.6f}, {_band[1]:.6f}] implied by {fx_pair}'s declared band - an inverted "
+                f"or scaled rate (ISA-0934/ISA-0429)")
+        _basis = FX_BASIS_GBP_PER_CCY
+    elif _is_pence:
+        if abs(float(fx_to_gbp) - 0.01) > 1e-12:
+            raise ValueError(f"{ticker}: a GBp level converts at exactly 0.01, got {fx_to_gbp!r} (ISA-0499)")
+        _basis = FX_BASIS_PENCE
+    else:
+        _basis = FX_BASIS_IDENTITY
     wk = week_key(datetime.date.fromisoformat(on))
     _rec_on = recorded_on or datetime.date.today()
     rec = doc["names"].setdefault(ticker, {"currency": cur, "total_return_basis": bool(total_return),
@@ -366,6 +446,9 @@ def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
         "gbp": (round(float(level) * float(fx_to_gbp), 8)
                 if (cur != "GBP" or _is_pence) else float(level)),
         "fx_to_gbp": float(fx_to_gbp) if fx_to_gbp is not None else 1.0,
+        "fx_basis": _basis,
+        **({"fx_pair": fx_pair} if fx_pair else {}),
+        **({"fx_quote": float(fx_quote)} if fx_quote is not None else {}),
         # ⚑ THE DENOMINATION THE LEVEL ARRIVED IN, stamped so the transform is visible on the
         # row rather than inferred from a rate (R4.2). The SERIES currency stays GBP because
         # `gbp` is pounds after conversion; `source_currency` says where it came from.
@@ -386,6 +469,138 @@ def record_level(doc: dict, ticker: str, on: str, level: float, currency: str,
         "recorded_on": _rec_on.isoformat(),
     }
     return doc
+
+
+def _gbp_per_ccy_band(pair: Optional[str]):
+    """Reciprocal of stock_price_fetch.FX_BANDS[pair] (which bounds the <ccy>-per-GBP quote)."""
+    try:
+        import stock_price_fetch as _spf                   # lazy: stock_price_fetch imports this module
+        lo, hi = _spf.FX_BANDS[pair]
+        return (1.0 / hi, 1.0 / lo)
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _pair_for(ccy: Optional[str]) -> Optional[str]:
+    try:
+        import stock_price_fetch as _spf
+        return _spf.CURRENCY_TO_PAIR.get(ccy)
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def migrate_fx_direction(doc: dict, *, today: Optional[str] = None,
+                         original_sha256: Optional[str] = None,
+                         frozen_path: Optional[str] = None) -> dict:
+    """ISA-0934 one-time, lineage-stamped correction of the pre-v2 vintage, IN MEMORY.
+
+    Rule: a foreign row's stored `fx_to_gbp` is the GBP<ccy>=X QUOTE (ccy per GBP). The corrected
+    value is gbp = level / quote, multiplier = 1/quote. Each corrected row keeps `level` and its
+    capture stamps untouched, records the quote as `fx_quote`, and is stamped `fx_basis`,
+    `fx_vintage` and `fx_corrected_on`. GBP rows are stamped IDENTITY, GBp rows PENCE.
+    ⚑ ATOMIC + REFUSING: every foreign quote must sit inside its pair's declared <ccy>-per-GBP
+    band (so the row is PROVABLY the inverted kind); a row outside it, an undeclared currency or a
+    non-positive level makes the whole migration refuse and leaves `doc` untouched.
+    Idempotent: rows already carrying fx_basis are left alone."""
+    import copy
+    today = today or datetime.date.today().isoformat()
+    work = copy.deepcopy(doc.get("names") or {})
+    per_ccy, refusals, n_ident, n_pence, deltas = {}, [], 0, 0, []
+    for t, rec in work.items():
+        cur = (rec or {}).get("currency")
+        obs = (rec or {}).get("observations") or {}
+        pair = _pair_for(cur) if cur not in (None, "GBP") else None
+        band = None
+        if pair:
+            try:
+                import stock_price_fetch as _spf
+                band = _spf.FX_BANDS[pair]
+            except Exception:                              # noqa: BLE001
+                band = None
+        prev_key = None
+        for k in sorted(obs):
+            o = obs[k]
+            if not isinstance(o, dict) or o.get("fx_basis"):
+                prev_key = k
+                continue
+            f = float(o.get("fx_to_gbp", 1.0))
+            if cur in (None, "GBP"):
+                if abs(f - 1.0) <= 1e-12:
+                    o["fx_basis"] = FX_BASIS_IDENTITY; n_ident += 1
+                elif abs(f - 0.01) <= 1e-12:
+                    o["fx_basis"] = FX_BASIS_PENCE; n_pence += 1
+                else:
+                    refusals.append({"ticker": t, "week": k, "why": "GBP series with factor %r" % f})
+                prev_key = k
+                continue
+            lv = o.get("level")
+            if not pair or not band:
+                refusals.append({"ticker": t, "week": k, "why": "no declared FX pair/band for %s" % cur})
+                continue
+            if not (band[0] <= f <= band[1]):
+                refusals.append({"ticker": t, "week": k,
+                                 "why": "stored rate %r outside the %s quote band %s - not provably "
+                                        "the inverted kind" % (f, pair, band)})
+                continue
+            if not lv or float(lv) <= 0:
+                refusals.append({"ticker": t, "week": k, "why": "non-positive level %r" % lv})
+                continue
+            old_gbp = o.get("gbp")
+            # ⚑ KR6 / FI-Q1-gbp (found 20-Nov-2026 in the P3 SHADOW preflight): this function used to compute
+            #   `gbp` itself (level / quote), a SECOND computer of a registered quantity. The corrected row is now
+            #   derived THROUGH `record_level` - the one registered computer - on a scratch doc, so the same
+            #   direction, reciprocal and band checks bind the migration, and only the conversion fields are
+            #   relayed onto the original row (level, as_of, source and capture stamps stay untouched).
+            try:
+                _scr = record_level({"names": {}}, t, o.get("as_of") or k, float(lv), cur,
+                                    o.get("source") or "ISA-0934 migration", fx_to_gbp=1.0 / f,
+                                    fx_basis=FX_BASIS_GBP_PER_CCY, fx_pair=pair, fx_quote=f)
+            except ValueError as exc:
+                refusals.append({"ticker": t, "week": k, "why": "record_level refused the corrected row: %s" % exc})
+                continue
+            _row = next(iter(next(iter(_scr["names"].values()))["observations"].values()))
+            o["gbp"] = _row["gbp"]
+            o["fx_to_gbp"] = _row["fx_to_gbp"]
+            o["fx_quote"] = _row["fx_quote"]
+            o["fx_pair"] = _row["fx_pair"]
+            o["fx_basis"] = _row["fx_basis"]
+            o["fx_vintage"] = FX_VINTAGE
+            o["fx_corrected_on"] = today
+            o.setdefault("source_currency", cur)
+            if old_gbp is not None and abs(float(old_gbp) - round(float(lv) * f, 8)) > 1e-6 * max(1.0, abs(float(old_gbp))):
+                refusals.append({"ticker": t, "week": k,
+                                 "why": "stored gbp %r != level x rate %r - not the documented "
+                                        "pre-v2 arithmetic" % (old_gbp, round(float(lv) * f, 8))})
+            c = per_ccy.setdefault(cur, {"names": set(), "observations": 0})
+            c["names"].add(t); c["observations"] += 1
+            # two-derivation check on the weekly RETURN: corrected = local return x (q0 / q1)
+            if prev_key is not None and k in obs:
+                p = obs[prev_key]
+                d0 = datetime.date.fromisoformat(prev_key); d1 = datetime.date.fromisoformat(k)
+                if (d1 - d0).days == 7 and p.get("fx_quote") and p.get("level"):
+                    r_new = o["gbp"] / p["gbp"] - 1.0
+                    r_ind = (float(lv) / float(p["level"])) * (float(p["fx_quote"]) / f) - 1.0
+                    deltas.append(abs(r_new - r_ind))
+            prev_key = k
+    summary = {"item": "ISA-0934", "on": today, "vintage": FX_VINTAGE,
+               "rule": "gbp = level / quote(GBP<ccy>=X); fx_to_gbp = 1/quote; quote kept as fx_quote",
+               "per_currency": {c: {"names": len(v["names"]), "observations": v["observations"]}
+                                for c, v in sorted(per_ccy.items())},
+               "n_corrected": sum(v["observations"] for v in per_ccy.values()),
+               "n_names_corrected": len({n for v in per_ccy.values() for n in v["names"]}),
+               "n_stamped_identity": n_ident, "n_stamped_pence": n_pence,
+               "two_derivation_max_return_delta": max(deltas) if deltas else None,
+               "two_derivation_pairs": len(deltas),
+               "original_sha256": original_sha256, "frozen_original": frozen_path,
+               "refusals": refusals[:50], "n_refusals": len(refusals)}
+    if refusals:
+        summary["state"] = "REFUSED"
+        return summary
+    doc["names"] = work
+    doc.setdefault("repairs", []).append({k: v for k, v in summary.items() if k != "refusals"})
+    doc["schema_version"] = SCHEMA_VERSION
+    summary["state"] = "MIGRATED" if summary["n_corrected"] or n_ident or n_pence else "NO_OP"
+    return summary
 
 
 def weekly_returns(doc: dict, ticker: str) -> Tuple[Dict[str, float], dict]:
@@ -567,17 +782,17 @@ def _selftest():
     for i in range(60):
         day = base + datetime.timedelta(weeks=i)
         record_level(d, "AAA", day.isoformat(), 100.0 * (1.01 ** i), "USD",
-                     "selftest", fx_to_gbp=0.78)
+                     "selftest", fx_to_gbp=0.78, fx_basis=FX_BASIS_GBP_PER_CCY)
     r, m = weekly_returns(d, "AAA")
     assert len(r) == 59 and m["gaps_skipped"] == 0, (len(r), m)
     # ISA-0809 — a stub (attempt-stamped, no currency, no observations) adopts its first currency
     d["names"]["STUB"] = {"last_fetched_on": "2026-10-03"}
-    record_level(d, "STUB", base.isoformat(), 100.0, "USD", "selftest", fx_to_gbp=0.78)
+    record_level(d, "STUB", base.isoformat(), 100.0, "USD", "selftest", fx_to_gbp=0.78, fx_basis=FX_BASIS_GBP_PER_CCY)
     assert d["names"]["STUB"]["currency"] == "USD" and len(d["names"]["STUB"]["observations"]) == 1, \
         "MUST-FIRE ISA-0809: a stub record must accept its first observation"
     try:
         record_level(d, "AAA", (base + datetime.timedelta(weeks=70)).isoformat(), 100.0, "EUR",
-                     "selftest", fx_to_gbp=0.85)
+                     "selftest", fx_to_gbp=0.85, fx_basis=FX_BASIS_GBP_PER_CCY)
         raise AssertionError("NEGATIVE CONTROL ISA-0809: a REAL currency change must still raise")
     except ValueError:
         pass
@@ -648,7 +863,90 @@ def _selftest():
         raise AssertionError("ISA-0549 NEGATIVE CONTROL: migration over an ambiguous map must REFUSE")
     except CanonicalIdentityConflict:
         pass
-    print("stock_return_store selftest OK (9 + 11 ISA-0549 assertions)")
+    n934 = _selftest_0934()
+    print("stock_return_store selftest OK (9 + 11 ISA-0549 + %d ISA-0934 assertions)" % n934)
+
+
+def _selftest_0934() -> int:
+    """ISA-0934: direction through the store, rising/falling/constant sterling, inverse refusal,
+    migration (exact, atomic, idempotent, refusing) and the strict load()."""
+    import tempfile
+    global STORE
+    n = 0
+    D = datetime.date
+    wk = [D(2026, 1, 2) + datetime.timedelta(weeks=i) for i in range(3)]
+
+    def series(quotes, locals_=(100.0, 100.0, 100.0)):
+        d = _empty()
+        for day, q, lv in zip(wk, quotes, locals_):
+            record_level(d, "USX", day.isoformat(), lv, "USD", "t", fx_to_gbp=1.0 / q,
+                         fx_basis=FX_BASIS_GBP_PER_CCY, fx_pair="GBPUSD=X", fx_quote=q,
+                         recorded_on=day)
+        return weekly_returns(d, "USX")[0], d
+    # RISING STERLING (1.25 -> 1.30): a flat USD price LOSES in GBP
+    r, _ = series((1.25, 1.30, 1.30))
+    assert abs(r[wk[1].isoformat()] - (1.25 / 1.30 - 1.0)) < 1e-9 and r[wk[1].isoformat()] < 0, r; n += 1
+    # FALLING STERLING (1.30 -> 1.25): a flat USD price GAINS in GBP
+    r, _ = series((1.30, 1.25, 1.25))
+    assert r[wk[1].isoformat()] > 0 and abs(r[wk[1].isoformat()] - (1.30 / 1.25 - 1.0)) < 1e-9, r; n += 1
+    # CONSTANT FX: the GBP return IS the local return
+    r, _ = series((1.30, 1.30, 1.30), (100.0, 110.0, 99.0))
+    assert abs(r[wk[1].isoformat()] - 0.10) < 1e-9 and abs(r[wk[2].isoformat()] - (99.0 / 110.0 - 1)) < 1e-9; n += 1
+    # NEGATIVE CONTROL - the defect's sign: under the old multiply-by-quote, rising sterling GAINED
+    assert (100.0 * 1.30) / (100.0 * 1.25) - 1.0 > 0; n += 1
+    # INVERSE refused: the quote in a GBP-per-ccy slot fails the reciprocal band
+    try:
+        record_level(_empty(), "USX", wk[0].isoformat(), 100.0, "USD", "t", fx_to_gbp=1.30,
+                     fx_basis=FX_BASIS_GBP_PER_CCY, fx_pair="GBPUSD=X")
+        raise AssertionError("ISA-0934 MUST-FIRE: an inverted multiplier must be refused by the band")
+    except ValueError:
+        pass
+    n += 1
+    # MIGRATION: an old-vintage doc (multiplied by the quote) becomes byte-equal to a fresh v2 write
+    old = _empty()
+    old["names"]["USX"] = {"currency": "USD", "total_return_basis": False, "observations": {}}
+    old["names"]["GBX.L"] = {"currency": "GBP", "total_return_basis": False, "observations": {}}
+    for day, q, lv in zip(wk, (1.25, 1.30, 1.28), (100.0, 104.0, 101.0)):
+        old["names"]["USX"]["observations"][day.isoformat()] = {
+            "level": lv, "gbp": round(lv * q, 8), "fx_to_gbp": q, "source_currency": "USD",
+            "as_of": day.isoformat(), "source": "t", "stamp_basis": "point_in_time",
+            "recorded_on": day.isoformat()}
+        old["names"]["GBX.L"]["observations"][day.isoformat()] = {
+            "level": 1250.0, "gbp": 12.5, "fx_to_gbp": 0.01, "source_currency": "GBp",
+            "as_of": day.isoformat(), "source": "t"}
+    assert fx_unqualified(old) == {"USX": 3}, fx_unqualified(old); n += 1
+    before = json.dumps(old, sort_keys=True)
+    res = migrate_fx_direction(old, today="2026-11-20", original_sha256="x")
+    assert res["state"] == "MIGRATED" and res["n_corrected"] == 3 and res["n_stamped_pence"] == 3, res; n += 1
+    _, fresh = series((1.25, 1.30, 1.28), (100.0, 104.0, 101.0))
+    for k in fresh["names"]["USX"]["observations"]:
+        a, b = old["names"]["USX"]["observations"][k], fresh["names"]["USX"]["observations"][k]
+        assert abs(a["gbp"] - b["gbp"]) < 1e-8 and abs(a["fx_to_gbp"] - b["fx_to_gbp"]) < 1e-15, (a, b)
+    n += 1
+    assert res["two_derivation_max_return_delta"] < 1e-9, res; n += 1
+    assert fx_unqualified(old) == {} and old["repairs"][-1]["item"] == "ISA-0934"; n += 1
+    assert migrate_fx_direction(old, today="2026-11-21")["state"] == "NO_OP", "idempotent"; n += 1
+    assert json.dumps(old, sort_keys=True) != before; n += 1
+    # MIGRATION REFUSES atomically on a row that is NOT provably the inverted kind
+    bad = json.loads(before)
+    bad["names"]["USX"]["observations"][wk[1].isoformat()]["fx_to_gbp"] = 0.77   # already GBP/USD?
+    bad_b = json.dumps(bad, sort_keys=True)
+    rr = migrate_fx_direction(bad, today="2026-11-20")
+    assert rr["state"] == "REFUSED" and json.dumps(bad, sort_keys=True) == bad_b, rr; n += 1
+    # STRICT LOAD: an unmigrated store on disk is REFUSED; the migrated one loads
+    STORE = os.path.join(tempfile.mkdtemp(), "s.json")
+    with open(STORE, "w", encoding="utf-8") as fh:
+        fh.write(before)
+    try:
+        load()
+        raise AssertionError("ISA-0934 MUST-FIRE: load() must refuse an unqualified store")
+    except StoreFXUnqualified:
+        pass
+    n += 1
+    assert load(allow_fx_unqualified=True)["names"]["USX"]; n += 1
+    save(old)
+    assert load()["names"]["USX"]["observations"][wk[0].isoformat()]["fx_basis"] == FX_BASIS_GBP_PER_CCY; n += 1
+    return n
 
 
 if __name__ == "__main__":
@@ -668,4 +966,32 @@ if __name__ == "__main__":
         if _r["changed"]:
             save(_doc)
         print(json.dumps(dict(_r, backup=_bk, after=identity_report(load())), indent=1)); sys.exit(0)
+    if "--migrate-fx-direction" in sys.argv:
+        # ISA-0934 one-time migration. Freezes the byte-exact original, then CAS-replaces the store.
+        import durable_store as _ds
+        _orig = _ds.read_bytes(STORE)
+        if _orig is None:
+            print(json.dumps({"state": "NO_STORE", "store": STORE})); sys.exit(2)
+        _sha = _ds.sha256_bytes(_orig)
+        _fdir = os.path.join(os.path.dirname(STORE), "Dashboard", "state", "frozen_stores")
+        os.makedirs(_fdir, exist_ok=True)
+        _frozen = os.path.join(_fdir, "stock_weekly_returns.pre_ISA-0934.%s.json" % _sha[:12])
+        _doc = json.loads(_orig.decode("utf-8"))
+        _today = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--on=")), None)
+        _rel = os.path.relpath(_frozen, os.path.dirname(STORE)).replace(os.sep, "/")
+        _r = migrate_fx_direction(_doc, today=_today, original_sha256=_sha, frozen_path=_rel)
+        if _r["state"] != "MIGRATED":
+            print(json.dumps(_r, indent=1)); sys.exit(0 if _r["state"] == "NO_OP" else 3)
+        if os.path.exists(_frozen):
+            if _ds.sha256_file(_frozen) != _sha:
+                print(json.dumps({"state": "REFUSED", "why": "frozen path exists with different bytes"})); sys.exit(3)
+        else:
+            _ds.atomic_write_bytes(_frozen, _orig, expected_sha=None)
+        assert _ds.sha256_file(_frozen) == _sha
+        _new = json.dumps(_doc, indent=1, ensure_ascii=False).encode("utf-8")
+        _w = _ds.atomic_write_bytes(STORE, _new, expected_sha=_sha)
+        _after = load()                                   # strict: must now be qualified
+        _r.update(new_sha256=_ds.sha256_file(STORE), write=_w, strict_reload_ok=True,
+                  unqualified_after=fx_unqualified(_after))
+        print(json.dumps(_r, indent=1, default=str)); sys.exit(0)
     print(json.dumps(coverage(load()), indent=1))

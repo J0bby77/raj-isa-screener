@@ -2559,6 +2559,9 @@ SUMMARY_ESCALATED = {
     # ISA-0830 (R6.6): X-Ray account/period identity - a MISMATCH is an ERROR (blocks the review); UNVERIFIED
     # reaches the warning list with this prefix.
     "xray_identity": "XRAY IDENTITY UNVERIFIED",
+    # ISA-0943 (20-Nov-2026): the FRS X-Ray binding ESCALATES only when the cross-check is OFF (no run-month X-Ray,
+    #   or one of another period); BOUND has nothing to tell the reader that Step 6.05 does not already say.
+    "frs_xray_binding": "Step 6.05 X-RAY CROSS-CHECK OFF",
     # ISA-0701 — activation outcomes ESCALATE: an activated/fulfilled first claim, or an execution
     #   that could NOT create one (deviation, blocked VCI, non-contemporaneous plan), is an exception.
     "obligation_activation": "Step 1.5 (ISA-0701)",

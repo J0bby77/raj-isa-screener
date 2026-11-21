@@ -38,6 +38,15 @@ import os
 import sys
 from pathlib import Path
 
+# ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -93,6 +102,7 @@ def build_panel(universe=None):
     Every series comes from the module that owns it. `refused` is a first-class outcome and is
     counted, never dropped (R4.9).
     """
+    _fi_mark("fund_learning", "build_panel")                      # ISA-0944: declared capability producer
     import fund_performance as fp
     import fund_action_stack as fas
     import benchmark_registry as breg

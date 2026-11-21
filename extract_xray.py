@@ -32,6 +32,15 @@ from datetime import datetime
 
 import pdfplumber
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -616,32 +625,143 @@ def _parse_fund_as_of(raw):
         return None
 
 
-def stamp_fund_staleness(funds, report_date):
-    """I4 -- every per-fund figure must declare how stale it is vs the report
-    header. Returns (funds, warnings). A gap is NOT an error (Morningstar lags
-    by design); publishing it undated IS."""
+# ⚑ ISA-0202 (20-Nov-2026): a per-fund X-Ray date is a CLAIM about when its figures were struck, and the claim can be
+#   wrong. Scottish Mortgage's printed date lags its own figures by one month (Nov X-Ray: printed 31-Jul, figures fit
+#   the golden total return to 30-Sep; the Sep X-Ray likewise). A staleness or comparison built on that label raises a
+#   false stale warning every month and turns a relabel into a SOURCE_CONFLICT. So a printed date is CORROBORATED
+#   against the golden NAV door (best-fit month-end strike) before anything uses it; an uncorroborated date is
+#   published as DATE_UNCORROBORATED - never as staleness, never compared. The ~0.5pp residual SMT shows even at its
+#   best-fit date is a price-vs-NAV basis difference and stays UNRESOLVED.
+DATE_STATES = ("CORROBORATED", "DATE_UNCORROBORATED", "NOT_CORROBORABLE")
+DATE_FIT_TOL_PP = 0.25          # DECLARED: raw close reproduces the X-Ray to 2dp on every corroborable fund (20-Nov-2026)
+DATE_FIT_LOOKBACK_DAYS = 100    # candidate strikes: month-ends from ~3 months before the printed date to the report date
+XRAY_FIT_WINDOWS = (("return_1yr", 1.0), ("return_3yr", 3.0), ("return_5yr", 5.0))
+STALE_DAYS_WARN = 5
+
+
+def _month_ends(d0, d1):
     import datetime as _dt
-    warnings = []
+    out, y, m = [], d0.year, d0.month
+    while True:
+        nm = _dt.date(y + (m // 12), m % 12 + 1, 1)
+        me = nm - _dt.timedelta(days=1)
+        if me > d1:
+            break
+        if me >= d0:
+            out.append(me)
+        y, m = nm.year, nm.month
+    return out
+
+
+def _door_golden():
+    """{xray_name_lower: series} via THE NAV door (fund_performance.nav_series_for), lazily. Never raises: a fund
+    the door refuses is simply not corroborable (its row says why)."""
+    import fund_performance as _fp
+    uni = _fp.load_universe()
+    names = {" ".join(str(u.get("xray_name") or "").lower().split()): (s, u)
+             for s, u in uni.items() if isinstance(u, dict) and u.get("xray_name")}
+    memo = {}
+
+    def golden(name):
+        k = " ".join(str(name or "").lower().split())
+        if k not in names:
+            return None, "no declared xray_name join in fund_universe"
+        if k not in memo:
+            s, u = names[k]
+            pv = _fp.nav_series_provenance(s, u)
+            if pv.get("state") not in ("BASIS_RECORDED", "DECLARED_LOCAL_SERIES"):
+                # a series of unknown or wrong price basis cannot corroborate anything (ISA-0901): the cache is
+                # migrated by Step 6.04, which runs AFTER this extraction - consumers re-corroborate after it
+                memo[k] = (None, "golden series provenance %s (basis not recorded at its declared %s) - not "
+                                 "corroborable until pre-run Step 6.04 records it" % (pv.get("state"), pv.get("declared_basis")))
+                return memo[k]
+            try:
+                memo[k] = (_fp.nav_series_for(s, u) or None, None)
+            except Exception as e:                                      # noqa: BLE001
+                memo[k] = (None, "NAV door refused: %s: %s" % (type(e).__name__, e))
+        return memo[k]
+    return golden
+
+
+def corroborate_fund_date(f, report_date, golden):
+    """-> {date_state, printed, best_fit_date, best_fit_max_diff_pp, printed_max_diff_pp, why}. `golden(name)` ->
+    (series, why). Pure on its inputs."""
+    import datetime as _dt
+    import fund_performance as _fp
+    printed = None
     try:
-        rep = _dt.date.fromisoformat((report_date or "")[:10])
-    except (ValueError, TypeError):
-        rep = None
+        printed = _dt.date.fromisoformat(str(f.get("as_of") or "")[:10])
+    except ValueError:
+        printed = _parse_any_date(f.get("as_of_raw"))
+    rep = report_date if isinstance(report_date, _dt.date) else _parse_any_date(report_date)
+    out = {"printed": printed.isoformat() if printed else None, "tolerance_pp": DATE_FIT_TOL_PP}
+    if not printed or not rep:
+        return dict(out, date_state="NOT_CORROBORABLE", why="printed date %r or report date %r unreadable"
+                    % (f.get("as_of_raw") or f.get("as_of"), report_date))
+    series, gwhy = golden(f.get("name"))
+    if not series:
+        return dict(out, date_state="NOT_CORROBORABLE", why=gwhy or "no golden series")
+    fig = [(k, y, f.get(k)) for k, y in XRAY_FIT_WINDOWS if f.get(k) is not None]
+    if not fig:
+        return dict(out, date_state="NOT_CORROBORABLE", why="no X-Ray 1/3/5y figure on the row")
+    fits = []
+    for c in _month_ends(printed - _dt.timedelta(days=DATE_FIT_LOOKBACK_DAYS), rep):
+        diffs = []
+        for k, y, x in fig:
+            ann = _fp.trailing_return(series, c, y, "golden", k)[1]
+            if not _fp.is_present(ann):
+                diffs = None
+                break
+            diffs.append(abs(ann.value - float(x)))
+        if diffs:
+            fits.append((max(diffs), c))
+    if not fits:
+        return dict(out, date_state="NOT_CORROBORABLE", why="the golden series covers no candidate strike date")
+    best = min(fits, key=lambda t: (round(t[0], 6), 0 if t[1] == printed else 1))   # a tie goes to the printed date
+    at_printed = next((d for d, c in fits if c == printed), None)
+    out.update(best_fit_date=best[1].isoformat(), best_fit_max_diff_pp=round(best[0], 3),
+               printed_max_diff_pp=(round(at_printed, 3) if at_printed is not None else None))
+    if best[1] == printed and best[0] <= DATE_FIT_TOL_PP:
+        return dict(out, date_state="CORROBORATED", why="the golden series reproduces the X-Ray at its printed date")
+    if best[1] != printed:
+        why = ("the X-Ray figures fit the golden series at %s (max diff %.2fpp), not at the printed %s (%s) - the "
+               "printed date is a label, not the strike" % (best[1], best[0], printed,
+                                                             "%.2fpp" % at_printed if at_printed is not None else "not measurable"))
+    else:
+        why = ("best fit is the printed date but the residual %.2fpp exceeds %.2fpp - a basis difference, UNRESOLVED"
+               % (best[0], DATE_FIT_TOL_PP))
+    return dict(out, date_state="DATE_UNCORROBORATED", why=why)
+
+
+def stamp_fund_staleness(funds, report_date, golden=None):
+    """I4 -- every per-fund figure declares how stale it is vs the report header, ON A CORROBORATED DATE ONLY.
+    Returns (funds, warnings). A gap is NOT an error (Morningstar lags by design); publishing it undated IS, and
+    so is publishing an uncorroborated label as staleness (ISA-0202). `report_date` in any X-Ray header format
+    ('30 Oct 2026', '31-Oct-2026', ISO); `golden` defaults to the NAV door."""
+    warnings = []
+    rep = _parse_any_date(report_date) if not hasattr(report_date, "year") else report_date
+    if golden is None:
+        try:
+            golden = _door_golden()
+        except Exception as e:                                          # noqa: BLE001
+            _gerr = "%s: %s" % (type(e).__name__, e)
+            golden = lambda _n: (None, "NAV door unavailable: " + _gerr)  # noqa: E731
     worst = 0
     for f in funds:
-        if f.get("as_of") and rep:
-            try:
-                d = (rep - _dt.date.fromisoformat(f["as_of"])).days
-            except ValueError:
-                d = None
+        c = corroborate_fund_date(f, rep, golden)
+        f["date_corroboration"] = c
+        f["date_state"] = c["date_state"]
+        if c["date_state"] == "CORROBORATED" and rep:
+            d = (rep - _parse_any_date(c["printed"])).days
             f["stale_days"] = d
-            f["as_of_basis"] = "per-fund Date column (NOT the report header)"
-            if d and d > 5:
+            f["as_of_basis"] = "per-fund Date column, corroborated against the golden series (NOT the report header)"
+            if d > STALE_DAYS_WARN:
                 worst = max(worst, d)
         else:
             f["stale_days"] = None
-            f["as_of_basis"] = "UNKNOWN -- no per-fund date parsed"
-            warnings.append(f"I4: '{f.get('name','?')}' has no per-fund as_of; "
-                            "its returns must NOT be presented as current")
+            f["as_of_basis"] = "%s - %s" % (c["date_state"], c.get("why"))
+            warnings.append("I4: '%s' per-fund date %s is %s (%s); its figures are not used for staleness or "
+                            "comparison" % (f.get("name", "?"), c.get("printed"), c["date_state"], c.get("why")))
     if worst:
         warnings.append(
             f"I4: X-Ray per-fund performance is {worst} days older than the report "
@@ -852,6 +972,7 @@ def parse_fund_holdings(text: str) -> list:
     Extract Portfolio Holdings table (page 4 of PDF).
     Returns list of fund dicts.
     """
+    _fi_mark("extract_xray", "parse_fund_holdings")                      # ISA-0940: declared capability producer
     funds = []
 
     # Find the holdings section
@@ -1009,6 +1130,13 @@ def parse_xray(pdf_path: str) -> dict:
     }
     result["correlation_matrix"] = parse_correlation_matrix(
         text, (result["holdings_statistics"] or {}).get("by_index"))
+    # ⚑ ISA-0202 (20-Nov-2026): I4 is wired here - every per-fund date is corroborated (or typed) before any consumer
+    #   reads it; the counts ride on _meta so a reader of an older file can tell it was never stamped.
+    _fh, _i4 = stamp_fund_staleness(result["fund_holdings"] or [], report_date)
+    result["_meta"]["fund_date_corroboration"] = {
+        "counts": {s: sum(1 for f in _fh if f.get("date_state") == s) for s in DATE_STATES},
+        "tolerance_pp": DATE_FIT_TOL_PP, "basis": "ISA-0202 best-fit month-end strike vs the golden NAV door"}
+    PARSE_WARNINGS.extend(_i4)
     result["_meta"]["parse_warnings"] = list(PARSE_WARNINGS)   # Fix Pack A10
 
     # ⚑ ISA-0830 (R6.6, 04-Oct-2026): the X-Ray header names the account ("AJ Bell ISA (ACB8G2I)").
@@ -1111,6 +1239,47 @@ def _selftest() -> int:
        [r["country"] for r in _rows] == ["United States", "Republic of Korea", "China", "Germany"])
     ok("P-B6 NEGATIVE CONTROL: a genuine two-number 'Other' country row is still read",
        [r["country"] for r in parse_country_exposure("Other 3.10 2.05\nGermany 1.0 2.0\n")] == ["Other", "Germany"])
+    # ── ISA-0202 (20-Nov-2026): staleness on corroborated dates only ─────────────────────────────────────
+    import datetime as _dt
+    import math as _m
+    base = [(_dt.date(2016, 8, 5) + _dt.timedelta(days=i), 100.0 * (1.0004 ** i) * (1.0 + 0.08 * _m.sin(i / 23.0)))
+            for i in range(0, 3740)]
+    import fund_performance as _fp
+
+    def _ann(series, d, y):
+        return round(_fp.trailing_return(series, d, y, "t", "x")[1].value, 2)
+    s30 = _dt.date(2026, 9, 30)
+    row_ok = {"name": "FUND A", "as_of": "2026-09-30", "return_1yr": _ann(base, s30, 1.0),
+              "return_3yr": _ann(base, s30, 3.0), "return_5yr": _ann(base, s30, 5.0)}
+    row_relab = dict(row_ok, name="FUND B", as_of="2026-07-31")          # figures struck 30-Sep, printed 31-Jul (SMT)
+    row_none = {"name": "FUND C", "as_of": "2026-09-30", "return_1yr": 5.0}
+    gold = lambda n: ((base, None) if n in ("FUND A", "FUND B") else (None, "no declared xray_name join"))  # noqa: E731
+    rows, w = stamp_fund_staleness([dict(row_ok), dict(row_relab), dict(row_none)], "30 Oct 2026", golden=gold)
+    st = {r["name"]: r for r in rows}
+    ok("ISA-0202 MUST-FIRE: the report date parses from the header format ('30 Oct 2026') - not every fund 'no as_of'",
+       st["FUND A"]["stale_days"] == 30)
+    ok("ISA-0202 MUST-FIRE: a corroborated date lagging the report by > 5 days WARNS (I4 staleness)",
+       any("30 days older than the report" in x for x in w), )
+    ok("ISA-0202 MUST-FIRE: an SMT-style relabel (figures fit 30-Sep, printed 31-Jul) is DATE_UNCORROBORATED with the best fit named",
+       st["FUND B"]["date_state"] == "DATE_UNCORROBORATED" and st["FUND B"]["date_corroboration"]["best_fit_date"] == "2026-09-30"
+       and st["FUND B"]["stale_days"] is None)
+    ok("ISA-0202 NEGATIVE CONTROL: the relabelled fund raises NO staleness figure (91 days would be false)",
+       not any("91 days" in x for x in w))
+    ok("ISA-0202 NEGATIVE CONTROL: a fund with no golden series is NOT_CORROBORABLE (typed), never CORROBORATED",
+       st["FUND C"]["date_state"] == "NOT_CORROBORABLE")
+    ok("ISA-0202: the dashed header form parses too", _parse_any_date("31-Oct-2026") == _dt.date(2026, 10, 31))
+    _lu, _np, _ns = _fp.load_universe, _fp.nav_series_provenance, _fp.nav_series_for
+    try:
+        _fp.load_universe = lambda *a, **k: {"S1": {"xray_name": "FUND A"}}
+        _fp.nav_series_provenance = lambda s, u: {"state": "PROVENANCE_UNRECORDED", "declared_basis": "raw_close"}
+        _fp.nav_series_for = lambda s, u: base
+        _g = _door_golden()("FUND A")
+        ok("ISA-0901/0202 MUST-FIRE: a golden series whose basis is not recorded does NOT corroborate (NOT_CORROBORABLE until 6.04)",
+           _g[0] is None and "not corroborable" in (_g[1] or ""))
+        _fp.nav_series_provenance = lambda s, u: {"state": "BASIS_RECORDED", "declared_basis": "raw_close"}
+        ok("ISA-0202 NEGATIVE CONTROL: a recorded-basis series is served to the corroboration", _door_golden()("FUND A")[0] is base)
+    finally:
+        _fp.load_universe, _fp.nav_series_provenance, _fp.nav_series_for = _lu, _np, _ns
     print("extract_xray selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

@@ -30,6 +30,15 @@ import os
 import re
 import sys
 
+# ── ISA-0940 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 WINDOWS = [("1M", 1 / 12, "cumulative"), ("3M", 0.25, "cumulative"), ("6M", 0.5, "cumulative"),
@@ -543,6 +552,7 @@ def _norm(n):
 
 def return_history(cur, as_of=None, universe=None, hist=None, xray=None, fp=None):
     """Seven horizons for every holding. Golden series first; X-Ray as the independent check (R5.2/R6.2)."""
+    _fi_mark("report_measures", "return_history")                      # ISA-0940: declared capability producer
     if fp is None:
         import fund_performance as fp                                   # noqa: E402 - optional heavy import
     universe = universe if universe is not None else fp.load_universe()
@@ -588,7 +598,17 @@ def return_history(cur, as_of=None, universe=None, hist=None, xray=None, fp=None
             if x and xk and x.get(xk) is not None:
                 xv, xd = float(x[xk]), x.get("as_of")
                 cell["xray"] = {"value": xv, "as_of": xd}
-                if cell["state"] != "OK":
+                # ⚑ ISA-0202/0901 (20-Nov-2026): an X-Ray figure whose printed date is NOT corroborated against the
+                #   golden series is neither a fill-in nor a comparison - SMT's printed date lags its figures by a month,
+                #   so comparing at it manufactured three SOURCE_CONFLICT cells every run. Rows stamped by
+                #   extract_xray.stamp_fund_staleness carry date_state; an unstamped (legacy) row keeps the old rule.
+                _ds = x.get("date_state")
+                if _ds is not None:
+                    cell["xray"]["date_state"] = _ds
+                if _ds is not None and _ds != "CORROBORATED":
+                    cell["xray_check"] = "DATE_UNCORROBORATED"
+                    cell["xray"]["why"] = ((x.get("date_corroboration") or {}).get("why"))
+                elif cell["state"] != "OK":
                     cell.update(state="OK", value=round(xv, 2), as_of=xd, source="Morningstar X-Ray (second source)")
                 elif series and xd and _date(xd):
                     gc, ga = fp.trailing_return(series, _date(xd), years, source, lab)
@@ -603,8 +623,9 @@ def return_history(cur, as_of=None, universe=None, hist=None, xray=None, fp=None
     n = sum(1 for r in rows for c in r["cells"].values() if c["state"] == "OK")
     na = sum(1 for r in rows for c in r["cells"].values() if c["state"] == "NOT_AVAILABLE")
     sc = sum(1 for r in rows for c in r["cells"].values() if c["state"] == "SOURCE_CONFLICT")
+    du = sum(1 for r in rows for c in r["cells"].values() if c.get("xray_check") == "DATE_UNCORROBORATED")
     return {"state": "OK" if rows else "NO_HOLDINGS", "as_of": as_of.isoformat(), "rows": rows,
-            "counts": {"sourced": n, "not_available": na, "source_conflict": sc},
+            "counts": {"sourced": n, "not_available": na, "source_conflict": sc, "xray_date_uncorroborated": du},
             "note": "Security returns, not the return you earned since buying. 3Y and 5Y are per year; the rest are "
                     "cumulative. Calendar YTD runs from 31 December."}
 
@@ -679,6 +700,15 @@ def compute(cur, cs=None, ledger=None, xray=None, base=HERE, hist=None, universe
         out["target_progress"] = target_progress(cur, cs=cs, base=base)
     except Exception as e:                                              # noqa: BLE001
         out["target_progress"] = {"state": "ERROR", "why": "%s: %s" % (type(e).__name__, e)}
+    if xray and (xray.get("fund_holdings") or []):
+        # ISA-0202: ALWAYS re-corroborated on read (one home), against the door as it stands after Step 6.04 - the
+        #   extraction-time stamp predates the NAV refresh/migration
+        try:
+            import extract_xray as _ex
+            xray = dict(xray, fund_holdings=_ex.stamp_fund_staleness([dict(r) for r in xray["fund_holdings"]],
+                                                                     (xray.get("_meta") or {}).get("report_date"))[0])
+        except Exception as e:                                          # noqa: BLE001
+            out["xray_date_corroboration_error"] = "%s: %s" % (type(e).__name__, e)
     try:
         out["returns"] = return_history(cur, xray=xray, hist=hist, universe=universe, fp=fp)
     except Exception as e:                                              # noqa: BLE001
@@ -759,6 +789,17 @@ def _selftest():
     f1 = next(r for r in rh["rows"] if r["code"] == "F1")["cells"]
     assert f1["1M"]["state"] == "OK" and f1["5Y"]["state"] == "OK", f1
     assert f1["1Y"]["state"] == "SOURCE_CONFLICT", ("MUST-FIRE: golden vs X-Ray disagreement is published", f1["1Y"])
+    rhu = return_history(cur, as_of=dt.date(2026, 10, 22), universe=FP.load_universe(), hist={},
+                         xray={"fund_holdings": [{"name": "FUND ONE", "as_of": "2026-07-31", "return_1yr": 99.0,
+                                                  "date_state": "DATE_UNCORROBORATED"}]}, fp=FP)
+    u1 = next(r for r in rhu["rows"] if r["code"] == "F1")["cells"]["1Y"]
+    assert u1["state"] == "OK" and u1.get("xray_check") == "DATE_UNCORROBORATED" and rhu["counts"]["source_conflict"] == 0, \
+        ("ISA-0202 MUST-FIRE: an uncorroborated X-Ray date is DATE_UNCORROBORATED, never SOURCE_CONFLICT", u1)
+    rhc = return_history(cur, as_of=dt.date(2026, 10, 22), universe=FP.load_universe(), hist={},
+                         xray={"fund_holdings": [{"name": "FUND ONE", "as_of": "2026-09-30", "return_1yr": 99.0,
+                                                  "date_state": "CORROBORATED"}]}, fp=FP)
+    assert next(r for r in rhc["rows"] if r["code"] == "F1")["cells"]["1Y"]["state"] == "SOURCE_CONFLICT", \
+        "ISA-0202 NEGATIVE CONTROL: a CORROBORATED date still publishes a real disagreement"
     bbb = next(r for r in rh["rows"] if r["code"] == "BBB")["cells"]
     assert bbb["1M"]["state"] == "NOT_AVAILABLE" and bbb["1M"]["value"] is None, "NEGATIVE CONTROL: no series -> no number"
     import tempfile

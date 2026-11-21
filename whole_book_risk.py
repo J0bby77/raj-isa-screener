@@ -163,6 +163,7 @@ def load_fund_series(portfolio: dict, as_of: dt.date, root: str = HERE, series_f
     """{ticker: qualification} for every held fund, via fund_performance.nav_series_for (injectable for tests).
     COST ONLY: on the default route the qualification is memoised per (ticker, as_of, NAV-cache stamp) - the engine
     campaign builds hundreds of receipts on one set of caches; any cache change recomputes."""
+    _fi_mark("whole_book_risk", "load_fund_series")                      # ISA-0944: declared capability producer
     if series_fn is None and universe is None:
         stamp = _nav_stamp(root)
         key = (tuple(sorted(f.get("ticker") for f in (portfolio or {}).get("funds") or [] if f.get("ticker"))),
