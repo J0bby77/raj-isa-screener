@@ -32,6 +32,11 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+try:                                                    # pragma: no cover - wiring only (ISA-0962 step 0)
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
 
 SCHEMA = "exposure_coverage/1"
 BASIS_TOL_PCT = 2.0           # X-Ray implied base vs NAV: larger gap = the % are of a different book
@@ -100,6 +105,7 @@ def _xray_basis(portfolio, xray, nav):
 
 
 def build(portfolio, xray=None, fmap=None):
+    _fi_mark("exposure_coverage", "build")           # ISA-0962: declared capability producer
     nav = float(((portfolio or {}).get("summary") or {}).get("total_value_gbp") or 0.0)
     as_of_p = ((portfolio or {}).get("_meta") or {}).get("data_date")
     as_of_x = ((xray or {}).get("_meta") or {}).get("report_date")
@@ -117,8 +123,14 @@ def build(portfolio, xray=None, fmap=None):
         net = {k: float((v or {}).get("net_pct") or 0.0) for k, v in aa.items()}
         cov = (net.get("stocks", 0) + net.get("bonds", 0) + net.get("cash", 0)) / 100.0 * nav
         unc = (net.get("other", 0) + net.get("not_classified", 0)) / 100.0 * nav
+        # ⚑ ISA-0926 (P7): the X-Ray prints each class to 2 dp, so the partition can sum to 100 +/- n x 0.005%. The
+        #   conservation bound is PRECISION-AWARE for this row and the rounding residual is PUBLISHED, never absorbed.
+        _tol926 = max(1.0, len(net) * 0.00005 * nav)
         rows.append(_row("asset_class", "COMPLETE" if unc < 0.5 else "LOWER_BOUND", "PUBLISHED_LOOKTHROUGH",
-                         as_of_x, nav, cov, unc, note=("X-Ray 'Other'/'Not classified' %.2f%% is NOT equity, bond "
+                         as_of_x, nav, cov, unc, rounding_tolerance_gbp=round(_tol926, 2),
+                         rounding_residual_gbp=round(nav - cov - max(unc, 0.0), 2),
+                         rounding_basis="%d X-Ray categories x 0.005%% (2-dp print) x NAV, floor GBP 1.00 (ISA-0926)" % len(net),
+                         note=("X-Ray 'Other'/'Not classified' %.2f%% is NOT equity, bond "
                          "or cash to Morningstar - it is unattributed here, never zero" % (net.get("other", 0) + net.get("not_classified", 0)))))
         equity_gbp = net.get("stocks", 0) / 100.0 * nav
         cash_gbp = net.get("cash", 0) / 100.0 * nav
@@ -222,12 +234,18 @@ def build(portfolio, xray=None, fmap=None):
     return {"schema": SCHEMA, "state": "OK" if basis.get("state") in ("MATCH", "UNVERIFIED") else "DEGRADED",
             "nav_gbp": round(nav, 2), "portfolio_as_of": as_of_p, "xray_as_of": as_of_x, "xray_basis": basis,
             "unvalued_holdings": unvalued_names, "rows": rows, "line": line,
-            "conservation_ok": all(abs(r["expected_gbp"] - r["covered_gbp"] - r["unclassified_gbp"] - r["unvalued_gbp"]) < 1.0
-                                   for r in rows)}
+            "conservation_ok": all(conserves(r) for r in rows)}
+
+
+def conserves(r) -> bool:
+    """ISA-0926: ONE home for the B08-R01 row conservation test - GBP 1.00, or the row's declared precision bound."""
+    gap = r["expected_gbp"] - r["covered_gbp"] - r["unclassified_gbp"] - r["unvalued_gbp"]
+    return abs(gap) < float(r.get("rounding_tolerance_gbp") or 1.0)
 
 
 def _selftest() -> int:
     fails = []
+    _sf = []
 
     def ok(name, cond):
         print(("PASS " if cond else "FAIL ") + name)
@@ -248,6 +266,15 @@ def _selftest() -> int:
     r = build(port, xr, fmap)
     rows = {x["dimension"]: x for x in r["rows"]}
     ok("B08-R01 conservation: covered + unclassified + unvalued = expected on every row", r["conservation_ok"])
+    _nv = 155857.21
+    _rr = {"expected_gbp": _nv, "covered_gbp": _nv + 15.58, "unclassified_gbp": 0.0, "unvalued_gbp": 0.0,
+           "rounding_tolerance_gbp": round(5 * 0.00005 * _nv, 2)}
+    ok("ISA-0926 NEGATIVE CONTROL: the Nov-2026 X-Ray 2-dp rounding (GBP 15.58 over) conserves within the declared bound",
+       conserves(_rr))
+    ok("ISA-0926 MUST-FIRE: a real 0.5% leak still FAILS conservation",
+       not conserves(dict(_rr, covered_gbp=_nv * 0.995)))
+    ok("ISA-0926 MUST-FIRE: a row with no declared bound keeps the GBP 1.00 test",
+       not conserves({"expected_gbp": 100.0, "covered_gbp": 98.5, "unclassified_gbp": 0.0, "unvalued_gbp": 0.0}))
     ok("B08-R02 MUST-FIRE: X-Ray 'Other' £10,000 is UNATTRIBUTED in asset_class, never zero",
        rows["asset_class"]["unclassified_gbp"] == 10000.0 and rows["asset_class"]["verdict_type"] == "LOWER_BOUND")
     ok("B08-R02: sector carries the same £10,000 as unattributed (not 'no sector')",

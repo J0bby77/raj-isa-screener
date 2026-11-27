@@ -121,6 +121,22 @@ def _use(tk, ev="THIN", score=70.0, corr=None, qualifies=True, held_gbp=0.0):
             "correlation": copy.deepcopy(corr if corr is not None else _UNMEASURED)}
 
 
+class _SizingFixtureGate:
+    """P8c (26-Nov-2026): the capability fixtures below assert SIZING / routing mechanics on UNCLASSIFIED fixture names
+    (FA, C, D, ...). With concentration_gate LIVE the caps refuse those names first, so the records lose their final state
+    (measured: CAP-min_entry_gbp, ISA-0705 comparator). Pin the gate to SHADOW for the fixture only; LIVE binding is
+    asserted on the real engine path (campaign part E, ISA-0465 MUST-FIRE / NEGATIVE CONTROL)."""
+    def __enter__(self):
+        import isa_policy as _ipx
+        self._ip, self._saved = _ipx, _ipx.V2_FLAGS.get("concentration_gate")
+        _ipx.V2_FLAGS["concentration_gate"] = "SHADOW"
+        return self
+
+    def __exit__(self, *exc):
+        self._ip.V2_FLAGS["concentration_gate"] = self._saved
+        return False
+
+
 def _split(uses, amount=20799.54, order=None, store=None, sequence=None, membership=None,
            underwriting=None):
     """`sequence=` passes the REAL sequencer output through the real router (ISA-0705).
@@ -133,7 +149,11 @@ def _split(uses, amount=20799.54, order=None, store=None, sequence=None, members
     seq = sequence if sequence is not None else {
         "order": [u["ticker"] for u in uses] if order is None else order,
         "basis": "fixture_order"}
-    with _TempFillStore(store):
+    # ⚑ P8c (26-Nov-2026): these fixtures assert SIZING mechanics (D15-D17, ladder, admission) on unclassified fixture names;
+    #   with concentration_gate LIVE the caps would refuse them first and the record has no final state (measured:
+    #   CAP-min_entry_gbp RAISED). The gate is pinned to SHADOW for the fixture; LIVE binding is asserted on the real
+    #   engine path (campaign part E, ISA-0465 MUST-FIRE / NEGATIVE CONTROL).
+    with _SizingFixtureGate(), _TempFillStore(store):
         out = _cd.sleeve_split(amount, portfolio, policy, 11250.0, candidates=uses,
                                sequence=seq, membership=membership, underwriting=underwriting,
                                new_capital_control=_cd.NCC_OPEN_FIXTURE)   # ISA-0807: sizing under an OPEN control
@@ -438,7 +458,7 @@ def check_stock_sleeve_weight_now_pct():
     portfolio, policy = _book()
     heavy = copy.deepcopy(portfolio)
     heavy["summary"]["stock_sleeve_value_gbp"] = float(heavy["summary"]["stock_sleeve_value_gbp"]) * 1.5
-    with _TempFillStore():
+    with _SizingFixtureGate(), _TempFillStore():
         a = _cd.sleeve_split(20799.54, portfolio, policy, 11250.0, candidates=[_use("FA")],
                              sequence={"order": ["FA"], "basis": "fixture_order"},
                              new_capital_control=_cd.NCC_OPEN_FIXTURE)   # ISA-0807
@@ -1010,7 +1030,7 @@ def _selftest(verbose: bool = True) -> int:
         "C": {"donor": "H", "released_gbp": 3000.0, "state": "REALISED",
               "provenance": "capability_checks fixture: realised donor reduction"}}
     import capital_destination as _cd705
-    with _TempFillStore(None):
+    with _SizingFixtureGate(), _TempFillStore(None):
         _o705 = _cd705.sleeve_split(20799.54, _pf705, _pol705, 11250.0,
                                     candidates=[_d705, _c705], sequence=_seq705,
                                     new_capital_control=_cd705.NCC_OPEN_FIXTURE)   # ISA-0807

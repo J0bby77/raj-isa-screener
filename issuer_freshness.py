@@ -673,6 +673,57 @@ def write(doc, here=None, month_label=None) -> str:
     return path
 
 
+NEW_NAME_ROUTE = "main"
+
+
+def add_review(month_label, review, here=None) -> dict:
+    """ISA-0957 (P9): add ONE issuer review for a NEW (non-held) name that the capital decision receipt selected or has in
+    case scope (`case_scope.issuer_reviews_due`). Written by the Step 10.0b case loop BEFORE that name's case is complete.
+
+    REFUSES (ValueError, nothing written): the month's document is absent (Step 5.0 writes the held population first);
+    the ticker is HELD (held names are Step 5.0's, reviewed against the broker book); the route is not 'main'; the review
+    is not a typed issuer_review() row. A same-ticker review is REPLACED (the newest research wins, the old id is kept in
+    `superseded_review_ids`). The held coverage is recomputed on the unchanged population, so the new name appears in
+    `not_in_population` and the document still writes only when the held population is COMPLETE."""
+    here = here or HERE
+    doc = load(month_label, here)
+    if doc is None:
+        raise ValueError("issuer_freshness.add_review: %s is absent - Step 5.0 writes the month's held-population document "
+                         "first (ISA-0713); a new-name review is added to it at Step 10.0b (ISA-0957)" % path_for(month_label, here))
+    need = {"review_id", "ticker", "route", "capital_authority_survives", "next_event_state", "underwriting_cutoff"}
+    missing = sorted(need - set(review or {}))
+    if missing:
+        raise ValueError("issuer_freshness.add_review: not a typed issuer_review() row - missing %s" % ", ".join(missing))
+    t = str(review.get("ticker") or "").upper()
+    held = set(((doc.get("population") or {}).get("expected")) or [])
+    if t in held:
+        raise ValueError("issuer_freshness.add_review: %s is HELD - held names are reviewed at Step 5.0 against the broker "
+                         "book, never added here" % t)
+    if review.get("route") != NEW_NAME_ROUTE:
+        raise ValueError("issuer_freshness.add_review: a new-name review has route %r (got %r)" % (NEW_NAME_ROUTE, review.get("route")))
+    keep, superseded = [], []
+    for r in doc.get("reviews") or []:
+        if str(r.get("ticker") or "").upper() == t:
+            superseded.append(r.get("review_id"))
+        else:
+            keep.append(r)
+    row = dict(review)
+    row["ticker"] = t
+    if superseded:
+        row["superseded_review_ids"] = [x for x in superseded if x]
+    row["added_by"] = "issuer_freshness.add_review (ISA-0957, Step 10.0b)"
+    keep.append(row)
+    doc["reviews"] = keep
+    doc["coverage"] = coverage_verdict(doc.get("population") or {}, keep)
+    doc.setdefault("new_name_reviews", [])
+    doc["new_name_reviews"] = sorted(set(doc["new_name_reviews"]) | {t})
+    p = write(doc, here=here, month_label=month_label)
+    return {"path": p, "ticker": t, "review_id": row.get("review_id"), "replaced": superseded,
+            "capital_authority_survives": row.get("capital_authority_survives"),
+            "coverage": (doc["coverage"] or {}).get("state"),
+            "next": "re-run the engine: python3 capital_decision_engine.py --month %s (the review STALES the receipt)" % month_label}
+
+
 def load(month_label, here=None):
     p = path_for(month_label, here)
     if not os.path.exists(p):
@@ -947,6 +998,36 @@ def _selftest(verbose: bool = True) -> int:
            "denominator", os.path.basename(p) == "issuer_reviews_sep_2026.json"
            and load("sep_2026", here=td)["coverage"]["n_expected"] == 6)
 
+        # ── ISA-0957 (P9): new-name reviews are ADDED to the month's held document at Step 10.0b ───────────
+        _nn = issuer_review("NEWX", route="main", underwriting_cutoff="2026-09-20", decision_at="2026-09-21",
+                            retrieved_at="2026-09-21T10:00Z", pack=research_pack("NEWX", {q: {"answer": "x", "source": "IR",
+                                                                                          "source_quality": SOURCE_HIERARCHY[0]}
+                                                                                      for q in RESEARCH_QUESTIONS}),
+                            next_event_date={"state": NOT_YET_ANNOUNCED})
+        _a = add_review("sep_2026", _nn, here=td)
+        _d2 = load("sep_2026", here=td)
+        ok("ISA-0957: a NEW name's review is added; held coverage stays COMPLETE and the name is named not_in_population",
+           _a["coverage"] == "COMPLETE" and "NEWX" in _d2["coverage"]["not_in_population"]
+           and _d2["coverage"]["n_expected"] == 6 and _d2["new_name_reviews"] == ["NEWX"], _a)
+        _nn2 = dict(_nn, review_id="IR-2026-09-22-NEWX", capital_authority_survives="REQUIRES_FULL_RE_UNDERWRITING")
+        _a2 = add_review("sep_2026", _nn2, here=td)
+        _rows = [r for r in load("sep_2026", here=td)["reviews"] if r["ticker"] == "NEWX"]
+        ok("ISA-0957: a second review for the same new name REPLACES the first and names the superseded id",
+           len(_rows) == 1 and _rows[0]["review_id"] == "IR-2026-09-22-NEWX" and _a2["replaced"] == [_nn["review_id"]], _rows)
+        for _bad, _why in ((dict(_nn, ticker="QBTS"), "HELD"), (dict(_nn, route="held"), "route"),
+                           ({"ticker": "NEWY"}, "missing")):
+            try:
+                add_review("sep_2026", _bad, here=td)
+                ok("ISA-0957 MUST-FIRE: add_review refuses (%s)" % _why, False)
+            except ValueError as exc:
+                ok("ISA-0957 MUST-FIRE: add_review refuses (%s) and writes nothing" % _why, _why in str(exc), exc)
+        try:
+            add_review("oct_2026", _nn, here=td)
+            ok("ISA-0957 MUST-FIRE: add_review refuses when the month's held document is absent", False)
+        except ValueError as exc:
+            ok("ISA-0957 MUST-FIRE: add_review refuses when the month's held document is absent (Step 5.0 first)",
+               "absent" in str(exc), exc)
+
     ok("R20.1: a reader can reconstruct input -> calculation -> constraint -> decision from the "
        "review row alone, without reading Python",
        set(_r) >= {"review_id", "ticker", "route", "underwriting_cutoff", "retrieved_at",
@@ -1003,6 +1084,20 @@ def main(argv=None):
     for i, a in enumerate(argv):
         if a == "--month" and i + 1 < len(argv):
             m = argv[i + 1]
+    if "--add-review" in argv:
+        # ISA-0957: python3 issuer_freshness.py --add-review <review.json> --month <mmm_yyyy>
+        src = argv[argv.index("--add-review") + 1]
+        if not m:
+            print("issuer_freshness --add-review needs --month <mmm_yyyy>")
+            return 2
+        with open(src, encoding="utf-8") as fh:
+            rv = json.load(fh)
+        try:
+            print(json.dumps(add_review(m, rv), indent=2, default=str))
+        except ValueError as exc:
+            print("REFUSED: %s" % exc)
+            return 1
+        return 0
     if "--next-review" in argv:
         route = "held"
         for i, a in enumerate(argv):

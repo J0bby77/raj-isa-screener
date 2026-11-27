@@ -646,6 +646,11 @@ def build_s6(portfolio: dict, analytics: dict, xray: dict) -> dict:
 def apply_report_measures(s6: dict, rm) -> dict:
     """ISA-0900 RENDERER feed: attach the pre-run's reporting-only measures to s6 exactly as computed.
     Absent is stated (state ABSENT), never an empty table. No calculation here (R20.2)."""
+    try:                                    # ISA-0968 (P8a step 0): execution-ledger mark (never raises)
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark('email_prefill', 'apply_report_measures')
+    except Exception:                                   # noqa: BLE001
+        pass
     s6 = dict(s6 or {})
     s6["report_measures"] = (dict(rm) if isinstance(rm, dict) and rm else
                              {"state": "ABSENT", "why": "summary.report_measures not written by this run's pre-run"})
@@ -1116,8 +1121,8 @@ def _fund_action_stack_block(path=None):
         "method_note": (
             "FRS is the fund analogue of the stock Source Score: return adequacy 35 / "
             "risk-adjusted efficiency 25 / marginal diversification 20 / fee efficiency 10 / "
-            "mandate integrity 10. Bands: >=%.0f HOLD/ADD, %.0f-%.0f RETAIN-ONLY (no new "
-            "money), " % (_fas_bands()[0], _fas_bands()[1], _fas_bands()[0] - 1) +
+            "mandate integrity 10. Bands: >=%.0f HOLD/ADD, %.0f-%.0f RETAIN-ONLY (a retention vote: it orders which "
+            "fund is sold first; new money follows the allocation rules - ISA-0918/ISA-0973), " % (_fas_bands()[0], _fas_bands()[1], _fas_bands()[0] - 1) +
             "<%.0f DEAD MONEY. " % _fas_bands()[1] +
             "Return adequacy is measured across 1y/3y/5y/10y and scored on the "
             "MEDIAN, because a single window is a bet on a start date, not a measurement -- "
@@ -1277,6 +1282,34 @@ def _s2_north_star_lines(analytics=None) -> list:
     return out
 
 
+def sell_off_line(so) -> str:
+    """P8b (ISA-0907): Raj's Active sell-off constraint, as the pre-run measured it (Step 6.10so). Renderer only (R20.2):
+    every number comes from summary.sell_off; absent is stated, never shown as clear."""
+    if not isinstance(so, dict) or not so:
+        return ("Active sell-off (ISA-0907): NOT MEASURED by this run's pre-run - fund trims may not fund stock purchases "
+                "until it is measured (UNKNOWN restricts).")
+    a = so.get("any_trim") or {}
+    st = a.get("state") or so.get("state") or "UNKNOWN"
+    ov = so.get("overall") or {}
+    ovs = ("" if ov.get("drawdown_pct") is None else
+           "; %s %+.1f%% from its 63-session closing high (limit -%s%%)"
+           % (ov.get("ticker") or "VUAG.L", float(ov["drawdown_pct"]), ov.get("threshold_pct")))
+    dn = so.get("donors") or {}
+    act = sorted("%s via %s %+.1f%%" % (k, v.get("comparator"), float(v["drawdown_pct"])) for k, v in dn.items()
+                 if v.get("state") == "ACTIVE" and v.get("drawdown_pct") is not None)
+    unk = sorted(k for k, v in dn.items() if v.get("state") == "UNKNOWN")
+    if st == "NOT_ENFORCED":
+        return ("Active sell-off (ISA-0907): NOT ENFORCED (rollback switch SELL_OFF_RULE_ENFORCED is off) - the rule is "
+                "not applied to fund-trim funding this run%s." % ovs)
+    if st == "CLEAR":
+        return "Active sell-off (ISA-0907): CLEAR%s - fund trims may fund stock purchases within the bands." % ovs
+    return ("Active sell-off (ISA-0907): %s (%s leg)%s%s%s - no fund trim may fund a stock purchase this run, and the "
+            "execution check refuses it again at the quote; cash-funded buys are unaffected and nothing is sold."
+            % (st, a.get("leg") or "n/a", ovs,
+               ("; donors whose own benchmark is down >= 10%%: %s" % ", ".join(act)) if act else "",
+               ("; unmeasured: %s" % ", ".join(unk)) if unk else ""))
+
+
 def _s2_standing_lines(analytics=None) -> list:
     """B5 trajectory + B1 drawdown-ladder standing lines for §2 (+ A21 policy note)."""
     lines = []
@@ -1305,6 +1338,7 @@ def _s2_standing_lines(analytics=None) -> list:
                      + (" | ⚑ 30% FRESH REVIEW required" if (ds.get("fresh_review") or {}).get("episode_id") == ds.get("episode_id") else ""))
     else:
         lines.append("Drawdown ladder: state not yet seeded — first monitor run populates (B1)")
+    lines.append(sell_off_line((analytics or {}).get("sell_off")))        # P8b ISA-0907
     # A21: paused S/O RAISES the bar (+5 conviction, one size notch down); NEVER gates timing.
     # ⚑ A21 IS DELETED (D21, 28-Aug-2026). It was written in the vocabulary of two RETIRED
     # things — the /100 conviction floor and the pre-ladder starter band — so retiring it is a
@@ -1960,7 +1994,16 @@ def appetite_guard_line(cde):
             "; holding still = GBP %s a year" % format(round(rm["no_action_whole_book_gbp_vol"]), ",")))
     sel = ag.get("selected") or {}
     st = ag.get("state")
-    if st == "REVIEW_REQUIRED":
+    _perm = (cde or {}).get("appetite_permission_at_formation") or {}
+    if st == "REVIEW_REQUIRED" and _perm.get("state") == "STANDING_AUTHORITY":
+        _cum = (_perm.get("cumulative") or {}).get("change_since_grant_gbp")
+        s += (". Severe-scenario diagnostic: the selected plan takes the scenario loss from %s%% to %s%% against your %s%% "
+              "limit. This is a scenario bound, not an actual loss; it proceeds under your PERMANENT severe-limit approval of "
+              "%s (no fresh waiver)%s. Your approval of each action is still required; nothing is sold."
+              % (sel.get("pre_loss_pct"), sel.get("post_loss_pct"), sel.get("appetite_pct"), _perm.get("granted_on"),
+                 "" if _cum is None else "; the scenario loss after the plan is GBP %s %s than at that approval"
+                 % (format(abs(round(_cum)), ","), "higher" if _cum >= 0 else "lower")))
+    elif st == "REVIEW_REQUIRED":
         s += (". APPETITE REVIEW REQUIRED: the selected plan takes the severe-scenario loss from %s%% to %s%% against "
               "your %s%% limit - its buys execute only with your explicit approval (Checkpoint-D tick 14); nothing is sold."
               % (sel.get("pre_loss_pct"), sel.get("post_loss_pct"), sel.get("appetite_pct")))
@@ -2434,6 +2477,7 @@ SUMMARY_RENDERED = {
     "report_measures":            "apply_report_measures",        # s6 - ISA-0900 bridge / contributions / holdings / return history
     "regime_state":               "_s2_standing_lines",           # s2 standing line
     "drawdown":                   "_s2_standing_lines",           # s2 B1 ladder line
+    "sell_off":                   "sell_off_line",                # s2 standing line - P8b ISA-0907 Active sell-off (Step 6.10so)
     "return_architecture":        "_ra_load",                     # s8 Section C
     "section_a_verdict":          "build_s8",                     # s8 Step 8A
     "section_c_verdict":          "build_s8",                     # s8 Step 8A

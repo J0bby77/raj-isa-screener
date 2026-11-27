@@ -20,6 +20,15 @@ Stdlib only.
 import argparse, ast, builtins, hashlib, json, os, re, sys
 import isa_source_cache as _sc                    # ISA-0594: one home for read/parse/walk
 
+# ── ISA-0952 (21-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
+# ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
+# isa_policy.V2_FLAGS["execution_ledger"] is False; it never raises into the caller.
+try:                                                    # pragma: no cover - wiring only
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -851,7 +860,7 @@ def pair_checkpoint_d_population(root=None, checkpoint=None, run_ctx=None, step9
     return []
 
 
-def pair_one_risk_share_authority(root=None, ctx=None):
+def pair_one_risk_share_authority(root=None, ctx=None, cdr=None):
     """ISA-0708 (20-Sep-2026) — the D27 ceiling and the review flag quote ONE risk-share id.
 
     ⚑ R6.2: PUBLISH the disagreement, never blend it. The two implementations were measured
@@ -862,9 +871,19 @@ def pair_one_risk_share_authority(root=None, ctx=None):
 
     Reads the run artefact rather than recomputing: a pair that recomputes is a third
     implementation of the quantity it is policing.
+
+    ⚑ ISA-0708 (21-Nov-2026): the DECISION-EFFECTIVE D27 consumer is capital_decision_engine
+    (constraints_for marks a bundle infeasible); the capital_destination receipt it was written
+    for is non-routing since ISA-0811. So the pair also reads the run month's Capital Decision
+    Receipt and requires its pre-trade risk_constraints.risk_share_authority to name the SAME
+    risk_share_calc_id as the review flag. Any gap is a WARN naming both ids: the engine may
+    legitimately decide on a different book snapshot, and that is said, never assumed.
+    `cdr` is the receipt dict (tests); when the artefact is read from disk the receipt is read
+    from capital_decision_receipt_<month>.json beside it.
     """
     root = root or HERE
     doc = ctx
+    _from_disk = ctx is None
     if doc is None:
         import glob as _glob
         import month_artefacts as _MA                  # ISA-0832; basename order as before
@@ -915,6 +934,38 @@ def pair_one_risk_share_authority(root=None, ctx=None):
             "rather than blended (R6.2) and closing it is ISA-0708's remaining work."
             % (len(div), worst["ticker"], worst["authoritative"],
                worst["locally_computed"], worst["delta"])))
+    if cdr is None and _from_disk:
+        _ml = ((doc.get("_meta") or {}).get("month_label") or "")
+        _cp = os.path.join(root, "capital_decision_receipt_%s.json" % _ml) if _ml else None
+        if _cp and os.path.exists(_cp):
+            try:
+                with open(_cp, encoding="utf-8") as fh:
+                    cdr = json.load(fh)
+            except Exception as exc:                                    # noqa: BLE001
+                errs.append(warn("pair_one_risk_share_authority/ISA-0708: %s unreadable (%s), so the "
+                                 "D27 decision consumer was not compared" % (os.path.basename(_cp), exc)))
+                return errs
+        else:
+            errs.append(warn("pair_one_risk_share_authority/ISA-0708: no capital_decision_receipt for "
+                             "month %r beside the run artefact, so the D27 decision consumer was not "
+                             "compared - nothing was checked, which is not agreement (R2.10)" % (_ml or None)))
+            return errs
+    if cdr is not None:
+        _ra = ((cdr.get("risk_constraints") or {}).get("risk_share_authority") or {})
+        _eid = _ra.get("risk_share_calc_id")
+        if not _ra:
+            errs.append(warn("pair_one_risk_share_authority/ISA-0708: Capital Decision Receipt %s carries no "
+                             "risk_constraints.risk_share_authority - it predates the ISA-0708 binding or the engine "
+                             "did not record which risk-share calculation its D27 ceiling used"
+                             % (cdr.get("receipt_id") or "?")))
+        elif _ra.get("state") != "IDENTIFIED" or not _eid:
+            errs.append(warn("pair_one_risk_share_authority/ISA-0708: the D27 decision consumer's pre-trade risk "
+                             "share is %s (%s) on receipt %s" % (_ra.get("state"), _ra.get("why"),
+                                                                 cdr.get("receipt_id") or "?")))
+        elif cid and _eid != cid:
+            errs.append(warn("pair_one_risk_share_authority/ISA-0708: the D27 decision consumer decided on %s while "
+                             "the review flag quotes %s - two calculations (different book snapshot, store or window). "
+                             "Published, not blended (R6.2)." % (_eid, cid)))
     return errs
 
 
@@ -1854,6 +1905,12 @@ def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
                     f"PERMANENTLY LOST unless outputs/ still holds it this session")
     for np_ in v.get("not_pit", []):
         rd, _, basis = np_.partition(":")
+        if rd not in HISTORIC_STALE_REGIME_ROWS:
+            # ⚑ ISA-0877 (P7): ISA-0547 fixed the capture ORDER on 02-Sep-2026; only the two declared August rows are
+            #   permanent. A NEW stale row is a regression of that fix - ERROR, never the permanent warning.
+            errs.append(f"A18/\u00a7Q: NEW regime row for {rd} is stamp_basis={basis}, not 'live' - a regression of the "
+                        f"ISA-0547 capture-order fix (not one of the declared historic rows {sorted(HISTORIC_STALE_REGIME_ROWS)})")
+            continue
         # ⚑ ISA-0546 — WARNING-GRADE, and now mechanically so. The row is HONESTLY stamped and
         # the gate is right to refuse it as point-in-time evidence; it is still usable for
         # everything except regime-conditional analysis. ISA-0517: the documented remedy is
@@ -1867,6 +1924,10 @@ def pair_screen_capture_coverage(dest_root=None, exists=os.path.exists):
             f"(ISA-0517): re-running the capture would stamp an August row live in September. "
             f"The cause is fixed forward by ISA-0547, not by rewriting this row."))
     return errs
+
+
+# ISA-0877 (P7): the ONLY permanent, deliberately-unremedied stale regime rows (ISA-0517 / ISA-0547). Declared, not inferred.
+HISTORIC_STALE_REGIME_ROWS = frozenset({"2026-08-15", "2026-08-22"})
 
 
 def pair_monthly_two_regimes(ctx_text, exists=os.path.exists):
@@ -4874,7 +4935,7 @@ def pair_regional_m_contracts():
     """RM1-RM4 — partition, world identity, inflation single-home, basis parity."""
     errs = []
     rm = _latest_j("regional_m")
-    if not rm or rm.get("state") in ("DISABLED", "NO_CAPTURE"):
+    if not rm or rm.get("state") in ("DISABLED", "NO_CAPTURE", "REFUSED_NO_RUN_XRAY"):   # ISA-0947 typed refusal
         return errs
     p = rm.get("partition") or {}
     if not p.get("is_partition"):
@@ -5851,11 +5912,19 @@ def pair_exposure_verdicts_honest(summary=None):
         if (fl.get("unclassified") or []) and v == "OK" and hi is None:
             out.append("B08-R02: unclassified names %s with no upper bound and verdict OK" % fl.get("unclassified"))
     ec = summary.get("exposure_coverage")
-    if ec and not ec.get("conservation_ok", False):
-        out.append("B08-R01: an exposure-coverage row does not conserve the book: %s"
-                   % [r.get("dimension") for r in (ec.get("rows") or [])
-                      if abs((r.get("expected_gbp") or 0) - (r.get("covered_gbp") or 0) - (r.get("unclassified_gbp") or 0)
-                             - (r.get("unvalued_gbp") or 0)) >= 1.0])
+    if ec:
+        # ISA-0926: re-judged with the ONE conservation test (precision-aware rows), never the producer's stale flag alone
+        import exposure_coverage as _ec926
+        _bad926 = [r.get("dimension") for r in (ec.get("rows") or [])
+                   if not _ec926.conserves({k: (r.get(k) or 0) for k in ("expected_gbp", "covered_gbp", "unclassified_gbp",
+                                                                          "unvalued_gbp")}
+                                           | ({"rounding_tolerance_gbp": r.get("rounding_tolerance_gbp")}
+                                              if r.get("rounding_tolerance_gbp") else
+                                              ({"rounding_tolerance_gbp": max(1.0, 5 * 0.00005 * float(r.get("expected_gbp") or 0))}
+                                               if r.get("dimension") == "asset_class" and r.get("basis") == "PUBLISHED_LOOKTHROUGH"
+                                               else {})))]
+        if _bad926:
+            out.append("B08-R01: an exposure-coverage row does not conserve the book: %s" % _bad926)
     return out
 
 
@@ -7847,6 +7916,7 @@ def check_all(tagged: bool = False, since_ts=None, fire_counts=None, sync_manife
     that never passes `fire_counts` gets byte-identical behaviour to before this change, so
     check_all()'s existing string/tagged contract is unchanged. Accumulation itself lives in
     the module-level `_tally_pair_fire()` so it is unit-testable without a full run."""
+    _fi_mark("consistency_check", "check_all")                      # ISA-0952: declared capability producer
     errs = []
 
     def _tally(name, out):
@@ -8691,6 +8761,20 @@ def _selftest():
         if _sm and _sm["class"] == "ENV":
             assert len(_sm.get("reason") or "") >= 20, "ISA-0524: ENV declaration without a reason: %s" % _n
     assert not pair_growth_email_renderer(), pair_growth_email_renderer()
+    # ── ISA-0877 (P7): historic stale regime rows are WARN; a NEW one is an ERROR; X-A2 gates on ERRORs only ──────
+    class _V877:
+        def __init__(self, rows): self.rows = rows
+    assert HISTORIC_STALE_REGIME_ROWS == frozenset({"2026-08-15", "2026-08-22"})
+    sys.path.insert(0, os.path.join(HERE, "tests_jul2026"))
+    import run_fixture_checks as _rfc877
+    _txt_hist = ("[FAIL] [WARN] A18/\u00a7Q: regime row for 2026-08-22 is stamp_basis=live_stale_source\n"
+                 "[FAIL] [WARN] ISA-0896: x takes 19 s\n2 MISMATCH(ES)\n")
+    assert _rfc877.cc_hard_errors(_txt_hist, 1) == [], "ISA-0877 NEGATIVE CONTROL: warnings alone are not an X-A2 failure"
+    _txt_new = _txt_hist + "[FAIL] A18/\u00a7Q: NEW regime row for 2026-11-27 is stamp_basis=live_stale_source\n"
+    assert len(_rfc877.cc_hard_errors(_txt_new, 1)) == 1, "ISA-0877 MUST-FIRE: a NEW stale regime row FAILS X-A2"
+    assert _rfc877.cc_hard_errors("Traceback (most recent call last):\n", 1), \
+        "ISA-0877 MUST-FIRE: a consistency_check crash (no verdict line) is a failure, never a pass"
+    assert _rfc877.cc_hard_errors("ALL PAIRS GREEN\n", 0) == []
 
     # ── ISA-0590 — the register gate must not fire on the run's OWN outputs, and must still
     #    fire on everything else. Three assertions, because the middle one is the whole fix and
@@ -9522,6 +9606,19 @@ def _suite_census_controls():
         and "AVGO" in _norm(_d708[0])["message"], \
         ("ISA-0708: a measured disagreement is PUBLISHED by name and magnitude, not blended "
          "and not hidden (R6.2) (%s)" % _d708)
+    _cdr_ok = {"receipt_id": "CDR-t", "risk_constraints": {"risk_share_authority": {
+        "state": "IDENTIFIED", "risk_share_calc_id": "RSHR-abc123abc123"}}}
+    assert pair_one_risk_share_authority(ctx=_ctx_ok, cdr=_cdr_ok) == [], \
+        "ISA-0708 POSITIVE CONTROL: the D27 decision consumer quoting the review flag's id is clean"
+    for _bad, _lbl in ((dict(_cdr_ok, risk_constraints={}), "no binding"),
+                       ({"risk_constraints": {"risk_share_authority": {"state": "UNIDENTIFIED",
+                                                                       "risk_share_calc_id": None, "why": "x"}}}, "unidentified"),
+                       ({"risk_constraints": {"risk_share_authority": {"state": "IDENTIFIED",
+                                                                       "risk_share_calc_id": "RSHR-ffffffffffff"}}}, "other id")):
+        _ob = pair_one_risk_share_authority(ctx=_ctx_ok, cdr=_bad)
+        assert _ob and _norm(_ob[0])["severity"] == WARN, \
+            ("ISA-0708 MUST-FIRE (%s): a D27 decision consumer that cannot name the review flag's risk_share_calc_id "
+             "is PUBLISHED, never read as agreement (%s)" % (_lbl, _ob))
     _o708b = pair_one_risk_share_authority(ctx={"summary": {}})
     assert _o708b and _norm(_o708b[0])["severity"] == WARN, \
         ("ISA-0708 NEGATIVE CONTROL: an artefact with no risk_contribution block is 'nothing "

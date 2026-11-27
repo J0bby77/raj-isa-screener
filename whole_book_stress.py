@@ -387,10 +387,25 @@ def run(portfolio: dict, measure: dict, as_of: Optional[dt.date] = None, *, epis
                                       ("REALISED_AT_OR_BEYOND_APPETITE" if -float(cur) >= lim else "WITHIN_APPETITE"))}
         items = []
         if av["book_verdict"] == "BOOK_EXCEEDS_APPETITE":
-            items.append({"item": "BOOK_EXCEEDS_APPETITE", "gbp_at_stake": sev["loss_gbp"],
-                          "deadline": "this review (Step 5)", "escalation": "Raj",
-                          "why": "the governing severe scenario loses %.1f%% of the ISA against your %.0f%% limit; buys "
-                                 "that raise it go to REVIEW; nothing is sold automatically" % (sev["loss_pct_nav"], lim)})
+            _sa = _standing_severe_authority()                      # P8 ISA-0915: a diagnostic, not a new waiver
+            av["standing_authority"] = _sa
+            if _sa.get("state") == "VALID":
+                _ref = (_sa.get("accepted_reference") or {}).get("pre_loss_gbp")
+                items.append({"item": "BOOK_EXCEEDS_APPETITE", "gbp_at_stake": sev["loss_gbp"],
+                              "deadline": "this review (Step 5) - visible, no fresh waiver",
+                              "escalation": "none (accepted under Raj's standing authority %s)" % _sa.get("authority_id"),
+                              "standing_authority": _sa.get("authority_id"),
+                              "change_since_grant_gbp": (None if _ref is None else round(sev["loss_gbp"] - float(_ref), 2)),
+                              "why": "the governing severe SCENARIO (a diagnostic, not an observed loss) loses %.1f%% of the "
+                                     "ISA against your %.0f%% limit; your permanent approval of %s covers it - it stays "
+                                     "visible in the same review, nothing is sold" % (sev["loss_pct_nav"], lim,
+                                                                                    _sa.get("granted_on"))})
+            else:
+                items.append({"item": "BOOK_EXCEEDS_APPETITE", "gbp_at_stake": sev["loss_gbp"],
+                              "deadline": "this review (Step 5)", "escalation": "Raj",
+                              "standing_authority_state": _sa.get("state"),
+                              "why": "the governing severe scenario loses %.1f%% of the ISA against your %.0f%% limit; buys "
+                                     "that raise it go to REVIEW; nothing is sold automatically" % (sev["loss_pct_nav"], lim)})
         if av["realised"]["verdict"] == "REALISED_AT_OR_BEYOND_APPETITE":
             items.append({"item": "REALISED_DRAWDOWN_AT_APPETITE", "gbp_at_stake": None, "deadline": "this review",
                           "escalation": "Raj", "why": "the flow-adjusted fall from peak has reached the limit"})
@@ -572,6 +587,14 @@ def episode_returns(portfolio: dict, history: Optional[dict] = None, fund_series
 
 
 # ────────────────────────────────────────────────────────────────────────────── pre-run Step 6.10s (orchestration)
+def _standing_severe_authority() -> dict:
+    try:
+        import risk_review_state as _rrs
+        return _rrs.standing_authority(_rrs.SEVERE, HERE)
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNKNOWN", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def prerun_step(summary: dict, portfolio: dict, stock_store: dict, month_label: str, root: str = HERE,
                 as_of: Optional[dt.date] = None, fetch: bool = True, folder: Optional[str] = None) -> dict:
     """P-D Step 6.10s: whole-ISA risk -> stress/appetite -> flow-adjusted record -> scale study, ONE call. Each part
@@ -631,6 +654,14 @@ def prerun_step(summary: dict, portfolio: dict, stock_store: dict, month_label: 
                                                        "as_of": w.get("last_covered_date")})
     except Exception as exc:                                            # noqa: BLE001
         st = {"state": "FAILED", "why": "%s: %s" % (type(exc).__name__, exc)}
+    # ⚑ P8 ISA-0915: the OBSERVED measure (actual flow-adjusted drawdown) keeps ONE persistent review episode
+    try:
+        import risk_review_state as _rrs
+        _ep = _rrs.observe_realised((st.get("appetite_verdict") or {}).get("realised"), root, write=True)
+    except Exception as exc:                                        # noqa: BLE001
+        _ep = {"state": "UNKNOWN", "why": "%s: %s" % (type(exc).__name__, exc)}
+    if isinstance(st.get("appetite_verdict"), dict):
+        st["appetite_verdict"]["realised_episode"] = {k: _ep.get(k) for k in ("state", "episode_id", "opened_on", "why")}
     arte["whole_book_stress"] = st
     res["whole_book_stress"] = {k: st.get(k) for k in ("state", "why", "severe", "appetite", "appetite_verdict",
                                                        "reverse_stress", "line")}

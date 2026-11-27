@@ -41,7 +41,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 try:
-    from framework_integrity import mark as _fi_mark            # execution ledger (R4.14)
+    from framework_integrity import _mark as _fi_mark   # ISA-0953: was `mark` (no such name) -> stub no-op            # execution ledger (R4.14)
 except Exception:                                                   # noqa: BLE001
     def _fi_mark(*_a, **_k):                                        # noqa: D103
         return None
@@ -241,7 +241,7 @@ def brake(portfolio: dict, counterfactual: Optional[dict]) -> dict:
 
 # ── the waterfall ───────────────────────────────────────────────────────────────────────────────────
 def waterfall(*, cash_deployable_gbp: float, policy_bands: dict, sleeve: dict, drawdown: dict,
-              brake_state: dict, donor_headroom_gbp: Optional[float]) -> dict:
+              brake_state: dict, donor_headroom_gbp: Optional[float], sell_off: dict) -> dict:
     """-> the ordered claims and the capital the stock decision may use. Pure.
 
     cash_capital  = cash/MMF - D23 reserve - fired drawdown tranches               (B1.6b, D23)
@@ -268,7 +268,14 @@ def waterfall(*, cash_deployable_gbp: float, policy_bands: dict, sleeve: dict, d
     hard_room = max(hard - sl, 0.0)
     pri_room_after_cash = pri - sl - cash_capital
     why_trim = []
-    if not brake_state.get("permits_fund_funded"):
+    _so = sell_off if isinstance(sell_off, dict) else {"state": "UNKNOWN", "why": "sell_off input is not a state"}
+    if _so.get("state") not in ("CLEAR", "NOT_ENFORCED"):
+        # ⚑ P8b ISA-0907 (Raj's standing constraint, Q1-A/Q2-A 25-Nov-2026): no fund trim funds a stock purchase while the
+        #   Active sell-off condition holds or cannot be measured (R4.3). Cash-funded buys are unaffected.
+        trim = 0.0
+        why_trim.append("ISA-0907 Active sell-off %s (%s leg): %s - no fund trim funds a stock purchase; cash-funded buys "
+                        "are unaffected" % (_so.get("state"), _so.get("leg") or "?", _so.get("why")))
+    elif not brake_state.get("permits_fund_funded"):
         trim = 0.0
         why_trim.append("D5: %s - fund-funded stock capital stops" % brake_state.get("label"))
     elif pri_room_after_cash <= EPS:
@@ -311,7 +318,7 @@ def waterfall(*, cash_deployable_gbp: float, policy_bands: dict, sleeve: dict, d
             "hard_room_gbp": round(hard_room, 2), "trim_capacity_gbp": round(trim, 2),
             "trim_capacity_why": why_trim, "stock_capital_gbp": round(stock_capital, 2),
             "max_fund_funded_gbp": round(trim_used_cap, 2), "binding": binding,
-            "brake": brake_state, "settlement": "SETTLE_FIRST (Raj D8): a fund-funded stock order is released only "
+            "brake": brake_state, "sell_off": _so, "settlement": "SETTLE_FIRST (Raj D8): a fund-funded stock order is released only "
                                                 "after the fund-sale proceeds settle; never bridged from the D23 "
                                                 "reserve or the drawdown reservation",
             "lines": lines,
@@ -378,9 +385,36 @@ def _json(path, default=None):
         return default
 
 
+def sell_off_decision(measurement: Optional[dict], portfolio: dict, tw: Optional[dict]) -> dict:
+    """P8b ISA-0907: ONE answer to 'may fund trims fund a stock purchase now?' for the receipt AND execution_check.
+    Overall leg / Raj's disorderly flag / an unmeasured market restrict every trim; INTERIM (ISA-0971): any held fund with
+    sellable band headroom whose OWN mandate benchmark is ACTIVE or UNKNOWN also stops ALL trims (deliberate
+    over-restriction until the donor order can exclude a single donor). Never a pass on missing data (R4.3)."""
+    _fi_mark("funding_waterfall", "sell_off_decision")
+    if measurement is None:
+        return {"state": "UNKNOWN", "leg": "MEASUREMENT", "why": "no sell-off measurement for this decision (ISA-0907) - "
+                "fund trims are not planned on an unmeasured market"}
+    try:
+        import sell_off_state as _sos
+        so = _sos.state_for(measurement)
+        if so.get("state") != "CLEAR":
+            return so
+        for sd, h in sorted((band_low_headroom(portfolio, tw or {}).get("by_fund") or {}).items()):
+            if float(h or 0.0) <= EPS:
+                continue
+            ds = _sos.state_for(measurement, sd)
+            if ds.get("state") != "CLEAR":
+                return dict(ds, donor=sd, interim=("ISA-0971: a locally restricted donor with sellable headroom stops ALL "
+                                                     "fund trims until the donor order can exclude one donor"))
+        return {"state": "CLEAR", "as_of": measurement.get("as_of")}
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNKNOWN", "leg": "MEASUREMENT", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def build(portfolio: dict, *, root: str = HERE, tw: Optional[dict] = None, ledger_entries=None,
           drawdown_state: Optional[dict] = None, counterfactual: Optional[dict] = None,
-          donor_headroom_gbp="auto", incoming: Optional[List[dict]] = None) -> dict:
+          donor_headroom_gbp="auto", incoming: Optional[List[dict]] = None,
+          sell_off_measurement: Optional[dict] = None) -> dict:
     """Read the declared inputs from `root` (unless supplied) and return the waterfall + its inputs."""
     _fi_mark("funding_waterfall", "build")
     tw = tw if tw is not None else _json(os.path.join(root, "target_weights.json"))
@@ -400,7 +434,8 @@ def build(portfolio: dict, *, root: str = HERE, tw: Optional[dict] = None, ledge
     if s.get("cash_deployable_gbp") is None:
         raise WaterfallRefused("portfolio summary.cash_deployable_gbp absent - no current funding figure (ISA-0857)")
     wf = waterfall(cash_deployable_gbp=float(s["cash_deployable_gbp"]), policy_bands=bands, sleeve=sl,
-                   drawdown=dd, brake_state=br, donor_headroom_gbp=donor_headroom_gbp)
+                   drawdown=dd, brake_state=br, donor_headroom_gbp=donor_headroom_gbp,
+                   sell_off=sell_off_decision(sell_off_measurement, portfolio, tw))
     wf["inputs"] = {"bands": bands, "sleeve": sl, "drawdown": dd,
                     "donor_headroom_gbp": donor_headroom_gbp,
                     "donor_headroom": donors}
@@ -409,6 +444,7 @@ def build(portfolio: dict, *, root: str = HERE, tw: Optional[dict] = None, ledge
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────────────────
 def _selftest(verbose: bool = True) -> int:
+    _SO_CLEAR = {"state": "CLEAR"}        # P8b: a calm market, stated (R4.7)
     n = [0]
 
     def ok(cond, msg):
@@ -425,7 +461,7 @@ def _selftest(verbose: bool = True) -> int:
     fired = {"state": "FIRES", "permits_fund_funded": False, "label": "brake FIRED"}
     # MUST-FIRE: 24% sleeve and no cash -> a donor-funded capacity exists (D4)
     w = waterfall(cash_deployable_gbp=250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(24000.0)),
-                  drawdown=nodd, brake_state=unm, donor_headroom_gbp=50000.0)
+                  drawdown=nodd, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=50000.0)
     ok(abs(w["trim_capacity_gbp"] - 1000.0) < 0.01 and abs(w["stock_capital_gbp"] - 1000.0) < 0.01
        and w["max_fund_funded_gbp"] == 1000.0,
        "ISA-0858 MUST-FIRE (D4): 24%% sleeve + no cash -> GBP 1,000 fund-funded capacity to the 25%% band: %s" % w)
@@ -434,17 +470,17 @@ def _selftest(verbose: bool = True) -> int:
        "ISA-0858 (D4/D5a/D8): a fund-funded spend is labelled 'brake UNMEASURED' and sequenced settle-first")
     # NEGATIVE CONTROL: 26% sleeve -> no fund trims; cash still usable
     w = waterfall(cash_deployable_gbp=5250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(26000.0)),
-                  drawdown=nodd, brake_state=unm, donor_headroom_gbp=50000.0)
+                  drawdown=nodd, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=50000.0)
     ok(w["trim_capacity_gbp"] == 0.0 and abs(w["stock_capital_gbp"] - 4000.0) < 0.01 and w["band"] == "COMPETE_25_30",
        "ISA-0858 NEGATIVE CONTROL (D4): 26%% sleeve -> fund trim refused; cash GBP 5,000 capped by the 30%% room GBP 4,000: %s" % w)
     # MUST-FIRE: 31% sleeve -> no new stock capital (D1 hard ceiling)
     w = waterfall(cash_deployable_gbp=20250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(31000.0)),
-                  drawdown=nodd, brake_state=unm, donor_headroom_gbp=50000.0)
+                  drawdown=nodd, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=50000.0)
     ok(w["stock_capital_gbp"] == 0.0 and w["replacement_only"] and w["binding"] == "HARD_CEILING",
        "ISA-0858 MUST-FIRE (D1): 31%% sleeve refuses any addition (replacement only)")
     # MUST-FIRE: brake FIRED -> fund-funded stops, cash-funded continues (D5b)
     w = waterfall(cash_deployable_gbp=3250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)),
-                  drawdown=nodd, brake_state=fired, donor_headroom_gbp=50000.0)
+                  drawdown=nodd, sell_off=_SO_CLEAR, brake_state=fired, donor_headroom_gbp=50000.0)
     ok(w["trim_capacity_gbp"] == 0.0 and abs(w["stock_capital_gbp"] - 3000.0) < 0.01,
        "ISA-0858 MUST-FIRE (D5b): brake FIRED -> fund-funded 0, cash-funded GBP 3,000 continues: %s" % w)
     try:
@@ -457,7 +493,7 @@ def _selftest(verbose: bool = True) -> int:
                                "tranche_log": [{"episode_id": 2, "key": "t10", "fired_on": "2026-10-20",
                                                 "tranche_gbp": 2833.33}]}, [])
     w = waterfall(cash_deployable_gbp=9000.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)),
-                  drawdown=dd, brake_state=fired, donor_headroom_gbp=0.0)
+                  drawdown=dd, sell_off=_SO_CLEAR, brake_state=fired, donor_headroom_gbp=0.0)
     ok(abs(w["cash_capital_gbp"] - 5916.67) < 0.01 and abs(w["stock_capital_gbp"] + 250.0 + 2833.33 - 9000.0) < 0.01,
        "ISA-0858 MUST-FIRE (B1.6b): stock 5,916.67 + tranche 2,833.33 + reserve 250 = 9,000 exactly, no double claim: %s" % w)
     dd2 = drawdown_reservation({"episode_id": 2, "tranches_fired": {"t10": True},
@@ -486,15 +522,15 @@ def _selftest(verbose: bool = True) -> int:
        "S3/B04 NEGATIVE CONTROL (R4.3): an actionable opportunity with no sized amount must not reserve zero")
     try:
         waterfall(cash_deployable_gbp=9000.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(1.0)),
-                  drawdown={"reserved_gbp": None, "why": "x"}, brake_state=unm, donor_headroom_gbp=0.0)
+                  drawdown={"reserved_gbp": None, "why": "x"}, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=0.0)
         ok(False, "an unmeasured drawdown reservation must refuse")
     except WaterfallRefused:
         ok(True, "")
     # idempotence: same inputs, same output
     a = waterfall(cash_deployable_gbp=9000.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)),
-                  drawdown=dd, brake_state=unm, donor_headroom_gbp=7000.0)
+                  drawdown=dd, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=7000.0)
     b = waterfall(cash_deployable_gbp=9000.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)),
-                  drawdown=dd, brake_state=unm, donor_headroom_gbp=7000.0)
+                  drawdown=dd, sell_off=_SO_CLEAR, brake_state=unm, donor_headroom_gbp=7000.0)
     ok(a == b, "ISA-0858: the waterfall is idempotent (a re-run reserves the same pounds once)")
     # pending fills count toward the sleeve; the MMF never does
     p = pf(24000.0)
@@ -506,7 +542,7 @@ def _selftest(verbose: bool = True) -> int:
                                  "amount_gbp": 9.0}])
     ok(sl["pending_fills_gbp"] == 2000.0 and sl["sleeve_gbp"] == 26000.0,
        "ISA-0858 MUST-FIRE (D1 'incl. pending fills'): a buy after the book date counts; the MMF and pre-book rows do not: %s" % sl)
-    w = waterfall(cash_deployable_gbp=250.0, policy_bands=bands, sleeve=sl, drawdown=nodd, brake_state=unm,
+    w = waterfall(cash_deployable_gbp=250.0, policy_bands=bands, sleeve=sl, drawdown=nodd, sell_off=_SO_CLEAR, brake_state=unm,
                   donor_headroom_gbp=50000.0)
     ok(w["trim_capacity_gbp"] == 0.0, "ISA-0858: the pending MTDR fill lifts the sleeve over 25%% - trims refused")
     ok(park_reason("STOCK_SLEEVE_REFUSED")["destination"] == "MMF"
@@ -523,6 +559,29 @@ def _selftest(verbose: bool = True) -> int:
                            {"funds": {"A": {"band_low": 0.05}, "B": {"band_low": 0.05}}})
     ok(hb["headroom_gbp"] == 4000.0 and hb["by_fund"] == {"A": 4000.0, "B": 0.0} and hb["undeclared_band_low"] == ["C"],
        "ISA-0858 (D7): donor headroom stops at each DECLARED band_low; an undeclared band is named, not sized: %s" % hb)
+    # ⚑ P8b ISA-0907 must-fires through the REAL waterfall (same book as the D4 trim cases above)
+    _wfa = waterfall(cash_deployable_gbp=3250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)), drawdown=nodd,
+                     sell_off={"state": "ACTIVE", "leg": "OVERALL", "why": "VUAG.L -9.2% vs its 63-session high"},
+                     brake_state={"permits_fund_funded": True, "label": "fixture"}, donor_headroom_gbp=50000.0)
+    _wfc = waterfall(cash_deployable_gbp=3250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)), drawdown=nodd,
+                     sell_off=_SO_CLEAR, brake_state={"permits_fund_funded": True, "label": "fixture"}, donor_headroom_gbp=50000.0)
+    ok("MUST-FIRE ISA-0907: Active sell-off -> fund-trim capacity 0, cash capital untouched",
+       _wfa["trim_capacity_gbp"] == 0.0 and _wfa["max_fund_funded_gbp"] == 0.0 and _wfa["cash_capital_gbp"] == _wfc["cash_capital_gbp"]
+       and any("ISA-0907" in w for w in _wfa["trim_capacity_why"]))
+    ok("NEGATIVE CONTROL ISA-0907: a CLEAR market leaves the D4 trim capacity as before", _wfc["trim_capacity_gbp"] > 0.0)
+    _wfu = waterfall(cash_deployable_gbp=3250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)), drawdown=nodd,
+                     sell_off={"state": "UNKNOWN", "why": "fetch failed"}, brake_state={"permits_fund_funded": True, "label": "fixture"},
+                     donor_headroom_gbp=50000.0)
+    ok("MUST-FIRE ISA-0907: an UNMEASURED market restricts exactly like ACTIVE (R4.3)", _wfu["trim_capacity_gbp"] == 0.0)
+    ok("MUST-FIRE ISA-0907: no measurement supplied -> UNKNOWN (never a pass)", sell_off_decision(None, pf(10000.0), {})["state"] == "UNKNOWN")
+    try:
+        waterfall(cash_deployable_gbp=3250.0, policy_bands=bands, sleeve=sleeve_at_decision(pf(10000.0)), drawdown=nodd,
+                  brake_state={"permits_fund_funded": True, "label": "fixture"}, donor_headroom_gbp=50000.0)
+        _r47 = False
+    except TypeError:
+        _r47 = True
+    ok("R4.7 NEGATIVE CONTROL: an un-updated caller without sell_off RAISES instead of defaulting", _r47)
+
     if verbose:
         print("funding_waterfall selftest: %d assertions, 0 failed" % n[0])
     return n[0]

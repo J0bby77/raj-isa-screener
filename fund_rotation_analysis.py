@@ -402,6 +402,16 @@ def t4_calibration(panel, window=T4_ROLL_WINDOW_M):
 # ISA-0165 (O-7) — T4, THE OPERATIVE MANDATE-DRIFT TRIGGER
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 
+def _style_diag(sd, breg, U):
+    """ISA-0921: the declared style diagnostic for this fund (benchmark_registry.STYLE_DIAGNOSTICS), never raising."""
+    if breg is None or not hasattr(breg, "style_diagnostic") or sd not in getattr(breg, "STYLE_DIAGNOSTICS", {}):
+        return None
+    try:
+        return breg.style_diagnostic(sd, U)
+    except Exception as e:                                      # noqa: BLE001
+        return {"state": "UNMEASURED", "why": "%s: %s" % (type(e).__name__, e)}
+
+
 def t4_mandate_drift(panel=None, calibration=None, drop=None, universe=None):
     """-> the T4 verdict per fund, and the R15.2 fire-rate check on the trigger itself.
 
@@ -480,6 +490,7 @@ def t4_mandate_drift(panel=None, calibration=None, drop=None, universe=None):
             "consecutive_obs_below": streak,
             "sustain_required": T4_SUSTAIN_OBS,
             "historic_fire_events": events,
+            "style_diagnostic": _style_diag(sd, _breg, U),       # ISA-0921 (Raj Q2-C): evidence only
             "claim": (None if not firing else
                       ("this fund has tracked its %s mandate (%s) at least %.2f below its own "
                        "rolling-R2 median of %.3f for %d consecutive semi-annual observations"

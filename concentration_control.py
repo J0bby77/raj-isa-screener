@@ -586,7 +586,11 @@ def real_shadow_evidence(here: str = HERE) -> dict:
             _engine = "n_bundles_evaluated" in c
             _real = (imp.get("state") == "OK" and int(c.get("n_bundles_evaluated") or 0) > 0) if _engine else \
                     (imp and imp.get("state") != "UNAVAILABLE")
-            if c.get("mode") == "SHADOW" and _real and b not in found:
+            # ⚑ P8c (26-Nov-2026, found in the P8c SHADOW): once the caps are LIVE the month's run context carries a LIVE
+            #   record and supersedes the archived SHADOW one, so a SHADOW-only test flipped readiness to NOT_READY the
+            #   first time LIVE ran (legacy router REFUSED, email "DECISION REQUIRED"). A LIVE engine record that EVALUATED
+            #   bundles is real pre-run evidence too.
+            if c.get("mode") in ("SHADOW", "LIVE") and _real and b not in found:
                 found.append(b)
     return {"state": "PRESENT" if found else "ABSENT", "files": found}
 
@@ -623,7 +627,7 @@ def live_readiness(here: str = HERE, *, review: Optional[dict] = None,
     _dm = tax.get("declared_file") or {}
     ev = real_shadow_evidence(here)
     if ev["state"] != "PRESENT":
-        blockers.append("NO_REAL_PRERUN_SHADOW_EVIDENCE (no real pre-run yet whose engine EVALUATED a plan against the caps; next chance: the 31-Oct-2026 pre-run)")
+        blockers.append("NO_REAL_PRERUN_SHADOW_EVIDENCE (no real pre-run yet whose engine EVALUATED a plan against the caps; next chance: the next monthly pre-run)")
     if coverage_state is not None and coverage_state != "COMPLETE":
         blockers.append("CLASSIFICATION_COVERAGE_%s" % coverage_state)
     return {"state": "READY" if not blockers else "NOT_READY", "blockers": blockers,
@@ -888,6 +892,21 @@ def _selftest(verbose: bool = True) -> int:
     if os.path.exists(real):
         ok("the DECLARED taxonomy on disk passes its own contract",
            not validate_theme_doc(json.load(open(real, encoding="utf-8"))))
+    # ── P8c (26-Nov-2026): a LIVE engine record over EVALUATED bundles is real evidence; over 0 bundles it is not ──
+    import shutil as _sh8c
+    _d8c = tempfile.mkdtemp(prefix="cc8c_")
+    try:
+        def _w8c(n, st):
+            json.dump({"summary": {"capital_decision_engine": {"concentration": {"mode": "LIVE", "n_bundles_evaluated": n,
+                       "impact": {"state": st}}}}}, open(os.path.join(_d8c, "run_context_dec_2026.json"), "w"))
+        _w8c(3, "OK")
+        ok("P8c MUST-FIRE: a LIVE engine record that evaluated bundles is real pre-run evidence (readiness stays READY "
+           "after the first LIVE run)", real_shadow_evidence(_d8c)["state"] == "PRESENT")
+        _w8c(0, "NO_BUNDLES_EVALUATED")
+        ok("P8c NEGATIVE CONTROL: a LIVE record over 0 evaluated bundles is NOT evidence",
+           real_shadow_evidence(_d8c)["state"] == "ABSENT")
+    finally:
+        _sh8c.rmtree(_d8c, ignore_errors=True)
     if verbose:
         print("concentration_control selftest: %d failure(s)" % len(fails))
     return 1 if fails else 0

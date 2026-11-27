@@ -38,6 +38,7 @@ failed to fetch.
 """
 from __future__ import annotations
 import argparse, datetime as dt, json, math, os, statistics as st, sys
+import re
 
 # ── ISA-0944 (20-Nov-2026): LIVE-PATH EXECUTION LEDGER (framework_integrity) ─────────────
 # ONE LINE at the head of the declared capability producer. `_mark` is in-memory and a NO-OP when
@@ -1387,6 +1388,12 @@ def build(as_of=None, portfolio=None, perf=None, refresh=False, xray=None, xray_
     }
 
 
+# ⚑ ISA-0918 / ISA-0973: the FRS band is a retention / sell-order VOTE; it never states whether a fund takes new money
+#   (the allocation rules decide). One matcher, used by the selftest over every renderer that prints the bands.
+FRS_NEW_MONEY_VERDICT_RX = re.compile(r"(?:HOLD/ADD|RETAIN-ONLY|WINDOW[_-]SPLIT|DEAD MONEY)\s*\((?:[^()]{0,20})?\b(?:no|not)\b[^()]{0,12}\bnew money\b")
+FRS_VERDICT_RENDERERS = ("fund_action_stack.py", "email_prefill.py", "build_monthly_isa_email.py")
+
+
 # ---------------------------------------------------------------- selftest
 def _selftest():
     """Synthetic sleeve with a KNOWN dominance relationship and a KNOWN dead-money fund, so the
@@ -1453,6 +1460,24 @@ def _selftest():
     _src_fas = open(os.path.abspath(__file__), encoding="utf-8").read()
     _bad = [p for p in ('"No new money; retain only"', '"Eligible for new money"') if p in _src_fas.split("def _selftest")[0]]
     assert not _bad, "ISA-0918 MUST-FIRE: the Fund Action Stack may not state a new-money verdict (FRS votes on sell order only): %r" % _bad
+    # ⚑ ISA-0973 (P8c, 26-Nov-2026): the same verdict must not survive in the EMAIL renderers' prose (the 1-Nov email's
+    #   method note said "RETAIN-ONLY (no new money)" after ISA-0918). Scan every renderer's non-selftest source.
+    _rx973 = FRS_NEW_MONEY_VERDICT_RX
+    assert _rx973.search('Bands: >=58 HOLD/ADD, 43-57 RETAIN-ONLY (no new money), <43 DEAD MONEY'), \
+        "ISA-0973 MUST-FIRE: the 1-Nov method-note phrase is detected"
+    assert not _rx973.search("RETAIN-ONLY (a retention vote: it orders which fund is sold first; new money follows the allocation rules)"), \
+        "ISA-0973 NEGATIVE CONTROL: the corrected wording passes"
+    assert not _rx973.search("Matador: no new money until its results are read"), \
+        "ISA-0973 NEGATIVE CONTROL: a stock-level router/engine verdict is not an FRS-band verdict"
+    _here973 = os.path.dirname(os.path.abspath(__file__))
+    _hits973 = {}
+    for _fn in FRS_VERDICT_RENDERERS:
+        _t = open(os.path.join(_here973, _fn), encoding="utf-8").read()
+        _t = _t.split("def _selftest")[0].replace('"\n            "', "").replace('" "', "")
+        _m = _rx973.findall(_t)
+        if _m:
+            _hits973[_fn] = _m[:3]
+    assert not _hits973, "ISA-0973 MUST-FIRE: an email renderer states an FRS-band new-money verdict (ISA-0918: the router decides): %r" % _hits973
     assert "fp.nav_series_for(sedol, u" in _bbody and 'u.get("yf_symbol") or u.get("isin")' not in _bbody, \
         "ISA-0869 MUST-FIRE: build() reads NAV through nav_series_for only (a second door went missing Polar's series)"
     assert _fp869.nav_freshness("Z", {}, dt.date(2026, 10, 31), series=[], state={"funds": {}})["state"] == "NO_SERIES", \

@@ -38,6 +38,11 @@ import argparse, datetime as dt, json, math, os, statistics as st, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+try:                                                    # pragma: no cover - wiring only (ISA-0962 step 0)
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
 
 SCHEMA_VERSION = 1
 MIN_MONTHS = 24
@@ -61,6 +66,7 @@ def _ann_geom(monthly):
 
 
 def category_declaration_status(universe=None):
+    _fi_mark("fund_pair_test", "category_declaration_status")   # ISA-0962: declared capability producer
     """⚑ Every fund whose peer-group block is still outstanding, with the exact one-line fix.
 
     Register L2: three redundancy pairs sit at UNKNOWN for want of a declared category, and
@@ -432,8 +438,10 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
     ap = argparse.ArgumentParser()
-    ap.add_argument("--portfolio", default=os.path.join(HERE, "portfolio_data_aug_2026.json"))
-    ap.add_argument("--xray", default=os.path.join(HERE, "xray_data_aug_2026.json"))
+    # ISA-0947: no August defaults - the caller names the run's own portfolio and X-Ray (a default month file is
+    #   the ISA-0943 class: a stale input that reads as current).
+    ap.add_argument("--portfolio", required=True)
+    ap.add_argument("--xray", required=True)
     ap.add_argument("--as-of", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()

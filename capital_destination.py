@@ -523,6 +523,9 @@ def c1_reference_deviation(sedol, *, material, vectors, vec_state, mandate_index
                                     "REDUCES" if pp < 0 else "WIDENS"))}
 
 
+T4_C3_REQUIRES_CALIBRATED_BAND = True    # ISA-0921 (Raj Q1-B) R4.13 rollback: False -> C3 reads T4 as before
+
+
 def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> dict:
     """-> the estimation-free ranking table, one row per fund, plus the state of each criterion.
 
@@ -585,8 +588,15 @@ def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> 
             t4, crit_state["c3"] = None, {"state": "UNAVAILABLE",
                                           "reason": "%s: %s" % (type(e).__name__, e)}
     t4_by = {r["sedol"]: r for r in ((t4 or {}).get("funds") or [])}
+    # ⚑ ISA-0921 (P7, Raj Q1-B 21-Nov-2026): a trigger outside its own declared fire-rate band is UNCALIBRATED
+    #   (R15.2 / ISA-0165) and must not order capital. While T4's band is not OK, C3 is FLAG-ONLY: the verdict is
+    #   carried on every row and rendered, but contributes 0 to the ordering. It reinstates itself the run the band
+    #   reads OK. T4_DROP is never touched. A firing fund's drift is still charged in its FRS (mandate_drift).
+    _t4_band = ((t4 or {}).get("fire_rate_band") or {}).get("state")
+    _c3_restricted = bool(T4_C3_REQUIRES_CALIBRATED_BAND and t4_by and _t4_band != "OK")
     crit_state.setdefault("c3", {
-        "state": ("MEASURED" if t4_by else "UNAVAILABLE"),
+        "state": ("RESTRICTED_T4_BAND_" + str(_t4_band) if _c3_restricted else ("MEASURED" if t4_by else "UNAVAILABLE")),
+        "t4_fire_rate_band": (t4 or {}).get("fire_rate_band"),
         "firing": (t4 or {}).get("firing"), "watch": (t4 or {}).get("watch"),
         "refused": (t4 or {}).get("refused"), "owner": "fund_rotation_analysis.py (ISA-0165)"})
 
@@ -640,6 +650,12 @@ def rank_inputs(universe, *, saa=None, pc=None, t4=None, exposure_path=None) -> 
             c3 = {"c3": 0, "state": "NOT_TESTED", "basis": tr.get("reason")}
         else:
             c3 = {"c3": 0, "state": "OK", "basis": "mandate intact on T4"}
+        if tr is not None and tr.get("style_diagnostic"):
+            c3["style_diagnostic"] = tr.get("style_diagnostic")       # ISA-0921 Q2-C: evidence, decides nothing
+        if _c3_restricted and c3.get("c3"):
+            c3 = dict(c3, c3=0, t4_state=c3.get("state"), state="RESTRICTED",
+                      basis=("T4 %s is SHOWN but does not order capital: T4's fire rate is %s outside its declared band "
+                             "(ISA-0921, Raj Q1-B 21-Nov-2026). %s" % (c3.get("state"), _t4_band, c3.get("basis") or "")))
 
         ocf = u.get("ocf")
         c4 = ({"c4": float(ocf), "state": "MEASURED", "basis": "fund_universe.ocf"} if ocf is not None
@@ -4370,6 +4386,12 @@ def _reporting_run_leaves_obligation_store_identical() -> bool:
             "correlation": {"measured": False, "rho_sleeve": None, "rho_basis": "UNMEASURED_ADVERSE_DEFAULT"}}
            for t, sc in (("FA", 70.0), ("FB", 60.0))]
     saved = _psm.FILL_STORE
+    # ⚑ P8c (26-Nov-2026): this control is about the OBLIGATION STORE, not concentration. With concentration_gate LIVE
+    #   the unclassified fixture names FA/FB are refused by the caps, no entry is underfilled and the control is VACUOUS
+    #   (measured). Pin the gate to SHADOW for the fixture, exactly as _shadow_failure_cannot_alter_plan does.
+    import isa_policy as _ip701
+    _saved701 = _ip701.V2_FLAGS.get("concentration_gate")
+    _ip701.V2_FLAGS["concentration_gate"] = "SHADOW"
     with tempfile.TemporaryDirectory() as td:
         st = os.path.join(td, "underfilled_positions.json")
         _psm.save_fill_obligations({"obligations": []}, st)
@@ -4380,6 +4402,7 @@ def _reporting_run_leaves_obligation_store_identical() -> bool:
                                sequence={"order": ["FA", "FB"], "basis": "fixture_order"})
         finally:
             _psm.FILL_STORE = saved
+            _ip701.V2_FLAGS["concentration_gate"] = _saved701
         al = out.get("allocation") or {}
         return (open(st, "rb").read() == b0 and al.get("obligations_persisted_to") is None
                 and al.get("obligations_store_mutated") is False
@@ -4776,10 +4799,27 @@ def _selftest(verbose=True) -> int:
            for r in d["ranking"]["rows"].values()
            if r["c2"]["state"] == "UNDECLARED_PROCESS") or not any(
            r["c2"]["state"] == "UNDECLARED_PROCESS" for r in d["ranking"]["rows"].values()))
-    ck("ISA-0386: the T4-FIRING fund is ranked BELOW every fund whose mandate is intact",
+    ck("ISA-0386: the T4-FIRING fund is ranked BELOW every fund whose mandate is intact (when T4's band is OK)",
        (lambda fir, rr: all(rr[f]["c3"]["c3"] > rr[o]["c3"]["c3"]
                             for f in fir for o in rr if rr[o]["c3"]["state"] == "OK") if fir
+        and d["ranking"]["criteria"]["c3"].get("state") == "MEASURED"
         else True)(d["ranking"]["criteria"]["c3"].get("firing") or [], d["ranking"]["rows"]))
+    # ── ISA-0921 (Raj Q1-B): T4 is flag-only in C3 while its fire-rate band is not OK ─────────────────────────
+    def _t4fix(band):
+        return {"state": "MEASURED", "firing": ["BR2Q8G6"], "watch": [], "refused": [],
+                "fire_rate_band": {"state": band},
+                "funds": [{"sedol": "BR2Q8G6", "state": "FIRING", "mandate_basis": "prospectus"},
+                          {"sedol": "BF93W97", "state": "OK"}]}
+    _u921 = json.load(open(HERE / "fund_universe.json"))
+    _rb = rank_inputs(_u921, t4=_t4fix("BREACH_HIGH"))
+    ck("ISA-0921 MUST-FIRE: with T4 BREACH_HIGH the firing fund contributes 0 to C3, is RESTRICTED, and still SHOWS FIRING",
+       _rb["rows"].get("BR2Q8G6", {}).get("c3", {}).get("c3") == 0
+       and _rb["rows"]["BR2Q8G6"]["c3"].get("state") == "RESTRICTED"
+       and _rb["rows"]["BR2Q8G6"]["c3"].get("t4_state") == "FIRING"
+       and str(_rb["criteria"]["c3"]["state"]).startswith("RESTRICTED"))
+    _ro = rank_inputs(_u921, t4=_t4fix("OK"))
+    ck("ISA-0921 NEGATIVE CONTROL: with T4's band OK the firing fund is demoted in C3 exactly as before",
+       _ro["rows"].get("BR2Q8G6", {}).get("c3", {}).get("c3") == 2 and _ro["criteria"]["c3"]["state"] == "MEASURED")
     ck("ISA-0386: trailing return appears NOWHERE in the ranking table",
        not any(("return" in k.lower() or "alpha" in k.lower())
                for r in d["ranking"]["rows"].values() for c in r.values()

@@ -11,7 +11,7 @@
       "fetch_failure",
       "UNKNOWN"
     ],
-    "updated": "2026-11-20T09:21:37+00:00"
+    "updated": "2026-11-21T09:27:50+00:00"
   },
   "names": {
     "F250-SPI|AAS.L": {
@@ -12366,7 +12366,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 5,
+      "runs_missing": 6,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "AVB"
@@ -12506,7 +12506,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 3,
+      "runs_missing": 4,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "BLDR"
@@ -12841,7 +12841,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 2,
+      "runs_missing": 3,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "CTVA"
@@ -13079,7 +13079,7 @@
       "reason": "fetch_failure",
       "reason_source": "self-evident: the ticker reappeared in a later run, so the absence was never a delisting",
       "returned_on": "2026-08-15",
-      "runs_missing": 5,
+      "runs_missing": 6,
       "status": "returned",
       "terminal_return_pct": null,
       "ticker": "EQR"
@@ -13735,7 +13735,7 @@
       "last_seen": "2026-10-17",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 1,
+      "runs_missing": 2,
       "status": "suspected_gone",
       "terminal_return_pct": null,
       "ticker": "KVUE"
@@ -14308,8 +14308,8 @@
       "last_seen": "2026-10-02",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 2,
-      "status": "suspected_gone",
+      "runs_missing": 3,
+      "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "PSKY"
     },
@@ -14598,7 +14598,7 @@
       "last_seen": "2026-09-19",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 3,
+      "runs_missing": 4,
       "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "TAP"
@@ -14709,7 +14709,7 @@
       "last_seen": "2026-09-19",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 3,
+      "runs_missing": 4,
       "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "TTD"
@@ -14862,8 +14862,8 @@
       "last_seen": "2026-10-02",
       "reason": "UNKNOWN",
       "reason_source": null,
-      "runs_missing": 2,
-      "status": "suspected_gone",
+      "runs_missing": 3,
+      "status": "confirmed_gone",
       "terminal_return_pct": null,
       "ticker": "WBD"
     },

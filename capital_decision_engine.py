@@ -49,7 +49,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 try:
-    from framework_integrity import mark as _fi_mark            # execution ledger (R4.14)
+    from framework_integrity import _mark as _fi_mark   # ISA-0953: was `mark` (no such name) -> stub no-op            # execution ledger (R4.14)
 except Exception:                                                   # noqa: BLE001
     def _fi_mark(*_a, **_k):                                        # noqa: D103
         return None
@@ -193,6 +193,14 @@ INPUT_FILES = {
     "target_weights": "target_weights.json",
     "transaction_ledger": "transaction_ledger.json",
     "weekly_store": "stock_weekly_returns.json",
+    # ISA-0955/0956 (P7): the held top-up identities are hash-bound, so a review written after formation STALES the
+    # receipt (re-run the engine) instead of leaving a receipt formed without it. Both OPTIONAL: absence refuses the
+    # held top-up by name (R4.3), never the receipt.
+    "issuer_reviews": "issuer_reviews_{m}.json",
+    "binary_positions": "vci_binary_positions.json",
+    # P8b ISA-0907: the pre-run's Active sell-off measurement (Step 6.10so). OPTIONAL: absence reads UNKNOWN and plans no
+    #   fund trim (R4.3), never refuses the receipt. Hash-bound so a re-measurement stales the receipt.
+    "sell_off_state": "sell_off_state_{m}.json",
 }
 
 
@@ -798,6 +806,152 @@ def build_census(inp: dict, pipeline: dict, store: dict, hurdle_pct: float, as_o
     return _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, None)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ISA-0954 (b)(c) — HELD TOP-UP IDENTITIES (P7, 21-Nov-2026; ISA-0956 / ISA-0955)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# The legacy capital_authorisation receipt required every held top-up to name the ISA-0706 held-binary budget
+# calc_id and the ISA-0713 issuer event_review_id. ISA-0811 made this engine the only stock-capital route without
+# carrying either constraint; issuer_freshness.capital_disposition had NO production caller. Both are enforced here.
+# ⚑ A refusal is HARD_BLOCKED, never CASE_PENDING: it removes one name from the bundle search and leaves the
+#   receipt free to route that capital to the next eligible name, the funds or the MMF sweep - a missing review
+#   for one holding must not freeze the month's capital (every pound must count).
+HELD_TOPUP_IDENTITY_ENFORCED = True     # R4.13 rollback: False -> identities recorded, nothing refused
+# ⚑ ISA-0957 (P9, Raj 25-Nov-2026 Q3-A): a NEW name needs the same issuer review before new-name capital. One issuer
+#   block (_issuer_gate) serves held top-ups and new names. Three branches for a NEW name (new_name_issuer_gate):
+#   review present and not ALLOW/CARRY -> HARD_BLOCKED; no review AND its case declared complete -> HARD_BLOCKED
+#   ISSUER_REVIEW_ABSENT; no review AND case incomplete -> DUE_IN_CASE_LOOP (no block - reviews are written by the
+#   Step 10.0b case loop AFTER selection; blocking them here would deadlock). Never CASE_PENDING: a refusal removes
+#   ONE name and the receipt re-forms (every pound must count).
+NEW_NAME_ISSUER_REVIEW_ENFORCED = True  # R4.13 rollback: False -> recorded ("would have been"), nothing refused
+NEW_NAME_ISSUER_ACTION = "BUY"
+NEW_NAME_ISSUER_ROUTE = "main"
+
+
+def held_topup_identities(inp: dict) -> dict:
+    """Computed ONCE per census from the run's own book: the held-binary budget (position_sizing.held_binary_budget,
+    the single home) and the month's issuer reviews (issuer_freshness store). Every failure is typed, never raised."""
+    root = inp.get("root") or HERE
+    month = inp.get("month")
+    pf = inp.get("portfolio") or {}
+    out = {"vci_budget": None, "vci_budget_error": None, "issuer_reviews": None, "issuer_error": None}
+    try:
+        import position_sizing as _ps0956
+        nav = float(((pf.get("summary") or {}).get("total_value_gbp")) or 0.0)
+        if nav <= 0:
+            raise ValueError("portfolio summary.total_value_gbp absent (ISA-0673)")
+        held = [{"ticker": s.get("ticker"), "size_pct": 100.0 * float(s.get("value_gbp") or 0.0) / nav}
+                for s in (pf.get("stocks") or []) if s.get("ticker")]
+        _bd = None
+        try:
+            _dd = (((pf.get("_meta") or {}).get("data_date")) or "").strip()
+            _bd = datetime.datetime.strptime(_dd, "%d-%b-%Y").date().isoformat() if _dd else None
+        except Exception:                                               # noqa: BLE001
+            _bd = None
+        out["vci_budget"] = _ps0956.held_binary_budget(held, declared=_ps0956.load_declared_binaries(root, as_of=_bd),
+                                                       root=root)
+    except Exception as exc:                                            # noqa: BLE001
+        out["vci_budget_error"] = "%s: %s" % (type(exc).__name__, exc)
+    rev = inp.get("issuer_reviews")
+    if isinstance(rev, dict):
+        out["issuer_reviews"] = {str(r.get("ticker") or "").upper(): r for r in (rev.get("reviews") or []) if r.get("ticker")}
+        out["issuer_doc"] = {"month_label": rev.get("month_label"), "as_of": rev.get("as_of"),
+                             "coverage": (rev.get("coverage") or {}).get("state")}
+    else:
+        out["issuer_error"] = ("issuer_reviews_%s.json is absent - the month's ISA-0713 issuer reviews are written at the "
+                               "monthly review; until then no held top-up can name an event_review_id" % month)
+    return out
+
+
+def _issuer_gate(t: str, ident: dict, as_of, *, action: str, route: str, run: bool = True, absent_note: Optional[str] = None):
+    """THE one issuer block (ISA-0955 held top-ups, ISA-0957 new names) -> (disposition|None, reasons, issuer_event, review).
+    A review present is judged by issuer_freshness.capital_disposition (the single home); ALLOW passes, CARRY passes with
+    the carried event named, anything else HARD_BLOCKS this one name. No review -> HARD_BLOCKED ISSUER_REVIEW_ABSENT."""
+    reasons, disp = [], None
+    rv = (ident.get("issuer_reviews") or {}).get(t) if ident.get("issuer_reviews") is not None else None
+    ie = {"event_review_id": (rv or {}).get("review_id"), "authority": "issuer_freshness.capital_disposition (ISA-0713/0955)"}
+    if run:
+        if rv is None:
+            disp = "HARD_BLOCKED"
+            reasons.append(_reason("issuer", "ISSUER_REVIEW_ABSENT", None, "this month's issuer review",
+                                   "issuer_freshness (ISA-0713/0955)",
+                                   absent_note or ident.get("issuer_error") or "no review for this holding in the month's issuer reviews"))
+        else:
+            try:
+                import issuer_freshness as _if0955
+                d = _if0955.capital_disposition(rv, action=action, as_of=as_of, route=route)
+            except Exception as exc:                                    # noqa: BLE001
+                d = {"disposition": "UNAVAILABLE", "reasons": ["%s: %s" % (type(exc).__name__, exc)]}
+            ie.update({k: d.get(k) for k in ("disposition", "reasons", "next_event_state", "next_event_date",
+                                             "event_before_next_guaranteed_review")})
+            if d.get("disposition") == "CARRY_EVENT_EXPLICITLY":
+                ie["carried"] = ("this decision CARRIES the event on %s: the receipt's scenarios underwrite it "
+                                 "and execution is re-checked by dealing_invalidation" % d.get("next_event_date"))
+            elif d.get("disposition") != "ALLOW":
+                disp = "HARD_BLOCKED"
+                reasons.append(_reason("issuer", "ISSUER_EVIDENCE_" + str(d.get("disposition")), (rv or {}).get("capital_authority_survives"),
+                                       "ALLOW", "issuer_freshness.capital_disposition (ISA-0713/0955)", "; ".join(d.get("reasons") or [])[:240]))
+    return disp, reasons, ie, rv
+
+
+def new_name_issuer_gate(ticker: str, ident: dict, as_of, case_complete: bool) -> dict:
+    """ISA-0957 -> {disposition: None (pass) | HARD_BLOCKED, reasons, record: {issuer_event}} for ONE new (non-held) name."""
+    t = str(ticker or "").upper()
+    rv = (ident.get("issuer_reviews") or {}).get(t) if ident.get("issuer_reviews") is not None else None
+    if rv is None and not case_complete:
+        ie = {"event_review_id": None, "authority": "issuer_freshness.capital_disposition (ISA-0713/0957)",
+              "state": "DUE_IN_CASE_LOOP",
+              "why": ("no issuer review yet for this NEW name; the Step 10.0b case loop writes one (issuer_freshness.py "
+                      "--add-review) before its case is complete. Not a block: the review is written after selection.")}
+        return {"disposition": None, "reasons": [], "record": {"issuer_event": ie}}
+    disp, reasons, ie, _ = _issuer_gate(
+        t, ident, as_of, action=NEW_NAME_ISSUER_ACTION, route=NEW_NAME_ISSUER_ROUTE, run=True,
+        absent_note=("the case was declared complete but the month's issuer reviews carry no review for this NEW name "
+                     "(ISA-0957): Step 10.0b writes it with issuer_freshness.py --add-review before completing the case"
+                     + ("; %s" % ident.get("issuer_error") if ident.get("issuer_error") else "")))
+    ie["authority"] = "issuer_freshness.capital_disposition (ISA-0713/0957)"
+    ie["state"] = "REVIEWED" if rv is not None else "ABSENT_AT_CASE_COMPLETE"
+    rec = {"issuer_event": ie}
+    if not NEW_NAME_ISSUER_REVIEW_ENFORCED:
+        rec["issuer_event"]["not_enforced"] = ("NEW_NAME_ISSUER_REVIEW_ENFORCED is False (rollback): would have been %s" % disp)
+        disp, reasons = None, []
+    return {"disposition": disp, "reasons": reasons, "record": rec}
+
+
+def held_topup_gate(ticker: str, ident: dict, as_of) -> dict:
+    """-> {disposition: None (pass) | HARD_BLOCKED | NOT_IN_SCOPE, reasons: [...], record: {...}} for ONE held top-up."""
+    t = str(ticker or "").upper()
+    reasons, rec = [], {}
+    vb = ident.get("vci_budget")
+    rec["vci_budget"] = {"calc_id": (vb or {}).get("calc_id"), "authority": "position_sizing.held_binary_budget (ISA-0706)",
+                         "blocks_capital": (vb or {}).get("blocks_capital"), "error": ident.get("vci_budget_error")}
+    disp = None
+    if not vb or not vb.get("calc_id"):
+        disp = "HARD_BLOCKED"
+        reasons.append(_reason("vci_budget", "HELD_BINARY_BUDGET_UNAVAILABLE", ident.get("vci_budget_error"), "a calc_id",
+                               "position_sizing.held_binary_budget (ISA-0706/0956)",
+                               "a held top-up is sized only against a named budget calculation"))
+    else:
+        refused = {str(r.get("ticker") or "").upper(): r for r in (vb.get("refusals") or [])}
+        row = next((r for r in (vb.get("rows") or []) if str(r.get("ticker") or "").upper() == t), None)
+        if t in refused:
+            disp = "HARD_BLOCKED"
+            reasons.append(_reason("vci_budget", "BINARY_STATE_UNCLASSIFIED", refused[t].get("control"), "declared",
+                                   "vci_binary_positions.json (ISA-0548/0956)", refused[t].get("why")))
+        elif row is not None and row.get("is_binary"):
+            disp = "NOT_IN_SCOPE"
+            reasons.append(_reason("route", "VCI_ROUTE_SEPARATE", "is_binary", "not binary",
+                                   "vci_binary_positions.json (ISA-0956)",
+                                   "a declared held binary is sized on the VCI route (held_position_review), never here"))
+    _di, _ri, rec["issuer_event"], _rv = _issuer_gate(t, ident, as_of, action="TOP_UP", route="held", run=disp is None)
+    if disp is None and _di:
+        disp = _di
+        reasons.extend(_ri)
+    if not HELD_TOPUP_IDENTITY_ENFORCED:
+        rec["not_enforced"] = "HELD_TOPUP_IDENTITY_ENFORCED is False (rollback): would have been %s" % disp
+        disp, reasons = None, []
+    return {"disposition": disp, "reasons": reasons, "record": rec}
+
+
 def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_overrides, switch_mode=False):
     """Every scored security -> exactly ONE disposition with typed reasons (s3.2). Stage numbers
     need not match the old 84->69->25->11 funnel; the old funnel is retained for comparison.
@@ -827,6 +981,7 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
     _ce_sec = step9.get("corporate_events")
     _ce_v = ((_ce_sec or {}).get("verdicts") or {}) if isinstance(_ce_sec, dict) else {}
     recs = {}
+    _ht_ident = held_topup_identities(inp)        # ISA-0955/0956: once per census, from the run's own book
     for t in universe:
         am = am_all.get(t) or {}
         rec = {"ticker": t, "stable_id": t, "in_hv": t in hv_by, "in_step9_rank": t in dpr,
@@ -925,6 +1080,13 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                 rec["reasons"].append(_reason("c1", "C1_" + str(c1.get("verdict") or "ABSENT"),
                                               c1.get("verdict"), "ADMISSIBLE", "t1_gates.current_admissibility (ISA-0616)",
                                               c1.get("why")))
+        if disp is None and t not in held:
+            # ISA-0957 (P9): a NEW name passes the same issuer block before new-name capital
+            _ng = new_name_issuer_gate(t, _ht_ident, as_of, (am or {}).get("case.complete") is True)
+            rec.update(_ng["record"])
+            if _ng["disposition"]:
+                disp = _ng["disposition"]
+                rec["reasons"].extend(_ng["reasons"])
         if disp is None and t in held:
             # held top-ups: the router's route verdict decides first (REPLACEMENT_ONLY needs a donor)
             adm = ((pc.get("correlation") or {}).get("admission") or {})
@@ -939,6 +1101,13 @@ def _build_census(inp, pipeline, store, hurdle_pct, as_of, amendments, price_ove
                 rec["reasons"].append(_reason("route", "REPLACEMENT_ONLY_NO_DONOR", adm.get("breaches"),
                                               "donor bundle authorised", "deployment_sequencer admission (ISA-0601/0705)",
                                               "a REPLACEMENT_ONLY top-up enters only as an atomic donor/successor bundle; no donor is authorised this run and no opportunistic liquidation is created (s6)"))
+        if disp is None and t in held and pc:
+            # ISA-0954 (b)(c): a held top-up names the held-binary budget calc_id and passes the issuer disposition
+            _hg = held_topup_gate(t, _ht_ident, as_of)
+            rec.update(_hg["record"])
+            if _hg["disposition"]:
+                disp = _hg["disposition"]
+                rec["reasons"].extend(_hg["reasons"])
         tg = (w.get("t1_gate_detail") or {})
         if disp is None and t not in held and tg and not (tg.get("ns_floor") or {}).get("pass", True):
             disp = "HARD_BLOCKED"
@@ -1315,8 +1484,14 @@ def concentration_eval(bundle: Tuple, held: Dict[str, float], nav: float, tax: d
 
 
 def constraints_for(bundle: Tuple, risk: dict, pre_shares: Dict[str, float], ceiling_pct: float,
-                    max_pos_gbp: float) -> List[dict]:
-    """Every authorised hard constraint on the FINAL bundle -> list of breaches (empty = feasible)."""
+                    max_pos_gbp: float, risk_share_calc_id: Optional[str] = None) -> List[dict]:
+    """Every authorised hard constraint on the FINAL bundle -> list of breaches (empty = feasible).
+
+    ISA-0708 (21-Nov-2026): a D27 breach names the AUTHORITATIVE pre-trade risk-share calculation it was
+    judged against (`risk_share_calc_id`, sleeve_risk.risk_share_authority). The post-trade share is the
+    SAME primitive (sleeve_risk.risk_shares) on the proposed weights and the same declared window - the
+    weight_at_ceiling pattern - so the id identifies data, window and method for both sides. None means
+    the engine could not identify its pre-trade calculation; pair_one_risk_share_authority reports that."""
     br = []
     if risk.get("state") != "MEASURED":
         br.append({"constraint": "post_trade_risk_measured", "observed": risk.get("why")})
@@ -1332,11 +1507,42 @@ def constraints_for(bundle: Tuple, risk: dict, pre_shares: Dict[str, float], cei
                 br.append({"constraint": "D27 sleeve risk-share ceiling", "ticker": t,
                            "observed_pct": _r(sh * 100, 2), "limit_pct": ceiling_pct,
                            "pre_trade_pct": None if pre is None else _r(pre * 100, 2),
+                           "risk_share_calc_id": risk_share_calc_id,
+                           "risk_share_authority": "sleeve_risk.risk_share_authority",
                            "note": "a bundle may neither create a breach nor deepen an existing one"})
     for t, a in bundle:
         if a > max_pos_gbp + EPS_GBP:
             br.append({"constraint": "max_stock_position_pct", "ticker": t, "observed": a, "limit": max_pos_gbp})
     return br
+
+
+def pre_trade_risk_authority(store: dict, portfolio: dict, pre_shares: Dict[str, float]) -> dict:
+    """ISA-0708 (21-Nov-2026) — the identity of the pre-trade sleeve risk share this engine decides D27 on.
+
+    ⚑ WHY. The engine is the decision-effective D27 consumer (constraints_for marks a bundle infeasible),
+    yet its receipt quoted shares with no `risk_share_calc_id`, so the live capital decision could not
+    say WHICH risk-share calculation it used - the very gap ISA-0708 exists to close. The shares are
+    still computed by sleeve_risk.risk_shares exactly as before (decision math unchanged); the authority
+    is called beside it for its identity, and the two are COMPARED (R6.2 publish, never blend).
+    IDENTIFIED: same shares to 1e-12. DIVERGED: an id exists but the shares differ (published, decides
+    nothing here). UNIDENTIFIED: no id could be produced - named, never invented (R2.10)."""
+    try:
+        import sleeve_risk as _sr0708
+        a = _sr0708.risk_share_authority(store, portfolio)
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNIDENTIFIED", "risk_share_calc_id": None,
+                "authority": "sleeve_risk.risk_share_authority", "why": "%s: %s" % (type(exc).__name__, exc)}
+    keys = set(a.get("shares") or {}) | set(pre_shares or {})
+    delta = max((abs(float((a.get("shares") or {}).get(k, 0.0)) - float((pre_shares or {}).get(k, 0.0)))
+                 for k in keys), default=None)
+    ident = bool(pre_shares) and delta is not None and delta <= 1e-12
+    return {"state": "IDENTIFIED" if ident else "DIVERGED",
+            "risk_share_calc_id": a.get("risk_share_calc_id"), "authority": a.get("authority"),
+            "window": a.get("window"), "method": (a.get("identity_basis") or {}).get("method"),
+            "max_abs_share_delta": delta,
+            "why": ("the engine's pre-trade shares ARE the authority's (same primitive, same inputs)" if ident else
+                    "the engine's pre-trade shares differ from the authority's by up to %r - published, not blended"
+                    % (delta,))}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -1762,7 +1968,9 @@ def switch_contest(ctx: dict) -> dict:
             w[s_] = tot
         legs = tuple(sorted(list(b) + [(t, -s) for t, s in sold.items()]))
         rk = plan_risk(store, portfolio, legs, so_set, memo)
-        br = constraints_for(b, rk, ctx["pre_shares"], ctx["ceiling"], ctx["max_pos"]) if rk.get("state") == "MEASURED" \
+        br = constraints_for(b, rk, ctx["pre_shares"], ctx["ceiling"], ctx["max_pos"],
+                             risk_share_calc_id=(ctx.get("pre_risk") or {}).get("risk_share_calc_id")) \
+            if rk.get("state") == "MEASURED" \
             else [{"constraint": "post_trade_risk_measured", "observed": rk.get("why")}]
         sds = rk.get("switch_delta_sigma")
         if sds is not None and not (sds.get("state") == "MEASURED" and sds.get("risk_improving")):
@@ -2333,8 +2541,11 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     #   the 30% hard ceiling measured at decision time incl. pending fills. Never re-derived here (R4.4).
     import funding_waterfall as _fw
     try:
+        _sop = input_path(month, "sell_off_state", root)              # P8b ISA-0907
+        _som = json.load(open(_sop, encoding="utf-8")) if os.path.exists(_sop) else None
         _wf = _fw.build(portfolio, root=root, tw=tw,
-                        ledger_entries=(inp.get("transaction_ledger") or {}).get("entries") or [])
+                        ledger_entries=(inp.get("transaction_ledger") or {}).get("entries") or [],
+                        sell_off_measurement=_som)
     except _fw.WaterfallRefused as _wfe:
         raise EngineRefused("FUNDING_WATERFALL_REFUSED (ISA-0858): %s" % _wfe)
     capital = round(float(_wf["stock_capital_gbp"]), 2)
@@ -2470,6 +2681,10 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         pre_risk = {"sleeve_sigma": pre["sleeve_sigma_ann"], "gbp_vol": pre["sleeve_sigma_ann"] * float(s.get("stock_sleeve_value_gbp") or 0)}
     except Exception as exc:                                        # noqa: BLE001
         pre_shares, pre_risk = {}, {"state": "UNMEASURED", "why": str(exc)}
+    _rsa0708 = (pre_trade_risk_authority(store, portfolio, pre_shares) if pre_shares else
+                {"state": "UNIDENTIFIED", "risk_share_calc_id": None, "authority": "sleeve_risk.risk_share_authority",
+                 "why": "pre-trade sleeve risk UNMEASURED: %s" % pre_risk.get("why")})
+    pre_risk["risk_share_calc_id"] = _rsa0708.get("risk_share_calc_id")
     ceiling = float(getattr(_sc, "SLEEVE_RISK_CEILING_PCT"))
     max_pos = float(tw["thresholds"]["max_stock_position_pct"]) * nav
     # ⚑ P-D (B08-R03, ISA-0887, 24/25-Oct-2026): the WHOLE-ISA covariance (stocks + funds, one sleeve_risk basis) is
@@ -2528,7 +2743,8 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
         r["gbp_vol"] = rk.get("gbp_vol")
         _wb_annotate(r, r["bundle"], _wbx, portfolio, nav,
                      fund_trim_gbp=max(float(r["stock_gbp"]) - float(_wf["cash_capital_gbp"]), 0.0))
-        r["breaches"] = constraints_for(r["bundle"], rk, pre_shares, ceiling, max_pos)
+        r["breaches"] = constraints_for(r["bundle"], rk, pre_shares, ceiling, max_pos,
+                                        risk_share_calc_id=_rsa0708.get("risk_share_calc_id"))
         if _conc["tax"] is not None and _conc["mode"] in ("SHADOW", "LIVE"):
             r["concentration"] = concentration_eval(r["bundle"], _conc["held"], nav, _conc["tax"])
             if _conc["mode"] == "LIVE" and r["concentration"]["state"] != "PASS":
@@ -2557,6 +2773,7 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                  "concentration_gate LIVE; Checkpoint-D tick 5 reads receipt.factor.selected) - %s" % _conc["mode"]]
                                 if _conc["mode"] != "LIVE" else [],
         "pre_trade": pre_risk, "pre_trade_risk_shares": {k: _r(v, 5) for k, v in pre_shares.items()},
+        "risk_share_authority": _rsa0708,
         "risk_metric": {"basis": _wbx.get("basis"), "why": _wbx.get("why"), "fund_states": _wbx.get("fund_states"),
                         "definition": ("WHOLE_BOOK_MEASURED: post-action whole-ISA GBP volatility (stocks + funds + cash, "
                                        "one sleeve_risk basis; fund-trim legs pro rata) - B08-R03 / ISA-0887"
@@ -2661,7 +2878,8 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                                  "n_rows_review_required": sum(1 for x in rows if (x.get("appetite_guard") or {}).get("state")
                                                                == "REVIEW_REQUIRED"),
                                  "authority": "isa_policy.RISK_APPETITE (Raj 24-Oct-2026)",
-                                 "consumer": "Checkpoint-D tick 14 (explicit approval); email s2 line"}
+                                 "consumer": ("Checkpoint-D tick 14, approve_action, execution_check (risk_review_state."
+                                              "appetite_permission, P8 ISA-0915/0916); email s2 line")}
     # ── decision-relevant research (fixed point, s9.1) ───────────────────────────────────────
     sel_names = [t for t, _ in (sel or {}).get("bundle", ())]
     sel_min_central = min((scen[t]["CENTRAL"] for t in sel_names), default=None)
@@ -2713,6 +2931,22 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
                  "case-pending name whose evidenced plausible economics could change the decision; NO fixed cap "
                  "(s9.1). Cases amend typed inputs only; the engine reruns the whole decision."),
         "questions": [q for q in CASE_QUESTIONS]}
+    # ISA-0957 (P9): the case loop's issuer-review work list - case-scope NEW names with no review yet
+    _due0957 = sorted(t for t in scope if t in recs and not recs[t].get("held")
+                      and (recs[t].get("issuer_event") or {}).get("state") == "DUE_IN_CASE_LOOP")
+    receipt["case_scope"]["issuer_reviews_due"] = _due0957
+    _ie0957 = [r0 for r0 in recs.values() if not r0.get("held") and r0.get("issuer_event")]
+    receipt["new_name_issuer"] = {
+        "enforced": NEW_NAME_ISSUER_REVIEW_ENFORCED, "authority": "Raj 25-Nov-2026 Q3-A (ISA-0957)",
+        "n_evaluated": len(_ie0957),
+        "n_reviewed": sum(1 for r0 in _ie0957 if (r0["issuer_event"] or {}).get("state") == "REVIEWED"),
+        "n_due_in_case_loop": sum(1 for r0 in _ie0957 if (r0["issuer_event"] or {}).get("state") == "DUE_IN_CASE_LOOP"),
+        "blocked": sorted(r0["ticker"] for r0 in _ie0957 if any(str(x.get("code") or "").startswith(("ISSUER_REVIEW_ABSENT", "ISSUER_EVIDENCE_"))
+                                                                 for x in r0.get("reasons") or [])),
+        "due_in_case_loop": _due0957,
+        "rule": ("a NEW name's issuer review (issuer_freshness, route main, action BUY) must be ALLOW or CARRY before new-name "
+                 "capital; a review that is neither, or none once the case is complete, HARD_BLOCKS that one name and the "
+                 "receipt re-forms without it; a name whose case is still open is DUE_IN_CASE_LOOP (Step 10.0b writes it)")}
     # ── alternatives / reasons lost (s8.5) ───────────────────────────────────────────────────
     feas = [r for r in rows if r["feasible"]]
     alts = {}
@@ -2844,14 +3078,22 @@ def build(month: str, root: str = HERE, as_of: Optional[str] = None, amendments_
     _cp = capital_path_identity()
     receipt["capital_path"] = _cp
     _path_ok = _cp.get("state") == "BOUND"
+    # ISA-0957 defence in depth: every SELECTED new name carries an ALLOW/CARRY issuer disposition (the census already
+    #   removes one that does not; this can only fire on a defect, and then withholds rather than funds)
+    _nn_bad = ([a["ticker"] for a in receipt["selected_actions"] if a["ticker"] in recs and not recs[a["ticker"]].get("held")
+                and ((recs[a["ticker"]].get("issuer_event") or {}).get("disposition") not in ("ALLOW", "CARRY_EVENT_EXPLICITLY"))]
+               if NEW_NAME_ISSUER_REVIEW_ENFORCED and state == "DECISION_COMPLETE" else [])
+    receipt["new_name_issuer"]["selected_without_allow"] = _nn_bad
     receipt["capital_authorised"] = bool(state == "DECISION_COMPLETE" and authority == "LIVE"
                                          and not ncc.get("blocks_new_stock_capital") and _book_ok and _path_ok
-                                         and _plan_ok)
+                                         and _plan_ok and not _nn_bad)
     receipt["capital_authorised_basis"] = ("authorised only when the decision is COMPLETE (every required case consumed, "
                                            "no decision-relevant research pending), the engine flag is LIVE, the "
                                            "canonical new-capital control is OPEN and the book is COMPLETE (ISA-0849). "
                                            "Approval and execution revalidation remain separate (s11)."
                                            + ("" if _book_ok else " WITHHELD: BOOK_INCOMPLETE - %s" % (_bc or {}).get("why"))
+                                           + ("" if not _nn_bad else " WITHHELD: NEW_NAME_ISSUER_REVIEW - selected %s without an "
+                                              "ALLOW/CARRY issuer review (ISA-0957)" % ", ".join(_nn_bad))
                                            + ("" if _path_ok else " WITHHELD: CAPITAL_PATH_UNBOUND (ISA-0863) - %s" % _cp.get("why"))
                                            + ("" if _plan_ok else " WITHHELD: FUND_TRIM_PLAN_%s (ISA-0858) - %s"
                                               % ((_plan or {}).get("state"), (_plan or {}).get("reason"))))
@@ -3070,7 +3312,8 @@ def old_v_new(path: str, rows, recs, scen, costs_by, capital, cash_rate, sel) ->
 
 # Run-instance metadata that does not change the DECISION: excluded from the decision hash so identical
 # inputs + method -> identical receipt_id (deterministic identity; the ledger is idempotent on it).
-_VOLATILE = ("receipt_id", "content_sha256", "produced_at", "runtime_s", "input_freshness", "_written_to", "_ledger")
+_VOLATILE = ("receipt_id", "content_sha256", "produced_at", "runtime_s", "input_freshness", "_written_to", "_ledger",
+             "appetite_permission_at_formation")   # P8: depends on the risk-review store, not on the decision inputs
 
 
 def hurdle_basis(root: str = HERE) -> dict:
@@ -3110,6 +3353,8 @@ def _decision_body(receipt: dict) -> dict:
 def _finish(receipt: dict, month: str, root: str, out_path: Optional[str], write: bool) -> dict:
     receipt["content_sha256"] = _sha(_decision_body(receipt))
     receipt["receipt_id"] = "CDR-%s-%s" % (month, receipt["content_sha256"][:12])
+    # P8 ISA-0915/0916: the appetite permission AT FORMATION (reporting only; execution re-checks it at the quote)
+    receipt["appetite_permission_at_formation"] = _appetite_permission_for(receipt, None, root)
     if write:
         p = out_path or os.path.join(root, "capital_decision_receipt_%s.json" % month)
         tmp = p + ".tmp"
@@ -3631,10 +3876,28 @@ def latest_watch(root: str = HERE, receipt_id: Optional[str] = None) -> Optional
     return last
 
 
+SELL_OFF_RECHECK_AT_EXECUTION = True   # ROLLBACK (R4.13, P8b ISA-0907): False -> the receipt's formation-time state only
+
+
+def _sell_off_now(month: str, root: str, injected: Optional[dict]) -> dict:
+    """P8b ISA-0907: re-measure the Active sell-off state at the quote (injected = test measurement). Unreadable -> UNKNOWN."""
+    try:
+        import funding_waterfall as _fwso
+        import sell_off_state as _sos
+        _pfp = input_path(month, "portfolio", root)
+        _pf = json.load(open(_pfp, encoding="utf-8")) if os.path.exists(_pfp) else {}
+        _tw = json.load(open(os.path.join(root, "target_weights.json"), encoding="utf-8"))
+        m = injected if injected is not None else _sos.measure([f.get("ticker") for f in (_pf.get("funds") or []) if f.get("ticker")],
+                                                               root=root)
+        return dict(_fwso.sell_off_decision(m, _pf, _tw), measured_as_of=(m or {}).get("as_of"))
+    except Exception as exc:                                        # noqa: BLE001
+        return {"state": "UNKNOWN", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def execution_check(month: str, ticker: str, price_major: float, quote_currency: str, quote_ts: str,
                     cash_available_gbp: Optional[float] = None, root: str = HERE,
                     now: Optional[datetime.datetime] = None, fx_quote_per_gbp: Optional[float] = None,
-                    authority: Optional[dict] = None) -> dict:
+                    authority: Optional[dict] = None, sell_off_now: Optional[dict] = None) -> dict:
     """s11 - validity of ONE selected action at an EXECUTABLE quote, re-checked before every order or
     partial fill. Never places an order. States: EXECUTABLE | REFUSED_* | REPRICE_REQUIRED.
     (a) the receipt verifies against the CURRENT inputs and is DECISION_COMPLETE + capital_authorised;
@@ -3687,6 +3950,13 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
                                for t, v in _fl.items()}
     # ISA-0864: the approval axis is reported on every outcome from here on (distinct from the execution state)
     out["approval"] = approval_state(month, ticker, rc, root)
+    # ⚑ P8 ISA-0916: the appetite permission is re-checked at the quote, not only at Checkpoint-D tick 14 - an action
+    #   cannot become EXECUTABLE after a review that recorded NO_STOCK_ADDITION for want of that approval.
+    if APPETITE_RECHECK_AT_EXECUTION:
+        _apr = _appetite_permission_for(rc, _approval_row(rc, ticker, root), root)
+        out["appetite_permission"] = _apr
+        if str(_apr.get("state")).startswith("REFUSED"):
+            return done(_apr["state"], _apr.get("why") or "appetite permission refused")
     if ticker in _fl:
         return done("REFUSED_ALREADY_FILLED", "receipt %s already has %d fill(s) for %s (qty %s, GBP %.2f of GBP %.2f): any further "
                     "order is a new decision on the post-fill book - re-run the engine" % (rc.get("receipt_id"), _fl[ticker]["n_fills"],
@@ -3828,6 +4098,15 @@ def execution_check(month: str, ticker: str, price_major: float, quote_currency:
             return done("AWAITING_SALE_SETTLEMENT", "this buy is funded by the switch sale(s) (GBP %.2f of proceeds, ISA-0621): "
                         "execute and settle the sale first, then re-check - cash for this order GBP %.2f < action GBP %.2f"
                         % (_salef, _cash_net, float(act.get("gbp") or 0)))
+        if _trims > EPS_GBP and SELL_OFF_RECHECK_AT_EXECUTION:
+            # ⚑ P8b ISA-0907: the fund sells this action needs are NOT placed while the Active sell-off holds (or cannot be
+            #   measured) - Raj's standing constraint, re-checked NOW, not at formation.
+            _so = _sell_off_now(month, root, sell_off_now)
+            out["sell_off"] = _so
+            if _so.get("state") not in ("CLEAR", "NOT_ENFORCED"):
+                return done("REFUSED_SELL_OFF_" + str(_so.get("state")), "this action needs GBP %.2f of fund trims and the Active "
+                            "sell-off condition is %s (%s leg: %s) - do NOT place the fund sells; cash for this order GBP %.2f "
+                            "(ISA-0907)" % (_trims, _so.get("state"), _so.get("leg"), _so.get("why"), _cash_net))
         if _trims > EPS_GBP:
             return done("AWAITING_FUND_SETTLEMENT", "this action is fund-funded (GBP %.2f of fund trims, ISA-0858 D8): place the "
                         "fund sells and re-check once the proceeds have SETTLED - cash for this order GBP %.2f < action GBP %.2f"
@@ -3921,8 +4200,31 @@ def _approval_rows(root: str = HERE) -> list:
         return [json.loads(ln) for ln in fh if ln.strip()]
 
 
+APPETITE_RECHECK_AT_EXECUTION = True   # ROLLBACK (R4.13, P8 ISA-0916): False -> only Checkpoint-D tick 14 checks it
+
+
+def _approval_row(rc: dict, ticker: str, root: str = HERE) -> Optional[dict]:
+    rows = [r for r in _approval_rows(root) if r.get("receipt_id") == (rc or {}).get("receipt_id")
+            and r.get("ticker") == ticker and r.get("receipt_sha256") == (rc or {}).get("content_sha256")]
+    return rows[-1] if rows else None
+
+
+def _appetite_permission_for(rc: dict, approval_row: Optional[dict], root: str = HERE) -> dict:
+    """P8 ISA-0915/0916: risk_review_state.appetite_permission on the receipt's selected-plan guard. A per-receipt
+    approval is the approval row's recorded `appetite_approval`. Unreadable -> REFUSED (R4.3), never a pass."""
+    _ag = (rc or {}).get("appetite_guard") or {}
+    _da = (approval_row or {}).get("appetite_approval")
+    try:
+        import risk_review_state as _rrs
+        return _rrs.appetite_permission(_ag, (rc or {}).get("receipt_id"), decision_approval=_da, root=root)
+    except Exception as exc:                                        # noqa: BLE001
+        if _ag.get("state") != "REVIEW_REQUIRED":
+            return {"state": "NOT_REQUIRED", "guard_state": _ag.get("state")}
+        return {"state": "REFUSED_APPETITE_PERMISSION_UNKNOWN", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def approve_action(month: str, ticker: str, approved_by: str, root: str = HERE, *, limit_price_major=None,
-                   max_gbp=None, note: Optional[str] = None) -> dict:
+                   max_gbp=None, note: Optional[str] = None, appetite_approval: Optional[dict] = None) -> dict:
     """ISA-0864 (11-Oct-2026, B05-R08): record Raj's APPROVAL of ONE action, bound to the receipt's content hash and
     the exact action tuple. Refused unless the receipt is VALID and capital-authorised and the ticker is selected;
     a limit may only TIGHTEN the receipt's economic maximum and approved GBP. Append-only, idempotent on
@@ -3954,6 +4256,11 @@ def approve_action(month: str, ticker: str, approved_by: str, root: str = HERE, 
     mg = gbp if max_gbp is None else float(max_gbp)
     if not math.isfinite(mg) or mg <= 0 or mg > gbp + EPS_GBP:
         raise EngineRefused("approve_action: max_gbp %r must be positive and <= the approved action GBP %.2f" % (max_gbp, gbp))
+    # ⚑ P8 ISA-0916: an approval of an action whose plan is appetite REVIEW_REQUIRED needs a valid standing authority
+    #   or Raj's per-receipt appetite approval ({approved_by, receipt_id}); investment assent alone is not enough.
+    _apr = _appetite_permission_for(rc, {"appetite_approval": appetite_approval} if appetite_approval else None, root)
+    if str(_apr.get("state")).startswith("REFUSED"):
+        raise EngineRefused("approve_action: %s - %s" % (_apr["state"], _apr.get("why")))
     key = "%s|%s" % (rc.get("receipt_id"), ticker)
     for r in _approval_rows(root):
         if r.get("idempotency_key") == key:
@@ -3961,7 +4268,8 @@ def approve_action(month: str, ticker: str, approved_by: str, root: str = HERE, 
     row = {"idempotency_key": key, "schema": "approval_v1", "month": month, "receipt_id": rc.get("receipt_id"),
            "receipt_sha256": rc.get("content_sha256"), "ticker": ticker, "action": act.get("action"),
            "action_gbp": gbp, "economic_max_price_major": emax, "limit_price_major": lim, "max_gbp": round(mg, 2),
-           "currency": act.get("currency"), "approved_by": approved_by, "note": note, "approved_at": _now().isoformat()}
+           "currency": act.get("currency"), "approved_by": approved_by, "note": note, "approved_at": _now().isoformat(),
+           "appetite_permission": _apr.get("state"), "appetite_approval": appetite_approval}
     with open(os.path.join(root, APPROVAL_LEDGER), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
     return {"state": "APPROVED", "idempotency_key": key,
@@ -4122,6 +4430,7 @@ def summary(receipt: dict) -> dict:
             # P-D (ISA-0887/0888): the comparator's risk basis and the selected plan's appetite guard (rendered only)
             "risk_metric": (receipt.get("risk_constraints") or {}).get("risk_metric"),
             "appetite_guard": receipt.get("appetite_guard"),
+            "appetite_permission_at_formation": receipt.get("appetite_permission_at_formation"),   # P8 ISA-0915
             "new_capital_control": receipt.get("new_capital_control")}
 
 
@@ -4188,8 +4497,14 @@ def main(argv=None) -> int:
     if month and "--approve" in argv:
         # ISA-0864: Raj's decision on ONE action of the VALID receipt (limits may only tighten)
         try:
+            _apx = opt("--appetite-approval")          # P8 ISA-0916: Raj's per-receipt appetite approval (only when no valid authority)
+            _apd = None
+            if _apx:
+                _vr = verify_receipt(month, opt("--root", HERE))
+                _apd = {"approved_by": _apx, "receipt_id": (_vr.get("receipt") or {}).get("receipt_id")}
             r = approve_action(month, opt("--approve"), opt("--approved-by"), opt("--root", HERE),
-                               limit_price_major=opt("--limit-price"), max_gbp=opt("--max-gbp"), note=opt("--note"))
+                               limit_price_major=opt("--limit-price"), max_gbp=opt("--max-gbp"), note=opt("--note"),
+                               appetite_approval=_apd)
         except (EngineRefused, TypeError, ValueError) as exc:
             print("CDE_REFUSED %s" % exc)
             return 2
@@ -4235,9 +4550,14 @@ def _row(bundle, wealth: dict, vol=1000.0, cost=0.0):
             "stock_gbp": round(sum(a for _, a in bundle), 2), "residual_gbp": 0.0}
 
 
+# P8b: inputs whose ABSENCE is a typed state the engine handles (UNKNOWN -> no fund trim, R4.3), and which did not exist
+#   for months formed before 25-Nov-2026 - their absence is not data loss, so it never makes a real month PARTIAL.
+OPTIONAL_INPUTS = ("sell_off_state",)
+
+
 def real_inputs_missing(month: str, root: str) -> list:
     """ISA-0832: the INPUT_FILES members absent for `month` under `root` ([] = the full real set is present)."""
-    return [k for k in INPUT_FILES if not os.path.exists(input_path(month, k, root))]
+    return [k for k in INPUT_FILES if k not in OPTIONAL_INPUTS and not os.path.exists(input_path(month, k, root))]
 
 
 MONTH_KEYED_INPUTS = tuple(k for k, p in INPUT_FILES.items() if "{m}" in p)
@@ -4252,7 +4572,7 @@ def real_month_state(month: str, root: str) -> dict:
                an intact LIVE, so PARTIAL means an environment that hides inputs (the 06..10-Oct census copy
                without archive/) or real data loss - both must be LOUD (R2.10), never a green skip."""
     missing = real_inputs_missing(month, root)
-    present_keyed = [k for k in MONTH_KEYED_INPUTS if k not in missing]
+    present_keyed = [k for k in MONTH_KEYED_INPUTS if k not in missing and k not in OPTIONAL_INPUTS]   # P8b
     if not present_keyed:
         return {"state": "ABSENT", "month": month, "missing": missing}
     return {"state": "COMPLETE" if not missing else "PARTIAL", "month": month, "missing": missing}
@@ -4737,6 +5057,152 @@ def _selftest(verbose: bool = True) -> int:
         _sh465.rmtree(_d465, ignore_errors=True)
     ok("ISA-0465 NEGATIVE CONTROL: an existing Tech breach (18%) does not refuse an addition that does not worsen it",
        not any(v["kind"] == "sector" and v["class"] == "Tech" for v in _c4["violations"]), _c4)
+    # ── ISA-0708 (21-Nov-2026): the D27 consumer quotes the authoritative risk-share id ─────────────
+    import datetime as _dt0708
+    _d0 = _dt0708.date(2024, 1, 5)
+    _dates = [(_d0 + _dt0708.timedelta(weeks=i)).isoformat() for i in range(80)]
+    _rnd = random.Random(708)
+    _st = {"names": {}}
+    for _t, _vol in (("AAA", 0.03), ("BBB", 0.05)):
+        _lv, _obs = 100.0, {}
+        for _d in _dates:
+            _lv *= 1.0 + _rnd.gauss(0.001, _vol)
+            _obs[_d] = {"gbp": _lv}
+        _st["names"][_t] = {"currency": "GBP", "total_return_basis": True, "observations": _obs}
+    _pf = {"stocks": [{"ticker": "AAA", "value_gbp": 6000.0}, {"ticker": "BBB", "value_gbp": 4000.0}]}
+    import sleeve_risk as _sr_t
+    _pre = _sr_t.risk_shares(_st, _pf)["shares"]
+    _rec = pre_trade_risk_authority(_st, _pf, _pre)
+    ok("ISA-0708 MUST-FIRE: the engine's pre-trade shares are IDENTIFIED by the authority's own calc id",
+       _rec["state"] == "IDENTIFIED" and _rec["risk_share_calc_id"] == _sr_t.risk_share_authority(_st, _pf)["risk_share_calc_id"]
+       and _rec["max_abs_share_delta"] <= 1e-12, _rec)
+    _rec2 = pre_trade_risk_authority(_st, _pf, {k: v + 0.01 for k, v in _pre.items()})
+    ok("ISA-0708 NEGATIVE CONTROL: shares that differ from the authority's are DIVERGED (published), never IDENTIFIED",
+       _rec2["state"] == "DIVERGED" and _rec2["risk_share_calc_id"] is not None, _rec2)
+    _rec3 = pre_trade_risk_authority(_st, {"stocks": [{"ticker": "ZZZ", "value_gbp": 1.0}]}, {"ZZZ": 1.0})
+    ok("ISA-0708 FAIL-CLOSED: no series -> UNIDENTIFIED with a named reason, never an invented id",
+       _rec3["state"] == "UNIDENTIFIED" and _rec3["risk_share_calc_id"] is None and _rec3.get("why"), _rec3)
+    _rk = {"state": "MEASURED", "risk_shares": {"AAA": 0.40}}
+    _br = constraints_for((("AAA", 100.0),), _rk, {"AAA": 0.36}, 35.0, 1e9, risk_share_calc_id="RSHR-test0708")
+    ok("ISA-0708 MUST-FIRE: a D27 breach names the authoritative calc id it was judged against",
+       len(_br) == 1 and _br[0]["constraint"] == "D27 sleeve risk-share ceiling"
+       and _br[0]["risk_share_calc_id"] == "RSHR-test0708", _br)
+    _br0 = constraints_for((("AAA", 100.0),), _rk, {"AAA": 0.36}, 35.0, 1e9)
+    ok("ISA-0708 NEGATIVE CONTROL: without an id the breach still binds and says so (None), it is not dropped",
+       len(_br0) == 1 and _br0[0]["risk_share_calc_id"] is None, _br0)
+    ok("ISA-0708 NEGATIVE CONTROL: a share under the ceiling is no breach, id or not",
+       constraints_for((("AAA", 100.0),), {"state": "MEASURED", "risk_shares": {"AAA": 0.30}}, {"AAA": 0.30}, 35.0, 1e9,
+                       risk_share_calc_id="RSHR-x") == [])
+    # ── ISA-0954 (b)(c) / ISA-0955 / ISA-0956 — held top-up identities (P7) ─────────────────────────────
+    _vb = {"calc_id": "VCIB-t", "blocks_capital": False, "refusals": [{"ticker": "UNK", "control": "is_binary", "why": "absent"}],
+           "rows": [{"ticker": "MU", "is_binary": False}, {"ticker": "QB", "is_binary": True}, {"ticker": "AV", "is_binary": False}]}
+    _rv = {"MU": {"ticker": "MU", "review_id": "IR-T-MU", "capital_authority_survives": "SURVIVES_UNCHANGED",
+                  "next_event_state": "NOT_YET_ANNOUNCED"},
+           "AV": {"ticker": "AV", "review_id": "IR-T-AV", "capital_authority_survives": "REQUIRES_FULL_RE_UNDERWRITING",
+                  "next_event_state": "NOT_YET_ANNOUNCED"}}
+    _id = {"vci_budget": _vb, "issuer_reviews": _rv}
+    _g = held_topup_gate("MU", _id, "2026-12-05")
+    ok("ISA-0956/0955 NEGATIVE CONTROL: a classified non-binary holding with an ALLOW review passes and NAMES both ids",
+       _g["disposition"] is None and _g["record"]["vci_budget"]["calc_id"] == "VCIB-t"
+       and _g["record"]["issuer_event"]["event_review_id"] == "IR-T-MU", _g)
+    _g = held_topup_gate("AV", _id, "2026-12-05")
+    ok("ISA-0955 MUST-FIRE: an issuer review requiring re-underwriting REFUSES the top-up (HARD_BLOCKED, not CASE_PENDING)",
+       _g["disposition"] == "HARD_BLOCKED" and any(r.get("code") == "ISSUER_EVIDENCE_BLOCK_NEW_CAPITAL" for r in _g["reasons"]), _g)
+    _g = held_topup_gate("MU", {"vci_budget": _vb, "issuer_reviews": None, "issuer_error": "absent"}, "2026-12-05")
+    ok("ISA-0955 MUST-FIRE: no issuer review for the month REFUSES the top-up by name",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "ISSUER_REVIEW_ABSENT", _g)
+    _g = held_topup_gate("MU", {"vci_budget": None, "vci_budget_error": "x", "issuer_reviews": _rv}, "2026-12-05")
+    ok("ISA-0956 MUST-FIRE: no held-binary budget calc_id REFUSES the top-up",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "HELD_BINARY_BUDGET_UNAVAILABLE", _g)
+    _g = held_topup_gate("UNK", _id, "2026-12-05")
+    ok("ISA-0956 MUST-FIRE: a holding unclassified in vci_binary_positions REFUSES the top-up",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "BINARY_STATE_UNCLASSIFIED", _g)
+    _g = held_topup_gate("QB", _id, "2026-12-05")
+    ok("ISA-0956 MUST-FIRE: a declared held binary is NOT_IN_SCOPE (VCI route), never sized here",
+       _g["disposition"] == "NOT_IN_SCOPE" and _g["reasons"][0].get("code") == "VCI_ROUTE_SEPARATE", _g)
+    _all = [held_topup_gate(x, i, "2026-12-05")["disposition"] for x in ("MU", "AV", "UNK", "QB")
+            for i in (_id, {"vci_budget": None, "issuer_reviews": None})]
+    ok("ISA-0955/0956 EVERY POUND: the gate never returns CASE_PENDING, so a refused holding never freezes the receipt",
+       "CASE_PENDING" not in _all, _all)
+    # ── ISA-0957 (P9) — new-name issuer review before new-name capital ─────────────────────────────────
+    _rvn = {"NEWA": {"ticker": "NEWA", "review_id": "IR-T-NEWA", "capital_authority_survives": "SURVIVES_UNCHANGED",
+                     "next_event_state": "NOT_YET_ANNOUNCED"},
+            "NEWB": {"ticker": "NEWB", "review_id": "IR-T-NEWB", "capital_authority_survives": "REQUIRES_FULL_RE_UNDERWRITING",
+                     "next_event_state": "NOT_YET_ANNOUNCED"},
+            "NEWC": {"ticker": "NEWC", "review_id": "IR-T-NEWC", "capital_authority_survives": "SURVIVES_UNCHANGED",
+                     "next_event_state": "UNRESOLVED_DATA_FAILURE"}}
+    _idn = {"issuer_reviews": _rvn}
+    _g = new_name_issuer_gate("NEWB", _idn, "2026-12-06", False)
+    ok("ISA-0957 MUST-FIRE: a NEW name whose review requires re-underwriting is HARD_BLOCKED (even with its case open)",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "ISSUER_EVIDENCE_BLOCK_NEW_CAPITAL"
+       and _g["record"]["issuer_event"]["state"] == "REVIEWED", _g)
+    _g = new_name_issuer_gate("NEWC", _idn, "2026-12-06", True)
+    ok("ISA-0957 MUST-FIRE: an unestablished mandatory event calendar BLOCKS new-name capital",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "ISSUER_EVIDENCE_BLOCK_NEW_CAPITAL", _g)
+    _g = new_name_issuer_gate("NEWD", _idn, "2026-12-06", True)
+    ok("ISA-0957 MUST-FIRE: a NEW name whose case is complete with NO review is HARD_BLOCKED ISSUER_REVIEW_ABSENT",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "ISSUER_REVIEW_ABSENT"
+       and _g["record"]["issuer_event"]["state"] == "ABSENT_AT_CASE_COMPLETE", _g)
+    _g = new_name_issuer_gate("NEWD", {"issuer_reviews": None, "issuer_error": "absent"}, "2026-12-06", True)
+    ok("ISA-0957 MUST-FIRE: no issuer document for the month + a complete case -> HARD_BLOCKED by name",
+       _g["disposition"] == "HARD_BLOCKED" and _g["reasons"][0].get("code") == "ISSUER_REVIEW_ABSENT", _g)
+    _g = new_name_issuer_gate("NEWD", {"issuer_reviews": None, "issuer_error": "absent"}, "2026-12-05", False)
+    ok("ISA-0957 NEGATIVE CONTROL: at the pre-run (no document, case open) a NEW name is DUE_IN_CASE_LOOP, not blocked",
+       _g["disposition"] is None and _g["record"]["issuer_event"]["state"] == "DUE_IN_CASE_LOOP", _g)
+    _g = new_name_issuer_gate("NEWA", _idn, "2026-12-06", True)
+    ok("ISA-0957 NEGATIVE CONTROL: an ALLOW review passes and NAMES the event_review_id",
+       _g["disposition"] is None and _g["record"]["issuer_event"]["event_review_id"] == "IR-T-NEWA"
+       and _g["record"]["issuer_event"]["disposition"] == "ALLOW", _g)
+    _rvc = {"NEWE": {"ticker": "NEWE", "review_id": "IR-T-NEWE", "capital_authority_survives": "SURVIVES_UNCHANGED",
+                     "next_event_state": "CONFIRMED", "next_event_date": "2026-12-20"}}
+    _g = new_name_issuer_gate("NEWE", {"issuer_reviews": _rvc}, "2026-12-06", True)
+    ok("ISA-0957 NEGATIVE CONTROL: a known event before the next guaranteed review is CARRIED, not blocked",
+       _g["disposition"] is None and _g["record"]["issuer_event"].get("disposition") == "CARRY_EVENT_EXPLICITLY"
+       and _g["record"]["issuer_event"].get("carried"), _g)
+    _all0957 = [new_name_issuer_gate(x, i, "2026-12-06", cc)["disposition"] for x in ("NEWA", "NEWB", "NEWC", "NEWD")
+                for i in (_idn, {"issuer_reviews": None}) for cc in (True, False)]
+    ok("ISA-0957 EVERY POUND: the new-name gate never returns CASE_PENDING (a refusal never freezes the receipt)",
+       "CASE_PENDING" not in _all0957 and set(_all0957) <= {None, "HARD_BLOCKED"}, _all0957)
+    _g0 = held_topup_gate("AV", _id, "2026-12-05")
+    ok("ISA-0957 NEGATIVE CONTROL: the held top-up path is unchanged by the shared issuer block",
+       _g0["disposition"] == "HARD_BLOCKED" and _g0["record"]["issuer_event"]["event_review_id"] == "IR-T-AV"
+       and _g0["record"]["issuer_event"].get("disposition") == "BLOCK_NEW_CAPITAL", _g0)
+    global NEW_NAME_ISSUER_REVIEW_ENFORCED
+    _sv0957 = NEW_NAME_ISSUER_REVIEW_ENFORCED
+    try:
+        NEW_NAME_ISSUER_REVIEW_ENFORCED = False
+        _g = new_name_issuer_gate("NEWB", _idn, "2026-12-06", True)
+        ok("ISA-0957 ROLLBACK: with the flag False nothing is refused and the would-have disposition is recorded",
+           _g["disposition"] is None and "HARD_BLOCKED" in str(_g["record"]["issuer_event"].get("not_enforced")), _g)
+    finally:
+        NEW_NAME_ISSUER_REVIEW_ENFORCED = _sv0957
+    import inspect as _insp0954
+    _src = _insp0954.getsource(_build_census)
+    ok("ISA-0957 BINDING: the live census calls new_name_issuer_gate on the NEW-name branch with the case-complete bit",
+       'new_name_issuer_gate(t, _ht_ident, as_of, (am or {}).get("case.complete") is True)' in _src)
+    _srcb = _insp0954.getsource(sys.modules[__name__])
+    ok("ISA-0957 BINDING: capital_authorised requires every selected new name to carry ALLOW/CARRY (invariant)",
+       "and _plan_ok and not _nn_bad)" in _srcb and 'receipt["case_scope"]["issuer_reviews_due"]' in _srcb)
+    ok("ISA-0954 BINDING: the live census calls held_topup_gate on the held top-up branch",
+       "held_topup_gate(t, _ht_ident, as_of)" in _src and "held_topup_identities(inp)" in _src)
+    ok("ISA-0954 (a) MUST-FIRE (static): a REPLACEMENT_ONLY admission outside the switch contest is ROUTE_UNAVAILABLE",
+       _src.count("REPLACEMENT_ONLY_NO_DONOR") >= 2 and 'disp = "ROUTE_UNAVAILABLE"' in _src)
+    ok("ISA-0954 (d) MUST-FIRE (static): a census refusal sets no target - permission is formed only for an unrefused record",
+       "if disp is None:\n            try:\n                import position_sizing as _ps" in _src)
+    import ast as _ast0954
+    for _rf in ("email_prefill.py", "build_monthly_isa_email.py"):
+        try:
+            _tree = _ast0954.parse(open(os.path.join(HERE, _rf), encoding="utf-8").read())
+            _calls = {n.func.attr for n in _ast0954.walk(_tree) if isinstance(n, _ast0954.Call)
+                      and isinstance(n.func, _ast0954.Attribute) and isinstance(n.func.value, _ast0954.Name)
+                      and n.func.value.id.startswith("_cde")}
+            _bad = sorted(_calls - {"verify_receipt", "summary"})
+            ok("ISA-0954 (e) MUST-FIRE (R20.2): %s calls only verify_receipt/summary on the engine" % _rf, not _bad, _bad)
+        except OSError:
+            ok("ISA-0954 (e): %s readable" % _rf, False)
+    _neg = _ast0954.parse("import capital_decision_engine as _cde\n_cde.build('dec_2026')\n")
+    _nc = {n.func.attr for n in _ast0954.walk(_neg) if isinstance(n, _ast0954.Call) and isinstance(n.func, _ast0954.Attribute)}
+    ok("ISA-0954 (e) NEGATIVE CONTROL: a renderer calling build() is caught", bool(_nc - {"verify_receipt", "summary"}))
     if verbose:
         print("capital_decision_engine selftest: %d FAIL(s)" % len(fails))
     return len(fails)

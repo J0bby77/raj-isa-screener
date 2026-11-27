@@ -138,9 +138,12 @@ V2_FLAGS: Dict[str, bool] = {
     # number. A rollback that computes a DIFFERENT number is a second authority.
     "demand_pull_live":           True,   # P4: sleeve_split reads position_sizing.stock_max
     "partial_starter_entry":      True,   # P4: D15-D17 floor-then-priority fill
-    # ISA-0465 (Raj 16-Sep-2026): "OFF" | "SHADOW" | "LIVE" — concentration_control. CANDIDATE ONLY:
-    # SHADOW until Raj reviews the shadow impact; LIVE requires a certified promotion.
-    "concentration_gate":         "SHADOW",
+    # ISA-0465 (Raj 16-Sep-2026): "OFF" | "SHADOW" | "LIVE" — concentration_control. LIVE requires a certified promotion.
+    # ⚑ P8c (Raj 26-Nov-2026 "LIVE for December (Recommended)", ISA-0465/0700): LIVE from the 05-Dec pre-run. A bundle
+    #   breaching sector <= 12% NAV / theme <= 50% post-trade sleeve, or adding an UNKNOWN-classified name, is a HARD
+    #   breach in the capital decision engine; the same flag binds the B3/D15 AI-complex factor cap (Raj 19-Oct "one
+    #   LIVE decision"). Restrict-only. Rollback: "SHADOW" (recorded, binds nothing).
+    "concentration_gate":         "LIVE",
     # ISA-0804/0811/0812 (03-Oct-2026): "OFF" | "SHADOW" | "LIVE". LIVE since TB-2026-10-03-03 by Raj risk acceptance (ISA-0812).
     # SHADOW: capital_decision_engine forms the Capital Decision Receipt every pre-run (Step 6.10e),
     # it is verified, rendered and ledgered, and NOTHING consumes it for capital - capital_destination
@@ -517,3 +520,19 @@ if __name__ == "__main__":
         except PolicyUnavailable as e:
             print(f"  {n:32s} = UNAVAILABLE — {e}")
             sys.exit(1)
+
+# ⚑ P8b (ISA-0907/0964, Raj 25-Nov-2026 09:50 'I agree with your recommendations for questions 1, 3 and 4' - Q1-A; 09:54 Q2-A
+#   'ok option A now (but i am not keen on this) and then we move to C as soon as we can'): the ACTIVE SELL-OFF standing
+#   constraint - do not sell core fund holdings to fund stock purchases while the overall ISA benchmark is >= 8% below its
+#   63-session daily-close high, OR the donor's own mandate comparator is >= 10% below its high, OR Raj has declared
+#   disorderly markets (restrict-only; mechanical definition ISA-0966). One home; sell_off_state measures it.
+SELL_OFF_RULE = {
+    "overall_benchmark": "VUAG.L",
+    "overall_drop_pct": 8.0,
+    "local_drop_pct": 10.0,
+    "window_trading_days": 63,
+    "high_basis": "DAILY_CLOSE",
+    "local_benchmark": "benchmark_registry.comparator_for(<donor sedol>)",
+    "restricts": "fund-trim funding of stock purchases (cash-funded buys, fund-to-fund actions and reductions unaffected)",
+    "authority": "Raj 25-Nov-2026 Q1-A (benchmark VUAG.L, 63-trading-day closing high, 8% / 10%) + Q2-A (manual restrict-only disorderly flag)",
+}

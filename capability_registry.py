@@ -663,6 +663,13 @@ def live_state(cap: dict, chain: dict) -> dict:
 RETIRED_STATES = ("RETIRED_SUPERSEDED",)
 
 
+def not_live_owner_rows(item_id: str, root: str = HERE, registry: Optional[dict] = None) -> List[dict]:
+    """ISA-0941 (21-Nov-2026) - delegates to THE lookup, isa_register.capability_not_live_owner_rows (one home; it lives
+    there so the register writer needs no import of this module - ISA-0498 fallback closure)."""
+    import isa_register as _ir941
+    return _ir941.capability_not_live_owner_rows(item_id, registry=registry if registry is not None else load(root))
+
+
 def retirement_valid(cap: dict, ids) -> bool:
     """ISA-0727 (18-Oct-2026): a capability RETIRED by a recorded decision leaves the LIVE/NOT-LIVE denominator only with
     a complete retirement record - on, by, authority, item, and superseded_by naming ANOTHER capability in the registry.
@@ -1019,6 +1026,45 @@ def _selftest(verbose: bool = True) -> int:
        live_state(_sh, _csh)["live"] is False
        and _csh["DECISION_EFFECTIVE"].get("kind") == "SHADOW_NOT_DECISION_EFFECTIVE", _csh["DECISION_EFFECTIVE"])
 
+    # ── ISA-0941: the not-live ownership lookup the register's terminal-transition gate relies on ──
+    _reg941 = {"capabilities": [cap(id="CAP-a941", not_live_reason={"item": "ISA-9941", "since": "2026-11-21", "why": "x"}),
+                                cap(id="CAP-b941", not_live_reason={"item": "ISA-9942", "since": "2026-11-21", "why": "y"})]}
+    ok("ISA-0941 MUST-FIRE: a capability naming the item as its not_live owner is returned",
+       [r["id"] for r in not_live_owner_rows("ISA-9941", HERE, _reg941)] == ["CAP-a941"], not_live_owner_rows("ISA-9941", HERE, _reg941))
+    ok("ISA-0941 NEGATIVE CONTROL: an item no capability names returns nothing",
+       not_live_owner_rows("ISA-9943", HERE, _reg941) == [])
+    import isa_register as _ir941t
+    _rt = {"on": "2026-11-21", "by": "x", "authority": "y", "item": "ISA-1", "superseded_by": "CAP-b941"}
+    _cases = [dict(cap(id="CAP-r1"), production_status="RETIRED_SUPERSEDED", retirement=_rt),
+              dict(cap(id="CAP-r2"), production_status="RETIRED_SUPERSEDED", retirement=dict(_rt, by=None)),
+              dict(cap(id="CAP-r3"), production_status="RETIRED_SUPERSEDED", retirement=dict(_rt, superseded_by="CAP-nowhere")),
+              dict(cap(id="CAP-r4"), production_status="LIVE", retirement=_rt)]
+    _ids941 = {c["id"] for c in _cases} | {"CAP-b941"}
+    ok("ISA-0941 CONSISTENCY: isa_register's retirement mirror agrees with retirement_valid on complete / incomplete / "
+       "foreign-successor / non-retired rows, and the state tuple matches RETIRED_STATES",
+       all(_ir941t._cap_retirement_valid(c, _ids941) == retirement_valid(c, _ids941) for c in _cases)
+       and tuple(_ir941t._CAP_RETIRED_STATES) == tuple(RETIRED_STATES))
+    # ── ISA-0953: a `_fi_mark` bound to a name framework_integrity does not define is NOT an instrument ──
+    import tempfile as _tf953, shutil as _sh953
+    _d953 = _tf953.mkdtemp(prefix="isa0953_")
+    _e953 = _tf953.mkdtemp(prefix="isa0953b_")       # a SECOND tree: parsed() memoises by path
+    try:
+        import framework_integrity as _fi953
+        _m953, _f953 = _fi953.CAPITAL_PATH_MANIFEST[0][0], _fi953.CAPITAL_PATH_MANIFEST[0][1]
+        _body = "\n\ndef %s(*a, **k):\n    _fi_mark(%r, %r)\n    return 1\n" % (_f953, _m953, _f953)
+        _stub = "except Exception:\n    def _fi_mark(*_a, **_k):\n        return None\n"
+        with open(os.path.join(_d953, _m953 + ".py"), "w") as _fh:
+            _fh.write("try:\n    from framework_integrity import mark as _fi_mark\n" + _stub + _body)
+        ok("ISA-0953 MUST-FIRE: a call site whose `_fi_mark` is bound to a non-existent framework_integrity name "
+           "(the stub path) is NOT counted as marked",
+           _fi953.mark_sites(_d953).get("%s.%s" % (_m953, _f953)) is False, _fi953.mark_sites(_d953))
+        with open(os.path.join(_e953, _m953 + ".py"), "w") as _fh:
+            _fh.write("try:\n    from framework_integrity import _mark as _fi_mark\n" + _stub + _body)
+        ok("ISA-0953 NEGATIVE CONTROL: the same site bound to framework_integrity._mark IS marked",
+           _fi953.mark_sites(_e953).get("%s.%s" % (_m953, _f953)) is True, _fi953.mark_sites(_e953))
+    finally:
+        _sh953.rmtree(_d953, ignore_errors=True)
+        _sh953.rmtree(_e953, ignore_errors=True)
     _uo = unobserved_producers(HERE, {"capabilities": [cap(producer="nonexistent_mod.never_marked")]})
     ok("ISA-0699 NEGATIVE CONTROL: a producer outside the manifest with no _mark site is reported unobserved",
        _uo["state"] == "FAIL" and _uo["rows"][0]["in_manifest"] is False, _uo)

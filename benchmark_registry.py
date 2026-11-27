@@ -267,6 +267,90 @@ def gbp_returns(ticker, **kw):
 DRIFT_FLOOR_BETA, DRIFT_FULL_BETA = 0.07, 0.50
 DRIFT_FLOOR_R2,   DRIFT_FULL_R2   = 0.04, 0.30
 DRIFT_MIN_MONTHS = 48          # 24 per half - the same minimum the FRS uses for mean/stddev
+# ⚑ ISA-0875 (P7, Raj Q3-B 21-Nov-2026): the floor's own declared rule is "the controls' readings rounded up", so it is
+#   EXECUTED every run instead of hand-maintained: floor = max(declared floor above, max control reading x MARGIN,
+#   rounded UP to 0.01). The +20% margin is DECLARED judgement (headroom so one month's noise cannot flip a census),
+#   uncalibrated (R14.4). GUARD: a tracker control reading above GUARD_X x the declared floor is a DATA fault, not
+#   noise - the floor is not widened to absorb it; every fund's drift is UNSCORED (excluded, R4.3) until resolved.
+DRIFT_CONTROLS = ("VUAG", "B50MZ94")      # the two index trackers (S&P 500, Japan): they cannot drift
+DRIFT_FLOOR_MARGIN = 1.20
+DRIFT_FLOOR_GUARD_X = 2.0
+DRIFT_FLOOR_RUNTIME = True                # R4.13 rollback: False -> the declared constants, exactly as before
+
+
+def _ceil2(v):
+    import math as _m
+    return _m.ceil(round(v * 100.0, 9)) / 100.0
+
+
+# ⚑ ISA-0921 (P7, Raj Q2-C 21-Nov-2026): a declared STYLE DIAGNOSTIC beside the prospectus mandate. It answers "style
+#   divergence or mandate change?" as EVIDENCE and decides nothing: T4, drift and the FRS keep the prospectus mandate
+#   (R6 golden source; changing the benchmark because a fund fails would be benchmark-shopping).
+STYLE_DIAGNOSTICS = {
+    "BR2Q8G6": {"ticker": "IWVL.L", "index": "MSCI World Value (iShares Edge MSCI World Value Factor)",
+                "authority": "Raj 21-Nov-2026 Q2-C: diagnostic only - never a measuring comparator (fails the tracker-control fit test)"},
+}
+
+
+def style_diagnostic(sedol, universe=None, fund_returns=None) -> dict:
+    """-> full-sample + halves + last rolling-36 R2 of the fund vs its declared style index AND vs its mandate comparator
+    on the SAME months. NOT_DECLARED for funds without one. Decides nothing."""
+    d = STYLE_DIAGNOSTICS.get(sedol)
+    if not d:
+        return {"state": "NOT_DECLARED"}
+    U = universe if universe is not None else load_universe()
+    try:
+        f = fund_returns if fund_returns is not None else _fund_returns(sedol, U)
+        bt, _c = comparator_for(sedol, U)
+        S, M = gbp_returns(d["ticker"]), gbp_returns(bt)
+    except Exception as e:                                     # noqa: BLE001
+        return {"state": "UNMEASURED", "why": "%s: %s" % (type(e).__name__, e), **d}
+    ks = sorted(set(f) & set(S) & set(M))
+    if len(ks) < DRIFT_MIN_MONTHS:
+        return {"state": "UNMEASURED", "why": "%d common months < %d" % (len(ks), DRIFT_MIN_MONTHS), **d}
+    def fit(X, kk):
+        r = _ols1([f[k] for k in kk], [X[k] for k in kk])
+        return {"beta": round(r[0], 3), "r2": round(r[1], 3)} if r else None
+    h = len(ks) // 2
+    return {"state": "MEASURED", **d, "mandate_comparator": bt, "n": len(ks),
+            "window": ["%d-%02d" % ks[0], "%d-%02d" % ks[-1]],
+            "style": {"full": fit(S, ks), "first_half": fit(S, ks[:h]), "second_half": fit(S, ks[h:]),
+                      "last_36m": fit(S, ks[-36:])},
+            "mandate": {"full": fit(M, ks), "first_half": fit(M, ks[:h]), "second_half": fit(M, ks[h:]),
+                        "last_36m": fit(M, ks[-36:])},
+            "role": "DIAGNOSTIC ONLY (Raj Q2-C) - decides nothing"}
+
+
+def drift_floors(universe=None, control_readings=None) -> dict:
+    """-> {state, floor_beta, floor_r2, readings, basis}. state RUNTIME_DERIVED | DECLARED_ONLY | CONTROL_UNMEASURED |
+    GUARD_BREACH. `control_readings` {sedol: (d_beta, d_r2)} is injectable for tests."""
+    if not DRIFT_FLOOR_RUNTIME:
+        return {"state": "DECLARED_ONLY", "floor_beta": DRIFT_FLOOR_BETA, "floor_r2": DRIFT_FLOOR_R2,
+                "basis": "DRIFT_FLOOR_RUNTIME is False (rollback): the declared constants"}
+    U = universe if universe is not None else load_universe()
+    rd = {}
+    if control_readings is None:
+        for c in DRIFT_CONTROLS:
+            m = mandate_drift(c, U, floors={"state": "DECLARED_ONLY", "floor_beta": DRIFT_FLOOR_BETA,
+                                            "floor_r2": DRIFT_FLOOR_R2})
+            rd[c] = ((m.get("d_beta"), m.get("d_r2")) if m.get("status") == "MEASURED" else None)
+    else:
+        rd = dict(control_readings)
+    if any(v is None for v in rd.values()) or not rd:
+        return {"state": "CONTROL_UNMEASURED", "floor_beta": DRIFT_FLOOR_BETA, "floor_r2": DRIFT_FLOOR_R2,
+                "readings": rd, "basis": ("a tracker control could not be measured this run - the DECLARED floors "
+                                          "apply and this is named, never read as a measured floor")}
+    mb = max(abs(v[0]) for v in rd.values()); mr = max(abs(v[1]) for v in rd.values())
+    if mb > DRIFT_FLOOR_GUARD_X * DRIFT_FLOOR_BETA or mr > DRIFT_FLOOR_GUARD_X * DRIFT_FLOOR_R2:
+        return {"state": "GUARD_BREACH", "floor_beta": None, "floor_r2": None, "readings": rd,
+                "basis": ("a tracker control reads |dbeta| %.3f / |dR2| %.3f, above %.1fx the declared floors - a "
+                          "data fault in the control or its comparator, not noise; drift is UNSCORED until resolved "
+                          "(raise an item against ISA-0875)" % (mb, mr, DRIFT_FLOOR_GUARD_X))}
+    return {"state": "RUNTIME_DERIVED", "readings": {k: [round(v[0], 4), round(v[1], 4)] for k, v in rd.items()},
+            "floor_beta": max(DRIFT_FLOOR_BETA, _ceil2(mb * DRIFT_FLOOR_MARGIN)),
+            "floor_r2": max(DRIFT_FLOOR_R2, _ceil2(mr * DRIFT_FLOOR_MARGIN)),
+            "basis": ("max(declared %.2f/%.2f, max control |dbeta| %.3f / |dR2| %.3f x %.2f, rounded up to 0.01) - "
+                      "ISA-0875, Raj Q3-B 21-Nov-2026" % (DRIFT_FLOOR_BETA, DRIFT_FLOOR_R2, mb, mr, DRIFT_FLOOR_MARGIN))}
 DRIFT_ANCHOR_BASIS = ("floors MEASURED from the two index-tracker controls 13-Aug-2026, beta floor re-measured 18-Oct-2026; upper "
                       "anchors DECLARED judgement, uncalibrated (R14.4)")
 
@@ -292,7 +376,7 @@ def _ols1(y, x):
     return b, r2
 
 
-def mandate_drift(sedol, universe=None, fund_returns=None):
+def mandate_drift(sedol, universe=None, fund_returns=None, floors=None):
     """-> dict. Measured drift of a fund away from the index it is supposed to track.
 
     status MEASURED -> `severity` in [0,1] and `points_fraction` = 1 - severity.
@@ -304,10 +388,16 @@ def mandate_drift(sedol, universe=None, fund_returns=None):
     U = universe if universe is not None else load_universe()
     mandate, basis = t4_mandate_for(sedol, U)
     bt, _c = comparator_for(sedol, U)
+    fl = floors if floors is not None else drift_floors(U)            # ISA-0875: runtime-derived floors
     out = {"sedol": sedol, "mandate": mandate, "mandate_basis": basis, "comparator": bt,
-           "anchors": {"floor_beta": DRIFT_FLOOR_BETA, "full_beta": DRIFT_FULL_BETA,
-                       "floor_r2": DRIFT_FLOOR_R2, "full_r2": DRIFT_FULL_R2,
-                       "basis": DRIFT_ANCHOR_BASIS}}
+           "anchors": {"floor_beta": fl.get("floor_beta"), "full_beta": DRIFT_FULL_BETA,
+                       "floor_r2": fl.get("floor_r2"), "full_r2": DRIFT_FULL_R2,
+                       "floors_state": fl.get("state"), "floors_basis": fl.get("basis"),
+                       "control_readings": fl.get("readings"), "basis": DRIFT_ANCHOR_BASIS}}
+    if fl.get("state") == "GUARD_BREACH":
+        out.update(status="UNSCORED", reason="ISA-0875 floor guard: " + str(fl.get("basis")))
+        return out
+    _FB, _FR = float(fl["floor_beta"]), float(fl["floor_r2"])
     try:
         f = fund_returns if fund_returns is not None else _fund_returns(sedol, U)
         B = gbp_returns(bt)
@@ -330,9 +420,9 @@ def mandate_drift(sedol, universe=None, fund_returns=None):
     d_beta = b2 - b1
     d_r2 = q2 - q1
     clamp = lambda v: 0.0 if v < 0 else (1.0 if v > 1 else v)
-    leg_b = clamp((abs(d_beta) - DRIFT_FLOOR_BETA) / (DRIFT_FULL_BETA - DRIFT_FLOOR_BETA))
+    leg_b = clamp((abs(d_beta) - _FB) / (DRIFT_FULL_BETA - _FB))
     # ⚑ ONLY A FALLING R2 IS DRIFT. A fund tracking its mandate BETTER has not drifted from it.
-    leg_r = clamp((max(0.0, -d_r2) - DRIFT_FLOOR_R2) / (DRIFT_FULL_R2 - DRIFT_FLOOR_R2))
+    leg_r = clamp((max(0.0, -d_r2) - _FR) / (DRIFT_FULL_R2 - _FR))
     sev = max(leg_b, leg_r)
     out.update(status="MEASURED", n=len(ks),
                window=[f"{ks[0][0]}-{ks[0][1]:02d}", f"{ks[h-1][0]}-{ks[h-1][1]:02d}",
@@ -349,7 +439,8 @@ def mandate_drift(sedol, universe=None, fund_returns=None):
 
 def all_mandate_drift(universe=None):
     U = universe if universe is not None else load_universe()
-    return {sd: mandate_drift(sd, U) for sd in U
+    fl = drift_floors(U)                                                # once per sleeve read (ISA-0875)
+    return {sd: mandate_drift(sd, U, floors=fl) for sd in U
             if isinstance(U.get(sd), dict) and not str(sd).startswith("_")}
 
 
@@ -536,6 +627,19 @@ def _selftest():
     ok("ISA-0875: the re-measured beta floor covers the 18-Oct control reading (Vanguard Japan 0.063) and the R2 floor "
        "its 0.028", DRIFT_FLOOR_BETA >= 0.063 and DRIFT_FLOOR_R2 >= 0.028)
     ok("the drift minimum is two 24-month halves", DRIFT_MIN_MONTHS == 48)
+    # ── ISA-0875 runtime floors (P7, Raj Q3-B) ─────────────────────────────────────────────────
+    _f = drift_floors({}, control_readings={"VUAG": (0.014, 0.015), "B50MZ94": (0.063, -0.028)})
+    ok("ISA-0875 MUST-FIRE: the floors are DERIVED from the controls (0.063 x 1.2 -> 0.08 beta; R2 stays at the declared 0.04)",
+       _f["state"] == "RUNTIME_DERIVED" and abs(_f["floor_beta"] - 0.08) < 1e-9 and abs(_f["floor_r2"] - 0.04) < 1e-9, _f)
+    _f = drift_floors({}, control_readings={"VUAG": (0.010, 0.010), "B50MZ94": (0.020, 0.010)})
+    ok("ISA-0875 NEGATIVE CONTROL: quiet controls never take the floor BELOW the declared constants",
+       _f["floor_beta"] == DRIFT_FLOOR_BETA and _f["floor_r2"] == DRIFT_FLOOR_R2, _f)
+    _f = drift_floors({}, control_readings={"VUAG": (0.014, 0.015), "B50MZ94": (0.200, 0.020)})
+    ok("ISA-0875 MUST-FIRE: a control above 2x the declared floor is a GUARD_BREACH (no floor), never absorbed",
+       _f["state"] == "GUARD_BREACH" and _f["floor_beta"] is None, _f)
+    _f = drift_floors({}, control_readings={"VUAG": None, "B50MZ94": (0.05, 0.02)})
+    ok("ISA-0875: an unmeasured control is NAMED (CONTROL_UNMEASURED) and the declared floors apply",
+       _f["state"] == "CONTROL_UNMEASURED" and _f["floor_beta"] == DRIFT_FLOOR_BETA, _f)
     print("benchmark_registry selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

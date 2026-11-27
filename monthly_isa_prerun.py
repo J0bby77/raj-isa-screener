@@ -4334,6 +4334,31 @@ def main():
         warnings.append(f"Step 6.10c (waiting_room): {type(_e).__name__}: {_e}")
         print(f"  waiting_room FAILED (non-fatal): {_e}")
 
+    # ── 6.10so — ACTIVE SELL-OFF measurement (P8b ISA-0907, Raj Q1-A/Q2-A 25-Nov-2026) ──────────────────────
+    # ⚑ Measured BEFORE the engine so the funding waterfall reads THIS run's market. A failure writes nothing: the
+    #   engine then reads UNKNOWN and plans no fund trim (R4.3) - cash-funded buys are unaffected. Never raises.
+    try:
+        import sell_off_state as _sos
+        _pfso = json.load(open(os.path.join(SCRIPT_DIR, f"portfolio_data_{month_label}.json"), encoding="utf-8"))
+        _som = _sos.measure([f.get("ticker") for f in (_pfso.get("funds") or []) if f.get("ticker")], root=SCRIPT_DIR)
+        _sop = os.path.join(SCRIPT_DIR, f"sell_off_state_{month_label}.json")
+        with open(_sop + ".tmp", "w", encoding="utf-8") as _fso:
+            json.dump(_som, _fso, indent=1, default=str)
+        os.replace(_sop + ".tmp", _sop)
+        _any = _sos.state_for(_som)
+        summary["sell_off"] = {"any_trim": _any, "overall": {k: (_som.get("overall") or {}).get(k) for k in
+                               ("ticker", "state", "drawdown_pct", "last_date", "high", "threshold_pct")},
+                               "donors": {k: {kk: v.get(kk) for kk in ("comparator", "state", "drawdown_pct")}
+                                          for k, v in (_som.get("donors") or {}).items()},
+                               "disorderly": _som.get("disorderly"), "artefact": os.path.basename(_sop)}
+        if _any.get("state") != "CLEAR":
+            warnings.append("Step 6.10so ACTIVE SELL-OFF %s (ISA-0907, %s leg): %s - no fund trim may fund a stock "
+                            "purchase this run; cash-funded buys unaffected" % (_any.get("state"), _any.get("leg"), _any.get("why")))
+        print("  sell-off: %s (%s)" % (_any.get("state"), _any.get("why") or "clear"))
+    except Exception as _eso:                                          # noqa: BLE001
+        summary["sell_off"] = {"state": "UNKNOWN", "why": "%s: %s" % (type(_eso).__name__, _eso)}
+        warnings.append("Step 6.10so (sell-off measurement, ISA-0907) FAILED - the engine plans no fund trim: %s" % _eso)
+
     # ── 6.10e — THE INTEGRATED CAPITAL DECISION ENGINE (ISA-0804, 03-Oct-2026) ──────────────
     # ⚑ Runs AFTER 6.10b so its old-v-new table compares with THIS run's governed plan, and with
     #   fresh_after = this run's start so a step9_pre / horizon_value bundle from an earlier run
@@ -4384,8 +4409,14 @@ def main():
     _s611 = []
     try:
         import regional_m as _rm
-        _rmr = _rm.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None))
+        # ISA-0947: the run's own X-Ray, bound by the SAME rule as the FRS (6.05) - never the August file
+        _rm_xb = _frs_run_inputs(month_label, portfolio_path, xray_path=xray_path)
+        _rmr = _rm.build(as_of=(run_date.isoformat() if isinstance(run_date, dt_date) else None),
+                         xray_path=_rm_xb.get("xray_path"))
         st = _rmr.get("state")
+        if st == "REFUSED_NO_RUN_XRAY":
+            warnings.append("Step 6.11a REGIONAL M REFUSED (ISA-0947, DEGRADE_ONLY): X-Ray binding %s - %s"
+                            % (_rm_xb.get("state"), _rm_xb.get("why")))
         if st == "NO_CAPTURE":
             warnings.append(
                 "Step 6.11a: regional_m_inputs.json is ABSENT — every M_k is UNMEASURED and every "

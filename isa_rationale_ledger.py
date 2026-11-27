@@ -77,6 +77,8 @@ CAPITAL_GATING = {
     "RISK_MIN_WEEKS": ("isa_policy.py", "Below this many consecutive overlapping weeks a covariance quantity is REFUSED (UNMEASURED -> A2.3 adverse default / gate UNMEASURED) rather than estimated (ISA-0680)."),
     "SECTOR_CAP_NAV": ("concentration_control.py", "Post-trade direct-stock exposure to one canonical sector as a fraction of total ISA NAV; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
     "RISK_APPETITE": ("isa_policy.py", "Raj's whole-ISA loss limit (P-D, ISA-0888, 24-Oct-2026): a plan that RAISES the governing severe-scenario loss while it is at/above the limit is REVIEW_REQUIRED and its buys execute only with Raj's explicit Checkpoint-D tick-14 approval; never a sale."),
+    # ISA-0907 (P8b, 25-Nov-2026): Raj's Active sell-off standing constraint (Q1-A / Q2-A).
+    "SELL_OFF_RULE": ("isa_policy.py", "Raj's Active sell-off constraint (ISA-0907, Q1-A/Q2-A 25-Nov-2026): while VUAG.L is >= 8% below its 63-session closing high, a donor's mandate comparator is >= 10% below its own, Raj has declared a disorderly market, or the measurement is UNKNOWN, fund trims may NOT fund stock purchases (trim capacity 0; refused again at the quote); restrict-only, never a forced trade."),
     "THEME_CAP_SLEEVE": ("concentration_control.py", "Post-trade exposure to one canonical theme as a fraction of the post-trade direct-stock sleeve; above it a new entry is CAP_CONSTRAINED or capped to headroom (ISA-0465, Raj 16-Sep-2026, DECLARED backstop)."),
 }
 

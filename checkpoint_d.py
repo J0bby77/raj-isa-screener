@@ -57,7 +57,7 @@ NO_ADDITION_REASON_MIN_CHARS = 40         # completeness gate (same spirit as ti
 
 
 def no_addition_basis(new_capital_control, decision_receipt, engine_authority="SHADOW", decision=None,
-                      router_summary=None) -> dict:
+                      router_summary=None, risk_root=None) -> dict:
     """ISA-0912 - is ANY stock addition executable this occurrence? Pure: the readings are passed in.
     executable=True only when the control is explicitly OPEN AND (engine LIVE) the receipt is VALID,
     DECISION_COMPLETE, capital_authorised and selected >= 1 addition. Under SHADOW the receipt has no
@@ -87,13 +87,16 @@ def no_addition_basis(new_capital_control, decision_receipt, engine_authority="S
     #   judgement pass would deadlock Checkpoint-D exactly as the control did.
     _ag = rr.get("appetite_guard") or {}
     _ap = (decision or {}).get("appetite_approval") or {}
-    if _ag.get("state") == "REVIEW_REQUIRED" and not (str(_ap.get("approved_by") or "").strip()
-                                                     and _ap.get("receipt_id") == rr.get("receipt_id")):
-        return {"executable": False, "basis": "APPETITE_APPROVAL_ABSENT", "selected": sel,
-                "why": ("receipt %s's selected plan needs Raj's explicit appetite approval (tick 14, ISA-0888: severe-scenario "
-                        "loss %s%% vs limit %s%%) and none is recorded - an unapproved REVIEW does not execute"
+    # ⚑ P8 ISA-0915/0916: ONE permission function (risk_review_state) - Raj's permanent severe authority covers a
+    #   REVIEW_REQUIRED plan without a fresh waiver; a per-receipt approval still works; anything else refuses.
+    _perm = _appetite_permission(_ag, rr.get("receipt_id"), _ap, risk_root)
+    if _perm["state"].startswith("REFUSED"):
+        return {"executable": False, "basis": "APPETITE_APPROVAL_ABSENT", "selected": sel, "appetite_permission": _perm,
+                "why": ("receipt %s's selected plan needs Raj's appetite approval (tick 14, ISA-0888: severe-scenario "
+                        "loss %s%% vs limit %s%%) and neither a valid standing authority nor a receipt approval is recorded "
+                        "(%s) - an unapproved REVIEW does not execute"
                         % (rr.get("receipt_id"), (_ag.get("selected") or {}).get("post_loss_pct"),
-                           (_ag.get("selected") or {}).get("appetite_pct")))}
+                           (_ag.get("selected") or {}).get("appetite_pct"), _perm.get("standing_authority")))}
     _jr = ((router_summary or {}).get("decision_receipt") or {}).get("judgement_refused") if isinstance(router_summary, dict) else None
     if _jr:
         return {"executable": False, "basis": "JUDGEMENT_REFUSED", "selected": sel,
@@ -159,10 +162,22 @@ def fund_leg_check(fund_actions, new_capital_control=None, fund_max_gbp=None) ->
     return out
 
 
+def _appetite_permission(guard, receipt_id, decision_approval, risk_root=None):
+    """P8 ISA-0915/0916: risk_review_state.appetite_permission, or REFUSED when it cannot be read (R4.3)."""
+    try:
+        import risk_review_state as _rrs
+        return _rrs.appetite_permission(guard, receipt_id, decision_approval=decision_approval,
+                                        root=risk_root or os.path.dirname(os.path.abspath(__file__)))
+    except Exception as exc:                                        # noqa: BLE001
+        if (guard or {}).get("state") != "REVIEW_REQUIRED":
+            return {"state": "NOT_REQUIRED"}
+        return {"state": "REFUSED_APPETITE_PERMISSION_UNKNOWN", "why": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log_all_n=LOG_ALL_N,
                           step9_records=None, factor_state=None, opportunity_set=None,
                           new_capital_control=None, decision_receipt=None, engine_authority="SHADOW",
-                          fund_max_gbp=None, router_summary=None):
+                          fund_max_gbp=None, router_summary=None, risk_root=None):
     """Return {passed, blocks, chosen, top5}.
       top5              : ordered list of the top T1 tickers (Fix Pack A4: ALL T1 qualify;
                           cases capped at 5 by the deploy-Source tiebreak — this is that list)
@@ -250,7 +265,7 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
     _nsa = None
     if str(decision.get("chosen_action") or "").strip().upper() == NO_STOCK_ADDITION:
         _nsa = no_addition_basis(new_capital_control, decision_receipt, engine_authority, decision=decision,
-                                 router_summary=router_summary)
+                                 router_summary=router_summary, risk_root=risk_root)
         _nsa["reason"] = str(decision.get("no_addition_reason") or "").strip()
         if chosen_set:
             blocks.append("ISA-0912: chosen_action NO_STOCK_ADDITION contradicts chosen ticker(s) %s - "
@@ -490,7 +505,12 @@ def validate_checkpoint_d(top5, decision, comparative_cases, logged_tickers, log
     _appetite_tick = {"state": _ag14.get("state") or "NOT_EVALUATED"}
     if _ag14.get("state") == "REVIEW_REQUIRED" and (chosen_set & _rb13):
         _ap14 = decision.get("appetite_approval") or {}
-        if not (str(_ap14.get("approved_by") or "").strip() and _ap14.get("receipt_id") == _rr13.get("receipt_id")):
+        _perm14 = _appetite_permission(_ag14, _rr13.get("receipt_id"), _ap14, risk_root)     # P8 ISA-0915/0916; risk_root: P8a.1 ISA-0970
+        _appetite_tick["permission"] = _perm14
+        if _perm14["state"] == "STANDING_AUTHORITY":
+            _appetite_tick["state"] = "APPROVED_STANDING_AUTHORITY"
+            _appetite_tick["authority_id"] = _perm14.get("authority_id")
+        elif _perm14["state"].startswith("REFUSED"):
             blocks.append("tick 14 (ISA-0888): the selected plan raises the severe-scenario loss to %s%% against Raj's "
                           "%s%% limit - record decision['appetite_approval'] = {approved_by, receipt_id: %s} (Raj's "
                           "explicit approval) or do not execute the buys; nothing is sold"
@@ -930,13 +950,27 @@ def _selftest() -> int:
         "ISA-0912: an untyped empty decision still blocks and names the typed decision"
     _rag = {"state": "VALID", "receipt": dict(_ra["receipt"], appetite_guard={"state": "REVIEW_REQUIRED",
                                                                            "selected": {"post_loss_pct": 52.8, "appetite_pct": 50}})}
-    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE")
+    import tempfile as _tf0
+    _rr_empty = _tf0.mkdtemp(prefix="ckd_rr_empty_")        # P8a.1 ISA-0970: NO standing authority (isolated from LIVE's store)
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE",
+                               risk_root=_rr_empty)
     assert _x["passed"] and _x["no_stock_addition"]["basis"] == "APPETITE_APPROVAL_ABSENT", \
         "MUST-FIRE (ISA-0912/tick 14): an authorised plan awaiting Raj's appetite approval is not executable -> no-addition passes %r" % _x["blocks"]
     _x = validate_checkpoint_d(feas, dict(_nd, appetite_approval={"approved_by": "Raj", "receipt_id": "CDR-A"}), cases, feas,
-                               new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE")
+                               new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE", risk_root=_rr_empty)
     assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_ADDITION_EXECUTABLE", \
         "NEGATIVE CONTROL (ISA-0912/tick 14): once Raj approved, NO_STOCK_ADDITION may not drop the selection"
+    import json as _jx, os as _ox
+    import risk_review_state as _rrsx
+    _rr_seed = _tf0.mkdtemp(prefix="ckd_rr_seed_")
+    _ox.makedirs(_ox.path.join(_rr_seed, "_review_nov2026"))
+    _jx.dump({"decision": {"appetite_approval": {"approved_by": _rrsx.MIGRATION_QUOTE, "receipt_id": _rrsx.MIGRATION_RECEIPT}}},
+             open(_ox.path.join(_rr_seed, _rrsx.MIGRATION_SOURCE), "w"))
+    assert _rrsx.seed_standing_authority(_rr_seed)["state"] == "SEEDED"
+    _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_rag, engine_authority="LIVE",
+                               risk_root=_rr_seed)
+    assert not _x["passed"] and _x["no_stock_addition"]["state"] == "REFUSED_ADDITION_EXECUTABLE", \
+        "MUST-FIRE (P8 ISA-0915): under Raj's standing severe authority the unapproved REVIEW plan IS executable, so NO_STOCK_ADDITION may not drop it %r" % _x["blocks"]
     _x = validate_checkpoint_d(feas, _nd, cases, feas, new_capital_control=_opn2, decision_receipt=_ra, engine_authority="LIVE",
                                router_summary={"decision_receipt": {"judgement_refused": ["NTAP"]}})
     assert _x["passed"] and _x["no_stock_addition"]["basis"] == "JUDGEMENT_REFUSED", \

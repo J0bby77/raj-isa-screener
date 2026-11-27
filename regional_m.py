@@ -68,6 +68,11 @@ from pathlib import Path
 
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(HERE))
+try:                                                    # pragma: no cover - wiring only (ISA-0961 step 0)
+    from framework_integrity import _mark as _fi_mark
+except Exception:                                       # noqa: BLE001  pragma: no cover
+    def _fi_mark(*_a, **_k):                            # noqa: D103
+        return None
 
 from isa_metric import Metric, Missing, as_dict, is_present          # one home for tagged values
 
@@ -183,9 +188,18 @@ def inflation_gbp():
                        "local inflation term cancels and the DOMESTIC one replaces it.")
 
 
-def partition_check(extra_labels=None) -> dict:
+def partition_check(extra_labels=None, *, xray_path=None) -> dict:
     """The map must be a PARTITION (no country in two cells) and TOTAL over every label that can
-    reach it. An unmapped label RAISES — absent and zero are opposite facts (R4.9)."""
+    reach it. An unmapped label RAISES — absent and zero are opposite facts (R4.9).
+
+    ⚑ ISA-0947 (P7, 21-Nov-2026): the X-Ray labels are the RUN's X-Ray (`xray_path`, bound by the pre-run's
+    _frs_run_inputs rule), never a development-time month file. This read xray_data_aug_2026.json on every run,
+    so a country that first appears in a later X-Ray was never checked. No path -> RAISES (R4.7)."""
+    if not xray_path:
+        raise RegionalMError("ISA-0947: partition_check needs the run's own X-Ray (xray_path); there is no default "
+                             "month file - an unchecked label set is a silent partial (R4.9)")
+    if not os.path.exists(str(xray_path)):
+        raise RegionalMError("ISA-0947: the run's X-Ray %s does not exist" % xray_path)
     seen, dupes = {}, []
     for c, cell in COUNTRY_TO_CELL.items():
         if c in seen and seen[c] != cell:
@@ -196,7 +210,7 @@ def partition_check(extra_labels=None) -> dict:
     for src, key in ((_read("fund_exposure_vectors.json"), "vectors"),):
         for _sd, vec in (src.get(key) or {}).items():
             labels |= set(vec)
-    xr = _read("xray_data_aug_2026.json")
+    xr = json.loads(Path(str(xray_path)).read_text(encoding="utf-8"))
     for row in (xr.get("country_exposure") or []):
         if row.get("country") not in (None, "Other"):
             labels.add(row["country"])
@@ -209,7 +223,8 @@ def partition_check(extra_labels=None) -> dict:
             "unresolved_labels_declared": list(UNRESOLVED_LABELS),
             "unmapped_labels": unmapped,
             "is_partition": not dupes and not bad_cell,
-            "is_total": not unmapped}
+            "is_total": not unmapped,
+            "xray_checked": os.path.basename(str(xray_path))}
 
 
 # ── CT-1 / CT-2 — the world identity, asserted as a BOUNDED INTERVAL ─────────────────────────
@@ -517,7 +532,8 @@ def benchmark_rollup(mc=None) -> dict:
             "retires": "return_architecture.IMPLIED_M_ASSUMPTION = 'uniform_benchmark_return'"}
 
 
-def build(as_of=None, out_path=None, inputs_path=None) -> dict:
+def build(as_of=None, out_path=None, inputs_path=None, xray_path=None) -> dict:
+    _fi_mark("regional_m", "build")                     # ISA-0961: declared capability producer
     if not ENABLED:
         return {"state": "DISABLED",
                 "reason": "regional_m.ENABLED is False (R4.13) — every M_k is UNMEASURED and every "
@@ -531,7 +547,14 @@ def build(as_of=None, out_path=None, inputs_path=None) -> dict:
                            "way strategic_allocation ships with no policy file and reads UNCAPPED."),
                 "_meta": {"module": "regional_m.py", "item": ITEM, "as_of": as_of}}
 
-    part = partition_check()
+    if not xray_path or not os.path.exists(str(xray_path)):
+        # ISA-0947: typed refusal, NOT written as the month's artefact (consumers read UNMEASURED, R4.3)
+        return {"state": "REFUSED_NO_RUN_XRAY",
+                "reason": ("ISA-0947: the run's own X-Ray is not bound (%s) - the country map's totality cannot be "
+                           "checked against this book, so every M_k is UNMEASURED and every consumer refuses"
+                           % (xray_path or "no xray_path passed")),
+                "_meta": {"module": "regional_m.py", "item": ITEM, "as_of": as_of}}
+    part = partition_check(xray_path=xray_path)
     if not part["is_partition"]:
         raise RegionalMError(
             "the cell map is NOT a partition: duplicates %s, cells outside the declared set %s. "
@@ -595,7 +618,7 @@ def build(as_of=None, out_path=None, inputs_path=None) -> dict:
 
 def report(doc=None) -> str:
     d = doc or build()
-    if d.get("state") in ("DISABLED", "NO_CAPTURE"):
+    if d.get("state") in ("DISABLED", "NO_CAPTURE", "REFUSED_NO_RUN_XRAY"):
         return "regional_m: %s — %s" % (d.get("state"), d.get("reason"))
     L = ["REGIONAL M (ISA-0160) — %s" % d["basis"]["quantity"],
          "specification: %s   currency: %s   horizon: %s"
@@ -641,6 +664,31 @@ def selftest(verbose=True) -> int:
             print(("  ok   " if cond else "  FAIL ") + name)
 
     tmp = Path(tempfile.mkdtemp())          # ⚑ never beside the scripts — the mount denies delete
+    # ISA-0947: a fixture X-Ray (mapped labels only) - the module never reads a month file by default now
+    _XRF = tmp / "xray_fixture.json"
+    _XRF.write_text(json.dumps({"country_exposure": [{"country": c} for c in ("United States", "United Kingdom", "Japan")]}),
+                    encoding="utf-8")
+    _orig_build = globals()["build"]
+
+    def build(*a, **k):                     # noqa: F811 - the selftest's calls bind the fixture X-Ray
+        k.setdefault("xray_path", str(_XRF))
+        return _orig_build(*a, **k)
+    _XRB = tmp / "xray_new_label.json"
+    _XRB.write_text(json.dumps({"country_exposure": [{"country": "United States"}, {"country": "Atlantis"}]}), encoding="utf-8")
+    ck("ISA-0947 MUST-FIRE: a label that first appears in THIS run's X-Ray is checked (is_total False) even with the "
+       "August file on disk", partition_check(xray_path=str(_XRB))["is_total"] is False
+       and "Atlantis" in partition_check(xray_path=str(_XRB))["unmapped_labels"])
+    ck("ISA-0947 NEGATIVE CONTROL: the fixture X-Ray with mapped labels only is total",
+       partition_check(xray_path=str(_XRF))["is_total"] is True)
+    _r0947 = _orig_build(out_path=tmp / "no_xray.json")
+    ck("ISA-0947 MUST-FIRE: build without the run's X-Ray is a typed refusal, never a default month file",
+       _r0947.get("state") in ("REFUSED_NO_RUN_XRAY", "NO_CAPTURE", "DISABLED") and not (tmp / "no_xray.json").exists())
+    try:
+        partition_check()
+        _raised = False
+    except RegionalMError:
+        _raised = True
+    ck("ISA-0947 R4.7: partition_check with no X-Ray RAISES", _raised)
     inp = _read(INPUTS_FILE)
     d = build(out_path=tmp / "rm.json")
 
@@ -806,4 +854,5 @@ if __name__ == "__main__":
     if "--report" in sys.argv:
         print(report())
     else:
-        print(json.dumps(build(), indent=2)[:6000])
+        _xa = sys.argv[sys.argv.index("--xray") + 1] if "--xray" in sys.argv else None   # ISA-0947: no default month
+        print(json.dumps(build(xray_path=_xa), indent=2)[:6000])

@@ -295,6 +295,51 @@ def _yf_history(symbol, period="max", *, basis):
     return series or None
 
 
+# ⚑ ISA-0948 (P8c, 26-Nov-2026) — THE DECLARED FUND NAV HISTORY DEPTH (one home). Raj 25-Nov-2026 09:50 Q4-A: keep the
+#   held depth for the December run and DECLARE it; after 06-Dec re-measure the mandate-drift noise floors (and T4) on
+#   the provider's full period=max history in SHADOW and report the effect before any change. Every consumer's window
+#   (NAV_DOOR_CONSUMERS) reads at most this depth. A cache may START LATER than the floor (class launch / route start),
+#   never earlier: a deeper series would move the floors (18-Oct: Vanguard Japan control |dbeta| 0.057 -> 0.090 vs 0.06).
+NAV_HISTORY_DEPTH = {
+    "policy": "HOLD_AT_CACHE_START",
+    "floor": "2016-08-05",
+    "rule": ("a refresh EXTENDS a cached series forward and never moves its start (_hold_depth); no cache may begin "
+             "before the floor; a series that starts later is held at its own first date (class launch / route start)"),
+    "held_starts_measured": {"as_of": "2026-11-26", "floor_start": ["GB00B2PLJD73", "GB00B2PLJM64", "GB00B55QSH09",
+                             "GB00B5TP8W88", "GB00B6SQYF47", "GB00B8N44Q86", "IE00B50MZ948", "IE00B61ZVB30", "SMT.L"],
+                             "later_start": {"GB00BF93W972": "2018-03-05", "IE000WSZ17Z4": "2023-05-17",
+                                             "POLAR_IE00B42W4J83": "2021-01-29", "VUAG.L": "2019-05-14"}},
+    "basis": ("the mandate-drift noise floors (benchmark_registry) and T4 calibration (fund_learning) were measured on "
+              "this depth; changing depth is a methodology decision, not a freshness fix"),
+    "authority": "Raj 25-Nov-2026 09:50 Q4-A (ISA-0948)",
+    "revisit_by": "2027-01-31",
+    "falsified_by": ("the post-06-Dec SHADOW re-measure on period=max shows the floors and T4 verdicts unchanged within "
+                     "their noise (then deeper history may be adopted by Raj), or a provider shortens history below the floor"),
+    "item": "ISA-0948",
+}
+
+
+def depth_violations(cache_dir=None) -> list:
+    """ISA-0948: every nav_cache/*.csv whose first date is BEFORE the declared floor (a silent deepening)."""
+    floor = dt.date.fromisoformat(NAV_HISTORY_DEPTH["floor"])
+    d = cache_dir or CACHE_DIR
+    out = []
+    for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not fn.endswith(".csv"):
+            continue
+        with open(os.path.join(d, fn), newline="", encoding="utf-8") as fh:
+            first = None
+            for row in csv.DictReader(fh):
+                try:
+                    first = dt.date.fromisoformat(row["date"])
+                    break
+                except (ValueError, KeyError):
+                    continue
+        if first is not None and first < floor:
+            out.append({"cache": fn, "first": first.isoformat(), "floor": floor.isoformat()})
+    return out
+
+
 def _hold_depth(new, cached):
     """A refresh EXTENDS a cached series; it never changes where it starts. Measured 18-Oct-2026: yfinance
     1.7.0 `period=max` returns history back to 2013 (SMT to the 1960s) where the caches (1.5.1) begin
@@ -1518,6 +1563,24 @@ def _selftest():
        "exemptions and direct readers are exactly as declared", aud["state"] == "PASS",
        {k: aud[k] for k in ("violations", "stale_exemptions", "undeclared_consumers", "stale_consumers",
                             "undeclared_direct_readers", "stale_direct_readers")})
+    # ── ISA-0948: the declared NAV history depth ──
+    _dh = NAV_HISTORY_DEPTH
+    ok("ISA-0948: the NAV depth declaration is complete (policy, floor, basis, authority, revisit_by, falsified_by)",
+       all(_dh.get(k) for k in ("policy", "floor", "basis", "authority", "revisit_by", "falsified_by"))
+       and dt.date.fromisoformat(_dh["revisit_by"]) > dt.date.fromisoformat(_dh["floor"]), _dh)
+    ok("ISA-0948: no real cache starts before the declared floor (depth held)", depth_violations() == [], depth_violations())
+    _tmp948 = tempfile.mkdtemp(prefix="fp948_")
+    try:
+        with open(os.path.join(_tmp948, "DEEP.csv"), "w", encoding="utf-8") as fh:
+            fh.write("date,close\n2013-01-02,10.0\n2016-08-05,11.0\n")
+        with open(os.path.join(_tmp948, "OK.csv"), "w", encoding="utf-8") as fh:
+            fh.write("date,close\n2016-08-05,11.0\n")
+        _v948 = depth_violations(_tmp948)
+        ok("ISA-0948 MUST-FIRE: a cache deepened to 2013 is a depth violation", [x["cache"] for x in _v948] == ["DEEP.csv"], _v948)
+    finally:
+        shutil.rmtree(_tmp948, ignore_errors=True)
+    _held = _hold_depth([(D(2013, 1, 2), 1.0), (D(2016, 8, 5), 2.0), (D(2026, 11, 1), 3.0)], [(D(2016, 8, 5), 2.0)])
+    ok("ISA-0948 NEGATIVE CONTROL: a refresh returning 2013+ history is cut back to the cache start", _held[0][0] == D(2016, 8, 5), _held[:1])
     print("fund_performance selftest: %d FAIL(s)" % len(fails))
     return len(fails)
 

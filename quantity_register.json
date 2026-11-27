@@ -142,7 +142,8 @@
    "surface": [
     "email.s7.risk_contribution_mctr",
     "run_context.summary.v21.risk_contribution.rows[].rc_share (relayed from the authority)",
-    "held_position_review.ceiling.risk_share_pct"
+    "held_position_review.ceiling.risk_share_pct",
+    "capital_decision_receipt.risk_constraints.risk_share_authority + D27 breach rows (risk_share_calc_id; ISA-0708 P6)"
    ],
    "assertion": "pair_risk_contribution_basis",
    "vocabulary": {
@@ -153,7 +154,7 @@
     ]
    },
    "gbp_exposure": 5471.24,
-   "note": "ISA-0708 (25-Sep-2026): ONE computer. sleeve_risk.risk_shares computes the Euler MCTR and share (the capital authority, published by risk_share_authority with its risk_share_calc_id); weight_at_ceiling evaluates the SAME function on a hypothetical weight vector; risk_contribution consumes the authoritative share for rc_share AND the review flag (risk_weight = w/(N*rc_share), an identity of the old formula). Its own covariance MCTR is published as the distinct DIAGNOSTIC quantity mctr_local_diagnostic and decides nothing when an authority is supplied. PREVIOUS NOTE: The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3).",
+   "note": "ISA-0708 (25-Sep-2026): ONE computer. sleeve_risk.risk_shares computes the Euler MCTR and share (the capital authority, published by risk_share_authority with its risk_share_calc_id); weight_at_ceiling evaluates the SAME function on a hypothetical weight vector; risk_contribution consumes the authoritative share for rc_share AND the review flag (risk_weight = w/(N*rc_share), an identity of the old formula). Its own covariance MCTR is published as the distinct DIAGNOSTIC quantity mctr_local_diagnostic and decides nothing when an authority is supplied. PREVIOUS NOTE: The risk flag makes a position a replacement candidate in the s10 comparison. On today's correlation-blind w.sigma proxy it points at the DIVERSIFIERS: ONT.L is overstated 4.4x and MU understated 8.9pp (spec F3). 21-Nov-2026 (P6): the DECISION-EFFECTIVE D27 consumer is capital_decision_engine.constraints_for; its pre-trade shares come from risk_shares and it now quotes the authority's risk_share_calc_id (pre_trade_risk_authority, parity-checked) on the receipt and on every D27 breach row.",
    "key_scope": [
     "sleeve_risk"
    ],
@@ -185,6 +186,13 @@
      "owner": "ISA-0708",
      "on": "2026-09-25",
      "by": "CLAUDE_BUILD ISA-0708"
+    },
+    "FI-Q1OOS-mctr-whole_book_risk.measure": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "evidence": "source read 21-Nov-2026 (TB-2026-11-20-03): whole_book_risk.py L392-393 computes mctr/shares over the WHOLE-ISA population (direct stocks + FUND_<ticker> fund series + cash at zero variance, weekly GBP store augmented by load_fund_series) and publishes them as whole_book.risk_shares / stock_risk_share_euler - a different population and denominator from the direct-stock sleeve MCTR. It reads no sleeve share and no capital consumer of `mctr` reads it. Its own one-home question against concentration_clusters' whole-portfolio contribution is ISA-0951.",
+     "owner": null,
+     "on": "2026-11-21",
+     "by": "CLAUDE_BUILD ISA-0708 (P6)"
     }
    }
   },
@@ -448,6 +456,61 @@
     "on": "2026-09-17",
     "by": "ISA-0695",
     "why": "ISA-0470 is CLOSED_FIXED (13-Sep); an UNADJUDICATED quantity must cost a LIVE item (ISA-0448). The computer adjudication belongs to the execution-owned fill-obligation store (ISA-0701, IN_PROGRESS), which names FI-QU-underfilled_obligation_gbp."
+   }
+  },
+  {
+   "name": "risk_shares",
+   "whole_isa_name": "whole_isa_risk_share",
+   "computer": "whole_book_risk.measure",
+   "units": "fraction_of_whole_ISA_risky_sigma (Euler, weekly GBP, stocks + funds)",
+   "surface": [
+    "capital_decision_receipt whole-book risk metric / appetite_guard (via whole_book_risk.engine_context)",
+    "run_context.summary whole_book_risk (P-D)"
+   ],
+   "assertion": "framework_integrity.q1_two_computers",
+   "gbp_exposure": null,
+   "note": "ISA-0951 (P7, 21-Nov-2026): THE whole-ISA risk share per holding. One computer: whole_book_risk.measure (the capital consumer - CDR whole-book metric and Raj's appetite guard). concentration_clusters' pct_of_portfolio_risk is a DIFFERENT quantity (monthly 36m correlation-cluster basis, report only) declared separately; the divergence is published there. Measured: _P7_work/evidence/measure_shadow_migrated.json (21-Nov-2026, Nov-2026 book, migrated NAV caches): whole_book_risk sigma_risky 12.67% weekly 2023-11-03..2026-10-30 vs concentration_clusters portfolio_vol 12.66% monthly 36m 2023-11..2026-10; per-holding shares diverge up to 3.8pp (Polar 15.18 vs 18.98, MU 11.15 vs 13.67, Artemis UK 7.07 vs 5.50, Artemis Eur 6.11 vs 4.20, Ranmore 4.62 vs 2.72, QBTS 1.19 vs 2.50, MTDR 2.93 vs -0.78)",
+   "key_scope": [
+    "whole_book_risk"
+   ],
+   "finding_dispositions": {
+    "FI-Q1OOS-risk_shares-capital_decision_engine.bundle_risk": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "owner": null,
+     "on": "2026-11-21",
+     "by": "CLAUDE_BUILD ISA-0951",
+     "evidence": "capital_decision_engine.bundle_risk publishes the STOCK-SLEEVE post-trade shares relayed from sleeve_risk.risk_shares (quantity mctr) - a different population from the whole ISA."
+    },
+    "FI-Q1OOS-risk_shares-capital_decision_engine.plan_risk": {
+     "disposition": "NOT_THIS_QUANTITY",
+     "owner": null,
+     "on": "2026-11-21",
+     "by": "CLAUDE_BUILD ISA-0951",
+     "evidence": "capital_decision_engine.plan_risk (L1488-1512) rounds sleeve_risk.risk_shares(store, post-trade sleeve)['shares'] - stock-sleeve population (quantity mctr), not whole-ISA."
+    }
+   }
+  },
+  {
+   "name": "pct_of_portfolio_risk",
+   "computer": "concentration_clusters.build",
+   "units": "pct_of_portfolio_vol (monthly 36m common window, correlation clusters; report)",
+   "surface": [
+    "concentration_clusters artefact risk_contribution[] (email/report concentration section)"
+   ],
+   "assertion": "framework_integrity.q1_two_computers",
+   "gbp_exposure": null,
+   "note": "ISA-0951 (P7): DISTINCT from the whole-ISA authority risk_shares (whole_book_risk.measure). It SETS NO LIMIT and is never a capital input. Its divergence from the authority is published (R6.2): _P7_work/evidence/measure_shadow_migrated.json (21-Nov-2026, Nov-2026 book, migrated NAV caches): whole_book_risk sigma_risky 12.67% weekly 2023-11-03..2026-10-30 vs concentration_clusters portfolio_vol 12.66% monthly 36m 2023-11..2026-10; per-holding shares diverge up to 3.8pp (Polar 15.18 vs 18.98, MU 11.15 vs 13.67, Artemis UK 7.07 vs 5.50, Artemis Eur 6.11 vs 4.20, Ranmore 4.62 vs 2.72, QBTS 1.19 vs 2.50, MTDR 2.93 vs -0.78)",
+   "key_scope": [
+    "concentration_clusters"
+   ],
+   "finding_dispositions": {
+    "FI-Q3-pct_of_portfolio_risk": {
+     "disposition": "OWNED_BY",
+     "owner": "ISA-0960",
+     "on": "2026-11-21",
+     "by": "CLAUDE_BUILD ISA-0951",
+     "evidence": "concentration_clusters.build carries no _mark site (report-only computer, decides nothing); instrumenting it is part of ISA-0960, which wires the authority divergence into the same function."
+    }
    }
   }
  ],

@@ -733,6 +733,9 @@ def write(item: dict, *, allow_update: bool = False) -> dict:
     _agate = analysis_gate_errors(item, existing.get(item["id"]))
     if _agate:
         raise ValueError("register contract breach (ISA-0829, R7.8/R13.7):\n  - " + "\n  - ".join(_agate))
+    _cgate = capability_owner_gate_errors(item, existing.get(item["id"]))
+    if _cgate:
+        raise ValueError("register contract breach (ISA-0941, R4.14 C7):\n  - " + "\n  - ".join(_cgate))
     if item["id"] in existing and not allow_update:
         raise ValueError(f"{item['id']} already exists; pass allow_update=True to supersede (R7.6)")
     if item["id"] in existing:
@@ -965,6 +968,57 @@ R75_GRANDFATHERED_NO_LIVENESS = frozenset({
     "ISA-0485",   # CLOSED_NOT_A_DEFECT 13-Sep-2026 - checkpoint replay after a bash timeout
 })
 _SUPERSESSION_STATES = ("SUPERSEDED", "DUPLICATE")
+
+
+CAPABILITY_REGISTRY_REL = ("Dashboard", "state", "capability_registry.json")
+_CAP_RETIRED_STATES = ("RETIRED_SUPERSEDED",)          # mirror of capability_registry.RETIRED_STATES (pinned by its selftest)
+
+
+def _cap_retirement_valid(cap: dict, ids) -> bool:
+    """Mirror of capability_registry.retirement_valid (ISA-0727). Duplicated ON PURPOSE: importing capability_registry
+    here put framework_integrity and 77 modules into the Composio fallback's static import closure (ISA-0498 found it,
+    21-Nov-2026). capability_registry's selftest asserts the two agree on complete/incomplete/foreign retirements."""
+    r = (cap or {}).get("retirement") or {}
+    return bool((cap or {}).get("production_status") in _CAP_RETIRED_STATES and r.get("on") and r.get("by")
+                and r.get("authority") and r.get("item") and r.get("superseded_by") in set(ids)
+                and r.get("superseded_by") != (cap or {}).get("id"))
+
+
+def capability_not_live_owner_rows(item_id: str, registry: Optional[dict] = None) -> list:
+    """ISA-0941 - THE lookup: every capability row whose not_live_reason.item names `item_id` (validly retired rows
+    excluded). Reads Dashboard/state/capability_registry.json beside this module - the signed registry, never the
+    register's scratch store. RAISES when it cannot be read: 'no rows' would read as 'safe to close'."""
+    if registry is None:
+        with open(Path(__file__).resolve().parent.joinpath(*CAPABILITY_REGISTRY_REL), encoding="utf-8") as fh:
+            registry = json.load(fh)
+    caps = registry.get("capabilities") or []
+    ids = {c.get("id") for c in caps}
+    out = []
+    for cap in caps:
+        nl = cap.get("not_live_reason")
+        if isinstance(nl, dict) and str(nl.get("item") or "").strip() == item_id and not _cap_retirement_valid(cap, ids):
+            out.append({"id": cap.get("id"), "name": cap.get("name"), "gbp_exposure": cap.get("gbp_exposure")})
+    return out
+
+
+def capability_owner_gate_errors(item: dict, prior: Optional[dict], registry: Optional[dict] = None) -> list:
+    """ISA-0941 (21-Nov-2026): [] unless this write moves an item from a live state into a TERMINAL one while a
+    capability row still names it as its not_live owner - then the rows are named and the write is refused.
+    Re-point the rows' not_live_reason to an OPEN owner (or prove the capability LIVE / retire it) first.
+    Fail-CLOSED: an unreadable capability registry refuses the transition (R4.3 - a null is never a pass)."""
+    st = item.get("state")
+    if not st or st in _LIVE_STATES or prior is None or prior.get("state") not in _LIVE_STATES:
+        return []
+    try:
+        rows = capability_not_live_owner_rows(item["id"], registry=registry)
+    except Exception as exc:                                            # noqa: BLE001
+        return ["%s -> %s refused: the capability registry could not be read to prove no capability names it as "
+                "its not_live owner (%s: %s)" % (item["id"], st, type(exc).__name__, exc)]
+    if not rows:
+        return []
+    return ["%s -> %s refused: capability row(s) %s still name it as their not_live owner (C7 would go NOT_MET). "
+            "Re-point each row's not_live_reason to an OPEN item, or prove it LIVE / retire it, then close."
+            % (item["id"], st, ", ".join("%s (GBP %s)" % (r["id"], r.get("gbp_exposure")) for r in rows))]
 
 
 def terminal_evidence_gaps(item: dict) -> list:
@@ -1704,6 +1758,17 @@ def selftest(verbose: bool = True) -> int:
        "ISA-0829: NOT_REQUIRED needs a real reason; with one it is admitted")
     ok(analysis_gate_errors(dict(_base), dict(_base), _cur) == [],
        "ISA-0829 R7.5: an item ALREADY BUILD_READY with nothing re-bound is not re-litigated by an unrelated update")
+    # ── ISA-0941: a terminal transition is refused while a capability names the item as its not_live owner ──
+    _r941 = {"capabilities": [{"id": "CAP-z941", "name": "z", "gbp_exposure": 1.0,
+                               "not_live_reason": {"item": "ISA-9941", "since": "2026-11-21", "why": "fixture"}}]}
+    _e941 = capability_owner_gate_errors({"id": "ISA-9941", "state": "CLOSED_FIXED"}, {"state": "IN_PROGRESS"}, _r941)
+    ok(_e941 and "CAP-z941" in _e941[0], "ISA-0941 MUST-FIRE: closing a capability's not_live owner is refused, naming the row")
+    ok(capability_owner_gate_errors({"id": "ISA-9941", "state": "SUPERSEDED"}, {"state": "OPEN"}, _r941) != [],
+       "ISA-0941 MUST-FIRE: supersession of a not_live owner is refused the same way")
+    ok(capability_owner_gate_errors({"id": "ISA-9942", "state": "CLOSED_FIXED"}, {"state": "IN_PROGRESS"}, _r941) == [],
+       "ISA-0941 NEGATIVE CONTROL: closing an item no capability names is admitted")
+    ok(capability_owner_gate_errors({"id": "ISA-9941", "state": "IN_PROGRESS"}, {"state": "OPEN"}, _r941) == [],
+       "ISA-0941 NEGATIVE CONTROL: a non-terminal update of an owner is admitted")
     shutil.rmtree(tmp, ignore_errors=True)
     os.environ.pop("ISA_REGISTER_STORE", None)
     _schema_cache.clear()

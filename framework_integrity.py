@@ -523,6 +523,15 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
      "CAP-mandate_drift producer - FRS mandate-drift component (beta/R2 halves vs comparator)"),
     ("fund_rotation_analysis", "t4_mandate_drift", "live_run",
      "CAP-t4_mandate_drift producer - T4 rotation trigger, read by capital_destination C3"),
+    ("exposure_coverage", "build", "live_run", "CAP-exposure_coverage producer - B08-R01/R02 whole-ISA exposure ledger (ISA-0962, P7 step 0)"),
+    ("fund_pair_test", "category_declaration_status", "live_run", "CAP-fund_category_status producer - Step 6.05 L2 peer-group status (ISA-0962, P7 step 0)"),
+    ("regional_m", "build", "live_run", "CAP-regional_m_cells producer - Step 6.11a regional M cells (ISA-0961, P7 step 0)"),
+    ("risk_review_state", "appetite_permission", "live_run", "CAP-risk_review_authority producer - the ONE appetite permission (ISA-0915/0916, P8a)"),
+    ("risk_review_state", "observe_realised", "live_run", "CAP-risk_review_authority - actual-drawdown persistent episode (ISA-0915, P8a)"),
+    ("whole_book_stress", "run", "live_run", "CAP-whole_book_stress producer - Step 6.10s whole-ISA stress + appetite verdicts (ISA-0968, P8a step 0)"),
+    ("email_prefill", "apply_report_measures", "live_run", "CAP-email_prefill_render producer - Step 6.10r in-process email hand-off (ISA-0968, P8a step 0)"),
+    ("sell_off_state", "measure", "live_run", "CAP-sell_off_state producer - Step 6.10so Active sell-off measurement (ISA-0907, P8b)"),
+    ("funding_waterfall", "build", "live_run", "CAP-funding_waterfall_plan producer - Step 6.10e engine funding (ISA-0965, P8b step 0)"),
     # --- ISA-0944 (20-Nov-2026): the fund-path consumers that had no capability row ---
     ("fund_action_stack", "build", "live_run", "CAP-fund_retention_score producer - Step 6.05 FRS, bands, anchor rule, A7 order"),
     ("holding_period_return", "all_holding_period_returns", "live_run", "CAP-holding_period_return producer - fund MWR / anchor mode"),
@@ -530,6 +539,9 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     ("fund_learning", "build_panel", "live_run", "CAP-fund_learning_panel producer - fund vs benchmark panel (T4 calibration input)"),
     ("whole_book_risk", "load_fund_series", "live_run", "CAP-whole_book_fund_series producer - held-fund weekly series qualification"),
     ("monthly_isa_prerun", "_frs_run_inputs", "live_run", "CAP-frs_run_inputs producer - Step 6.05 run X-Ray binding (ISA-0943)"),
+    # --- ISA-0950 / ISA-0952 (21-Nov-2026, P6): producers that had no capability row ---
+    ("capital_decision_engine", "build", "live_run", "CAP-capital_decision_receipt producer - the Capital Decision Receipt (Step 6.10e)"),
+    ("consistency_check", "check_all", "live_run", "CAP-a18_consistency producer - A18 consistency pairs (Step 9d)"),
     ("position_sizing", "binary_budget_report", "live_run", "CAP-vci_binary_risk_committed producer"),
     ("position_sizing", "min_hold_ok", "live_run", "CAP-min_hold_verdict producer (D24 position clock)"),
     ("position_sizing", "activate_from_executions", "live_run",
@@ -747,6 +759,14 @@ def mark_sites(root: str = HERE) -> Dict[str, bool]:
         _, tree = parsed(path)
         if tree is None:
             continue
+        # ⚑ ISA-0953 (21-Nov-2026): a `_fi_mark` call is an instrument ONLY if the module binds `_fi_mark` to a
+        #   ledger function that EXISTS here. capital_decision_engine imported `framework_integrity.mark` (no such
+        #   name) inside try/except, so `_fi_mark` was the no-op stub on every run since 03-Oct while this check
+        #   counted its nine call sites as marked - 'instrumented' and silent at once (R4.3, R4.14).
+        fi_bound = m == "framework_integrity" or any(
+            isinstance(n, ast.ImportFrom) and n.module == "framework_integrity"
+            and any((a.asname or a.name) == "_fi_mark" and callable(globals().get(a.name)) for a in n.names)
+            for n in ast.walk(tree))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -761,7 +781,7 @@ def mark_sites(root: str = HERE) -> Dict[str, bool]:
                     # is the name inside this module. Both count — and NOTHING ELSE does,
                     # because a check that matched on file text would be satisfied by a
                     # comment mentioning the ledger (ISA-0446).
-                    if nm in ("_mark", "_fi_mark"):
+                    if nm == "_mark" or (nm == "_fi_mark" and fi_bound):
                         found[(m, node.name)] = True
                         break
     return {"%s.%s" % k: v for k, v in found.items()}
