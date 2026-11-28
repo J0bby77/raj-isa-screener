@@ -532,6 +532,8 @@ CAPITAL_PATH_MANIFEST: List[Tuple[str, str, str, str]] = [
     ("email_prefill", "apply_report_measures", "live_run", "CAP-email_prefill_render producer - Step 6.10r in-process email hand-off (ISA-0968, P8a step 0)"),
     ("sell_off_state", "measure", "live_run", "CAP-sell_off_state producer - Step 6.10so Active sell-off measurement (ISA-0907, P8b)"),
     ("funding_waterfall", "build", "live_run", "CAP-funding_waterfall_plan producer - Step 6.10e engine funding (ISA-0965, P8b step 0)"),
+    ("suite_census_runner", "publish", "live_run", "CAP-suite_census_publish producer - census publication read by the capital boundary (ISA-0978, P10a step 0)"),
+    ("isa_retrospective_intake", "record_findings", "live_run", "CAP-retrospective_intake_record producer - weekly 16b-2 register capture (ISA-0977, P10a step 0)"),
     # --- ISA-0944 (20-Nov-2026): the fund-path consumers that had no capability row ---
     ("fund_action_stack", "build", "live_run", "CAP-fund_retention_score producer - Step 6.05 FRS, bands, anchor rule, A7 order"),
     ("holding_period_return", "all_holding_period_returns", "live_run", "CAP-holding_period_return producer - fund MWR / anchor mode"),

@@ -187,6 +187,79 @@ IGNORE_PREFIXES = ("_bak", "_to_delete", "__pycache__", "_baseline", "register_a
 #   fingerprint and every source enumeration.
 DATA_READ_HOMES = ("archive",)
 PREPARE_MAX_AGE_H = 24
+# ⚑ ISA-0978 (27-Nov-2026) - THE SANDBOX COPY IS RESUMABLE. prepare() used to rmtree the sandbox and copytree LIVE in
+#   ONE pass. On a roomy off-VM folder (the only room left once earlier sessions' /tmp scratch was stranded) that copy
+#   took longer than one ~180 s host call (178 MB and 144 MB of ~190 MB on two attempts) and every call started again
+#   from zero, so the LIVE census could never publish. The copy is now an rsync-style sync: a file already in the
+#   sandbox with LIVE's size and mtime is kept, a changed one is re-copied, anything LIVE does not have (or the copy
+#   rules ignore, e.g. a suite's __pycache__) is removed, and the sync stops at the call deadline. META is still
+#   written only after a COMPLETE copy that passed the unchanged read-home parity and roll checks, so a partial copy
+#   can never read as prepared; step() reports the unfinished copy as PROGRESS (call again), never REFUSED.
+SYNC_MTIME_TOL_S = 2.0          # FAT/NTFS/bridge mounts round mtimes; copy2 preserves LIVE's mtime on every copy
+PREPARE_TAIL_S = 25.0           # call time kept for the parity + roll checks + META after the copy completes
+
+
+def _same_file(src: str, dst: str) -> bool:
+    import stat as _st
+    try:
+        a, b = os.lstat(src), os.lstat(dst)
+    except OSError:
+        return False
+    if _st.S_ISLNK(a.st_mode) or _st.S_ISLNK(b.st_mode):
+        return _st.S_ISLNK(a.st_mode) and _st.S_ISLNK(b.st_mode) and os.readlink(src) == os.readlink(dst)
+    if _st.S_ISDIR(b.st_mode):
+        return False
+    return a.st_size == b.st_size and abs(a.st_mtime - b.st_mtime) < SYNC_MTIME_TOL_S
+
+
+def _rm(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+
+
+def _sync_tree(src: str, dst: str, ignore, deadline_ts=None) -> dict:
+    """ISA-0978: make dst file-for-file src (ignore applied, copytree semantics with symlinks=True), keeping files
+    that already match. Stops at deadline_ts. -> {complete, copied, kept, removed}"""
+    import time as _t
+    st = {"complete": False, "copied": 0, "kept": 0, "removed": 0}
+    for dp, dn, fn in os.walk(src):
+        if deadline_ts is not None and _t.time() > deadline_ts:
+            return st
+        rel = os.path.relpath(dp, src)
+        ddir = dst if rel == "." else os.path.join(dst, rel)
+        names = list(dn) + list(fn)
+        ig = set(ignore(dp, names))
+        link_dirs = [d for d in dn if os.path.islink(os.path.join(dp, d))]
+        dn[:] = sorted(d for d in dn if d not in ig and d not in link_dirs)
+        files = sorted([f for f in fn if f not in ig] + [d for d in link_dirs if d not in ig])
+        keep_dirs, keep_files = set(dn), set(files)
+        if os.path.lexists(ddir) and (os.path.islink(ddir) or not os.path.isdir(ddir)):
+            os.remove(ddir)
+        os.makedirs(ddir, exist_ok=True)
+        for x in sorted(os.listdir(ddir)):
+            q = os.path.join(ddir, x)
+            is_dir = os.path.isdir(q) and not os.path.islink(q)
+            if (x not in keep_dirs and x not in keep_files) or (x in keep_dirs and not is_dir):
+                _rm(q)
+                st["removed"] += 1
+        for f in files:
+            if deadline_ts is not None and _t.time() > deadline_ts:
+                return st
+            a, b = os.path.join(dp, f), os.path.join(ddir, f)
+            if _same_file(a, b):
+                st["kept"] += 1
+                continue
+            if os.path.lexists(b):
+                _rm(b)
+            if os.path.islink(a):
+                os.symlink(os.readlink(a), b)
+            else:
+                shutil.copy2(a, b)
+            st["copied"] += 1
+    st["complete"] = True
+    return st
 
 
 def _home_manifest(root: str, home: str) -> dict:
@@ -258,29 +331,46 @@ def _rolls(root: str) -> dict:
             "census_roll": rg.census_roll(root).get("roll")}          # ISA-0746
 
 
-def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
-    """Fresh sandbox copy of LIVE. -> {"state": "PREPARED"|"REFUSED", ...}"""
+def prepare(live: str, sandbox: str = DEFAULT_SANDBOX, deadline_ts=None) -> dict:
+    """Sandbox copy of LIVE, synced incrementally (ISA-0978) -> {"state": "PREPARED"|"PREPARING"|"REFUSED", ...}.
+    PREPARING = the copy stopped at deadline_ts with its progress kept; no META is written until it completes."""
     import release_gate as rg
     import isa_write_guard as wg
     v = rg.verify_live(live)
     if v.get("state") != "TRUSTED":
         return {"state": "REFUSED", "why": "LIVE is %s against %s - a census of unsigned code cannot "
                                            "vouch for a Trusted build (R18.5)" % (v.get("state"), v.get("build_id"))}
-    if os.path.isdir(sandbox):
-        shutil.rmtree(sandbox)
+    # ISA-0978: never a stale META or before-snapshot beside a copy that is being (re)synced; the suites' temp
+    #   home is cleared as the old rmtree cleared it. The copy already on disk counts as room it will reuse.
+    for _stale in (META, "live_snapshot_before.json"):
+        if os.path.lexists(os.path.join(sandbox, _stale)):
+            os.remove(os.path.join(sandbox, _stale))
+    shutil.rmtree(os.path.join(sandbox, "_tmp"), ignore_errors=True)
+    _have = 0.0
+    if os.path.isdir(_tree(sandbox)):
+        for _dp, _dn, _fn in os.walk(_tree(sandbox)):
+            for _f in _fn:
+                try:
+                    _have += os.lstat(os.path.join(_dp, _f)).st_size / 1e6
+                except OSError:
+                    pass
     _room, _need = _free_mb(sandbox), census_space_needed_mb(live)
-    if _room < _need:
+    if _room + _have < _need:
         return {"state": "REFUSED", "environment": True,
                 "why": ("ENVIRONMENT (ISA-0786): %.0f MB free on the volume holding %s, below the %.0f MB this "
                         "census needs (2 x tree + parent inputs + %d MB margin) - REFUSED rather than run suites "
                         "that would fail on the disk and publish a false RED (R2.9). Set ISA_CENSUS_SANDBOX to a "
                         "roomy path." % (_room, sandbox, _need, CENSUS_MARGIN_MB))}
-    os.makedirs(sandbox)
+    os.makedirs(sandbox, exist_ok=True)
     tree = _tree(sandbox)
 
     def ignore(d, names):
         return [n for n in names if any(n == x or n.startswith(x) for x in IGNORE_PREFIXES)]
-    shutil.copytree(live, tree, ignore=ignore, symlinks=True)
+    _sync = _sync_tree(live, tree, ignore, deadline_ts)
+    if not _sync["complete"]:
+        return {"state": "PREPARING", "sync": _sync,
+                "why": ("ISA-0978: sandbox copy not finished inside this call (copied %d, kept %d, removed %d) - "
+                        "progress is kept; the next --step resumes it" % (_sync["copied"], _sync["kept"], _sync["removed"]))}
     # ⚑ ISA-0729 (23-Sep-2026) — R5.12 CANDIDATE PARITY. Several release scripts read the monthly
     #   inputs Raj saves in the PARENT folder (Cash Statement, AJ Bell portfolio/X-Ray, Transaction
     #   History; extract_cash_statement.parse defaults to dirname(HERE)). A sandbox holding only the
@@ -288,11 +378,18 @@ def prepare(live: str, sandbox: str = DEFAULT_SANDBOX) -> dict:
     #   FILES (not its folders) are copied beside the sandbox tree, read-only inputs.
     _parent = os.path.dirname(os.path.realpath(live))
     _n_parent = 0
+    _parent_files = set()
     for _fn in sorted(os.listdir(_parent)):
         _src = os.path.join(_parent, _fn)
         if os.path.isfile(_src) and not os.path.islink(_src):
-            shutil.copy2(_src, os.path.join(sandbox, _fn))
+            _parent_files.add(_fn)
+            if not _same_file(_src, os.path.join(sandbox, _fn)):
+                shutil.copy2(_src, os.path.join(sandbox, _fn))
             _n_parent += 1
+    for _fn in sorted(os.listdir(sandbox)):                 # ISA-0978: a parent input LIVE no longer has is removed
+        _q = os.path.join(sandbox, _fn)
+        if os.path.isfile(_q) and _fn not in _parent_files:
+            os.remove(_q)
     for stale in (STATUS_REL, HISTORY_REL):
         if os.path.exists(os.path.join(tree, stale)):
             os.remove(os.path.join(tree, stale))
@@ -362,7 +459,10 @@ def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150
     _deadline = (call_started if call_started is not None else _IMPORTED_AT) + CALL_CEILING_S
     t0 = _now()
     if _needs_prepare(live, sandbox):
-        p = prepare(live, sandbox)
+        p = prepare(live, sandbox, deadline_ts=_deadline - PREPARE_TAIL_S)
+        if p["state"] == "PREPARING":                                  # ISA-0978: resumable, never a refusal
+            return {"state": "PROGRESS", "preparing": True, "recorded": None, "on_disk": None, "timeouts": 0,
+                    "sync": p.get("sync"), "why": p["why"]}
         if p["state"] != "PREPARED":
             return {"state": "REFUSED", "why": p["why"]}
     tree = _tree(sandbox)
@@ -407,6 +507,11 @@ def step(live: str = HERE, sandbox: str = DEFAULT_SANDBOX, budget_s: float = 150
 
 
 def publish(live: str, sandbox: str, runner_write_escapes: int = 0) -> dict:
+    try:
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark('suite_census_runner', 'publish')
+    except Exception:                                                   # noqa: BLE001 - monitoring never breaks the census
+        pass
     import consistency_check as cc
     import isa_write_guard as wg
     tree = _tree(sandbox)
@@ -697,6 +802,50 @@ def _selftest(verbose: bool = True) -> int:
         ok("ISA-0837 MUST-FIRE (R5.14 next occurrence): a purge into LIVE's archive after prepare forces a fresh "
            "copy before the next step", _needs_prepare(live, sandbox))
         os.remove(os.path.join(_arch837, "portfolio_data_zzz_2100.json"))
+        # ── ISA-0978: an interrupted prepare resumes; the kept copy converges on LIVE ────────────────────
+        import time as _t978
+        _tree978 = _tree(sandbox)
+        _pr978 = prepare(live, sandbox, deadline_ts=_t978.time() - 1)
+        ok("ISA-0978 MUST-FIRE: a prepare that runs out of call time returns PREPARING and leaves NO meta "
+           "(a partial copy can never read as prepared)",
+           _pr978.get("state") == "PREPARING" and not os.path.exists(os.path.join(sandbox, META))
+           and _needs_prepare(live, sandbox), _pr978)
+        _sp978 = step(live, sandbox, budget_s=30, kind="manual", call_started=_t978.time() - 10 ** 4)
+        ok("ISA-0978 MUST-FIRE: step() reports an unfinished copy as PROGRESS (call again), never REFUSED",
+           _sp978.get("state") == "PROGRESS" and _sp978.get("preparing") is True, _sp978)
+        with open(os.path.join(_tree978, "zz_extra_0978.txt"), "w") as fh:
+            fh.write("stale")
+        os.makedirs(os.path.join(_tree978, "__pycache__"), exist_ok=True)
+        with open(os.path.join(_tree978, "__pycache__", "x.pyc"), "w") as fh:
+            fh.write("x")
+        _dj978 = os.path.join(_tree978, "data.json")
+        with open(_dj978, "w") as fh:
+            fh.write("xx")                                    # SAME SIZE as LIVE's '{}', different bytes
+        os.utime(_dj978, (_t978.time() - 1000, _t978.time() - 1000))
+        with open(os.path.join(sandbox, "zz_gone_parent.txt"), "w") as fh:
+            fh.write("a parent input LIVE no longer has")
+        _pr978b = prepare(live, sandbox)
+        ok("ISA-0978 MUST-FIRE: the resumed prepare completes - PREPARED, META written, no re-prepare needed",
+           _pr978b.get("state") == "PREPARED" and os.path.exists(os.path.join(sandbox, META))
+           and not _needs_prepare(live, sandbox), _pr978b)
+        ok("ISA-0978 NEGATIVE CONTROL: the kept copy converges on LIVE - a same-size changed file is re-copied, a stale "
+           "extra file, an ignored __pycache__ and a vanished parent input are removed",
+           open(_dj978).read() == open(os.path.join(live, "data.json")).read()
+           and not os.path.exists(os.path.join(_tree978, "zz_extra_0978.txt"))
+           and not os.path.exists(os.path.join(_tree978, "__pycache__"))
+           and not os.path.exists(os.path.join(sandbox, "zz_gone_parent.txt")), _pr978b)
+
+        def _man978(r0):
+            out = {}
+            for _dp, _dn, _fn in os.walk(r0):
+                _dn[:] = [d for d in _dn if not any(d == x or d.startswith(x) for x in IGNORE_PREFIXES)]
+                for _f in _fn:
+                    _rel = os.path.relpath(os.path.join(_dp, _f), r0)
+                    if _rel.replace(os.sep, "/") not in (STATUS_REL.replace(os.sep, "/"), HISTORY_REL.replace(os.sep, "/")):
+                        out[_rel] = open(os.path.join(_dp, _f), "rb").read()
+            return out
+        ok("ISA-0978: after the resume the sandbox tree is byte-for-byte LIVE (copy rules applied)",
+           _man978(live) == _man978(_tree978), sorted(set(_man978(live)) ^ set(_man978(_tree978)))[:5])
         # a data-dependent RED suite -> FRESH_RED -> REFUSED
         with open(os.path.join(live, "s_red.py"), "w") as fh:
             fh.write("import json\ndef _selftest():\n    d = json.load(open('data.json'))\n"
@@ -822,7 +971,9 @@ def main(argv=None):
         return 0
     if "--step" in argv:
         r = step(live, sandbox, budget_s=float(opt("--budget", 150)), kind=opt("--kind", "manual"))
-        if r["state"] == "PROGRESS":
+        if r["state"] == "PROGRESS" and r.get("preparing"):
+            print("CENSUS_PROGRESS preparing sandbox %s - run --step again" % (r.get("sync"),))
+        elif r["state"] == "PROGRESS":
             print("CENSUS_PROGRESS %s/%s timeouts=%s" % (r.get("recorded"), r.get("on_disk"), r.get("timeouts")))
         elif r["state"] == "PUBLISHED":
             print("CENSUS_PUBLISHED state=%s duration_s=%s live_changed_during_census=%s | %s"

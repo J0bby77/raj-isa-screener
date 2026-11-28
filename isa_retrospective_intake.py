@@ -659,6 +659,43 @@ def coverage(root=None) -> list:
 # an EXPLICIT no-findings record. A run that quietly reported nothing now fails
 # (R2.10 - "could not measure it" and "there was nothing" must never render the same).
 
+def _refresh_views() -> dict:
+    """ISA-0977 (27-Nov-2026): the register views are RENDERS of the store (R14.3), so a store write here re-renders
+    and re-exports them in the same call - before, record_findings wrote isa_items.jsonl and nothing in the weekly
+    screen re-rendered the markdown views, so they stayed stale on LIVE and reached the next monthly pre-run as an A18
+    ERROR. Views are written ONLY beside a canonical store (<root>/Dashboard/state -> <root>): a redirected scratch or
+    test store (ISA_REGISTER_STORE elsewhere) must never overwrite the real views. Never raises - the finding is
+    already durable in the store; a failed refresh is returned (and printed) for the run to report, and
+    consistency_check.pair_register_renders_current still catches any drift."""
+    store = R.store_dir().resolve()
+    if store.name != "state" or store.parent.name != "Dashboard":
+        return {"state": "SKIPPED_NON_CANONICAL_STORE", "store": str(store)}
+    dest = store.parent.parent
+    # ⚑ run as SUBPROCESSES, not imports: this module is in the Composio-fallback import closure and an import of
+    #   the render/export modules widens it (their literals become unclassified fallback inputs, A18/ISA-0498).
+    try:
+        chk = _views_check(dest, write=True)
+        return {"state": "REFRESHED" if chk["ok"] else "DRIFT_AFTER_REFRESH", "dest": str(dest), "drift": chk["drift"]}
+    except Exception as e:                                              # noqa: BLE001
+        return {"state": "FAILED", "dest": str(dest), "why": "%s: %s" % (type(e).__name__, e)}
+
+
+def _views_check(dest, write: bool = False) -> dict:
+    """(write then) check the markdown views and the CSV/XLSX exports at dest against the CURRENT store."""
+    import os as _os
+    import subprocess as _sp
+    here = Path(__file__).resolve().parent
+    env = dict(_os.environ, ISA_REGISTER_STORE=str(R.store_dir().resolve()), PYTHONDONTWRITEBYTECODE="1")
+    drift = []
+    for script in ("isa_register_render.py", "isa_register_export.py"):
+        for mode in (("--write", "--check") if write else ("--check",)):
+            r = _sp.run([sys.executable, str(here / script), mode, "--dest", str(dest)], capture_output=True,
+                        text=True, timeout=150, env=env, cwd=str(here))
+            if r.returncode != 0:
+                drift.append("%s %s rc=%s: %s" % (script, mode, r.returncode, ((r.stdout or "") + (r.stderr or ""))[-300:]))
+    return {"ok": not drift, "drift": drift}
+
+
 def record_findings(run_label: str, findings: list, *, group: str = None,
                     run_date: str = None, dry_run: bool = False) -> dict:
     """Capture EVERY finding of a run durably, and promote to the register per R7.7 (ISA-0764).
@@ -679,6 +716,11 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
     creates no work. Ids are content-derived from (run_label, index, title): a re-run cannot
     inflate the record, and a re-run keeps the ledger (it resolves the existing id).
     """
+    try:
+        from framework_integrity import _mark as _fi_mark
+        _fi_mark('isa_retrospective_intake', 'record_findings')
+    except Exception:                                                   # noqa: BLE001 - monitoring never breaks capture
+        pass
     existing = {a for it in R.read_all() for a in it.get("aliases", [])}
     written, informational, ledger = [], [], []
     for i, f in enumerate(findings, 1):
@@ -761,7 +803,12 @@ def record_findings(run_label: str, findings: list, *, group: str = None,
     if informational and not dry_run:
         save_nonregistrable(informational)
     _stamp_run(run_label, len(written), group, run_date, dry_run, ledger=ledger)
+    views = _refresh_views() if (written and not dry_run) else {"state": "NOT_NEEDED", "why": "no store write"}
+    if written and not dry_run:
+        print("REGISTER_VIEWS %s (%d new item(s)) %s" % (views["state"], len(written),
+                                                       views.get("why") or views.get("drift") or ""))
     return {"run": run_label, "created": len(written), "titles": written, "dry_run": dry_run,
+            "views": views,
             "informational": len(informational),
             "informational_detail": [(x["rule"], x["title"]) for x in informational],
             "ledger": ledger}
@@ -1218,6 +1265,10 @@ def selftest(verbose=True) -> int:
              "severity": "HIGH", **_cs}], group="EUA")
         ok(r3["created"] == 0 and r3["ledger"][0]["isa_id"] == _led["20260920_EUA#1"]["isa_id"],
            "a re-run resolves the existing id rather than minting or dropping it")
+        ok(r1["views"]["state"] == "SKIPPED_NON_CANONICAL_STORE",
+           "ISA-0977 NEGATIVE CONTROL: a store redirected outside <root>/Dashboard/state never renders views "
+           "(a scratch/test store cannot overwrite the real register views)")
+        ok(r3["views"]["state"] == "NOT_NEEDED", "ISA-0977: a re-run that writes nothing refreshes nothing")
         ok(run_findings("20269999_NONE")["state"] == "MISSING",
            "NEGATIVE CONTROL: an unrecorded run is MISSING, never 'no findings' (R2.10)")
         ok(run_findings("20260815_SP500")["state"] == "NO_FINDINGS_CAPTURED",
@@ -1234,6 +1285,37 @@ def selftest(verbose=True) -> int:
         else:
             os.environ.pop("ISA_REGISTER_STORE", None)
         R._schema_cache.clear()
+
+    # ── ISA-0977: a promoting record_findings leaves the views current (store and views move together) ──
+    vtmp = Path(tempfile.mkdtemp(prefix="isa_views0977_"))
+    vstore = vtmp / "Dashboard" / "state"
+    vstore.mkdir(parents=True)
+    _schema = R.store_dir() / R.SCHEMA_FILE
+    if not _schema.exists():
+        _schema = Path(R.__file__).parent / R.SCHEMA_FILE
+    (vstore / R.SCHEMA_FILE).write_text(_schema.read_text(encoding="utf-8"), encoding="utf-8")
+    _old977 = os.environ.get("ISA_REGISTER_STORE")
+    os.environ["ISA_REGISTER_STORE"] = str(vstore)
+    R._schema_cache.clear()
+    try:
+        _v977 = record_findings("20261127_NASDAQ", [
+            {"title": "HIGH - the fixture-check step replayed end-of-run invariants mid-run", "detail": "b",
+             "severity": "HIGH", **_cs}], group="NASDAQ")
+        ok(_v977["created"] == 1 and _v977["views"]["state"] == "REFRESHED",
+           "ISA-0977 MUST-FIRE: a promoted finding re-renders and re-exports the views in the same call (%s)" % (_v977["views"],))
+        ok(_views_check(vtmp)["ok"],
+           "ISA-0977 MUST-FIRE: after record_findings the R14.3 render AND export checks are clean (no manual step)")
+        R.write({**R.read_all()[0], "id": R.next_id(), "aliases": [], "title": "a direct store write with no refresh"})
+        ok(not _views_check(vtmp)["ok"],
+           "ISA-0977 NEGATIVE CONTROL: a store write that bypasses the refresh is still caught as R14.3 drift")
+    finally:
+        if _old977:
+            os.environ["ISA_REGISTER_STORE"] = _old977
+        else:
+            os.environ.pop("ISA_REGISTER_STORE", None)
+        R._schema_cache.clear()
+        import shutil as _sh977
+        _sh977.rmtree(vtmp, ignore_errors=True)
 
     # ── ISA-0473 deliverable intake gate ──
     dtmp = Path(tempfile.mkdtemp(prefix="isa_deliv_"))
